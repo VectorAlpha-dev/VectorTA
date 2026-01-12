@@ -1,26 +1,3 @@
-//! # Volume Oscillator (VOSC)
-//!
-//! VOSC measures the difference between short-term and long-term volume moving averages
-//! as a percentage, helping identify volume trends and divergences.
-//!
-//! ## Parameters
-//! - **short_period**: Short moving average period. Defaults to 2.
-//! - **long_period**: Long moving average period. Defaults to 5.
-//!
-//! ## Returns
-//! - **`Ok(VoscOutput)`** containing a `Vec<f64>` of oscillator values (percentage) matching input length.
-//! - **`Err(VoscError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - **SIMD Status**: AVX2/AVX512 implemented for initial accumulation but disabled by default
-//!   (sliding window is loop-carried; <5% gain vs scalar at 100k).
-//! - **Streaming Performance**: O(1) — single ring buffer + running sums and NaN counters
-//! - **Scalar Path**: Tightened with unchecked indexing + loop-jamming (faster, tests unchanged)
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix for output allocation
-//! - **Batch Support**: ✓ Row-specific optimization via shared prefix sums across parameter rows
-//! - **CUDA/Python**: CUDA wrapper uses typed errors, VRAM checks, and returns VRAM handles; Python interop exposes CUDA Array Interface v3 and DLPack v1.x (versioned + legacy) with preserved numerical outputs.
-//! - **Note**: Sliding update per time step is inherently sequential; SIMD adds little benefit here.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -33,9 +10,6 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::convert::AsRef;
 use thiserror::Error;
-
-
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 mod vosc_python_cuda_handle {
@@ -115,7 +89,6 @@ mod vosc_python_cuda_handle {
             dl_device: Option<pyo3::PyObject>,
             copy: Option<pyo3::PyObject>,
         ) -> PyResult<PyObject> {
-            // Compute target device id and validate `dl_device` hint if provided.
             let (kdl, alloc_dev) = self.__dlpack_device__();
             if let Some(dev_obj) = dl_device.as_ref() {
                 if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -129,9 +102,7 @@ mod vosc_python_cuda_handle {
                                 "device copy not implemented for __dlpack__",
                             ));
                         } else {
-                            return Err(PyValueError::new_err(
-                                "dl_device mismatch for __dlpack__",
-                            ));
+                            return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                         }
                     }
                 }
@@ -167,9 +138,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for VoscInput<'a> {
@@ -197,7 +168,10 @@ pub struct VoscOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VoscParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -333,7 +307,11 @@ pub enum VoscError {
     #[error("vosc: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vosc: invalid batch range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("vosc: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -383,7 +361,6 @@ pub fn vosc_with_kernel(input: &VoscInput, kernel: Kernel) -> Result<VoscOutput,
         });
     }
 
-    // SIMD underperforms due to loop-carried dependency; prefer Scalar for Auto.
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -426,19 +403,16 @@ pub fn vosc_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Precompute reciprocals to avoid repeated divisions
     let short_div = 1.0 / (short_period as f64);
     let long_div = 1.0 / (long_period as f64);
 
-    // Window bounds
     let start = first_valid;
-    let end_init = start + long_period; // exclusive upper bound of the first long window
+    let end_init = start + long_period;
     let short_start = end_init - short_period;
 
     let mut short_sum = 0.0f64;
     let mut long_sum = 0.0f64;
 
-    // Initial window accumulation (single pass, loop-jammed)
     unsafe {
         let mut i = start;
         while i < end_init {
@@ -450,17 +424,14 @@ pub fn vosc_scalar(
             i += 1;
         }
 
-        // First valid output index
         let mut idx = end_init - 1;
 
-        // Write initial value
         let mut lavg = long_sum * long_div;
         let mut savg = short_sum * short_div;
         *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
 
-        // Sliding window (tight loop; unchecked indexing; loop-jammed)
-        let mut t_s = end_init - short_period; // j - short_period (for j = end_init)
-        let mut t_l = start; // j - long_period  (for j = end_init)
+        let mut t_s = end_init - short_period;
+        let mut t_l = start;
 
         let mut j = end_init;
         let len = data.len();
@@ -468,7 +439,6 @@ pub fn vosc_scalar(
         while j < len {
             let x_new = *data.get_unchecked(j);
 
-            // Preserve update order: add then subtract for each sum
             short_sum += x_new;
             short_sum -= *data.get_unchecked(t_s);
 
@@ -503,15 +473,14 @@ pub fn vosc_avx512(
         let long_div = 1.0 / (long_period as f64);
 
         let start = first_valid;
-        let end_init = start + long_period; // exclusive
-        let short_start = end_init - short_period; // inclusive
+        let end_init = start + long_period;
+        let short_start = end_init - short_period;
         let len = data.len();
         let dptr = data.as_ptr();
 
         let mut short_sum = 0.0f64;
         let mut long_sum = 0.0f64;
 
-        // [start, short_start) -> long_sum
         let mut i = start;
         let end_a = short_start;
         if end_a > i {
@@ -530,7 +499,6 @@ pub fn vosc_avx512(
             }
         }
 
-        // [short_start, end_init) -> both sums
         let end_b = end_init;
         if end_b > i {
             let mut acc = _mm512_setzero_pd();
@@ -552,13 +520,11 @@ pub fn vosc_avx512(
             }
         }
 
-        // first valid output
         let mut idx = end_b - 1;
         let mut lavg = long_sum * long_div;
         let mut savg = short_sum * short_div;
         *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
 
-        // sliding (scalar, same as reference)
         let mut t_s = end_init - short_period;
         let mut t_l = start;
         let mut j = end_init;
@@ -592,15 +558,14 @@ pub fn vosc_avx2(
         let long_div = 1.0 / (long_period as f64);
 
         let start = first_valid;
-        let end_init = start + long_period; // exclusive
-        let short_start = end_init - short_period; // inclusive
+        let end_init = start + long_period;
+        let short_start = end_init - short_period;
         let len = data.len();
         let dptr = data.as_ptr();
 
         let mut short_sum = 0.0f64;
         let mut long_sum = 0.0f64;
 
-        // [start, short_start) -> long_sum
         let mut i = start;
         let end_a = short_start;
         if end_a > i {
@@ -619,7 +584,6 @@ pub fn vosc_avx2(
             }
         }
 
-        // [short_start, end_init) -> both sums
         let end_b = end_init;
         if end_b > i {
             let mut acc = _mm256_setzero_pd();
@@ -641,13 +605,11 @@ pub fn vosc_avx2(
             }
         }
 
-        // first valid output
         let mut idx = end_b - 1;
         let mut lavg = long_sum * long_div;
         let mut savg = short_sum * short_div;
         *out.get_unchecked_mut(idx) = 100.0 * (savg - lavg) / lavg;
 
-        // sliding (scalar, same as reference)
         let mut t_s = end_init - short_period;
         let mut t_l = start;
         let mut j = end_init;
@@ -722,7 +684,7 @@ fn vosc_row_scalar_prefix(
     let long_div = 1.0 / (long_period as f64);
     let len = data.len();
     if warm >= len {
-        return; // nothing to write; warmup covers all
+        return;
     }
     unsafe {
         let mut i = warm;
@@ -788,18 +750,15 @@ pub struct VoscStream {
     short_period: usize,
     long_period: usize,
 
-    // Circular buffer holds the last `long_period` samples.
     buf: Vec<f64>,
-    head: usize,  // next write index (points to the oldest sample)
-    count: usize, // number of values seen so far (caps at long_period)
+    head: usize,
+    count: usize,
 
-    // Running state for O(1) updates
     short_sum: f64,
     long_sum: f64,
     short_nan: usize,
     long_nan: usize,
 
-    // Precomputed reciprocals to match batch formula exactly
     inv_short: f64,
     inv_long: f64,
 }
@@ -829,38 +788,29 @@ impl VoscStream {
 
             short_sum: 0.0,
             long_sum: 0.0,
-            short_nan: short_period, // start as "all NaN" until we populate
-            long_nan: long_period,   // start as "all NaN" until we populate
+            short_nan: short_period,
+            long_nan: long_period,
 
             inv_short: 1.0 / (short_period as f64),
             inv_long: 1.0 / (long_period as f64),
         })
     }
 
-    /// O(1) streaming update:
-    /// - Adds `value` into both windows.
-    /// - Subtracts the element that falls out of each window.
-    /// - Returns None until long window is full; thereafter returns the VOSC or NaN if a window contains NaN.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let L = self.long_period;
         let S = self.short_period;
         let head = self.head;
 
-        // Values to be removed (captured before overwrite)
-        // Oldest of the long window is exactly at `head`.
         let old_long = unsafe { *self.buf.get_unchecked(head) };
 
-        // Oldest of the short window is at (head + L - S) % L when short is already full.
         let old_short = if self.count >= S {
             unsafe { *self.buf.get_unchecked((head + L - S) % L) }
         } else {
-            0.0 // won't be used
+            0.0
         };
 
-        
         if value.is_nan() {
-            
             self.long_nan += 1;
             self.short_nan += 1;
         } else {
@@ -868,20 +818,16 @@ impl VoscStream {
             self.short_sum += value;
         }
 
-        
         if self.count >= L {
             if old_long.is_nan() {
-                
                 self.long_nan -= 1;
             } else {
                 self.long_sum -= old_long;
             }
         } else {
-            
             self.long_nan -= 1;
         }
 
-        
         if self.count >= S {
             if old_short.is_nan() {
                 self.short_nan -= 1;
@@ -889,11 +835,9 @@ impl VoscStream {
                 self.short_sum -= old_short;
             }
         } else {
-            
             self.short_nan -= 1;
         }
 
-        
         unsafe {
             *self.buf.get_unchecked_mut(head) = value;
         }
@@ -903,26 +847,19 @@ impl VoscStream {
         }
         self.head = next;
 
-        
         if self.count < L {
             self.count += 1;
             if self.count < L {
-                
                 return None;
             }
         }
 
-        
         debug_assert!(self.count >= S);
 
-        
         if self.long_nan != 0 || self.short_nan != 0 {
             return Some(f64::NAN);
         }
 
-        
-        
-        
         let lavg = self.long_sum * self.inv_long;
         let savg = self.short_sum * self.inv_short;
         Some(100.0 * (savg - lavg) / lavg)
@@ -1000,13 +937,10 @@ pub fn vosc_batch_with_kernel(
     sweep: &VoscBatchRange,
     k: Kernel,
 ) -> Result<VoscBatchOutput, VoscError> {
-    
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(VoscError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(VoscError::InvalidKernelForBatch(k)),
     };
     let mut simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1014,7 +948,7 @@ pub fn vosc_batch_with_kernel(
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
-    
+
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
         simd = Kernel::Scalar;
@@ -1171,35 +1105,28 @@ fn vosc_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(VoscError::InvalidRange {
-            start: sweep.short_period.0,
-            end: sweep.short_period.1,
-            step: sweep.short_period.2,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(VoscError::InvalidRange {
+        start: sweep.short_period.0,
+        end: sweep.short_period.1,
+        step: sweep.short_period.2,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let mut warmup_periods = Vec::with_capacity(combos.len());
     for c in &combos {
         let lp = c.long_period.unwrap();
-        let warm = first
-            .checked_add(lp)
-            .and_then(|v| v.checked_sub(1))
-            .ok_or(VoscError::InvalidPeriod {
+        let warm = first.checked_add(lp).and_then(|v| v.checked_sub(1)).ok_or(
+            VoscError::InvalidPeriod {
                 period: lp,
                 data_len: data.len(),
-            })?;
+            },
+        )?;
         warmup_periods.push(warm);
     }
 
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let values = unsafe {
         let ptr = buf_mu.as_mut_ptr() as *mut f64;
         let len = buf_mu.len();
@@ -1208,11 +1135,8 @@ fn vosc_batch_inner(
         Vec::from_raw_parts(ptr, len, cap)
     };
 
-    
     let mut values = values;
 
-    
-    
     let mut prefix = Vec::with_capacity(cols + 1);
     prefix.push(0.0f64);
     let mut acc = 0.0f64;
@@ -1319,13 +1243,11 @@ fn vosc_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(VoscError::InvalidRange {
-            start: sweep.short_period.0,
-            end: sweep.short_period.1,
-            step: sweep.short_period.2,
-        })?;
+    let total = rows.checked_mul(cols).ok_or(VoscError::InvalidRange {
+        start: sweep.short_period.0,
+        end: sweep.short_period.1,
+        step: sweep.short_period.2,
+    })?;
     if out.len() != total {
         return Err(VoscError::OutputLengthMismatch {
             expected: total,
@@ -1333,17 +1255,15 @@ fn vosc_batch_inner_into(
         });
     }
 
-    
     let mut warm = Vec::with_capacity(combos.len());
     for c in &combos {
         let lp = c.long_period.unwrap();
-        let w = first
-            .checked_add(lp)
-            .and_then(|v| v.checked_sub(1))
-            .ok_or(VoscError::InvalidPeriod {
+        let w = first.checked_add(lp).and_then(|v| v.checked_sub(1)).ok_or(
+            VoscError::InvalidPeriod {
                 period: lp,
                 data_len: data.len(),
-            })?;
+            },
+        )?;
         warm.push(w);
     }
 
@@ -1355,7 +1275,6 @@ fn vosc_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let mut prefix = Vec::with_capacity(cols + 1);
     prefix.push(0.0f64);
     let mut acc = 0.0f64;
@@ -1364,7 +1283,6 @@ fn vosc_batch_inner_into(
         prefix.push(acc);
     }
 
-    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let s = combos[row].short_period.unwrap();
         let l = combos[row].long_period.unwrap();
@@ -1589,43 +1507,42 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            VoscParams::default(), 
+            VoscParams::default(),
             VoscParams {
-                short_period: Some(1), 
+                short_period: Some(1),
                 long_period: Some(2),
             },
             VoscParams {
-                short_period: Some(1), 
+                short_period: Some(1),
                 long_period: Some(5),
             },
             VoscParams {
-                short_period: Some(2), 
+                short_period: Some(2),
                 long_period: Some(10),
             },
             VoscParams {
-                short_period: Some(5), 
+                short_period: Some(5),
                 long_period: Some(20),
             },
             VoscParams {
-                short_period: Some(10), 
+                short_period: Some(10),
                 long_period: Some(50),
             },
             VoscParams {
-                short_period: Some(20), 
+                short_period: Some(20),
                 long_period: Some(100),
             },
             VoscParams {
-                short_period: Some(3), 
+                short_period: Some(3),
                 long_period: Some(5),
             },
             VoscParams {
-                short_period: Some(10), 
+                short_period: Some(10),
                 long_period: Some(10),
             },
             VoscParams {
-                short_period: Some(4), 
+                short_period: Some(4),
                 long_period: Some(12),
             },
             VoscParams {
@@ -1644,12 +1561,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1702,7 +1618,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_vosc_tests {
@@ -1751,7 +1667,6 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, (short_period, long_period))| {
-                
                 if short_period > long_period {
                     return Ok(());
                 }
@@ -1766,8 +1681,6 @@ mod tests {
                 let VoscOutput { values: ref_out } =
                     vosc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
-                
                 for i in 0..(long_period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1777,8 +1690,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 for i in (long_period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1809,11 +1720,7 @@ mod tests {
                     );
                 }
 
-                
-                
-                
                 for i in long_period..data.len() {
-                    
                     let short_start = i + 1 - short_period;
                     let long_start = i + 1 - long_period;
 
@@ -1835,8 +1742,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 if short_period == long_period {
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
@@ -1848,8 +1753,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() <= f64::EPSILON) {
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
@@ -1919,18 +1822,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (1, 5, 1, 2, 10, 2),     
-            (2, 10, 2, 5, 20, 5),    
-            (10, 20, 5, 20, 50, 10), 
-            (1, 3, 1, 3, 6, 1),      
-            (5, 15, 2, 10, 30, 5),   
-            (2, 2, 0, 5, 25, 5),     
-            (1, 10, 3, 10, 10, 0),   
-            (3, 9, 3, 9, 27, 9),     
-            (1, 5, 1, 5, 5, 0),      
+            (1, 5, 1, 2, 10, 2),
+            (2, 10, 2, 5, 20, 5),
+            (10, 20, 5, 20, 50, 10),
+            (1, 3, 1, 3, 6, 1),
+            (5, 15, 2, 10, 30, 5),
+            (2, 2, 0, 5, 25, 5),
+            (1, 10, 3, 10, 10, 0),
+            (3, 9, 3, 9, 27, 9),
+            (1, 5, 1, 5, 5, 0),
         ];
 
         for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step)) in
@@ -1952,7 +1853,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2011,7 +1911,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2037,10 +1937,9 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_vosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let volume = candles
@@ -2049,10 +1948,8 @@ mod tests {
 
         let input = VoscInput::with_default_candles(&candles);
 
-        
         let baseline = vosc(&input)?.values;
 
-        
         let mut out = vec![0.0f64; volume.len()];
         vosc_into(&input, &mut out)?;
 
@@ -2077,10 +1974,6 @@ mod tests {
     }
 }
 
-
-
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "vosc")]
 #[pyo3(signature = (data, short_period=2, long_period=5, kernel=None))]
@@ -2102,7 +1995,6 @@ pub fn vosc_py<'py>(
     };
     let input = VoscInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| vosc_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2130,8 +2022,6 @@ impl VoscStreamPy {
         Ok(VoscStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated VOSC value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2158,7 +2048,6 @@ pub fn vosc_batch_py<'py>(
         long_period: long_period_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err("No valid parameter combinations"));
@@ -2170,20 +2059,16 @@ pub fn vosc_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow in vosc_batch_py"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| -> Result<Vec<VoscParams>, VoscError> {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2191,12 +2076,10 @@ pub fn vosc_batch_py<'py>(
                 _ => kernel,
             };
 
-            
             vosc_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2218,7 +2101,6 @@ pub fn vosc_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vosc_cuda_batch_dev")]
@@ -2245,8 +2127,7 @@ pub fn vosc_cuda_batch_dev_py(
         let cuda = CudaVosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();
-        cuda
-            .vosc_batch_dev(slice_in, &sweep)
+        cuda.vosc_batch_dev(slice_in, &sweep)
             .map(|(dev, _combos)| (dev, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2287,8 +2168,7 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
         let cuda = CudaVosc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();
-        cuda
-            .vosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
+        cuda.vosc_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map(|dev| (dev, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2300,10 +2180,6 @@ pub fn vosc_cuda_many_series_one_param_dev_py(
         device_id: dev_id_u32,
     })
 }
-
-
-
-
 
 #[inline]
 pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Result<(), VoscError> {
@@ -2376,7 +2252,6 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
         }
     }
 
-    
     let warm = match first
         .checked_add(long_period)
         .and_then(|v| v.checked_sub(1))
@@ -2397,18 +2272,13 @@ pub fn vosc_into_slice(dst: &mut [f64], input: &VoscInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-/// Write VOSC (Volume Oscillator) values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-/// - Uses the module's kernel auto-selection (Auto short-circuits to Scalar for parity).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn vosc_into(input: &VoscInput, out: &mut [f64]) -> Result<(), VoscError> {
     vosc_into_slice(out, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vosc_js(data: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
     let params = VoscParams {
@@ -2417,14 +2287,14 @@ pub fn vosc_js(data: &[f64], short_period: usize, long_period: usize) -> Result<
     };
     let input = VoscInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
     vosc_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vosc_into(
     in_ptr: *const f64,
@@ -2446,7 +2316,6 @@ pub fn vosc_into(
         let input = VoscInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
             let mut temp = vec![0.0; len];
             vosc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2461,7 +2330,7 @@ pub fn vosc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vosc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2470,7 +2339,7 @@ pub fn vosc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2480,14 +2349,14 @@ pub fn vosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VoscBatchConfig {
     pub short_period_range: (usize, usize, usize),
     pub long_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VoscBatchJsOutput {
     pub values: Vec<f64>,
@@ -2496,7 +2365,7 @@ pub struct VoscBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = vosc_batch)]
 pub fn vosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: VoscBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2521,7 +2390,7 @@ pub fn vosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vosc_batch_into(
     in_ptr: *const f64,
@@ -2549,7 +2418,9 @@ pub fn vosc_batch_into(
         let cols = len;
 
         if rows == 0 {
-            return Err(JsValue::from_str("vosc_batch_into: no valid parameter combinations"));
+            return Err(JsValue::from_str(
+                "vosc_batch_into: no valid parameter combinations",
+            ));
         }
         let total = rows
             .checked_mul(cols)
@@ -2557,7 +2428,6 @@ pub fn vosc_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Resolve to regular kernel for row executor, match alma.rs
         vosc_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

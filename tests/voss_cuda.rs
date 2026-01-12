@@ -1,5 +1,3 @@
-
-
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -65,7 +63,7 @@ fn voss_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_voss.buf.copy_to(&mut voss_g)?;
     dev_filt.buf.copy_to(&mut filt_g)?;
 
-    let tol = 1e-2; 
+    let tol = 1e-2;
     for idx in 0..(cpu.rows * cpu.cols) {
         let cv = cpu.voss[idx];
         let gv = voss_g[idx] as f64;
@@ -99,12 +97,11 @@ fn voss_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     use vector_ta::indicators::voss::{voss_with_kernel, VossData, VossInput, VossParams};
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (2 + s)..rows {
-            
             let x = t as f64 + (s as f64) * 0.1;
             tm[t * cols + s] = (x * 0.0021).sin() + 0.00021 * x;
         }
@@ -115,7 +112,6 @@ fn voss_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         bandwidth: Some(0.25),
     };
 
-    
     let mut voss_cpu_tm = vec![f64::NAN; cols * rows];
     let mut filt_cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

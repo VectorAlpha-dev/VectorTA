@@ -1,28 +1,5 @@
-//! # Correlation Cycle (John Ehlers)
-//!
-//! Computes real, imag, angle, and market state outputs based on correlation phasor analysis.
-//! Uses phase correlation to identify market cycles and determine market state (trending vs cycling).
-//!
-//! ## Parameters
-//! - **period**: Window size for correlation calculation (default: 20)
-//! - **threshold**: Threshold for market state determination (default: 9.0)
-//!
-//! ## Returns
-//! - **`Ok(CorrelationCycleOutput)`** on success, containing four `Vec<f64>` arrays:
-//!   - real: Real component of the phasor
-//!   - imag: Imaginary component of the phasor
-//!   - angle: Phase angle in degrees
-//!   - state: Market state (1.0 for trending, 0.0 for cycling)
-//! - **`Err(CorrelationCycleError)`** on various error conditions.
-//!
-//! ## Developer Status
-//! - SIMD enabled: AVX2/AVX512 accumulate four jammed dot-products per window. On a 100k series,
-//!   AVX2 outperforms scalar by >25% and AVX512 is also faster than scalar (slightly behind AVX2 on this CPU).
-//! - Scalar path optimized: loop-jammed accumulators, trig/denominator precompute, fused state pass; matches tests.
-//! - Batch: row-specific SIMD not implemented; potential future win is caching trig tables for identical periods across rows.
-//! - CUDA/Python: CUDA wrapper with typed errors plus Python CAI v3/DLPack v1.x zero-copy interop; VRAM handles retain device context and id.
-//! - Memory: uses alloc_with_nan_prefix/make_uninit_matrix/init_matrix_prefixes; no O(N) temporaries for outputs.
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -32,13 +9,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context as CudaContext;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc as StdArc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -91,7 +66,10 @@ pub struct CorrelationCycleOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CorrelationCycleParams {
     pub period: Option<usize>,
     pub threshold: Option<f64>,
@@ -230,7 +208,11 @@ pub enum CorrelationCycleError {
     #[error("correlation_cycle: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("correlation_cycle: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("correlation_cycle: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("correlation_cycle: invalid input: {0}")]
@@ -278,10 +260,9 @@ pub fn correlation_cycle_with_kernel(
         k => k,
     };
 
-    let warm_real_imag_angle = first + period; 
-    let warm_state = first + period + 1; 
+    let warm_real_imag_angle = first + period;
+    let warm_state = first + period + 1;
 
-    
     let mut real = alloc_with_nan_prefix(len, warm_real_imag_angle);
     let mut imag = alloc_with_nan_prefix(len, warm_real_imag_angle);
     let mut angle = alloc_with_nan_prefix(len, warm_real_imag_angle);
@@ -312,13 +293,7 @@ pub fn correlation_cycle_with_kernel(
     })
 }
 
-/// Compute Correlation Cycle into caller-provided buffers (no allocations).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API:
-///   real/imag/angle warmup at `first_non_nan + period`, state warmup at `first_non_nan + period + 1`.
-/// - All output slice lengths must equal the input length.
-/// - Uses `Kernel::Auto` dispatch internally.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn correlation_cycle_into(
     input: &CorrelationCycleInput,
     out_real: &mut [f64],
@@ -337,10 +312,15 @@ pub fn correlation_cycle_into(
         || out_angle.len() != len
         || out_state.len() != len
     {
-        let got = *[out_real.len(), out_imag.len(), out_angle.len(), out_state.len()]
-            .iter()
-            .min()
-            .unwrap_or(&0);
+        let got = *[
+            out_real.len(),
+            out_imag.len(),
+            out_angle.len(),
+            out_state.len(),
+        ]
+        .iter()
+        .min()
+        .unwrap_or(&0);
         return Err(CorrelationCycleError::OutputLengthMismatch { expected: len, got });
     }
 
@@ -351,16 +331,21 @@ pub fn correlation_cycle_into(
 
     let period = input.get_period();
     if period == 0 || period > len {
-        return Err(CorrelationCycleError::InvalidPeriod { period, data_len: len });
+        return Err(CorrelationCycleError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if len - first < period {
-        return Err(CorrelationCycleError::NotEnoughValidData { needed: period, valid: len - first });
+        return Err(CorrelationCycleError::NotEnoughValidData {
+            needed: period,
+            valid: len - first,
+        });
     }
 
     let threshold = input.get_threshold();
     let chosen = correlation_cycle_auto_kernel();
 
-    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm_ria = (first + period).min(len);
     let warm_s = (first + period + 1).min(len);
@@ -418,10 +403,15 @@ pub fn correlation_cycle_into_slices(
         || dst_angle.len() != len
         || dst_state.len() != len
     {
-        let got = *[dst_real.len(), dst_imag.len(), dst_angle.len(), dst_state.len()]
-            .iter()
-            .min()
-            .unwrap_or(&0);
+        let got = *[
+            dst_real.len(),
+            dst_imag.len(),
+            dst_angle.len(),
+            dst_state.len(),
+        ]
+        .iter()
+        .min()
+        .unwrap_or(&0);
         return Err(CorrelationCycleError::OutputLengthMismatch { expected: len, got });
     }
     let first = data
@@ -466,7 +456,6 @@ pub fn correlation_cycle_into_slices(
         }
     }
 
-    
     let warm_ria = first + period;
     let warm_s = first + period + 1;
     for v in &mut dst_real[..warm_ria] {
@@ -512,21 +501,19 @@ unsafe fn correlation_cycle_compute_into(
     angle: &mut [f64],
     state: &mut [f64],
 ) {
-    
-    let half_pi = f64::asin(1.0); 
-    let two_pi = 4.0 * f64::asin(1.0); 
+    let half_pi = f64::asin(1.0);
+    let two_pi = 4.0 * f64::asin(1.0);
 
-    
     let n = period as f64;
     let w = two_pi / n;
 
     let mut cos_table = vec![0.0f64; period];
-    let mut sin_table = vec![0.0f64; period]; 
+    let mut sin_table = vec![0.0f64; period];
 
     let mut sum_cos = 0.0f64;
-    let mut sum_sin = 0.0f64; 
+    let mut sum_sin = 0.0f64;
     let mut sum_cos2 = 0.0f64;
-    let mut sum_sin2 = 0.0f64; 
+    let mut sum_sin2 = 0.0f64;
 
     {
         let mut j = 0usize;
@@ -587,7 +574,6 @@ unsafe fn correlation_cycle_compute_into(
         }
     }
 
-    
     let t2_const = n.mul_add(sum_cos2, -(sum_cos * sum_cos));
     let t4_const = n.mul_add(sum_sin2, -(sum_sin * sum_sin));
     let has_t2 = t2_const > 0.0;
@@ -595,11 +581,9 @@ unsafe fn correlation_cycle_compute_into(
     let sqrt_t2c = if has_t2 { t2_const.sqrt() } else { 0.0 };
     let sqrt_t4c = if has_t4 { t4_const.sqrt() } else { 0.0 };
 
-    
-    let start_ria = first + period; 
-    let start_s = start_ria + 1; 
+    let start_ria = first + period;
+    let start_s = start_ria + 1;
 
-    
     let mut prev_angle = f64::NAN;
 
     let dptr = data.as_ptr();
@@ -607,11 +591,10 @@ unsafe fn correlation_cycle_compute_into(
     let sptr = sin_table.as_ptr();
 
     for i in start_ria..data.len() {
-        
         let mut sum_x = 0.0f64;
         let mut sum_x2 = 0.0f64;
-        let mut sum_xc = 0.0f64; 
-        let mut sum_xs = 0.0f64; 
+        let mut sum_xc = 0.0f64;
+        let mut sum_xs = 0.0f64;
 
         let mut j = 0usize;
         while j + 4 <= period {
@@ -1090,7 +1073,6 @@ pub unsafe fn correlation_cycle_avx512_long(
     correlation_cycle_compute_into(data, period, threshold, first, real, imag, angle, state)
 }
 
-
 #[inline(always)]
 pub unsafe fn correlation_cycle_row_scalar_with_first(
     data: &[f64],
@@ -1104,7 +1086,6 @@ pub unsafe fn correlation_cycle_row_scalar_with_first(
 ) {
     correlation_cycle_compute_into(data, period, threshold, first, real, imag, angle, state)
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1136,46 +1117,33 @@ pub unsafe fn correlation_cycle_row_avx512_with_first(
     correlation_cycle_avx512(data, period, threshold, first, real, imag, angle, state)
 }
 
-/// Streaming kernel note: Uses an O(1) sliding-DFT phasor update (no per-tick window scan).
-/// Matches batch semantics and one-tick alignment; NaNs are treated as zeros inside the window.
 #[derive(Debug, Clone)]
 pub struct CorrelationCycleStream {
-    
     period: usize,
     threshold: f64,
 
-    
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
 
-    /// Previously computed tuple to emit on the next call (one-tick delay to match batch)
     last: Option<(f64, f64, f64, f64)>,
 
-    
-
-    
     sum_x: f64,
     sum_x2: f64,
 
-    
-    
-    
-    phasor_re: f64, 
-    phasor_im: f64, 
+    phasor_re: f64,
+    phasor_im: f64,
 
-    
     prev_angle: f64,
 
-    
     n: f64,
     half_pi: f64,
-    z_re: f64,     
-    z_im: f64,     
-    sum_cos: f64,  
-    sum_sin: f64,  
-    sqrt_t2c: f64, 
-    sqrt_t4c: f64, 
+    z_re: f64,
+    z_im: f64,
+    sum_cos: f64,
+    sum_sin: f64,
+    sqrt_t2c: f64,
+    sqrt_t4c: f64,
     has_t2: bool,
     has_t4: bool,
 }
@@ -1191,22 +1159,19 @@ impl CorrelationCycleStream {
         }
         let threshold = params.threshold.unwrap_or(9.0);
 
-        
-        let half_pi = f64::asin(1.0); 
-        let two_pi = 4.0 * half_pi; 
+        let half_pi = f64::asin(1.0);
+        let two_pi = 4.0 * half_pi;
         let n = period as f64;
         let w = two_pi / n;
 
-        
         let (s_w, c_w) = w.sin_cos();
         let z_re = c_w;
-        let z_im = -s_w; 
+        let z_im = -s_w;
 
-        
         let mut sum_cos = 0.0f64;
-        let mut sum_sin = 0.0f64; 
+        let mut sum_sin = 0.0f64;
         let mut sum_cos2 = 0.0f64;
-        let mut sum_sin2 = 0.0f64; 
+        let mut sum_sin2 = 0.0f64;
 
         let mut j = 0usize;
         while j + 4 <= period {
@@ -1244,7 +1209,6 @@ impl CorrelationCycleStream {
             j += 1;
         }
 
-        
         let t2_const = n.mul_add(sum_cos2, -(sum_cos * sum_cos));
         let t4_const = n.mul_add(sum_sin2, -(sum_sin * sum_sin));
         let has_t2 = t2_const > 0.0;
@@ -1255,7 +1219,7 @@ impl CorrelationCycleStream {
         Ok(Self {
             period,
             threshold,
-            buffer: vec![0.0; period], 
+            buffer: vec![0.0; period],
             head: 0,
             filled: false,
             last: None,
@@ -1279,25 +1243,17 @@ impl CorrelationCycleStream {
         })
     }
 
-    /// Per-tick O(1) update. Returns `None` until the first full window is formed.
-    /// After that, returns the previous window’s (real, imag, angle, state) each call
-    /// to match the batch alignment (one-tick latency).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
-        
         let x_new = if value.is_nan() { 0.0 } else { value };
-        let x_old = self.buffer[self.head]; 
+        let x_old = self.buffer[self.head];
         self.buffer[self.head] = x_new;
         self.head = (self.head + 1) % self.period;
 
-        
         self.sum_x += x_new - x_old;
-        
+
         self.sum_x2 = (x_new * x_new) - (x_old * x_old) + self.sum_x2;
 
-        
-        
-        
         let dx = x_new - x_old;
         let s = self.phasor_re + dx;
 
@@ -1307,8 +1263,6 @@ impl CorrelationCycleStream {
         self.phasor_re = new_re;
         self.phasor_im = new_im;
 
-        
-        
         let first_wrap_now = !self.filled && self.head == 0;
         if first_wrap_now {
             self.filled = true;
@@ -1316,8 +1270,6 @@ impl CorrelationCycleStream {
             return None;
         }
 
-        
-        
         let mut sum_x_exact = 0.0f64;
         let mut sum_x2_exact = 0.0f64;
         let mut k = 0usize;
@@ -1372,7 +1324,6 @@ impl CorrelationCycleStream {
             }
         }
 
-        
         let mut ang = if i_val == 0.0 {
             0.0
         } else {
@@ -1384,7 +1335,6 @@ impl CorrelationCycleStream {
             a
         };
 
-        
         let st = if self.prev_angle.is_finite() && (ang - self.prev_angle).abs() < self.threshold {
             if ang >= 0.0 {
                 1.0
@@ -1397,11 +1347,8 @@ impl CorrelationCycleStream {
             f64::NAN
         };
 
-        
         self.prev_angle = ang;
 
-        
-        
         let to_emit = self.last.take();
         self.last = Some((r_val, i_val, ang, st));
 
@@ -1517,7 +1464,7 @@ pub fn correlation_cycle_batch_with_kernel(
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, 
+        _ => Kernel::Scalar,
     };
     correlation_cycle_batch_par_slice(data, sweep, simd)
 }
@@ -1557,8 +1504,12 @@ impl CorrelationCycleBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid(r: &CorrelationCycleBatchRange) -> Result<Vec<CorrelationCycleParams>, CorrelationCycleError> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CorrelationCycleError> {
+fn expand_grid(
+    r: &CorrelationCycleBatchRange,
+) -> Result<Vec<CorrelationCycleParams>, CorrelationCycleError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CorrelationCycleError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1596,25 +1547,41 @@ fn expand_grid(r: &CorrelationCycleBatchRange) -> Result<Vec<CorrelationCyclePar
             let mut x = start;
             loop {
                 vals.push(x);
-                if x >= end { break; }
+                if x >= end {
+                    break;
+                }
                 let next = x + step;
-                if !next.is_finite() || next == x { break; }
+                if !next.is_finite() || next == x {
+                    break;
+                }
                 x = next;
-                if x > end + 1e-12 { break; }
+                if x > end + 1e-12 {
+                    break;
+                }
             }
         } else {
             let mut x = start;
             loop {
                 vals.push(x);
-                if x <= end { break; }
+                if x <= end {
+                    break;
+                }
                 let next = x - step.abs();
-                if !next.is_finite() || next == x { break; }
+                if !next.is_finite() || next == x {
+                    break;
+                }
                 x = next;
-                if x < end - 1e-12 { break; }
+                if x < end - 1e-12 {
+                    break;
+                }
             }
         }
         if vals.is_empty() {
-            return Err(CorrelationCycleError::InvalidRange { start: start as usize, end: end as usize, step: step.abs() as usize });
+            return Err(CorrelationCycleError::InvalidRange {
+                start: start as usize,
+                end: end as usize,
+                step: step.abs() as usize,
+            });
         }
         Ok(vals)
     }
@@ -1629,7 +1596,10 @@ fn expand_grid(r: &CorrelationCycleBatchRange) -> Result<Vec<CorrelationCyclePar
     let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &t in &thresholds {
-            out.push(CorrelationCycleParams { period: Some(p), threshold: Some(t) });
+            out.push(CorrelationCycleParams {
+                period: Some(p),
+                threshold: Some(t),
+            });
         }
     }
     Ok(out)
@@ -1683,29 +1653,30 @@ fn correlation_cycle_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| CorrelationCycleError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let mut real_mu = make_uninit_matrix(rows, cols);
     let mut imag_mu = make_uninit_matrix(rows, cols);
     let mut angle_mu = make_uninit_matrix(rows, cols);
     let mut state_mu = make_uninit_matrix(rows, cols);
 
-    
     let ria_warm: Vec<usize> = combos
         .iter()
         .map(|c| first.checked_add(c.period.unwrap()).unwrap_or(usize::MAX))
         .collect();
     let st_warm: Vec<usize> = combos
         .iter()
-        .map(|c| first.checked_add(c.period.unwrap()).and_then(|v| v.checked_add(1)).unwrap_or(usize::MAX))
+        .map(|c| {
+            first
+                .checked_add(c.period.unwrap())
+                .and_then(|v| v.checked_add(1))
+                .unwrap_or(usize::MAX)
+        })
         .collect();
 
-    
     init_matrix_prefixes(&mut real_mu, cols, &ria_warm);
     init_matrix_prefixes(&mut imag_mu, cols, &ria_warm);
     init_matrix_prefixes(&mut angle_mu, cols, &ria_warm);
     init_matrix_prefixes(&mut state_mu, cols, &st_warm);
 
-    
     let mut real_guard = ManuallyDrop::new(real_mu);
     let mut imag_guard = ManuallyDrop::new(imag_mu);
     let mut angle_guard = ManuallyDrop::new(angle_mu);
@@ -1784,7 +1755,6 @@ fn correlation_cycle_batch_inner(
         }
     }
 
-    
     let real = unsafe {
         Vec::from_raw_parts(
             real_guard.as_mut_ptr() as *mut f64,
@@ -1863,10 +1833,15 @@ fn correlation_cycle_batch_inner_into(
         || out_angle.len() != expected
         || out_state.len() != expected
     {
-        let got = *[out_real.len(), out_imag.len(), out_angle.len(), out_state.len()]
-            .iter()
-            .min()
-            .unwrap_or(&0);
+        let got = *[
+            out_real.len(),
+            out_imag.len(),
+            out_angle.len(),
+            out_state.len(),
+        ]
+        .iter()
+        .min()
+        .unwrap_or(&0);
         return Err(CorrelationCycleError::OutputLengthMismatch { expected, got });
     }
 
@@ -1887,7 +1862,7 @@ fn correlation_cycle_batch_inner_into(
             }
             _ => correlation_cycle_row_scalar_with_first(data, p, t, first, r, im, an, st),
         }
-        
+
         let ria = first + p;
         let stp = first + p + 1;
         for v in &mut r[..ria] {
@@ -2199,7 +2174,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_cc_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2207,7 +2181,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
             CorrelationCycleParams {
                 period: Some(20),
@@ -2224,14 +2197,13 @@ mod tests {
             CorrelationCycleParams {
                 period: None,
                 threshold: None,
-            }, 
+            },
         ];
 
         for params in test_params {
             let input = CorrelationCycleInput::from_candles(&candles, "close", params.clone());
             let output = correlation_cycle_with_kernel(&input, kernel)?;
 
-            
             let arrays = vec![
                 ("real", &output.real),
                 ("imag", &output.imag),
@@ -2241,14 +2213,12 @@ mod tests {
 
             for (array_name, values) in arrays {
                 for (i, &val) in values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
@@ -2256,7 +2226,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
@@ -2264,7 +2233,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in {} array with params {:?}",
@@ -2278,7 +2246,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_cc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2321,24 +2288,20 @@ mod tests {
         check_cc_no_poison
     );
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
-fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
-        
+    fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = CorrelationCycleInput::from_candles(
             &candles,
             "close",
             CorrelationCycleParams::default(),
         );
 
-        
         let baseline = correlation_cycle(&input)?;
 
-        
         let len = candles.close.len();
         let mut out_real = vec![0.0f64; len];
         let mut out_imag = vec![0.0f64; len];
@@ -2353,13 +2316,11 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
             &mut out_state,
         )?;
 
-        
         assert_eq!(baseline.real.len(), out_real.len());
         assert_eq!(baseline.imag.len(), out_imag.len());
         assert_eq!(baseline.angle.len(), out_angle.len());
         assert_eq!(baseline.state.len(), out_state.len());
 
-        
         fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2406,18 +2367,16 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        let strat = (5usize..=50) 
-            .prop_flat_map(|period| {
-                (
-                    prop::collection::vec(
-                        (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                        period + 10..400, 
-                    ),
-                    Just(period),
-                    1.0f64..20.0f64, 
-                )
-            });
+        let strat = (5usize..=50).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+                    period + 10..400,
+                ),
+                Just(period),
+                1.0f64..20.0f64,
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period, threshold)| {
@@ -2427,16 +2386,12 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                 };
                 let input = CorrelationCycleInput::from_slice(&data, params);
 
-                
                 let output = correlation_cycle_with_kernel(&input, kernel).unwrap();
 
-                
                 let ref_output = correlation_cycle_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let warmup_period = period;
 
-                
                 for i in 0..warmup_period {
                     prop_assert!(
                         output.real[i].is_nan(),
@@ -2461,7 +2416,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                
                 for i in 0..=period {
                     prop_assert!(
                         output.state[i].is_nan(),
@@ -2472,7 +2426,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                
                 for i in warmup_period..data.len() {
                     if !output.real[i].is_nan() {
                         prop_assert!(
@@ -2494,7 +2447,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                
                 for i in warmup_period..data.len() {
                     if !output.angle[i].is_nan() {
                         prop_assert!(
@@ -2507,7 +2459,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                
                 for i in (period + 1)..data.len() {
                     if !output.state[i].is_nan() {
                         let state_val = output.state[i];
@@ -2523,9 +2474,7 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                
                 for i in 0..data.len() {
-                    
                     let real_bits = output.real[i].to_bits();
                     let ref_real_bits = ref_output.real[i].to_bits();
 
@@ -2551,7 +2500,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    
                     let imag_bits = output.imag[i].to_bits();
                     let ref_imag_bits = ref_output.imag[i].to_bits();
 
@@ -2577,7 +2525,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    
                     let angle_bits = output.angle[i].to_bits();
                     let ref_angle_bits = ref_output.angle[i].to_bits();
 
@@ -2603,7 +2550,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                         );
                     }
 
-                    
                     let state_bits = output.state[i].to_bits();
                     let ref_state_bits = ref_output.state[i].to_bits();
 
@@ -2628,11 +2574,8 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                     for i in warmup_period..data.len() {
-                        
                         if !output.real[i].is_nan() {
                             prop_assert!(
                                 output.real[i].abs() < 1e-6,
@@ -2702,7 +2645,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2710,14 +2652,12 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CorrelationCycleBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 40, 10) 
-            .threshold_range(5.0, 15.0, 5.0) 
+            .period_range(10, 40, 10)
+            .threshold_range(5.0, 15.0, 5.0)
             .apply_candles(&c, "close")?;
 
-        
         let matrices = vec![
             ("real", &output.real),
             ("imag", &output.imag),
@@ -2727,7 +2667,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
 
         for (matrix_name, values) in matrices {
             for (idx, &val) in values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2738,7 +2677,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                 let period = output.combos[row].period.unwrap();
                 let threshold = output.combos[row].threshold.unwrap();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
@@ -2746,7 +2684,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
@@ -2754,7 +2691,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in {} matrix, params: period={}, threshold={}",
@@ -2767,7 +2703,6 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2794,11 +2729,11 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         let mut out_a = vec![0.0; n];
         let mut out_s = vec![0.0; n];
 
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             correlation_cycle_into(&input, &mut out_r, &mut out_i, &mut out_a, &mut out_s)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
             return Ok(());
         }
@@ -2813,23 +2748,49 @@ fn test_correlation_cycle_into_matches_api_v2() -> Result<(), Box<dyn Error>> {
         }
 
         for i in 0..n {
-            assert!(eq_or_both_nan(base.real[i], out_r[i]), "real mismatch at {}: base={}, into={}", i, base.real[i], out_r[i]);
-            assert!(eq_or_both_nan(base.imag[i], out_i[i]), "imag mismatch at {}: base={}, into={}", i, base.imag[i], out_i[i]);
-            assert!(eq_or_both_nan(base.angle[i], out_a[i]), "angle mismatch at {}: base={}, into={}", i, base.angle[i], out_a[i]);
-            assert!(eq_or_both_nan(base.state[i], out_s[i]), "state mismatch at {}: base={}, into={}", i, base.state[i], out_s[i]);
+            assert!(
+                eq_or_both_nan(base.real[i], out_r[i]),
+                "real mismatch at {}: base={}, into={}",
+                i,
+                base.real[i],
+                out_r[i]
+            );
+            assert!(
+                eq_or_both_nan(base.imag[i], out_i[i]),
+                "imag mismatch at {}: base={}, into={}",
+                i,
+                base.imag[i],
+                out_i[i]
+            );
+            assert!(
+                eq_or_both_nan(base.angle[i], out_a[i]),
+                "angle mismatch at {}: base={}, into={}",
+                i,
+                base.angle[i],
+                out_a[i]
+            );
+            assert!(
+                eq_or_both_nan(base.state[i], out_s[i]),
+                "state mismatch at {}: base={}, into={}",
+                i,
+                base.state[i],
+                out_s[i]
+            );
         }
 
         Ok(())
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32CorrelationCycle", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "DeviceArrayF32CorrelationCycle",
+    unsendable
+)]
 pub struct DeviceArrayF32CcPy {
     pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
-    
-    
+
     pub(crate) _ctx: StdArc<CudaContext>,
     pub(crate) device_id: i32,
 }
@@ -2863,7 +2824,7 @@ impl DeviceArrayF32CcPy {
             inner.buf.as_device_ptr().as_raw() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        // Stream omitted: producing kernels synchronize before returning.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2883,7 +2844,6 @@ impl DeviceArrayF32CcPy {
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Validate dl_device hint against the allocation device.
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2903,8 +2863,6 @@ impl DeviceArrayF32CcPy {
             }
         }
 
-        // Producer synchronizes its CUDA stream before returning; reject
-        // explicitly disallowed stream==0 per Array API semantics.
         if let Some(obj) = &stream {
             if let Ok(s) = obj.extract::<i64>(py) {
                 if s == 0 {
@@ -2915,19 +2873,21 @@ impl DeviceArrayF32CcPy {
             }
         }
 
-        // Move VRAM handle out; subsequent exports get an empty buffer.
         let dummy = cust::memory::DeviceBuffer::<f32>::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            crate::cuda::moving_averages::DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            crate::cuda::moving_averages::DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Pass max_version through to the shared helper as a bound Python object.
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
@@ -2979,7 +2939,8 @@ pub fn correlation_cycle_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
-        let quad = cuda.correlation_cycle_batch_dev(slice_in, &sweep)
+        let quad = cuda
+            .correlation_cycle_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((quad, ctx, dev_id))
     })?;
@@ -3034,7 +2995,8 @@ pub fn correlation_cycle_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
-        let quad = cuda.correlation_cycle_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+        let quad = cuda
+            .correlation_cycle_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((quad, ctx, dev_id))
     })?;
@@ -3067,12 +3029,10 @@ pub fn correlation_cycle_py<'py>(
     let params = CorrelationCycleParams { period, threshold };
     let input = CorrelationCycleInput::from_slice(data_slice, params);
 
-    // Compute without GIL for better performance
     let output = py
         .allow_threads(|| correlation_cycle_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Create output dictionary with zero-copy transfers
     let dict = PyDict::new(py);
     dict.set_item("real", output.real.into_pyarray(py))?;
     dict.set_item("imag", output.imag.into_pyarray(py))?;
@@ -3108,7 +3068,6 @@ pub fn correlation_cycle_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // Preallocate flat outputs
     let out_real = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_imag = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_angle = unsafe { PyArray1::<f64>::new(py, [total], false) };
@@ -3186,7 +3145,7 @@ impl CorrelationCycleStreamPy {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CorrelationCycleJsOutput {
     pub real: Vec<f64>,
@@ -3195,7 +3154,7 @@ pub struct CorrelationCycleJsOutput {
     pub state: Vec<f64>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correlation_cycle_js(
     data: &[f64],
@@ -3218,7 +3177,7 @@ pub fn correlation_cycle_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CorrelationCycleBatchJsOutput {
     pub real: Vec<f64>,
@@ -3230,7 +3189,7 @@ pub struct CorrelationCycleBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correlation_cycle_batch_js(
     data: &[f64],
@@ -3263,7 +3222,7 @@ pub fn correlation_cycle_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correlation_cycle_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3272,7 +3231,7 @@ pub fn correlation_cycle_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correlation_cycle_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3282,7 +3241,7 @@ pub fn correlation_cycle_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correlation_cycle_into(
     in_ptr: *const f64,
@@ -3308,14 +3267,12 @@ pub fn correlation_cycle_into(
         let params = CorrelationCycleParams { period, threshold };
         let input = CorrelationCycleInput::from_slice(data, params);
 
-        // Check for aliasing - if ANY output pointer matches input, we need temp buffers
         let has_aliasing = in_ptr == real_ptr as *const f64
             || in_ptr == imag_ptr as *const f64
             || in_ptr == angle_ptr as *const f64
             || in_ptr == state_ptr as *const f64;
 
         if has_aliasing {
-            // Use temporary buffers for all outputs
             let mut temp_real = vec![0.0; len];
             let mut temp_imag = vec![0.0; len];
             let mut temp_angle = vec![0.0; len];
@@ -3331,7 +3288,6 @@ pub fn correlation_cycle_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results to output pointers
             let real_out = std::slice::from_raw_parts_mut(real_ptr, len);
             let imag_out = std::slice::from_raw_parts_mut(imag_ptr, len);
             let angle_out = std::slice::from_raw_parts_mut(angle_ptr, len);
@@ -3342,7 +3298,6 @@ pub fn correlation_cycle_into(
             angle_out.copy_from_slice(&temp_angle);
             state_out.copy_from_slice(&temp_state);
         } else {
-            // Direct computation into output buffers
             let real_out = std::slice::from_raw_parts_mut(real_ptr, len);
             let imag_out = std::slice::from_raw_parts_mut(imag_ptr, len);
             let angle_out = std::slice::from_raw_parts_mut(angle_ptr, len);

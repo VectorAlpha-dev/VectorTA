@@ -1,10 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for AlphaTrend (AT).
-//! - Mirrors ALMA-style conventions: JIT options, NON_BLOCKING stream, optional VRAM checks,
-//!   simple policies, and chunked launches.
-//! - Category: Recurrence/IIR. Host precomputes shared TR and momentum arrays.
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::alphatrend::{AlphaTrendBatchRange, AlphaTrendParams};
 use crate::indicators::mfi::{mfi_with_kernel, MfiInput, MfiParams};
@@ -12,8 +7,8 @@ use crate::indicators::rsi::{rsi_with_kernel, RsiInput, RsiParams};
 use crate::utilities::enums::Kernel;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
-use cust::function::{BlockSize, GridSize};
 use cust::error::CudaError;
+use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -28,11 +23,27 @@ use std::sync::Arc;
 pub enum CudaAlphaTrendError {
     Cuda(CudaError),
     InvalidInput(String),
-    MissingKernelSymbol { name: &'static str },
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     InvalidPolicy(&'static str),
-    DeviceMismatch { buf: u32, current: u32 },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 
@@ -44,12 +55,23 @@ impl fmt::Display for CudaAlphaTrendError {
             CudaAlphaTrendError::MissingKernelSymbol { name } => {
                 write!(f, "Missing kernel symbol: {}", name)
             }
-            CudaAlphaTrendError::OutOfMemory { required, free, headroom } => write!(
+            CudaAlphaTrendError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "Out of memory on device: required={}B, free={}B, headroom={}B",
                 required, free, headroom
             ),
-            CudaAlphaTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaAlphaTrendError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
             ),
@@ -122,7 +144,8 @@ impl CudaAlphaTrend {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(CudaAlphaTrendError::Cuda)?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaAlphaTrendError::Cuda)?;
+        let stream =
+            Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaAlphaTrendError::Cuda)?;
 
         Ok(Self {
             module,
@@ -134,9 +157,13 @@ impl CudaAlphaTrend {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     pub fn set_policy(&mut self, p: CudaAlphaTrendPolicy) {
         self.policy = p;
@@ -151,12 +178,18 @@ impl CudaAlphaTrend {
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaAlphaTrendError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Ok((free, _)) = mem_get_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaAlphaTrendError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaAlphaTrendError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -164,18 +197,41 @@ impl CudaAlphaTrend {
     }
 
     #[inline]
-    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaAlphaTrendError> {
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaAlphaTrendError> {
         let dev = Device::get_device(self.device_id).map_err(CudaAlphaTrendError::Cuda)?;
-        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX).map_err(CudaAlphaTrendError::Cuda)? as u32;
-        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY).map_err(CudaAlphaTrendError::Cuda)? as u32;
-        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ).map_err(CudaAlphaTrendError::Cuda)? as u32;
-        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaAlphaTrendError::Cuda)? as u32;
-        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY).map_err(CudaAlphaTrendError::Cuda)? as u32;
-        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ).map_err(CudaAlphaTrendError::Cuda)? as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaAlphaTrendError::Cuda)? as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .map_err(CudaAlphaTrendError::Cuda)? as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .map_err(CudaAlphaTrendError::Cuda)? as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaAlphaTrendError::Cuda)? as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .map_err(CudaAlphaTrendError::Cuda)? as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .map_err(CudaAlphaTrendError::Cuda)? as u32;
         let (gx, gy, gz) = grid;
         let (bx, by, bz) = block;
         if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
-            return Err(CudaAlphaTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaAlphaTrendError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -206,40 +262,88 @@ impl CudaAlphaTrend {
         Ok((bits, n_words))
     }
 
-    // ---- helpers: expand grid ----
     fn expand_grid(r: &AlphaTrendBatchRange) -> Result<Vec<AlphaTrendParams>, CudaAlphaTrendError> {
-        fn axis_usize((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, CudaAlphaTrendError> {
-            if st == 0 || s == e { return Ok(vec![s]); }
+        fn axis_usize(
+            (s, e, st): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaAlphaTrendError> {
+            if st == 0 || s == e {
+                return Ok(vec![s]);
+            }
             let mut v = Vec::new();
             if s < e {
                 let mut cur = s;
-                while cur <= e { v.push(cur); let next = cur.saturating_add(st); if next == cur { break; } cur = next; }
+                while cur <= e {
+                    v.push(cur);
+                    let next = cur.saturating_add(st);
+                    if next == cur {
+                        break;
+                    }
+                    cur = next;
+                }
             } else {
                 let mut cur = s;
-                while cur >= e { v.push(cur); let next = cur.saturating_sub(st); if next == cur { break; } cur = next; if cur == 0 && e > 0 { break; } }
+                while cur >= e {
+                    v.push(cur);
+                    let next = cur.saturating_sub(st);
+                    if next == cur {
+                        break;
+                    }
+                    cur = next;
+                    if cur == 0 && e > 0 {
+                        break;
+                    }
+                }
             }
-            if v.is_empty() { return Err(CudaAlphaTrendError::InvalidInput("empty usize range".into())); }
+            if v.is_empty() {
+                return Err(CudaAlphaTrendError::InvalidInput(
+                    "empty usize range".into(),
+                ));
+            }
             Ok(v)
         }
         fn axis_f64((s, e, st): (f64, f64, f64)) -> Result<Vec<f64>, CudaAlphaTrendError> {
-            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return Ok(vec![s]); }
+            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                return Ok(vec![s]);
+            }
             let mut out = Vec::new();
             if s < e {
-                let step = if st > 0.0 { st } else { -st }; let mut x = s; while x <= e + 1e-12 { out.push(x); x += step; }
+                let step = if st > 0.0 { st } else { -st };
+                let mut x = s;
+                while x <= e + 1e-12 {
+                    out.push(x);
+                    x += step;
+                }
             } else {
-                let step = if st > 0.0 { -st } else { st }; if step.abs() < 1e-12 { return Ok(vec![s]); } let mut x = s; while x >= e - 1e-12 { out.push(x); x += step; }
+                let step = if st > 0.0 { -st } else { st };
+                if step.abs() < 1e-12 {
+                    return Ok(vec![s]);
+                }
+                let mut x = s;
+                while x >= e - 1e-12 {
+                    out.push(x);
+                    x += step;
+                }
             }
-            if out.is_empty() { return Err(CudaAlphaTrendError::InvalidInput("empty f64 range".into())); }
+            if out.is_empty() {
+                return Err(CudaAlphaTrendError::InvalidInput("empty f64 range".into()));
+            }
             Ok(out)
         }
         let coeffs = axis_f64(r.coeff)?;
         let periods = axis_usize(r.period)?;
         let mut out = Vec::with_capacity(coeffs.len().saturating_mul(periods.len()));
-        for &c in &coeffs { for &p in &periods { out.push(AlphaTrendParams { coeff: Some(c), period: Some(p), no_volume: Some(r.no_volume) }); } }
+        for &c in &coeffs {
+            for &p in &periods {
+                out.push(AlphaTrendParams {
+                    coeff: Some(c),
+                    period: Some(p),
+                    no_volume: Some(r.no_volume),
+                });
+            }
+        }
         Ok(out)
     }
 
-    // ---- host precompute: TR (shared) ----
     fn build_tr_f32(
         high: &[f32],
         low: &[f32],
@@ -272,7 +376,6 @@ impl CudaAlphaTrend {
         Ok((tr, first))
     }
 
-    // ---- host precompute: momentum per unique period (RSI or MFI) ----
     fn build_momentum_table_f32(
         no_volume: bool,
         high: &[f32],
@@ -284,7 +387,6 @@ impl CudaAlphaTrend {
         let len = close.len();
         let mut out: HashMap<usize, Vec<f32>> = HashMap::with_capacity(unique_periods.len());
         if no_volume {
-            // RSI(close)
             let close64: Vec<f64> = close.iter().map(|&v| v as f64).collect();
             for &p in unique_periods {
                 let rsi = rsi_with_kernel(
@@ -295,7 +397,6 @@ impl CudaAlphaTrend {
                 out.insert(p, rsi.values.into_iter().map(|v| v as f32).collect());
             }
         } else {
-            // MFI(HLC3, volume)
             let mut hlc3_64 = vec![0f64; len];
             for i in 0..len {
                 let h = high[i] as f64;
@@ -337,7 +438,9 @@ impl CudaAlphaTrend {
         let func = self
             .module
             .get_function("alphatrend_batch_f32")
-            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol { name: "alphatrend_batch_f32" })?;
+            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol {
+                name: "alphatrend_batch_f32",
+            })?;
 
         let block_x = match policy {
             BatchKernelPolicy::OneD { block_x } => block_x,
@@ -351,13 +454,12 @@ impl CudaAlphaTrend {
         self.validate_launch((grid_x, 1, 1), (block_x, 1, 1))?;
 
         unsafe {
-            // Slice outputs for this combo chunk
             let mut high_ptr = d_high.as_device_ptr().as_raw();
             let mut low_ptr = d_low.as_device_ptr().as_raw();
-            let mut close_ptr: u64 = 0; // kernel never dereferences close
+            let mut close_ptr: u64 = 0;
             let mut tr_ptr = d_tr.as_device_ptr().as_raw();
             let mut mom_ptr = d_momentum_flat.as_device_ptr().as_raw();
-            // Advance scalar arrays by combo_offset elements
+
             let mut map_ptr = d_mrow_for_combo
                 .as_device_ptr()
                 .as_raw()
@@ -374,13 +476,14 @@ impl CudaAlphaTrend {
             let mut first_i = first_valid as i32;
             let mut ncomb_i = n_combos as i32;
             let mut nmrows_i = n_mrows as i32;
-            // offset outputs by combo_offset * len
-            let off_elems = combo_offset
-                .checked_mul(len)
-                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("combo_offset*len overflow".into()))?;
+
+            let off_elems = combo_offset.checked_mul(len).ok_or_else(|| {
+                CudaAlphaTrendError::InvalidInput("combo_offset*len overflow".into())
+            })?;
             let out_off_bytes = off_elems
                 .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("byte offset overflow".into()))? as u64;
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("byte offset overflow".into()))?
+                as u64;
             let mut k1_ptr = d_k1.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
             let mut k2_ptr = d_k2.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
             let args: &mut [*mut c_void] = &mut [
@@ -426,11 +529,12 @@ impl CudaAlphaTrend {
         combo_offset: usize,
         n_combos_chunk: usize,
     ) -> Result<(), CudaAlphaTrendError> {
-        // Precompute ATR table on device
         let func_atr = self
             .module
             .get_function("atr_table_from_tr_f32")
-            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol { name: "atr_table_from_tr_f32" })?;
+            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol {
+                name: "atr_table_from_tr_f32",
+            })?;
 
         let n_pr = unique_periods.len();
         let len_i = len as i32;
@@ -438,14 +542,14 @@ impl CudaAlphaTrend {
         let n_pr_i = n_pr as i32;
 
         let periods_i32: Vec<i32> = unique_periods.iter().map(|&p| p as i32).collect();
-        let d_periods_u = DeviceBuffer::from_slice(&periods_i32)
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let d_periods_u =
+            DeviceBuffer::from_slice(&periods_i32).map_err(CudaAlphaTrendError::Cuda)?;
 
         let atr_elems = n_pr
             .checked_mul(len)
             .ok_or_else(|| CudaAlphaTrendError::InvalidInput("n_pr*len overflow".into()))?;
-        let mut d_atr_table: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(atr_elems) }
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let mut d_atr_table: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(atr_elems) }.map_err(CudaAlphaTrendError::Cuda)?;
 
         unsafe {
             let mut tr_ptr = d_tr.as_device_ptr().as_raw();
@@ -471,13 +575,17 @@ impl CudaAlphaTrend {
                 .map_err(CudaAlphaTrendError::Cuda)?;
         }
 
-        // Main fast-path kernel
         let func = self
             .module
             .get_function("alphatrend_batch_from_precomputed_f32")
-            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol { name: "alphatrend_batch_from_precomputed_f32" })?;
+            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol {
+                name: "alphatrend_batch_from_precomputed_f32",
+            })?;
 
-        let block_x = match policy { BatchKernelPolicy::OneD { block_x } => block_x, _ => 128 };
+        let block_x = match policy {
+            BatchKernelPolicy::OneD { block_x } => block_x,
+            _ => 128,
+        };
         let needed_x = ((n_combos_chunk as u32) + block_x - 1) / block_x;
         let grid_x = needed_x.min(65_535).max(1);
 
@@ -488,8 +596,14 @@ impl CudaAlphaTrend {
             let mut mask_ptr = d_mask_bits.as_device_ptr().as_raw();
 
             let off_i32 = (combo_offset * std::mem::size_of::<i32>()) as u64;
-            let mut pr_map_ptr = d_period_row_for_combo.as_device_ptr().as_raw().wrapping_add(off_i32);
-            let mut mr_map_ptr = d_mrow_for_combo.as_device_ptr().as_raw().wrapping_add(off_i32);
+            let mut pr_map_ptr = d_period_row_for_combo
+                .as_device_ptr()
+                .as_raw()
+                .wrapping_add(off_i32);
+            let mut mr_map_ptr = d_mrow_for_combo
+                .as_device_ptr()
+                .as_raw()
+                .wrapping_add(off_i32);
 
             let off_f32 = (combo_offset * std::mem::size_of::<f32>()) as u64;
             let mut coeff_ptr = d_coeffs.as_device_ptr().as_raw().wrapping_add(off_f32);
@@ -501,12 +615,13 @@ impl CudaAlphaTrend {
             let mut npr_i = n_pr as i32;
             let mut nmrows_i = n_pr as i32;
 
-            let off_elems = combo_offset
-                .checked_mul(len)
-                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("combo_offset*len overflow".into()))?;
+            let off_elems = combo_offset.checked_mul(len).ok_or_else(|| {
+                CudaAlphaTrendError::InvalidInput("combo_offset*len overflow".into())
+            })?;
             let out_off_bytes = off_elems
                 .checked_mul(std::mem::size_of::<f32>())
-                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("byte offset overflow".into()))? as u64;
+                .ok_or_else(|| CudaAlphaTrendError::InvalidInput("byte offset overflow".into()))?
+                as u64;
             let mut k1_ptr = d_k1.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
             let mut k2_ptr = d_k2.as_device_ptr().as_raw().wrapping_add(out_off_bytes);
 
@@ -558,7 +673,6 @@ impl CudaAlphaTrend {
             ));
         }
 
-        // Validate combos and collect unique periods
         let mut unique: Vec<usize> = Vec::with_capacity(combos.len());
         for p in &combos {
             let period = p.period.unwrap_or(14);
@@ -578,7 +692,6 @@ impl CudaAlphaTrend {
         unique.sort_unstable();
         unique.dedup();
 
-        // Host momentum (float rows) and then pack to 1-bit
         let mom_map = Self::build_momentum_table_f32(
             sweep.no_volume,
             high_f32,
@@ -590,7 +703,6 @@ impl CudaAlphaTrend {
         let n_mrows = mom_map.len();
         debug_assert_eq!(n_mrows, unique.len());
 
-        // Build mapping & arrays
         let mut period_to_row: HashMap<usize, i32> = HashMap::with_capacity(n_mrows);
         for (row_idx, &p) in unique.iter().enumerate() {
             period_to_row.insert(p, row_idx as i32);
@@ -613,10 +725,8 @@ impl CudaAlphaTrend {
             })
             .collect();
 
-        // Pack momentum to 1-bit
         let (mask_bits_u32, n_words) = Self::pack_momentum_rows_to_bits(&unique, &mom_map, len)?;
 
-        // VRAM estimate for fast path
         let bytes_prices_tr = len
             .checked_mul(4)
             .and_then(|v| v.checked_mul(3))
@@ -650,7 +760,6 @@ impl CudaAlphaTrend {
             .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
 
         if let Err(e) = Self::will_fit(bytes_fast, 64 * 1024 * 1024) {
-            // ---- Baseline fallback (still avoids uploading close) ----
             let flat_elems = n_mrows
                 .checked_mul(len)
                 .ok_or_else(|| CudaAlphaTrendError::InvalidInput("n_mrows*len overflow".into()))?;
@@ -680,19 +789,21 @@ impl CudaAlphaTrend {
             let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAlphaTrendError::Cuda)?;
             let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAlphaTrendError::Cuda)?;
             let d_tr = DeviceBuffer::from_slice(&tr).map_err(CudaAlphaTrendError::Cuda)?;
-            let d_mom = DeviceBuffer::from_slice(&momentum_flat).map_err(CudaAlphaTrendError::Cuda)?;
+            let d_mom =
+                DeviceBuffer::from_slice(&momentum_flat).map_err(CudaAlphaTrendError::Cuda)?;
             let d_map = DeviceBuffer::from_slice(&map_rows).map_err(CudaAlphaTrendError::Cuda)?;
             let d_coeffs = DeviceBuffer::from_slice(&coeffs).map_err(CudaAlphaTrendError::Cuda)?;
-            let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaAlphaTrendError::Cuda)?;
+            let d_periods =
+                DeviceBuffer::from_slice(&periods).map_err(CudaAlphaTrendError::Cuda)?;
 
             let rows = combos.len();
             let elems = rows
                 .checked_mul(len)
                 .ok_or_else(|| CudaAlphaTrendError::InvalidInput("rows*len overflow".into()))?;
-            let mut d_k1: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-                .map_err(CudaAlphaTrendError::Cuda)?;
-            let mut d_k2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-                .map_err(CudaAlphaTrendError::Cuda)?;
+            let mut d_k1: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAlphaTrendError::Cuda)?;
+            let mut d_k2: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAlphaTrendError::Cuda)?;
 
             let block_x = match self.policy.batch {
                 BatchKernelPolicy::OneD { block_x } => block_x,
@@ -721,7 +832,9 @@ impl CudaAlphaTrend {
                 )?;
                 launched += chunk;
             }
-            self.stream.synchronize().map_err(CudaAlphaTrendError::Cuda)?;
+            self.stream
+                .synchronize()
+                .map_err(CudaAlphaTrendError::Cuda)?;
 
             return Ok(CudaAlphaTrendBatch {
                 k1: DeviceArrayF32 {
@@ -738,7 +851,6 @@ impl CudaAlphaTrend {
             });
         }
 
-        // ---- Fast path ----
         let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAlphaTrendError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAlphaTrendError::Cuda)?;
         let d_tr = DeviceBuffer::from_slice(&tr).map_err(CudaAlphaTrendError::Cuda)?;
@@ -747,16 +859,17 @@ impl CudaAlphaTrend {
         let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaAlphaTrendError::Cuda)?;
         let d_pr_map = DeviceBuffer::from_slice(&map_rows).map_err(CudaAlphaTrendError::Cuda)?;
         let d_mr_map = DeviceBuffer::from_slice(&map_rows).map_err(CudaAlphaTrendError::Cuda)?;
-        let d_mask_bits = DeviceBuffer::from_slice(&mask_bits_u32).map_err(CudaAlphaTrendError::Cuda)?;
+        let d_mask_bits =
+            DeviceBuffer::from_slice(&mask_bits_u32).map_err(CudaAlphaTrendError::Cuda)?;
 
         let rows = combos.len();
         let elems = rows
             .checked_mul(len)
             .ok_or_else(|| CudaAlphaTrendError::InvalidInput("rows*len overflow".into()))?;
-        let mut d_k1: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAlphaTrendError::Cuda)?;
-        let mut d_k2: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let mut d_k1: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAlphaTrendError::Cuda)?;
+        let mut d_k2: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAlphaTrendError::Cuda)?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
@@ -786,7 +899,9 @@ impl CudaAlphaTrend {
             )?;
             launched += chunk;
         }
-        self.stream.synchronize().map_err(CudaAlphaTrendError::Cuda)?;
+        self.stream
+            .synchronize()
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         Ok(CudaAlphaTrendBatch {
             k1: DeviceArrayF32 {
@@ -831,7 +946,6 @@ impl CudaAlphaTrend {
             return Err(CudaAlphaTrendError::InvalidInput("invalid period".into()));
         }
 
-        // Build first_valid per series and TR_tm (time-major)
         let mut first_valids = vec![0i32; cols];
         let mut tr_tm = vec![f32::NAN; elems];
         for s in 0..cols {
@@ -856,11 +970,8 @@ impl CudaAlphaTrend {
             }
         }
 
-        // Momentum_tm (RSI or MFI) per series.
-        // Note: host-side computation for correctness; may be optimized in future.
         let mut momentum_tm = vec![f32::NAN; elems];
         if no_volume {
-            // RSI on close per series
             for s in 0..cols {
                 let mut col = vec![0f64; rows];
                 for t in 0..rows {
@@ -882,7 +993,6 @@ impl CudaAlphaTrend {
                 }
             }
         } else {
-            // MFI on HLC3 + volume per series
             for s in 0..cols {
                 let mut hlc3 = vec![0f64; rows];
                 let mut vol = vec![0f64; rows];
@@ -910,7 +1020,6 @@ impl CudaAlphaTrend {
             }
         }
 
-        // VRAM estimate
         let bytes_tr_mom = elems
             .checked_mul(2)
             .and_then(|v| v.checked_mul(4))
@@ -928,28 +1037,23 @@ impl CudaAlphaTrend {
             .ok_or_else(|| CudaAlphaTrendError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(bytes, 64 * 1024 * 1024)?;
 
-        // Upload
-        let d_high_tm = DeviceBuffer::from_slice(high_tm_f32)
-            .map_err(CudaAlphaTrendError::Cuda)?;
-        let d_low_tm = DeviceBuffer::from_slice(low_tm_f32)
-            .map_err(CudaAlphaTrendError::Cuda)?;
-        let d_tr_tm = DeviceBuffer::from_slice(&tr_tm)
-            .map_err(CudaAlphaTrendError::Cuda)?;
-        let d_mom_tm = DeviceBuffer::from_slice(&momentum_tm)
-            .map_err(CudaAlphaTrendError::Cuda)?;
-        let d_first = DeviceBuffer::from_slice(&first_valids)
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let d_high_tm = DeviceBuffer::from_slice(high_tm_f32).map_err(CudaAlphaTrendError::Cuda)?;
+        let d_low_tm = DeviceBuffer::from_slice(low_tm_f32).map_err(CudaAlphaTrendError::Cuda)?;
+        let d_tr_tm = DeviceBuffer::from_slice(&tr_tm).map_err(CudaAlphaTrendError::Cuda)?;
+        let d_mom_tm = DeviceBuffer::from_slice(&momentum_tm).map_err(CudaAlphaTrendError::Cuda)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaAlphaTrendError::Cuda)?;
 
-        let mut d_k1_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAlphaTrendError::Cuda)?;
-        let mut d_k2_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAlphaTrendError::Cuda)?;
+        let mut d_k1_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAlphaTrendError::Cuda)?;
+        let mut d_k2_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAlphaTrendError::Cuda)?;
 
-        // Launch
         let func = self
             .module
             .get_function("alphatrend_many_series_one_param_f32")
-            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol { name: "alphatrend_many_series_one_param_f32" })?;
+            .map_err(|_| CudaAlphaTrendError::MissingKernelSymbol {
+                name: "alphatrend_many_series_one_param_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
@@ -988,7 +1092,9 @@ impl CudaAlphaTrend {
                 .map_err(CudaAlphaTrendError::Cuda)?;
         }
 
-        self.stream.synchronize().map_err(CudaAlphaTrendError::Cuda)?;
+        self.stream
+            .synchronize()
+            .map_err(CudaAlphaTrendError::Cuda)?;
 
         Ok((
             DeviceArrayF32 {
@@ -1005,7 +1111,6 @@ impl CudaAlphaTrend {
     }
 }
 
-// -------- Benches (batch only for now) --------
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
@@ -1018,11 +1123,11 @@ pub mod benches {
         let n_combos = PARAM_SWEEP;
         let n_pr = PARAM_SWEEP;
 
-        let in_bytes = len * 3 * 4; // high, low, tr
-        let out_bytes = 2 * len * n_combos * 4; // k1+k2
-        let atr_bytes = len * n_pr * 4; // precomputed ATR table
+        let in_bytes = len * 3 * 4;
+        let out_bytes = 2 * len * n_combos * 4;
+        let atr_bytes = len * n_pr * 4;
         let mask_words = (len + 31) / 32;
-        let mask_bytes = n_pr * mask_words * 4; // 1-bit momentum mask, packed in u32 words
+        let mask_bytes = n_pr * mask_words * 4;
 
         in_bytes + out_bytes + atr_bytes + mask_bytes + 64 * 1024 * 1024
     }
@@ -1101,7 +1206,7 @@ pub mod benches {
     }
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaAlphaTrend::new(0).expect("cuda alphatrend");
-        // Generate synthetic HLCV with NaNs prefix
+
         let (h, l, c) = {
             let mut h = vec![f32::NAN; ONE_SERIES_LEN];
             let mut l = vec![f32::NAN; ONE_SERIES_LEN];
@@ -1129,15 +1234,9 @@ pub mod benches {
         let mut unique: Vec<usize> = combos.iter().map(|p| p.period.unwrap_or(14)).collect();
         unique.sort_unstable();
         unique.dedup();
-        let mom_map = CudaAlphaTrend::build_momentum_table_f32(
-            sweep.no_volume,
-            &h,
-            &l,
-            &c,
-            &v,
-            &unique,
-        )
-        .expect("momentum");
+        let mom_map =
+            CudaAlphaTrend::build_momentum_table_f32(sweep.no_volume, &h, &l, &c, &v, &unique)
+                .expect("momentum");
         let (mask_bits_u32, _n_words) =
             CudaAlphaTrend::pack_momentum_rows_to_bits(&unique, &mom_map, ONE_SERIES_LEN)
                 .expect("mask bits");
@@ -1146,11 +1245,22 @@ pub mod benches {
         for (row_idx, &p) in unique.iter().enumerate() {
             period_to_row.insert(p, row_idx as i32);
         }
-        let coeffs: Vec<f32> = combos.iter().map(|c| c.coeff.unwrap_or(1.0) as f32).collect();
-        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(14) as i32).collect();
+        let coeffs: Vec<f32> = combos
+            .iter()
+            .map(|c| c.coeff.unwrap_or(1.0) as f32)
+            .collect();
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(14) as i32)
+            .collect();
         let map_rows: Vec<i32> = combos
             .iter()
-            .map(|c| period_to_row.get(&c.period.unwrap_or(14)).copied().unwrap_or(-1))
+            .map(|c| {
+                period_to_row
+                    .get(&c.period.unwrap_or(14))
+                    .copied()
+                    .unwrap_or(-1)
+            })
             .collect();
 
         let d_high = DeviceBuffer::from_slice(&h).expect("d_high");
@@ -1162,7 +1272,6 @@ pub mod benches {
         let d_coeffs = DeviceBuffer::from_slice(&coeffs).expect("d_coeffs");
         let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
 
-        // Precompute ATR table once on device.
         let periods_i32: Vec<i32> = unique.iter().map(|&p| p as i32).collect();
         let d_periods_u = DeviceBuffer::from_slice(&periods_i32).expect("d_periods_u");
         let atr_elems = unique.len() * ONE_SERIES_LEN;

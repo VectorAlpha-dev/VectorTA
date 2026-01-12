@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::jsa::{
     jsa_batch_with_kernel, jsa_with_kernel, JsaBatchRange, JsaInput, JsaParams,
 };

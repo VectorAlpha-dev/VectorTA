@@ -1,24 +1,3 @@
-//! # Compound Ratio Moving Average (CoRa Wave)
-//!
-//! A weighted moving average where weights increase in a "logarithmically linear" way (linear when plotted on a log chart).
-//! The step ratio between weights is consistent, and the tail weight can be significantly reduced compared to other MAs.
-//! Includes optional auto-smoothing with WMA for cleaner signals.
-//!
-//! ## Parameters
-//! - **period**: Window size for the moving average (default: 20)
-//! - **r_multi**: Compound ratio multiplier (default: 2.0)
-//! - **smooth**: Enable auto-smoothing with WMA (default: true)
-//!
-//! ## Returns
-//! - **`Ok(CoraWaveOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CoraWaveError)`** on various error conditions.
-//!
-//! ## Developer Status
-//! - SIMD: AVX2/AVX512 stubs delegate to scalar. CoRa’s time-recursive update has a strict dependency chain, so cross-time SIMD offers no win; keep scalar as fastest.
-//! - Scalar: Optimized to O(1) per step for CoRa using geometric-weight recurrence; WMA smoothing recomputed per emission to match streaming numerics exactly.
-//! - Batch: Row kernel uses the same O(1) CoRa update per row. Row-SIMD across rows is plausible but not yet implemented; runtime selection short-circuits to scalar.
-//! - Memory: Uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes; warmup/NaN semantics unchanged.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -28,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -84,7 +63,10 @@ pub struct CoraWaveOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CoraWaveParams {
     pub period: Option<usize>,
     pub r_multi: Option<f64>,
@@ -286,22 +268,19 @@ pub fn cora_wave_with_kernel(
     Ok(CoraWaveOutput { values: out })
 }
 
-/// Write CoRa Wave outputs into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the `cora_wave()` Vec API (quiet-NaN prefix).
-/// - The output slice length must equal the input data length.
-/// - Uses Kernel::Auto for runtime selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cora_wave_into(input: &CoraWaveInput, out: &mut [f64]) -> Result<(), CoraWaveError> {
     let (data, weights, inv_wsum, smooth_period, first, chosen) =
         cora_wave_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(CoraWaveError::OutputLengthMismatch { expected: data.len(), got: out.len() });
+        return Err(CoraWaveError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
     }
 
-    
     let warm = first + weights.len() - 1 + smooth_period.saturating_sub(1);
     let warm = warm.min(out.len());
     if warm > 0 {
@@ -311,16 +290,7 @@ pub fn cora_wave_into(input: &CoraWaveInput, out: &mut [f64]) -> Result<(), Cora
         }
     }
 
-    
-    cora_wave_compute_into(
-        data,
-        &weights,
-        inv_wsum,
-        smooth_period,
-        first,
-        chosen,
-        out,
-    );
+    cora_wave_compute_into(data, &weights, inv_wsum, smooth_period, first, chosen, out);
     Ok(())
 }
 
@@ -332,7 +302,10 @@ pub fn cora_wave_into_slice(
 ) -> Result<(), CoraWaveError> {
     let (data, weights, inv_wsum, smooth_period, first, chosen) = cora_wave_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(CoraWaveError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(CoraWaveError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
     cora_wave_compute_into(data, &weights, inv_wsum, smooth_period, first, chosen, dst);
 
@@ -347,17 +320,7 @@ pub fn cora_wave_into_slice(
 fn cora_wave_prepare<'a>(
     input: &'a CoraWaveInput,
     kernel: Kernel,
-) -> Result<
-    (
-        &'a [f64], // data
-        Vec<f64>,  // weights
-        f64,       // inv_weight_sum
-        usize,     // smooth_period
-        usize,     // first valid
-        Kernel,    // chosen kernel
-    ),
-    CoraWaveError,
-> {
+) -> Result<(&'a [f64], Vec<f64>, f64, usize, usize, Kernel), CoraWaveError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -389,7 +352,6 @@ fn cora_wave_prepare<'a>(
         return Err(CoraWaveError::InvalidRMulti { value: r_multi });
     }
 
-    // CoRa weights once
     let mut weights = Vec::with_capacity(period);
     let inv_sum: f64;
     if period == 1 {
@@ -402,7 +364,7 @@ fn cora_wave_prepare<'a>(
         let base = 1.0 + r * r_multi;
 
         let mut sum = 0.0;
-        // newest gets largest weight ⇒ exponent j+1
+
         let mut w = start_wt * base;
         for _ in 0..period {
             weights.push(w);
@@ -449,7 +411,6 @@ fn cora_wave_compute_into(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // SIMD stubs keep calling the scalar-with-weights version
                 cora_wave_scalar_with_weights(data, weights, inv_wsum, smooth_period, first, out)
             }
             _ => unreachable!(),
@@ -472,7 +433,6 @@ pub fn cora_wave_scalar_with_weights(
         return;
     }
 
-    // Fast path: no smoothing
     if smooth_period == 1 {
         if p == 1 {
             let start = first_val;
@@ -487,11 +447,10 @@ pub fn cora_wave_scalar_with_weights(
             return;
         }
 
-        // geometric parameters from weights
         let w0 = unsafe { *weights.get_unchecked(0) };
         let w1 = unsafe { *weights.get_unchecked(1) };
-        let inv_R = w0 / w1; // == 1/R
-        let a_old = w0 * inv_R; // == a
+        let inv_R = w0 / w1;
+        let a_old = w0 * inv_R;
         let w_last = unsafe { *weights.get_unchecked(p - 1) };
 
         let warm0 = first_val + p - 1;
@@ -500,7 +459,6 @@ pub fn cora_wave_scalar_with_weights(
         }
         let start0 = warm0 + 1 - p;
 
-        // initial dot at warm0
         let mut acc0 = 0.0;
         let mut acc1 = 0.0;
         let mut acc2 = 0.0;
@@ -539,7 +497,6 @@ pub fn cora_wave_scalar_with_weights(
 
             *out.get_unchecked_mut(warm0) = S * inv_wsum;
 
-            // O(1) recurrence forward
             let mut i = warm0;
             while i + 1 < n {
                 let x_old = *data.get_unchecked(i + 1 - p);
@@ -552,12 +509,11 @@ pub fn cora_wave_scalar_with_weights(
         return;
     }
 
-    // Smoothing (WMA 1..m) — recompute weighted sum each emission to match streaming numerics
     let m = smooth_period;
     let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
 
     if p == 1 {
-        let warm0 = first_val; // p-1 == 0
+        let warm0 = first_val;
         if warm0 >= n {
             return;
         }
@@ -566,7 +522,6 @@ pub fn cora_wave_scalar_with_weights(
         let mut head = 0usize;
         let warm_total = warm0 + m - 1;
         unsafe {
-            // fill ring with raw values
             for i in warm0..n {
                 ring_mu
                     .get_unchecked_mut(head)
@@ -576,7 +531,7 @@ pub fn cora_wave_scalar_with_weights(
                 if i >= warm_total {
                     let mut acc = 0.0;
                     for k in 0..m {
-                        let idx = (head + k) % m; // oldest..newest
+                        let idx = (head + k) % m;
                         let v = *ring_mu.get_unchecked(idx).assume_init_ref();
                         acc += v * ((k + 1) as f64);
                     }
@@ -587,11 +542,10 @@ pub fn cora_wave_scalar_with_weights(
         return;
     }
 
-    // General p>=2: CoRa geometric recurrence + O(1) WMA
     let w0 = unsafe { *weights.get_unchecked(0) };
     let w1 = unsafe { *weights.get_unchecked(1) };
-    let inv_R = w0 / w1; // 1/R
-    let a_old = w0 * inv_R; // a
+    let inv_R = w0 / w1;
+    let a_old = w0 * inv_R;
     let w_last = unsafe { *weights.get_unchecked(p - 1) };
 
     let warm0 = first_val + p - 1;
@@ -600,7 +554,6 @@ pub fn cora_wave_scalar_with_weights(
     }
     let start0 = warm0 + 1 - p;
 
-    // initial dot
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
     let mut acc2 = 0.0;
@@ -637,7 +590,6 @@ pub fn cora_wave_scalar_with_weights(
             j += 1;
         }
 
-        // ring for CoRa outputs
         let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
         let mut fill = 0usize;
 
@@ -660,9 +612,8 @@ pub fn cora_wave_scalar_with_weights(
             return;
         }
 
-        // switch to recompute WMA per emission to match streaming
         let mut head = 0usize;
-        // emit first
+
         {
             let mut acc = 0.0;
             for k in 0..m {
@@ -673,7 +624,6 @@ pub fn cora_wave_scalar_with_weights(
             *out.get_unchecked_mut(warm_total) = acc / wma_sum;
         }
 
-        // stream forward
         while i + 1 < n {
             let x_old = *data.get_unchecked(i + 1 - p);
             let x_new = *data.get_unchecked(i + 1);
@@ -695,7 +645,6 @@ pub fn cora_wave_scalar_with_weights(
     }
 }
 
-// Keep old function as a stub that calls the new one for backward compatibility
 #[inline]
 pub fn cora_wave_scalar(
     data: &[f64],
@@ -705,7 +654,6 @@ pub fn cora_wave_scalar(
     first_val: usize,
     out: &mut [f64],
 ) {
-    // CoRa weights
     if period == 1 {
         cora_wave_scalar_with_weights(data, &[1.0], 1.0, smooth_period, first_val, out);
         return;
@@ -745,7 +693,6 @@ unsafe fn cora_wave_simd128(
 ) {
     use core::arch::wasm32::*;
 
-    // For now, fallback to scalar
     cora_wave_scalar(data, period, r_multi, smooth_period, first_val, out);
 }
 
@@ -759,7 +706,6 @@ unsafe fn cora_wave_avx2(
     first_val: usize,
     out: &mut [f64],
 ) {
-    // For now, fallback to scalar
     cora_wave_scalar(data, period, r_multi, smooth_period, first_val, out);
 }
 
@@ -773,46 +719,38 @@ unsafe fn cora_wave_avx512(
     first_val: usize,
     out: &mut [f64],
 ) {
-    // For now, fallback to scalar
     cora_wave_scalar(data, period, r_multi, smooth_period, first_val, out);
 }
 
-/// Decision: Streaming uses O(1) CoRa recurrence; WMA smoothing recomputes per emission by default
-/// to match scalar/batch numerics exactly. Optional O(1) WMA is implemented but disabled by default.
 #[derive(Debug, Clone)]
 pub struct CoraWaveStream {
-    // ---- config ----
     period: usize,
     r_multi: f64,
     smooth: bool,
-    smooth_period: usize, // m
+    smooth_period: usize,
 
-    // ---- precomputed geometric parameters for CoRa ----
-    base: f64,     // geometric ratio R = 1 + r*r_multi
-    inv_R: f64,    // 1/R
-    a_old: f64,    // "a" in the derivation: start_wt (== w0 * inv_R)
-    w_last: f64,   // weight of newest sample when window is full: a*R^p
-    inv_wsum: f64, // 1 / sum(weights)
+    base: f64,
+    inv_R: f64,
+    a_old: f64,
+    w_last: f64,
+    inv_wsum: f64,
 
-    // ---- state: CoRa ----
     ring_x: Vec<f64>,
-    head_x: usize, // points at slot to overwrite next
-    idx: usize,    // number of samples seen
+    head_x: usize,
+    idx: usize,
     have_S: bool,
-    S: f64, // current (unnormalized) weighted sum
+    S: f64,
 
-    // ---- state: smoothing (WMA over CoRa outputs) ----
     m: usize,
     wma_sum: f64,
     ring_y: Vec<f64>,
     head_y: usize,
-    y_count: usize, // number of CoRa values stored so far
-    // O(1) WMA running sums (used only in FAST mode)
-    Ssum_y: f64, // simple sum of last m CoRa values
-    Wsum_y: f64, // weighted sum with weights 1..m
+    y_count: usize,
 
-    // ---- behavior toggles ----
-    fast_smooth: bool, // false => recompute WMA per emission (exact match); true => O(1)
+    Ssum_y: f64,
+    Wsum_y: f64,
+
+    fast_smooth: bool,
 }
 
 impl CoraWaveStream {
@@ -832,27 +770,22 @@ impl CoraWaveStream {
             return Err(CoraWaveError::InvalidRMulti { value: r_multi });
         }
 
-        // ----- smoothing length (m) -----
         let m = if smooth {
             ((period as f64).sqrt().round() as usize).max(1)
         } else {
             1
         };
 
-        // ===== CoRa geometric weights (no full weight vector needed) =====
-        // Weight definition used elsewhere in this file:
-        //   w_j = start_wt * base^(j+1), j = 0..p-1, newest uses j=p-1.
         let p = period;
         let start_wt = 0.01_f64;
-        // step ratio baseline across j (prior to r_multi):
+
         let end_wt = p as f64;
         let r = (end_wt / start_wt).powf(1.0 / (p as f64 - 1.0)) - 1.0;
         let base = 1.0 + r * r_multi;
         let inv_R = 1.0 / base;
-        // a_old := "a" in the recurrence; here it's simply start_wt
+
         let a_old = start_wt;
 
-        
         let base_pow_p = if (base - 1.0).abs() < 1e-16 {
             1.0
         } else {
@@ -860,19 +793,15 @@ impl CoraWaveStream {
         };
         let w_last = a_old * base_pow_p;
 
-        
         let weight_sum = if (base - 1.0).abs() < 1e-16 {
-            
             a_old * (p as f64)
         } else {
             a_old * base * (base_pow_p - 1.0) / (base - 1.0)
         };
         let inv_wsum = 1.0 / weight_sum;
 
-        
         let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
 
-        
         const FAST_WMA_O1_DEFAULT: bool = false;
 
         Ok(Self {
@@ -901,28 +830,23 @@ impl CoraWaveStream {
         })
     }
 
-    /// Push one value. Returns Some(value) when warm-up is complete, else None.
     #[inline]
     pub fn update(&mut self, x_new: f64) -> Option<f64> {
-        
         let pos = self.head_x;
         let x_old = self.ring_x[pos];
         self.ring_x[pos] = x_new;
         self.head_x = (pos + 1) % self.period;
         self.idx += 1;
 
-        
         if !self.have_S {
             if self.idx < self.period {
                 return None;
             }
-            
-            
+
             let mut S = 0.0;
-            let mut w = self.a_old * self.base; 
+            let mut w = self.a_old * self.base;
             let mut i = 0usize;
             while i < self.period {
-                
                 let xi = self.ring_x[(self.head_x + i) % self.period];
                 S = xi.mul_add(w, S);
                 w *= self.base;
@@ -931,63 +855,54 @@ impl CoraWaveStream {
             self.S = S;
             self.have_S = true;
 
-            
             let y = self.S * self.inv_wsum;
             if self.m == 1 {
                 return Some(y);
             }
-            
+
             self.ring_y[self.y_count] = y;
             self.y_count += 1;
-            
+
             self.head_y = self.y_count % self.m;
             if self.fast_smooth {
                 self.Ssum_y += y;
-                self.Wsum_y += (self.y_count as f64) * y; 
+                self.Wsum_y += (self.y_count as f64) * y;
             }
             return None;
         }
 
-        
-        
         self.S = (self.S * self.inv_R) - self.a_old * x_old + self.w_last * x_new;
         let y = self.S * self.inv_wsum;
 
-        
         if self.m == 1 {
             return Some(y);
         }
 
-        
         if !self.fast_smooth {
-            
-            
             if self.y_count < self.m {
-                
                 self.ring_y[self.head_y] = y;
                 self.head_y = (self.head_y + 1) % self.m;
                 self.y_count += 1;
                 if self.y_count < self.m {
                     return None;
                 }
-                
+
                 let mut acc = 0.0;
                 let mut k = 0usize;
                 while k < self.m {
-                    let idx = (self.head_y + k) % self.m; 
+                    let idx = (self.head_y + k) % self.m;
                     let v = self.ring_y[idx];
                     acc = v.mul_add((k + 1) as f64, acc);
                     k += 1;
                 }
                 return Some(acc / self.wma_sum);
             } else {
-                
                 self.ring_y[self.head_y] = y;
                 self.head_y = (self.head_y + 1) % self.m;
                 let mut acc = 0.0;
                 let mut k = 0usize;
                 while k < self.m {
-                    let idx = (self.head_y + k) % self.m; 
+                    let idx = (self.head_y + k) % self.m;
                     let v = self.ring_y[idx];
                     acc = v.mul_add((k + 1) as f64, acc);
                     k += 1;
@@ -995,9 +910,7 @@ impl CoraWaveStream {
                 return Some(acc / self.wma_sum);
             }
         } else {
-            
             if self.y_count < self.m {
-                
                 self.ring_y[self.y_count] = y;
                 self.y_count += 1;
                 self.Ssum_y += y;
@@ -1005,14 +918,13 @@ impl CoraWaveStream {
                 if self.y_count < self.m {
                     return None;
                 }
-                
+
                 self.head_y = 0;
                 return Some(self.Wsum_y / self.wma_sum);
             }
 
-            
             let y_old = self.ring_y[self.head_y];
-            
+
             self.Wsum_y = self.Wsum_y - self.Ssum_y + (self.m as f64) * y;
             self.ring_y[self.head_y] = y;
             self.Ssum_y = self.Ssum_y + y - y_old;
@@ -1022,7 +934,6 @@ impl CoraWaveStream {
         }
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct CoraWaveBatchRange {
@@ -1075,23 +986,30 @@ fn axis_usize((s, e, t): (usize, usize, usize)) -> Result<Vec<usize>, CoraWaveEr
     if s < e {
         v = (s..=e).step_by(t).collect();
     } else if s > e {
-        
         let mut x = s;
         loop {
             v.push(x);
-            if x <= e { break; }
-            if x < t { break; }
+            if x <= e {
+                break;
+            }
+            if x < t {
+                break;
+            }
             let next = x - t;
-            if next < e { break; }
+            if next < e {
+                break;
+            }
             x = next;
         }
-        
-        if *v.last().unwrap_or(&s) != e && s >= e {
-            
-        }
+
+        if *v.last().unwrap_or(&s) != e && s >= e {}
     }
     if v.is_empty() {
-        return Err(CoraWaveError::InvalidRange { start: s as f64, end: e as f64, step: t as f64 });
+        return Err(CoraWaveError::InvalidRange {
+            start: s as f64,
+            end: e as f64,
+            step: t as f64,
+        });
     }
     Ok(v)
 }
@@ -1116,7 +1034,11 @@ fn axis_f64((s, e, t): (f64, f64, f64)) -> Result<Vec<f64>, CoraWaveError> {
         }
     }
     if v.is_empty() {
-        return Err(CoraWaveError::InvalidRange { start: s, end: e, step: t });
+        return Err(CoraWaveError::InvalidRange {
+            start: s,
+            end: e,
+            step: t,
+        });
     }
     Ok(v)
 }
@@ -1138,7 +1060,11 @@ fn expand_grid_cw(r: &CoraWaveBatchRange) -> Result<Vec<CoraWaveParams>, CoraWav
     let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
-            out.push(CoraWaveParams { period: Some(p), r_multi: Some(m), smooth: Some(r.smooth) });
+            out.push(CoraWaveParams {
+                period: Some(p),
+                r_multi: Some(m),
+                smooth: Some(r.smooth),
+            });
         }
     }
     Ok(out)
@@ -1170,9 +1096,7 @@ pub fn cora_wave_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(CoraWaveError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(CoraWaveError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1192,12 +1116,15 @@ fn cora_wave_batch_inner(
 ) -> Result<CoraWaveBatchOutput, CoraWaveError> {
     let combos = expand_grid_cw(sweep)?;
     if combos.is_empty() {
-        return Err(CoraWaveError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
+        return Err(CoraWaveError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
+        });
     }
 
     let cols = data.len();
     if cols == 0 {
-        
         return Err(CoraWaveError::AllValuesNaN);
     }
 
@@ -1213,7 +1140,6 @@ fn cora_wave_batch_inner(
         });
     }
 
-    
     let rows = combos.len();
     let _total = rows
         .checked_mul(cols)
@@ -1234,7 +1160,6 @@ fn cora_wave_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    
     let flat_len = rows
         .checked_mul(max_p)
         .ok_or_else(|| CoraWaveError::InvalidInput("rows*max_period overflow".into()))?;
@@ -1256,17 +1181,14 @@ fn cora_wave_batch_inner(
 
             let mut sum = 0.0;
             for j in 0..p {
-                
                 let w = start_wt * base.powi((j + 1) as i32);
                 flat_w[row * max_p + j] = w;
                 sum += w;
             }
             inv_sums[row] = 1.0 / sum;
         }
-        
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_uninit: &mut [MaybeUninit<f64>] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len()) };
@@ -1348,7 +1270,11 @@ pub fn cora_wave_batch_inner_into(
 ) -> Result<Vec<CoraWaveParams>, CoraWaveError> {
     let combos = expand_grid_cw(sweep)?;
     if combos.is_empty() {
-        return Err(CoraWaveError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
+        return Err(CoraWaveError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
+        });
     }
 
     let cols = data.len();
@@ -1360,7 +1286,10 @@ pub fn cora_wave_batch_inner_into(
         .checked_mul(cols)
         .ok_or_else(|| CoraWaveError::InvalidInput("rows*cols overflow".into()))?;
     if out.len() != expected {
-        return Err(CoraWaveError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(CoraWaveError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
     let first = data
@@ -1375,7 +1304,6 @@ pub fn cora_wave_batch_inner_into(
         });
     }
 
-    
     let warms: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1389,13 +1317,11 @@ pub fn cora_wave_batch_inner_into(
         })
         .collect();
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     init_matrix_prefixes(out_mu, cols, &warms);
 
-    
     let flat_len = rows
         .checked_mul(max_p)
         .ok_or_else(|| CoraWaveError::InvalidInput("rows*max_period overflow".into()))?;
@@ -1416,7 +1342,6 @@ pub fn cora_wave_batch_inner_into(
 
             let mut sum = 0.0;
             for j in 0..p {
-                
                 let w = start_wt * base.powi((j + 1) as i32);
                 flat_w[row * max_p + j] = w;
                 sum += w;
@@ -1439,7 +1364,7 @@ pub fn cora_wave_batch_inner_into(
         };
         let w_ptr = flat_w[row * max_p..].as_ptr();
         let inv = inv_sums[row];
-        
+
         let dst: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols) };
         match actual {
@@ -1484,7 +1409,7 @@ unsafe fn cora_wave_row_scalar_with_weights(
     data: &[f64],
     first: usize,
     period: usize,
-    w_ptr: *const f64, 
+    w_ptr: *const f64,
     inv_wsum: f64,
     smooth_period: usize,
     out: &mut [f64],
@@ -1495,7 +1420,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    
     if smooth_period == 1 {
         if p == 1 {
             let warm0 = first;
@@ -1507,12 +1431,11 @@ unsafe fn cora_wave_row_scalar_with_weights(
             return;
         }
 
-        
         let w0 = *w_ptr.add(0);
         let w1 = *w_ptr.add(1);
-        let inv_R = w0 / w1; 
-        let a_old = w0 * inv_R; 
-        let w_last = *w_ptr.add(p - 1); 
+        let inv_R = w0 / w1;
+        let a_old = w0 * inv_R;
+        let w_last = *w_ptr.add(p - 1);
 
         let warm0 = first + p - 1;
         if warm0 >= n {
@@ -1520,7 +1443,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
         }
         let start0 = warm0 + 1 - p;
 
-        
         let mut acc0 = 0.0;
         let mut acc1 = 0.0;
         let mut acc2 = 0.0;
@@ -1557,7 +1479,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
 
         *out.get_unchecked_mut(warm0) = S * inv_wsum;
 
-        
         let mut i = warm0;
         while i + 1 < n {
             let x_old = *data.get_unchecked(i + 1 - p);
@@ -1569,7 +1490,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    
     let m = smooth_period;
     let wma_sum = (m as f64) * ((m as f64) + 1.0) * 0.5;
 
@@ -1579,7 +1499,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
             return;
         }
 
-        
         let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
         let mut fill = 0usize;
 
@@ -1596,7 +1515,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
             return;
         }
 
-        
         let mut Ssum = 0.0;
         let mut Wsum = 0.0;
         for k in 0..m {
@@ -1624,12 +1542,11 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    
     let w0 = *w_ptr.add(0);
     let w1 = *w_ptr.add(1);
-    let inv_R = w0 / w1; 
-    let a_old = w0 * inv_R; 
-    let w_last = *w_ptr.add(p - 1); 
+    let inv_R = w0 / w1;
+    let a_old = w0 * inv_R;
+    let w_last = *w_ptr.add(p - 1);
 
     let warm0 = first + p - 1;
     if warm0 >= n {
@@ -1637,7 +1554,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
     }
     let start0 = warm0 + 1 - p;
 
-    
     let mut acc0 = 0.0;
     let mut acc1 = 0.0;
     let mut acc2 = 0.0;
@@ -1671,7 +1587,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
         j += 1;
     }
 
-    
     let mut ring_mu: Vec<MaybeUninit<f64>> = make_uninit_matrix(1, m);
     let mut fill = 0usize;
 
@@ -1694,7 +1609,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
         return;
     }
 
-    
     let mut Ssum = 0.0;
     let mut Wsum = 0.0;
     for k in 0..m {
@@ -1705,7 +1619,6 @@ unsafe fn cora_wave_row_scalar_with_weights(
     let mut head = 0usize;
     *out.get_unchecked_mut(warm_total) = Wsum / wma_sum;
 
-    
     while i + 1 < n {
         let x_old = *data.get_unchecked(i + 1 - p);
         let x_new = *data.get_unchecked(i + 1);
@@ -1873,7 +1786,6 @@ pub fn cora_wave_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -1916,7 +1828,6 @@ pub fn cora_wave_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cora_wave_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, r_multi_range=(2.0,2.0,0.0), smooth=true, device_id=0))]
@@ -1938,9 +1849,7 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
         smooth,
     };
 
-    
     fn combos_for_py(sweep: &CoraWaveBatchRange) -> Vec<CoraWaveParams> {
-        
         let (ps, pe, pt) = sweep.period;
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]
@@ -1951,10 +1860,16 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
             let mut x = ps;
             loop {
                 v.push(x);
-                if x <= pe { break; }
-                if x < pt { break; }
+                if x <= pe {
+                    break;
+                }
+                if x < pt {
+                    break;
+                }
                 let next = x - pt;
-                if next < pe { break; }
+                if next < pe {
+                    break;
+                }
                 x = next;
             }
             v
@@ -1981,7 +1896,11 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
         let mut out = Vec::with_capacity(periods.len().saturating_mul(mults.len()));
         for &p in &periods {
             for &m in &mults {
-                out.push(CoraWaveParams { period: Some(p), r_multi: Some(m), smooth: Some(sweep.smooth) });
+                out.push(CoraWaveParams {
+                    period: Some(p),
+                    r_multi: Some(m),
+                    smooth: Some(sweep.smooth),
+                });
             }
         }
         out
@@ -1995,7 +1914,15 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
         let out = cuda
             .cora_wave_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<(DeviceArrayF32, std::sync::Arc<cust::context::Context>, u32, Vec<CoraWaveParams>), PyErr>((out, ctx, dev, combos_for_py(&sweep)))
+        Ok::<
+            (
+                DeviceArrayF32,
+                std::sync::Arc<cust::context::Context>,
+                u32,
+                Vec<CoraWaveParams>,
+            ),
+            PyErr,
+        >((out, ctx, dev, combos_for_py(&sweep)))
     })?;
 
     let dict = PyDict::new(py);
@@ -2005,7 +1932,14 @@ pub fn cora_wave_cuda_batch_dev_py<'py>(
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("r_multis", r_multis.into_pyarray(py))?;
     dict.set_item("smooth", smooth)?;
-    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx_arc), device_id: Some(dev_id) }, dict))
+    Ok((
+        DeviceArrayF32Py {
+            inner,
+            _ctx: Some(ctx_arc),
+            device_id: Some(dev_id),
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2040,10 +1974,14 @@ pub fn cora_wave_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<(DeviceArrayF32, std::sync::Arc<cust::context::Context>, u32), PyErr>((out, ctx, dev))
     })?;
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx_arc), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx_arc),
+        device_id: Some(dev_id),
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cora_wave_js(
     data: &[f64],
@@ -2065,7 +2003,7 @@ pub fn cora_wave_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cora_wave_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2074,7 +2012,7 @@ pub fn cora_wave_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cora_wave_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2082,7 +2020,7 @@ pub fn cora_wave_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cora_wave_into(
     in_ptr: *const f64,
@@ -2125,8 +2063,7 @@ pub fn cora_wave_into(
     }
 }
 
-// WASM Batch APIs
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CoraWaveBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2134,7 +2071,7 @@ pub struct CoraWaveBatchConfig {
     pub smooth: bool,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CoraWaveBatchJsOutput {
     pub values: Vec<f64>,
@@ -2143,7 +2080,7 @@ pub struct CoraWaveBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = cora_wave_batch)]
 pub fn cora_wave_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: CoraWaveBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2165,7 +2102,7 @@ pub fn cora_wave_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cora_wave_batch_into(
     in_ptr: *const f64,
@@ -2191,8 +2128,7 @@ pub fn cora_wave_batch_into(
             r_multi: (rmulti_start, rmulti_end, rmulti_step),
             smooth,
         };
-        let combos = expand_grid_cw(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_cw(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
@@ -2203,7 +2139,7 @@ pub fn cora_wave_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2217,7 +2153,7 @@ pub struct CoraWaveContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl CoraWaveContext {
@@ -2320,12 +2256,11 @@ mod tests {
     use std::error::Error;
 
     #[test]
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     fn test_cora_wave_into_matches_api() {
-        // Prepare input with a few leading NaNs and then finite values
         let mut data = vec![f64::NAN; 5];
         for i in 0..256 {
-            let x = (i as f64 * 0.03141592653589793).sin() * 10.0 + 50.0; // deterministic waveform
+            let x = (i as f64 * 0.03141592653589793).sin() * 10.0 + 50.0;
             data.push(x);
         }
 
@@ -2356,7 +2291,6 @@ mod tests {
         let input = CoraWaveInput::from_candles(&candles, "close", CoraWaveParams::default());
         let result = cora_wave_with_kernel(&input, kernel)?;
 
-        // REFERENCE VALUES FROM PINESCRIPT
         let expected_last_five = [
             59248.63632114,
             59251.74238978,
@@ -2369,7 +2303,7 @@ mod tests {
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
             assert!(
-                diff < 0.01, // Using looser tolerance for this complex calculation
+                diff < 0.01,
                 "[{}] CoRa Wave {:?} mismatch at idx {}: got {}, expected {}",
                 test_name,
                 kernel,
@@ -2630,7 +2564,7 @@ mod tests {
             .r_multi_range(1.0, 3.0, 0.25)
             .apply_candles(&c, "close")?;
 
-        let expected = 41 * 9; // 20..=60 => 41; 1.0..=3.0 step .25 => 9
+        let expected = 41 * 9;
         assert_eq!(out.combos.len(), expected);
         assert_eq!(out.rows, expected);
         assert_eq!(out.cols, c.close.len());
@@ -2703,7 +2637,6 @@ mod tests {
         Ok(())
     }
 
-    // Test generation macro - same pattern as ALMA
     macro_rules! generate_all_cora_wave_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2731,7 +2664,6 @@ mod tests {
         };
     }
 
-    // Generate all the tests for different kernels
     generate_all_cora_wave_tests!(
         check_cora_wave_accuracy,
         check_cora_wave_partial_params,
@@ -2771,14 +2703,13 @@ mod tests {
         let params = CoraWaveParams::default();
         let input = CoraWaveInput::from_slice(&data, params);
         let scalar = cora_wave_with_kernel(&input, Kernel::Scalar).unwrap();
-        let simd = cora_wave_with_kernel(&input, Kernel::Scalar).unwrap(); // same path on WASM
+        let simd = cora_wave_with_kernel(&input, Kernel::Scalar).unwrap();
         assert_eq!(scalar.values.len(), simd.values.len());
         for (i, (a, b)) in scalar.values.iter().zip(simd.values.iter()).enumerate() {
             assert!((a - b).abs() < 1e-10, "SIMD128 mismatch at {i}: {a} vs {b}");
         }
     }
 
-    // Property-based tests
     #[cfg(feature = "proptest")]
     proptest! {
         #[test]

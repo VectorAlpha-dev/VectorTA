@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::mod_god_mode::{
     mod_god_mode, mod_god_mode_batch_with_kernel, ModGodModeBatchRange, ModGodModeData,
     ModGodModeInput, ModGodModeMode, ModGodModeParams,
@@ -64,7 +62,6 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
         mode: ModGodModeMode::TraditionMg,
     };
 
-    
     let cpu = mod_god_mode_batch_with_kernel(
         &candles.high,
         &candles.low,
@@ -74,7 +71,6 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
         Kernel::ScalarBatch,
     )?;
 
-    
     let cuda = CudaModGodMode::new(0).expect("CudaModGodMode");
     let res = cuda
         .mod_god_mode_batch_dev(&h, &l, &c, None, &sweep)
@@ -89,7 +85,7 @@ fn mod_god_mode_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
     res.outputs.wt2.buf.copy_to(&mut sig_host)?;
     res.outputs.hist.buf.copy_to(&mut hist_host)?;
 
-    let tol = 1.5e-1; 
+    let tol = 1.5e-1;
     for i in 0..(cpu.rows * cpu.cols) {
         let cpu_wt = cpu.wavetrend[i];
         let gpu_wt = wt_host[i] as f64;
@@ -132,8 +128,8 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         eprintln!("[mod_god_mode_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 4usize; 
-    let rows = 1024usize; 
+    let cols = 4usize;
+    let rows = 1024usize;
     let mut h_tm = vec![f64::NAN; cols * rows];
     let mut l_tm = vec![f64::NAN; cols * rows];
     let mut c_tm = vec![f64::NAN; cols * rows];
@@ -147,7 +143,6 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         }
     }
 
-    
     let mut wt_cpu = vec![f64::NAN; cols * rows];
     let mut sig_cpu = vec![f64::NAN; cols * rows];
     let mut hist_cpu = vec![f64::NAN; cols * rows];
@@ -183,7 +178,6 @@ fn mod_god_mode_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         }
     }
 
-    
     let h_tm_f32: Vec<f32> = h_tm.iter().map(|&v| v as f32).collect();
     let l_tm_f32: Vec<f32> = l_tm.iter().map(|&v| v as f32).collect();
     let c_tm_f32: Vec<f32> = c_tm.iter().map(|&v| v as f32).collect();

@@ -1,17 +1,3 @@
-//! CUDA scaffolding for the VOSC (Volume Oscillator).
-//!
-//! Category: Prefix-sum/rational.
-//! - Batch (one-series × many-params) precomputes a single f64 prefix sum on host and
-//!   evaluates all (short,long) rows on device.
-//! - Many-series × one‑param uses time‑major prefix per series with per‑series
-//!   first_valid indices.
-//!
-//! Parity goals with ALMA/CWMA wrappers:
-//! - PTX loaded via OUT_DIR with DetermineTargetFromContext + OptLevel O2 (fallbacks)
-//! - Non‑blocking stream
-//! - Policy enums + light introspection
-//! - VRAM checks + grid.y chunking to <= 65_535
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::vosc::{VoscBatchRange, VoscParams};
@@ -26,7 +12,6 @@ use std::env;
 use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
-
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default, Debug)]
@@ -55,20 +40,30 @@ pub enum CudaVoscError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle returned by the VOSC CUDA wrapper.
 pub struct DeviceArrayF32 {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -164,12 +159,24 @@ impl CudaVosc {
         })
     }
 
-    pub fn set_policy(&mut self, p: CudaVoscPolicy) { self.policy = p; }
-    pub fn policy(&self) -> &CudaVoscPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn set_policy(&mut self, p: CudaVoscPolicy) {
+        self.policy = p;
+    }
+    pub fn policy(&self) -> &CudaVoscPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn synchronize(&self) -> Result<(), CudaVoscError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -214,7 +221,6 @@ impl CudaVosc {
             .ok_or_else(|| CudaVoscError::InvalidInput("size overflow".into()))
     }
 
-    
     fn expand_combos(range: &VoscBatchRange) -> Vec<VoscParams> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
             if step == 0 || start == end {
@@ -280,7 +286,9 @@ impl CudaVosc {
             .ok_or_else(|| CudaVoscError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_combos(sweep);
         if combos.is_empty() {
-            return Err(CudaVoscError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaVoscError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         for c in &combos {
             let s = c.short_period.unwrap_or(0);
@@ -308,7 +316,6 @@ impl CudaVosc {
         let mut prefix = vec![0.0f64; len + 1];
         let mut acc = 0.0f64;
         for i in 0..len {
-            
             acc += data[i] as f64;
             prefix[i + 1] = acc;
         }
@@ -364,19 +371,15 @@ impl CudaVosc {
                 let mut p_ptr = d_prefix.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
-                let offset_i_bytes =
-                    match Self::checked_mul(start, std::mem::size_of::<i32>()) {
-                        Ok(v) => v as u64,
-                        Err(e) => return Err(e),
-                    };
+                let offset_i_bytes = match Self::checked_mul(start, std::mem::size_of::<i32>()) {
+                    Ok(v) => v as u64,
+                    Err(e) => return Err(e),
+                };
                 let mut s_ptr = d_short
                     .as_device_ptr()
                     .as_raw()
                     .wrapping_add(offset_i_bytes);
-                let mut l_ptr = d_long
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(offset_i_bytes);
+                let mut l_ptr = d_long.as_device_ptr().as_raw().wrapping_add(offset_i_bytes);
                 let mut n_i = chunk as i32;
                 let offset_elems = match Self::checked_mul(start, len) {
                     Ok(v) => v,
@@ -387,10 +390,7 @@ impl CudaVosc {
                         Ok(v) => v as u64,
                         Err(e) => return Err(e),
                     };
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(offset_f_bytes);
+                let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add(offset_f_bytes);
                 let args: &mut [*mut c_void] = &mut [
                     &mut p_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
@@ -427,7 +427,6 @@ impl CudaVosc {
             .map(|c| c.long_period.unwrap() as i32)
             .collect();
 
-        
         let prefix_bytes = Self::checked_mul(len + 1, std::mem::size_of::<Float2>())?;
         let params_len = shorts.len().saturating_add(longs.len());
         let params_bytes = Self::checked_mul(params_len, std::mem::size_of::<i32>())?;
@@ -438,7 +437,6 @@ impl CudaVosc {
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(bytes, headroom)?;
 
-        
         let d_prefix = unsafe { DeviceBuffer::from_slice_async(&prefix_f2, &self.stream) }?;
         let d_short = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
         let d_long = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
@@ -468,7 +466,6 @@ impl CudaVosc {
         ))
     }
 
-    
     fn prepare_many_series_inputs_f64(
         data_tm_f32: &[f32],
         cols: usize,
@@ -483,7 +480,7 @@ impl CudaVosc {
         if short == 0 || long == 0 || short > long || long > rows {
             return Err(CudaVoscError::InvalidInput("invalid periods".into()));
         }
-        
+
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -541,7 +538,7 @@ impl CudaVosc {
         if short == 0 || long == 0 || short > long || long > rows {
             return Err(CudaVoscError::InvalidInput("invalid periods".into()));
         }
-        
+
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -564,7 +561,7 @@ impl CudaVosc {
         for s in 0..cols {
             let stride = cols;
             let mut acc = 0.0f64;
-            
+
             for t in 0..rows {
                 let v = data_tm_f32[t * stride + s];
                 if !v.is_nan() {
@@ -623,7 +620,7 @@ impl CudaVosc {
                 (*(self as *const _ as *mut CudaVosc)).debug_many_logged = true;
             }
         }
-        
+
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -660,7 +657,7 @@ impl CudaVosc {
         short: usize,
         long: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
-        ) -> Result<(), CudaVoscError> {
+    ) -> Result<(), CudaVoscError> {
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
@@ -686,7 +683,6 @@ impl CudaVosc {
             }
         }
 
-        
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         const MAX_GRID_Y: usize = 65_535;
         let block: BlockSize = (block_x, 1, 1).into();
@@ -733,31 +729,25 @@ impl CudaVosc {
         let short = params.short_period.unwrap_or(2);
         let long = params.long_period.unwrap_or(5);
 
-        
         let use_ds = rows >= 131_072 || cols >= 1024;
 
         let elems = Self::checked_mul(rows, cols)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(elems, &self.stream)?
-        };
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
 
         if use_ds {
             let (prefix_tm, first_valids) =
                 Self::prepare_many_series_inputs(data_tm_f32, cols, rows, short, long)?;
-            let prefix_bytes =
-                Self::checked_mul(rows + 1, cols)?
-                    .checked_mul(std::mem::size_of::<Float2>())
-                    .ok_or_else(|| CudaVoscError::InvalidInput("size overflow".into()))?;
-            let fv_bytes =
-                Self::checked_mul(cols, std::mem::size_of::<i32>())?;
-            let out_bytes =
-                Self::checked_mul(elems, std::mem::size_of::<f32>())?;
+            let prefix_bytes = Self::checked_mul(rows + 1, cols)?
+                .checked_mul(std::mem::size_of::<Float2>())
+                .ok_or_else(|| CudaVoscError::InvalidInput("size overflow".into()))?;
+            let fv_bytes = Self::checked_mul(cols, std::mem::size_of::<i32>())?;
+            let out_bytes = Self::checked_mul(elems, std::mem::size_of::<f32>())?;
             let tmp = Self::checked_add(prefix_bytes, fv_bytes)?;
             let bytes = Self::checked_add(tmp, out_bytes)?;
             Self::will_fit(bytes, 64 * 1024 * 1024)?;
             let d_prefix_tm = unsafe { DeviceBuffer::from_slice_async(&prefix_tm, &self.stream) }?;
-            let d_first =
-                unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+            let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
             self.launch_many_series_kernel_ds(
                 &d_prefix_tm,
                 &d_first,
@@ -768,7 +758,6 @@ impl CudaVosc {
                 &mut d_out_tm,
             )?;
         } else {
-            
             use crate::indicators::vosc::{vosc_with_kernel, VoscData, VoscInput};
             use crate::utilities::enums::Kernel;
 
@@ -792,9 +781,8 @@ impl CudaVosc {
                     host_out[t * cols + s] = out.values[t] as f32;
                 }
             }
-            
-            d_out_tm =
-                unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+
+            d_out_tm = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
             unsafe { d_out_tm.async_copy_from(host_out.as_slice(), &self.stream) }?;
         }
         self.stream.synchronize()?;
@@ -808,14 +796,13 @@ impl CudaVosc {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; 
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -864,7 +851,7 @@ pub mod benches {
 
         let len = ONE_SERIES_LEN;
         let mut x = vec![f32::NAN; len];
-        
+
         for i in 10..len {
             let f = i as f32;
             x[i] = (f * 0.0007).cos() + 0.03 * (f * 0.0011).sin();
@@ -890,7 +877,7 @@ pub mod benches {
         let d_prefix = DeviceBuffer::from_slice(&prefix_f2).expect("d_prefix");
         let d_short = DeviceBuffer::from_slice(&shorts).expect("d_short");
         let d_long = DeviceBuffer::from_slice(&longs).expect("d_long");
-        
+
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(combos.len() * len) }.expect("d_out");
         VoscBatchState {
@@ -904,7 +891,9 @@ pub mod benches {
             first_valid,
         }
     }
-    fn prep_vosc_batch_box() -> Box<dyn CudaBenchState> { Box::new(prep_vosc_batch()) }
+    fn prep_vosc_batch_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_vosc_batch())
+    }
 
     struct VoscManyState {
         cuda: CudaVosc,
@@ -965,7 +954,9 @@ pub mod benches {
             long: 34,
         }
     }
-    fn prep_vosc_many_box() -> Box<dyn CudaBenchState> { Box::new(prep_vosc_many()) }
+    fn prep_vosc_many_box() -> Box<dyn CudaBenchState> {
+        Box::new(prep_vosc_many())
+    }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![

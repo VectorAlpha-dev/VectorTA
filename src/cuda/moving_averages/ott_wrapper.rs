@@ -1,18 +1,3 @@
-//! CUDA wrapper for the OTT (Optimized Trend Tracker) indicator.
-//!
-//! Design mirrors ALMA/CWMA wrappers:
-//! - PTX load with DetermineTargetFromContext + O2, with fallbacks.
-//! - NON_BLOCKING stream.
-//! - Light policy knobs and one-shot introspection (BENCH_DEBUG=1).
-//! - VRAM headroom checks and simple chunking when needed.
-//!
-//! Math strategy:
-//! - Generic path: compute MA on device via `CudaMaSelector` (or wrapper-specific
-//!   many-series functions), then apply OTT on device using `ott_apply_single_f32`
-//!   or `ott_many_series_one_param_f32`.
-//! - Fast path for default `ma_type == "VAR"`: use VAR-integrated kernels
-//!   (`ott_from_var_*`) to avoid a separate MA pass.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -41,7 +26,11 @@ pub enum CudaOttError {
     #[error("CUDA error: {0}")]
     Cuda(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -49,7 +38,14 @@ pub enum CudaOttError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -239,8 +235,6 @@ impl CudaOtt {
         }
     }
 
-    
-
     pub fn ott_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -250,7 +244,7 @@ impl CudaOtt {
             return Err(CudaOttError::InvalidInput("empty price input".into()));
         }
         let cols = prices_f32.len();
-        
+
         if prices_f32.iter().all(|v| !v.is_finite()) {
             return Err(CudaOttError::InvalidInput("all values are NaN".into()));
         }
@@ -282,15 +276,12 @@ impl CudaOtt {
             ));
         }
 
-        
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(cols) }?;
         unsafe { d_prices.async_copy_from(prices_f32, &self.stream) }?;
 
-        
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
         self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, out_elems)?;
 
-        
         let mut f_var: Option<Function> = self.module.get_function("ott_from_var_batch_f32").ok();
         let mut f_apply = self
             .module
@@ -299,9 +290,6 @@ impl CudaOtt {
                 name: "ott_apply_single_f32",
             })?;
 
-        
-        
-        
         let all_var = combos.iter().all(|p| {
             p.ma_type
                 .as_deref()
@@ -360,17 +348,19 @@ impl CudaOtt {
                 }
 
                 self.stream.synchronize()?;
-                return Ok(DeviceArrayF32 { buf: d_out, rows, cols });
+                return Ok(DeviceArrayF32 {
+                    buf: d_out,
+                    rows,
+                    cols,
+                });
             }
         }
 
-        
         let mut d_period = unsafe { DeviceBuffer::<i32>::uninitialized(1) }
             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
         let mut d_percent = unsafe { DeviceBuffer::<f32>::uninitialized(1) }
             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
 
-        
         let selector = CudaMaSelector::new(self.device_id as usize);
 
         for (row_idx, p) in combos.iter().enumerate() {
@@ -380,13 +370,10 @@ impl CudaOtt {
             let row_offset = row_idx
                 .checked_mul(cols)
                 .ok_or_else(|| CudaOttError::InvalidInput("row offset overflow".into()))?;
-            let out_row_ptr =
-                unsafe { d_out.as_device_ptr().offset(row_offset as isize) };
+            let out_row_ptr = unsafe { d_out.as_device_ptr().offset(row_offset as isize) };
 
             if ma_type.eq_ignore_ascii_case("VAR") {
-                
                 if let Some(ref mut func) = f_var {
-                    
                     unsafe { d_period.async_copy_from(&[period as i32], &self.stream) }
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                     unsafe { d_percent.async_copy_from(&[percent], &self.stream) }
@@ -414,7 +401,6 @@ impl CudaOtt {
                             .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
                     }
                 } else {
-                    
                     let dev = selector
                         .ma_to_device("VAR", CudaMaData::SliceF32(prices_f32), period)
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
@@ -425,11 +411,10 @@ impl CudaOtt {
                         percent,
                         out_row_ptr.as_raw(),
                     )?;
-                    
+
                     self.stream.synchronize()?;
                 }
             } else {
-                
                 let dev = selector
                     .ma_to_device(ma_type, CudaMaData::SliceF32(prices_f32), period)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
@@ -503,15 +488,11 @@ impl CudaOtt {
         let percent = params.percent.unwrap_or(1.4) as f32;
         let ma_type = params.ma_type.as_deref().unwrap_or("VAR");
 
-        
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
-        self
-            .memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, expected_elems)?;
+        self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, expected_elems)?;
 
         if ma_type.eq_ignore_ascii_case("VAR") {
-            
-            let mut d_in =
-                unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
+            let mut d_in = unsafe { DeviceBuffer::<f32>::uninitialized(expected_elems) }?;
             unsafe { d_in.async_copy_from(data_tm_f32, &self.stream) }?;
             let mut func = self
                 .module
@@ -539,8 +520,6 @@ impl CudaOtt {
                 self.stream.launch(&mut func, grid, block, 0, args)?;
             }
         } else {
-            
-            
             let ma_dev = if ma_type.eq_ignore_ascii_case("EMA") {
                 let p = crate::indicators::moving_averages::ema::EmaParams {
                     period: Some(period),
@@ -574,7 +553,11 @@ impl CudaOtt {
                 CudaWilders::new(self.device_id as usize)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
                     .wilders_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
-                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map(|h| super::DeviceArrayF32 {
+                        buf: h.buf,
+                        rows: h.rows,
+                        cols: h.cols,
+                    })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("KAMA") {
                 let p = crate::indicators::moving_averages::kama::KamaParams {
@@ -583,14 +566,17 @@ impl CudaOtt {
                 CudaKama::new(self.device_id as usize)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
                     .kama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
-                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map(|h| super::DeviceArrayF32 {
+                        buf: h.buf,
+                        rows: h.rows,
+                        cols: h.cols,
+                    })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("VWMA") {
                 return Err(CudaOttError::InvalidInput(
                     "vwma requires candles+volume; not supported in this path".into(),
                 ));
             } else if ma_type.eq_ignore_ascii_case("VPWMA") {
-                
                 let p = crate::indicators::moving_averages::vpwma::VpwmaParams {
                     period: Some(period),
                     power: Some(0.382),
@@ -598,7 +584,11 @@ impl CudaOtt {
                 CudaVpwma::new(self.device_id as usize)
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
                     .vpwma_multi_series_one_param_time_major_dev(data_tm_f32, cols, rows, &p)
-                    .map(|h| super::DeviceArrayF32 { buf: h.buf, rows: h.rows, cols: h.cols })
+                    .map(|h| super::DeviceArrayF32 {
+                        buf: h.buf,
+                        rows: h.rows,
+                        cols: h.cols,
+                    })
                     .map_err(|e| CudaOttError::Cuda(e.to_string()))?
             } else if ma_type.eq_ignore_ascii_case("NAMA") {
                 let p = crate::indicators::moving_averages::nama::NamaParams {
@@ -620,7 +610,6 @@ impl CudaOtt {
                 )));
             };
 
-            
             let mut func = self
                 .module
                 .get_function("ott_many_series_one_param_f32")
@@ -654,7 +643,6 @@ impl CudaOtt {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -738,8 +726,14 @@ pub mod benches {
         };
         let combos = expand_combos(&sweep).expect("ott expand combos");
         let n_combos = combos.len();
-        let periods_host: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(2) as i32).collect();
-        let percents_host: Vec<f32> = combos.iter().map(|p| p.percent.unwrap_or(1.4) as f32).collect();
+        let periods_host: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(2) as i32)
+            .collect();
+        let percents_host: Vec<f32> = combos
+            .iter()
+            .map(|p| p.percent.unwrap_or(1.4) as f32)
+            .collect();
 
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
         let d_periods = DeviceBuffer::from_slice(&periods_host).expect("d_periods");

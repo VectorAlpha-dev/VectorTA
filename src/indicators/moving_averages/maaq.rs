@@ -1,110 +1,9 @@
-//! # Moving Average Adaptive Q (MAAQ)
-//!
-//! An adaptive moving average that adjusts smoothing based on the ratio of short-term noise
-//! to long-term signal, with period, fast, and slow smoothing coefficients. Matches alma.rs API.
-//!
-//! ## Parameters
-//! - **period**: Window size.
-//! - **fast_period**: Smoothing coefficient (fast).
-//! - **slow_period**: Smoothing coefficient (slow).
-//!
-//! ## Returns
-//! - **Ok(MaaqOutput)** on success, with output values.
-//! - **Err(MaaqError)** otherwise.
-//!
-//! ## Developer Status
-//! - SIMD: AVX2 implemented (vectorized init |Δ| + scalar stream). AVX512 delegates to AVX2 to avoid downclock regressions.
-//! - Speed: On 100k, AVX2/AVX512 ~2–3% faster than scalar; keep enabled but modest gains (stream is inherently serial).
-//! - Streaming update: O(1) per update via rolling |Δ| sum; warmup parity preserved.
-//! - Batch (row-specific): Not adopted; shared prefix-sum approach did not show >5% wins in this repo’s profile.
-//! - Memory: Zero-copy/uninit helpers used (alloc_with_nan_prefix, make_uninit_matrix). Warmup parity with ALMA preserved.
-//! - CUDA: Enabled wrappers; returns VRAM handles. Python interop provides CAI v3 (byte‑strides) and DLPack v1.x negotiation (versioned/legacy) with primary‑context RAII.
-
-/// # WASM API Guide – MAAQ
-///
-/// This file exposes a dual-layer WebAssembly interface for the MAAQ
-/// (Moving Average Adaptive Q) indicator, balancing **ergonomics** for
-/// everyday users with **zero-copy throughput** for latency-critical code.
-///
-/// ---
-/// ## 1 · Safe / Ergonomic API  <small>(recommended)</small>
-/// | JS export | Rust impl | Purpose | Notes |
-/// |-----------|-----------|---------|-------|
-/// | `maaq_js(data, period, fast_period, slow_period)` | `maaq_js` | Single-parameter run | Returns a fresh `Vec<f64>` *without* an internal copy – the values are written directly into the return buffer before it is handed to JS. │
-/// | `maaq_batch_js(data, config)` | `maaq_batch_js` | Grid sweep (legacy) | Returns flat values array only for backward compatibility. │
-/// | `maaq_batch(data, config)`<br>(JS object) | `maaq_batch_unified_js` | Grid sweep over `(period, fast_period, slow_period)` | Accepts `period_range`, `fast_period_range`, `slow_period_range`; returns a flat result matrix plus combo metadata. │
-///
-/// **Characteristics**
-/// * Memory-safe, runs under the default linear-memory quota.
-/// * Adequate for charting & once-off indicator queries.
-///
-/// Example:
-/// ```javascript
-/// import * as wasm from './maaq_bg.wasm';
-///
-/// const y = wasm.maaq_js(prices, 11, 2, 30);
-///
-/// const grid = wasm.maaq_batch(prices, {
-///   period_range: [10, 20, 5],
-///   fast_period_range: [2, 4, 1],
-///   slow_period_range: [20, 40, 10]
-/// });
-/// ```
-///
-/// ---
-/// ## 2 · Fast / Unsafe API  <small>(zero-copy)</small>
-/// | JS export | Rust impl | Purpose | Notes |
-/// |-----------|-----------|---------|-------|
-/// | `maaq_alloc(len)` / `maaq_free(ptr,len)` | `maaq_alloc`, `maaq_free` | Manual buffer lifecycle | Aligns to 8 bytes; caller **must** free. │
-/// | `maaq_into(inPtr,outPtr,len,period,fast_period,slow_period)` | `maaq_into` | In-place single-run | Detects `inPtr === outPtr` and uses a temp scratch buffer to avoid alias corruption. │
-/// | `maaq_batch_into(inPtr,outPtr,len,config)` | `maaq_batch_into` | In-place grid sweep | Serial on WASM for portability. │
-///
-/// **Performance**
-/// * Zero heap allocations inside hot loops
-/// * ~1.5×–2.0× faster than the safe API for repeated calls on pre-allocated
-///   buffers (measured in Chrome 125, 10 k-point series, 100 updates/s).
-///
-/// **Caveats**
-/// * **No bounds or lifetime checks** – treat pointers as raw FFI.
-/// * Always wrap calls in `try { … } finally { free() }`.
-/// * Recreate `TypedArray` views after *any* WASM call (memory may grow).
-///
-/// ```javascript
-/// const n = prices.length;
-/// const inPtr  = wasm.maaq_alloc(n);
-/// const outPtr = wasm.maaq_alloc(n);
-///
-/// try {
-///   new Float64Array(wasm.memory.buffer, inPtr,  n).set(prices);
-///   wasm.maaq_into(inPtr, outPtr, n, 11, 2, 30);
-///   const result = new Float64Array(wasm.memory.buffer, outPtr, n);
-/// } finally {
-///   wasm.maaq_free(inPtr,  n);
-///   wasm.maaq_free(outPtr, n);
-/// }
-/// ```
-///
-/// ---
-/// ## Porting other indicators
-/// 1. Expose a safe `_js` wrapper returning a `Vec<f64>`.
-/// 2. Provide `*_alloc` / `*_free` helpers.
-/// 3. Add `*_into` for zero-copy execution (check `inPtr === outPtr`).
-/// 4. Mirror the batch pattern if parameter sweeps are needed.
-///
-/// ---
-/// ## Memory-safety checklist
-/// 1. Guard every unsafe pointer with null-checks.
-/// 2. Validate `period > 0 && period ≤ len` *before* slicing.
-/// 3. Overwrite warm-up (prefix) indices with `NaN` in `*_into` helpers.
-/// 4. Document warm-up length (`period – 1`) for stream consistency.
-///
-/// ---
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaMaaq;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::maaq_wrapper::DeviceArrayF32Maaq;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaMaaq;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -146,7 +45,10 @@ pub struct MaaqOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MaaqParams {
     pub period: Option<usize>,
     pub fast_period: Option<usize>,
@@ -293,12 +195,14 @@ pub enum MaaqError {
     #[error("maaq: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("maaq: Invalid range (start={start}, end={end}, step={step})")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("maaq: Non-batch kernel passed to batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    #[error(
-        "maaq: periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}"
-    )]
+    #[error("maaq: periods cannot be zero: period = {period}, fast = {fast_p}, slow = {slow_p}")]
     ZeroPeriods {
         period: usize,
         fast_p: usize,
@@ -321,12 +225,13 @@ fn maaq_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), MaaqError> {
-    
     if out.len() != data.len() {
-        return Err(MaaqError::OutputLengthMismatch { expected: data.len(), got: out.len() });
+        return Err(MaaqError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
     }
     unsafe {
-        
         if first > 0 {
             maaq_scalar(data, period, fast_p, slow_p, first, out)?;
         } else {
@@ -353,23 +258,7 @@ fn maaq_compute_into(
 fn maaq_prepare<'a>(
     input: &'a MaaqInput,
     kernel: Kernel,
-) -> Result<
-    (
-        
-        &'a [f64],
-        // period
-        usize,
-        // fast_p
-        usize,
-        // slow_p
-        usize,
-        // first
-        usize,
-        // chosen
-        Kernel,
-    ),
-    MaaqError,
-> {
+) -> Result<(&'a [f64], usize, usize, usize, usize, Kernel), MaaqError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -385,7 +274,6 @@ fn maaq_prepare<'a>(
     let fast_p = input.get_fast_period();
     let slow_p = input.get_slow_period();
 
-    // Validation
     if period == 0 || fast_p == 0 || slow_p == 0 {
         return Err(MaaqError::ZeroPeriods {
             period,
@@ -406,7 +294,6 @@ fn maaq_prepare<'a>(
         });
     }
 
-    // Kernel auto-detection only once
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -418,16 +305,17 @@ fn maaq_prepare<'a>(
 pub fn maaq_with_kernel(input: &MaaqInput, kernel: Kernel) -> Result<MaaqOutput, MaaqError> {
     let (data, period, fast_p, slow_p, first, chosen) = maaq_prepare(input, kernel)?;
 
-    let warm = first + period - 1; // ALMA parity: prefix length
+    let warm = first + period - 1;
     let mut out = alloc_with_nan_prefix(data.len(), warm);
 
-    // Sanity: output slice must match input length
     if out.len() != data.len() {
-        return Err(MaaqError::OutputLengthMismatch { expected: data.len(), got: out.len() });
+        return Err(MaaqError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
     }
     maaq_compute_into(data, period, fast_p, slow_p, first, chosen, &mut out)?;
 
-    // ALMA parity: restore NaN prefix (implementations may have written raw prices)
     let warmup_end = first + period - 1;
     for v in &mut out[..warmup_end] {
         *v = f64::NAN;
@@ -449,29 +337,25 @@ pub fn maaq_scalar(
     let fast_sc = 2.0 / (fast_p as f64 + 1.0);
     let slow_sc = 2.0 / (slow_p as f64 + 1.0);
 
-    // ring buffer of |Δ| for the current window
     let mut diffs = vec![0.0f64; period];
     let mut vol_sum = 0.0;
-    // fill diffs[1..period-1] over data[first..first+period-1]
+
     for j in 1..period {
         let d = (data[first + j] - data[first + j - 1]).abs();
         diffs[j] = d;
         vol_sum += d;
     }
 
-    // Copy raw prices to warmup area (to match AVX2)
     let warm_end = (first + period).min(len);
     if warm_end > first {
         out[first..warm_end].copy_from_slice(&data[first..warm_end]);
     }
 
-    // first computable index (at period, not period-1, to match AVX2)
     let i0 = first + period;
     if i0 >= len {
         return Ok(());
     }
 
-    // Add the final diff to complete the window
     let new_diff = (data[i0] - data[i0 - 1]).abs();
     diffs[0] = new_diff;
     vol_sum += new_diff;
@@ -484,15 +368,13 @@ pub fn maaq_scalar(
     };
     let mut sc = fast_sc.mul_add(er0, slow_sc);
     sc *= sc;
-    // EMA-style update using fused multiply-add
+
     prev_val = sc.mul_add(data[i0] - prev_val, prev_val);
     out[i0] = prev_val;
 
-    // head points to the oldest |Δ| (which is diffs[1] now)
     let mut head = if period > 1 { 1usize } else { 0usize };
 
     for i in (i0 + 1)..len {
-        // roll window: drop oldest |Δ|, add newest
         vol_sum -= diffs[head];
         let nd = (data[i] - data[i - 1]).abs();
         diffs[head] = nd;
@@ -528,18 +410,15 @@ pub fn maaq_avx2(
 ) -> Result<(), MaaqError> {
     use core::arch::x86_64::*;
 
-    // ------ safety & basic checks ------------------------------------------------------------
     let len = data.len();
     debug_assert_eq!(len, out.len());
     if len == 0 {
         return Ok(());
     }
 
-    // ------ 1 · pre-compute constants --------------------------------------------------------
     let fast_sc = 2.0 / (fast_p as f64 + 1.0);
     let slow_sc = 2.0 / (slow_p as f64 + 1.0);
 
-    // SIMD abs helper: abs(x) = andnot(signmask, x), signmask = -0.0
     #[inline(always)]
     unsafe fn vabs_pd(x: __m256d) -> __m256d {
         let sign = _mm256_set1_pd(-0.0f64);
@@ -551,7 +430,6 @@ pub fn maaq_avx2(
         f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
     }
 
-    // ------ 2 · rolling-window buffers -------------------------------------------------------
     let mut diffs: Vec<f64> = Vec::with_capacity(period);
     unsafe {
         diffs.set_len(period);
@@ -561,7 +439,6 @@ pub fn maaq_avx2(
     unsafe {
         let dp = data.as_ptr();
 
-        // Compute |Δ| for k = first+1 .. first+period-1 into diffs[1..]
         let base = first + 1;
         let n = period.saturating_sub(1);
 
@@ -576,12 +453,10 @@ pub fn maaq_avx2(
             j += 4;
         }
 
-        // Horizontal sum of accv
         let mut tmp = [0.0f64; 4];
         _mm256_storeu_pd(tmp.as_mut_ptr(), accv);
         vol_sum = tmp[0] + tmp[1] + tmp[2] + tmp[3];
 
-        // Tail
         while j < n {
             let k = base + j;
             let d = fast_abs(*dp.add(k) - *dp.add(k - 1));
@@ -590,7 +465,6 @@ pub fn maaq_avx2(
             j += 1;
         }
 
-        // Copy warmup prices verbatim (ALMA parity)
         let warm_end = (first + period).min(len);
         if warm_end > first {
             core::ptr::copy_nonoverlapping(
@@ -600,13 +474,11 @@ pub fn maaq_avx2(
             );
         }
 
-        // First computable index
         let i0 = first + period;
         if i0 >= len {
             return Ok(());
         }
 
-        // Complete window by inserting final |Δ|
         let new_diff = fast_abs(*dp.add(i0) - *dp.add(i0 - 1));
         *diffs.get_unchecked_mut(0) = new_diff;
         vol_sum += new_diff;
@@ -622,10 +494,8 @@ pub fn maaq_avx2(
         prev_val = sc.mul_add(*dp.add(i0) - prev_val, prev_val);
         *out.get_unchecked_mut(i0) = prev_val;
 
-        // Head points to oldest |Δ|
         let mut head = if period > 1 { 1usize } else { 0usize };
 
-        // Main streaming loop (inherently serial)
         let mut i = i0 + 1;
         let op = out.as_mut_ptr();
         while i < len {
@@ -668,31 +538,27 @@ pub fn maaq_avx512(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), MaaqError> {
-    // On many CPUs AVX-512 can downclock and underperform AVX2 for this workload.
-    // Keep the AVX512 entry as a thin wrapper delegating to the AVX2 path.
     maaq_avx2(data, period, fast_p, slow_p, first, out)
 }
 
-// Streaming/Stateful MaaqStream  — O(1) per update
 #[derive(Debug, Clone)]
 pub struct MaaqStream {
     period: usize,
     fast_period: usize,
     slow_period: usize,
-    buffer: Vec<f64>, // ring buffer of last `period` prices
-    diff: Vec<f64>,   // ring buffer of |Δ| aligned with `buffer` writes
-    head: usize,      // next write position (also the oldest element)
+    buffer: Vec<f64>,
+    diff: Vec<f64>,
+    head: usize,
     filled: bool,
-    last: f64,    // last output value (EMA state)
-    count: usize, // number of values seen so far
-    // ---- new for O(1) ----
-    vol_sum: f64, // rolling sum of |Δ| in the window
-    fast_sc: f64, // precomputed 2/(fast_period+1)
-    slow_sc: f64, // precomputed 2/(slow_period+1)
+    last: f64,
+    count: usize,
+
+    vol_sum: f64,
+    fast_sc: f64,
+    slow_sc: f64,
 }
 
 impl MaaqStream {
-    /// Decision: Streaming uses O(1) rolling |Δ| and FMA; matches batch post-warmup.
     pub fn try_new(params: MaaqParams) -> Result<Self, MaaqError> {
         let period = params.period.unwrap_or(11);
         let fast_p = params.fast_period.unwrap_or(2);
@@ -725,15 +591,10 @@ impl MaaqStream {
         })
     }
 
-    /// Push one sample; returns the stream value.
-    /// Warmup semantics: return raw inputs for the first `period` samples (batch parity:
-    /// those indices would be NaN), then switch to EMA-style MAAQ that matches batch output.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // ---- Warmup: fill buffers, accumulate vol_sum, echo input ----
         if !self.filled {
             let prev = if self.count > 0 {
-                // previous input (for |Δ|)
                 let idx_prev = (self.head + self.period - 1) % self.period;
                 self.buffer[idx_prev]
             } else {
@@ -751,21 +612,17 @@ impl MaaqStream {
             }
 
             self.count += 1;
-            self.last = value; // EMA state equals last input during warmup
+            self.last = value;
 
             if self.count == self.period {
                 self.filled = true;
             }
-            return Some(value); // stream returns raw values during warmup
+            return Some(value);
         }
 
-        // ---- Steady state: O(1) update of Σ|Δ| and EMA ----
-
-        // Previous input x_{t-1} for new |Δ|
         let idx_prev = (self.head + self.period - 1) % self.period;
         let prev_input = self.buffer[idx_prev];
 
-        // Drop oldest |Δ|, insert newest |Δ|
         let old_diff = self.diff[self.head];
         self.vol_sum -= old_diff;
 
@@ -773,28 +630,23 @@ impl MaaqStream {
         self.diff[self.head] = new_diff;
         self.vol_sum += new_diff;
 
-        // Value leaving the window is x_{t-period}
         let old_value = self.buffer[self.head];
 
-        // Overwrite buffer with the current input (advance ring)
         self.buffer[self.head] = value;
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
         }
 
-        // Efficiency ratio ER in [0, 1] (guard div-by-zero on flat windows)
         let er = if self.vol_sum > f64::EPSILON {
             (value - old_value).abs() / self.vol_sum
         } else {
             0.0
         };
 
-        // SC = (er * fast + slow)^2  (use FMA and square)
         let mut sc = self.fast_sc.mul_add(er, self.slow_sc);
         sc *= sc;
 
-        // EMA-style update: y = y_prev + sc * (x - y_prev)
         let out = sc.mul_add(value - self.last, self.last);
         self.last = out;
         Some(out)
@@ -884,14 +736,10 @@ pub fn maaq_batch_with_kernel(
     sweep: &MaaqBatchRange,
     k: Kernel,
 ) -> Result<MaaqBatchOutput, MaaqError> {
-    // Note: AVX2/AVX512 batch underperforms scalar for MAAQ on our profile; short-circuit Auto to ScalarBatch.
-    // SIMD code paths are left in place for future revisits.
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(MaaqError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(MaaqError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -951,7 +799,9 @@ pub fn expand_grid(r: &MaaqBatchRange) -> Vec<MaaqParams> {
                     Some(nx) if nx < x => x = nx,
                     _ => break,
                 }
-                if x == 0 { break; }
+                if x == 0 {
+                    break;
+                }
             }
         }
         v
@@ -1001,7 +851,11 @@ fn maaq_batch_inner(
 ) -> Result<MaaqBatchOutput, MaaqError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MaaqError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(MaaqError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let first = data
         .iter()
@@ -1018,26 +872,26 @@ fn maaq_batch_inner(
     let cols = data.len();
 
     if rows.checked_mul(cols).is_none() {
-        return Err(MaaqError::InvalidRange { start: rows, end: cols, step: 0 });
+        return Err(MaaqError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 0,
+        });
     }
 
-    // Per-row warm prefix: first non-NaN + that row's period - 1
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let fast_p = combos[row].fast_period.unwrap();
         let slow_p = combos[row].slow_period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1051,7 +905,6 @@ fn maaq_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1072,7 +925,6 @@ fn maaq_batch_inner(
         }
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let values: Vec<f64> = unsafe {
         Vec::from_raw_parts(
@@ -1082,7 +934,6 @@ fn maaq_batch_inner(
         )
     };
 
-    
     Ok(MaaqBatchOutput {
         values,
         combos,
@@ -1091,7 +942,6 @@ fn maaq_batch_inner(
     })
 }
 
-/// Batch compute MAAQ directly into pre-allocated output slice (zero-copy)
 pub fn maaq_batch_inner_into(
     data: &[f64],
     sweep: &MaaqBatchRange,
@@ -1101,7 +951,11 @@ pub fn maaq_batch_inner_into(
 ) -> Result<Vec<MaaqParams>, MaaqError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(MaaqError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(MaaqError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let first = data
         .iter()
@@ -1117,35 +971,34 @@ pub fn maaq_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(MaaqError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    let expected = rows.checked_mul(cols).ok_or(MaaqError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
     if out.len() != expected {
-        return Err(MaaqError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(MaaqError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let fast_p = combos[row].fast_period.unwrap();
         let slow_p = combos[row].slow_period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1165,7 +1018,6 @@ pub fn maaq_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1227,8 +1079,6 @@ pub unsafe fn maaq_row_avx512(
 ) {
     maaq_avx2(data, period, fast_p, slow_p, first, out);
 }
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -1460,10 +1310,7 @@ mod tests {
             }
         }
         assert_eq!(batch_output.len(), stream_values.len());
-        
-        
-        
-        
+
         for i in period..batch_output.len() {
             let b = batch_output[i];
             let s = stream_values[i];
@@ -1508,7 +1355,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_maaq_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1516,11 +1362,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_cases = vec![
-            
             MaaqParams::default(),
-            
             MaaqParams {
                 period: Some(5),
                 fast_period: Some(2),
@@ -1531,7 +1374,6 @@ mod tests {
                 fast_period: Some(3),
                 slow_period: Some(20),
             },
-            
             MaaqParams {
                 period: Some(11),
                 fast_period: Some(2),
@@ -1547,19 +1389,16 @@ mod tests {
                 fast_period: Some(5),
                 slow_period: Some(50),
             },
-            
             MaaqParams {
                 period: Some(30),
                 fast_period: Some(6),
                 slow_period: Some(60),
             },
-            
             MaaqParams {
                 period: Some(10),
                 fast_period: Some(8),
                 slow_period: Some(30),
             },
-            
             MaaqParams {
                 period: Some(25),
                 fast_period: Some(1),
@@ -1571,16 +1410,13 @@ mod tests {
             let input = MaaqInput::from_candles(&candles, "close", params.clone());
             let output = maaq_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params period={:?}, fast_period={:?}, slow_period={:?}",
@@ -1588,7 +1424,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params period={:?}, fast_period={:?}, slow_period={:?}",
@@ -1596,7 +1431,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params period={:?}, fast_period={:?}, slow_period={:?}",
@@ -1609,7 +1443,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_maaq_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1662,7 +1495,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1670,17 +1502,11 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
             ((5, 10, 2), (2, 4, 1), (10, 30, 5)),
-            
             ((10, 20, 5), (2, 6, 2), (20, 50, 10)),
-            
             ((20, 30, 5), (4, 8, 2), (40, 80, 20)),
-            
             ((10, 15, 5), (5, 10, 5), (30, 60, 30)),
-            
             ((8, 12, 1), (2, 5, 1), (15, 25, 5)),
         ];
 
@@ -1692,9 +1518,7 @@ mod tests {
                 .slow_period_range(slow_range.0, slow_range.1, slow_range.2)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1704,7 +1528,6 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, fast_period={:?}, slow_period={:?})",
@@ -1712,7 +1535,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, fast_period={:?}, slow_period={:?})",
@@ -1720,7 +1542,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, fast_period={:?}, slow_period={:?})",
@@ -1733,7 +1554,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1751,15 +1571,14 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let main_strat = (
             proptest::collection::vec(
                 (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                 20..200,
             ),
-            2usize..30,  
-            1usize..10,  
-            10usize..50, 
+            2usize..30,
+            1usize..10,
+            10usize..50,
         )
             .prop_filter("valid params", |(data, period, fast_p, slow_p)| {
                 *period <= data.len() && *fast_p < *slow_p
@@ -1775,11 +1594,9 @@ mod tests {
                 };
                 let input = MaaqInput::from_slice(&data, params.clone());
 
-                
                 let result = maaq_with_kernel(&input, kernel)?;
                 let reference = maaq_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(
                     result.values.len(),
                     data.len(),
@@ -1788,7 +1605,6 @@ mod tests {
                     data.len()
                 );
 
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_end = first_valid + period - 1;
                 for i in 0..warmup_end.min(data.len()) {
@@ -1800,7 +1616,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in 0..result.values.len() {
                     let y = result.values[i];
                     let r = reference.values[i];
@@ -1828,12 +1643,10 @@ mod tests {
                     );
                 }
 
-                
-                
                 let data_min = data.iter().copied().fold(f64::INFINITY, f64::min);
                 let data_max = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);
                 let range = (data_max - data_min).abs();
-                let tolerance = range * 0.02; 
+                let tolerance = range * 0.02;
 
                 for (i, &val) in result.values.iter().enumerate() {
                     if val.is_finite() && i >= period {
@@ -1848,7 +1661,6 @@ mod tests {
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
                     let constant_val = data[0];
                     for (i, &val) in result.values[period..].iter().enumerate() {
@@ -1865,15 +1677,14 @@ mod tests {
             },
         )?;
 
-        
         let maaq_strat = (
             proptest::collection::vec(
                 (-100f64..100f64).prop_filter("finite", |x| x.is_finite()),
                 50..100,
             ),
-            5usize..15,  
-            1usize..5,   
-            20usize..40, 
+            5usize..15,
+            1usize..5,
+            20usize..40,
         )
             .prop_filter("valid maaq params", |(_data, period, fast_p, slow_p)| {
                 *fast_p < *slow_p
@@ -1890,19 +1701,15 @@ mod tests {
                 let input = MaaqInput::from_slice(&data, params);
                 let result = maaq_with_kernel(&input, kernel)?;
 
-                
                 let fast_sc = 2.0 / (fast_p as f64 + 1.0);
                 let slow_sc = 2.0 / (slow_p as f64 + 1.0);
 
-                
                 for i in (period + 1)..data.len() {
-                    
                     let signal = (data[i] - data[i - period]).abs();
                     let noise: f64 = (1..=period)
                         .map(|j| (data[i - j + 1] - data[i - j]).abs())
                         .sum();
 
-                    
                     if noise > f64::EPSILON {
                         let er = signal / noise;
                         prop_assert!(
@@ -1912,11 +1719,8 @@ mod tests {
                             i
                         );
 
-                        
-                        
                         let sc = (er * fast_sc + slow_sc).powi(2);
 
-                        
                         let min_sc = slow_sc.powi(2);
                         let max_sc = (fast_sc + slow_sc).powi(2);
                         prop_assert!(
@@ -1930,13 +1734,11 @@ mod tests {
                     }
                 }
 
-                
                 if data.len() >= period * 3 {
-                    
                     let trending_indices: Vec<usize> = (period..data.len())
                         .filter(|&i| {
                             let signal = (data[i] - data[i.saturating_sub(period)]).abs();
-                            signal > 10.0 
+                            signal > 10.0
                         })
                         .collect();
 
@@ -1949,7 +1751,6 @@ mod tests {
                             });
                         let local_range = (price_range.1 - price_range.0).abs();
 
-                        
                         prop_assert!(
                             tracking_error <= local_range * 0.2 + 1.0,
                             "Poor tracking in trend at {}: error {} > 20% of range {}",
@@ -1964,13 +1765,12 @@ mod tests {
             },
         )?;
 
-        
         let step_strat = (
-            10usize..30,     
-            2usize..5,       
-            20usize..40,     
-            -100f64..100f64, 
-            -100f64..100f64, 
+            10usize..30,
+            2usize..5,
+            20usize..40,
+            -100f64..100f64,
+            -100f64..100f64,
         )
             .prop_filter("different levels", |(_p, _f, _s, init, final_level)| {
                 (init - final_level).abs() > 1.0
@@ -1979,7 +1779,6 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &step_strat,
             |(period, fast_p, slow_p, initial, final_level)| {
-                
                 let mut data = vec![initial; 50];
                 data.extend(vec![final_level; 50]);
 
@@ -1991,7 +1790,6 @@ mod tests {
                 let input = MaaqInput::from_slice(&data, params);
                 let result = maaq_with_kernel(&input, kernel)?;
 
-                
                 let last_values = &result.values[90..];
                 let convergence_target = final_level;
 
@@ -1999,7 +1797,6 @@ mod tests {
                     let distance_to_target = (val - convergence_target).abs();
                     let initial_distance = (initial - final_level).abs();
 
-                    
                     prop_assert!(
                         distance_to_target < initial_distance * 0.3,
                         "Failed to converge: value {} too far from target {}",
@@ -2012,15 +1809,14 @@ mod tests {
             },
         )?;
 
-        
         let small_strat = (
             proptest::collection::vec(
                 (-100f64..100f64).prop_filter("finite", |x| x.is_finite()),
                 1..5,
             ),
-            1usize..3, 
-            1usize..3, 
-            3usize..6, 
+            1usize..3,
+            1usize..3,
+            3usize..6,
         )
             .prop_filter("valid small params", |(data, period, _fast_p, _slow_p)| {
                 *period <= data.len()
@@ -2036,13 +1832,10 @@ mod tests {
                 };
                 let input = MaaqInput::from_slice(&data, params);
 
-                
                 let result = maaq_with_kernel(&input, kernel)?;
 
-                
                 prop_assert_eq!(result.values.len(), data.len());
 
-                
                 for i in 0..period.min(data.len()) {
                     if data[i].is_finite() {
                         prop_assert!(
@@ -2063,11 +1856,9 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_maaq_tests!(check_maaq_property);
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_maaq_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data: Vec<f64> = vec![f64::NAN, f64::NAN, f64::NAN];
         for i in 0..256u32 {
             let x = (i as f64).sin() * 0.5 + (i as f64) * 0.1 + ((i % 7) as f64) * 0.01;
@@ -2076,16 +1867,13 @@ mod tests {
 
         let input = MaaqInput::from_slice(&data, MaaqParams::default());
 
-        
         let baseline = maaq(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
         super::maaq_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        
         for (idx, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || ((a - b).abs() <= 1e-12);
             assert!(equal, "Mismatch at {}: {} vs {}", idx, a, b);
@@ -2095,7 +1883,6 @@ mod tests {
     }
 }
 
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -2104,7 +1891,6 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyA
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct PrimaryCtxGuard {
@@ -2134,10 +1920,11 @@ impl PrimaryCtxGuard {
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl Drop for PrimaryCtxGuard {
     fn drop(&mut self) {
-        unsafe { let _ = cust::sys::cuDevicePrimaryCtxRelease_v2(self.dev); }
+        unsafe {
+            let _ = cust::sys::cuDevicePrimaryCtxRelease_v2(self.dev);
+        }
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Maaq", unsendable)]
@@ -2151,7 +1938,10 @@ pub struct DeviceArrayF32MaaqPy {
 #[pymethods]
 impl DeviceArrayF32MaaqPy {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let inner = self
             .inner
             .as_ref()
@@ -2166,9 +1956,13 @@ impl DeviceArrayF32MaaqPy {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 { 0 } else { inner.device_ptr() as usize };
+        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 {
+            0
+        } else {
+            inner.device_ptr() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
-        // Producing stream is synchronized before return; omit stream per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2188,8 +1982,7 @@ impl DeviceArrayF32MaaqPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = _dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2209,7 +2002,6 @@ impl DeviceArrayF32MaaqPy {
         }
         let _ = _stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let inner = self
             .inner
             .take()
@@ -2228,7 +2020,9 @@ impl DeviceArrayF32MaaqPy {
 impl Drop for DeviceArrayF32MaaqPy {
     fn drop(&mut self) {
         if let Some(ref pc) = self.pc_guard {
-            unsafe { pc.push_current(); }
+            unsafe {
+                pc.push_current();
+            }
         }
     }
 }
@@ -2253,7 +2047,6 @@ pub fn maaq_py<'py>(
         slow_period: Some(slow_period),
     };
 
-    // Prefer zero-copy for contiguous input; fallback to a single copy for non-contiguous views
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let input = MaaqInput::from_slice(slice_in, params);
         py.allow_threads(|| maaq_with_kernel(&input, kern).map(|o| o.values))
@@ -2284,7 +2077,7 @@ pub fn maaq_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?;
 
     let sweep = MaaqBatchRange {
         period: period_range,
@@ -2292,20 +2085,18 @@ pub fn maaq_batch_py<'py>(
         slow_period: slow_period_range,
     };
 
-    // Expand grid to calculate dimensions
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate output array (OK for batch operations) with overflow guard
-    let total = rows.checked_mul(cols).ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
+    let total = rows
+        .checked_mul(cols)
+        .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
     let combos = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2320,7 +2111,6 @@ pub fn maaq_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 4. Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2382,8 +2172,13 @@ pub fn maaq_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    let pc = PrimaryCtxGuard::new(device_id as u32).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(DeviceArrayF32MaaqPy { inner: Some(inner), device_id: device_id as u32, pc_guard: Some(pc) })
+    let pc =
+        PrimaryCtxGuard::new(device_id as u32).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(DeviceArrayF32MaaqPy {
+        inner: Some(inner),
+        device_id: device_id as u32,
+        pc_guard: Some(pc),
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2418,8 +2213,13 @@ pub fn maaq_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    let pc = PrimaryCtxGuard::new(device_id as u32).map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(DeviceArrayF32MaaqPy { inner: Some(inner), device_id: device_id as u32, pc_guard: Some(pc) })
+    let pc =
+        PrimaryCtxGuard::new(device_id as u32).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(DeviceArrayF32MaaqPy {
+        inner: Some(inner),
+        device_id: device_id as u32,
+        pc_guard: Some(pc),
+    })
 }
 
 #[cfg(feature = "python")]
@@ -2448,17 +2248,13 @@ impl MaaqStreamPy {
     }
 }
 
-// ================== WASM Bindings ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 
-// ================== WASM Types ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MaaqBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2466,7 +2262,7 @@ pub struct MaaqBatchConfig {
     pub slow_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MaaqBatchJsOutput {
     pub values: Vec<f64>,
@@ -2475,9 +2271,7 @@ pub struct MaaqBatchJsOutput {
     pub cols: usize,
 }
 
-// ================== Safe / Ergonomic API ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_js(
     data: &[f64],
@@ -2492,14 +2286,14 @@ pub fn maaq_js(
     };
     let input = MaaqInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
     maaq_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_batch_js(data: &[f64], config: JsValue) -> Result<Vec<f64>, JsValue> {
     let config: MaaqBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2517,7 +2311,7 @@ pub fn maaq_batch_js(data: &[f64], config: JsValue) -> Result<Vec<f64>, JsValue>
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = maaq_batch)]
 pub fn maaq_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MaaqBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2543,7 +2337,7 @@ pub fn maaq_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_batch_metadata_js(
     period_start: usize,
@@ -2574,22 +2368,19 @@ pub fn maaq_batch_metadata_js(
     metadata
 }
 
-// ================== Zero-Copy WASM Helper ==================
-
-/// Write MAAQ values directly to output slice - no allocations
 #[inline]
 pub fn maaq_into_slice(dst: &mut [f64], input: &MaaqInput, kern: Kernel) -> Result<(), MaaqError> {
     let (data, period, fast_p, slow_p, first, chosen) = maaq_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(MaaqError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(MaaqError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
-    // Compute MAAQ values directly into dst
     maaq_compute_into(data, period, fast_p, slow_p, first, chosen, dst)?;
 
-    // ALMA parity: restore NaN prefix
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2598,34 +2389,24 @@ pub fn maaq_into_slice(dst: &mut [f64], input: &MaaqInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-// ================== Native Into API (no allocations) ==================
-
-/// Compute MAAQ directly into a caller-provided output buffer.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API.
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn maaq_into(input: &MaaqInput, out: &mut [f64]) -> Result<(), MaaqError> {
     maaq_into_slice(out, input, Kernel::Auto)
 }
 
-// ================== Fast / Unsafe API (Zero-Copy) ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2633,7 +2414,7 @@ pub fn maaq_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_into(
     in_ptr: *const f64,
@@ -2643,16 +2424,13 @@ pub fn maaq_into(
     fast_period: usize,
     slow_period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to maaq_into"));
     }
 
     unsafe {
-        // Create slice from pointer
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
@@ -2663,7 +2441,6 @@ pub fn maaq_into(
             return Err(JsValue::from_str("Invalid slow_period"));
         }
 
-        // Calculate MAAQ
         let params = MaaqParams {
             period: Some(period),
             fast_period: Some(fast_period),
@@ -2671,18 +2448,14 @@ pub fn maaq_into(
         };
         let input = MaaqInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
             let mut temp = vec![0.0; len];
             maaq_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct computation into output buffer
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             maaq_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2692,9 +2465,7 @@ pub fn maaq_into(
     }
 }
 
-// ================== Optimized Batch Processing ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn maaq_batch_into(
     in_ptr: *const f64,
@@ -2702,7 +2473,6 @@ pub fn maaq_batch_into(
     len: usize,
     config: JsValue,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to maaq_batch_into"));
     }
@@ -2719,13 +2489,10 @@ pub fn maaq_batch_into(
             slow_period: config.slow_period_range,
         };
 
-        // Calculate output size
         let combos = expand_grid(&range);
         let total_size = combos.len() * len;
 
-        // Check for aliasing
         if in_ptr == out_ptr {
-            // Use temporary buffer
             let mut temp = vec![0.0; total_size];
             maaq_batch_inner_into(data, &range, Kernel::Auto, false, &mut temp)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;

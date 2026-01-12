@@ -120,7 +120,7 @@ fn compute_ma_series_for(
 ) -> Result<Vec<f64>> {
     let data_close: Vec<f64> = if let Some(c) = &req.close { c.clone() } else { req.series.clone().unwrap_or_else(|| gen_synthetic(100_000)) };
     let name = indicator.to_ascii_lowercase();
-    
+
     let params = override_params.or_else(|| if is_fast { req.fast_params.as_ref() } else { req.slow_params.as_ref() });
     let values = match name.as_str() {
         "cwma" => { CwmaBuilder::default().period(period).apply_slice(&data_close)?.values }
@@ -129,15 +129,15 @@ fn compute_ma_series_for(
         "maaq" => { MaaqBuilder::default().period(period).apply_slice(&data_close)?.values }
         "mwdx" => { MwdxBuilder::default().apply_slice(&data_close)?.values }
         "mama" => {
-            
+
             use my_project::indicators::moving_averages::mama::MamaBuilder;
             MamaBuilder::default().apply_slice(&data_close)?.mama_values
         }
         "ehlers_pma" => {
-            
+
             EhlersPmaBuilder::default().apply_slice(&data_close)?.predict
         }
-        
+
         "ma" | "ma_stream" => { SmaBuilder::default().period(period).apply_slice(&data_close)?.values }
         "alma" => {
             let offset = req.offset; let sigma = req.sigma;
@@ -170,7 +170,7 @@ fn compute_ma_series_for(
         "fwma" => { FwmaBuilder::default().period(period).apply_slice(&data_close)?.values }
         "linreg" => { LinRegBuilder::default().period(period).apply_slice(&data_close)?.values }
         "tema" => { TemaBuilder::default().period(period).apply_slice(&data_close)?.values }
-        
+
         "jma" => {
             let mut b = JmaBuilder::default().period(period);
             if let Some(p) = params {
@@ -199,7 +199,7 @@ fn compute_ma_series_for(
         }
         "tilson" => { TilsonBuilder::default().period(period).apply_slice(&data_close)?.values }
         "tradjema" => {
-            
+
             let close = &data_close;
             let mut high=Vec::with_capacity(close.len()); let mut low=Vec::with_capacity(close.len());
             for (i,&c) in close.iter().enumerate(){ if c.is_finite(){ let amp=0.002*((i%100) as f64/100.0+0.5); high.push(c*(1.0+amp)); low.push(c*(1.0-amp)); } else { high.push(f64::NAN); low.push(f64::NAN);} }
@@ -216,7 +216,7 @@ fn compute_ma_series_for(
             b.apply_slice(&data_close, None)?.values
         }
         "vpwma" => { VpwmaBuilder::default().period(period).apply_slice(&data_close)?.values }
-        
+
         "ehlers_ecema" => {
             let mut b = EhlersEcemaBuilder::default().length(period);
             if let Some(p) = params {
@@ -232,11 +232,11 @@ fn compute_ma_series_for(
             b.apply_slice(&data_close)?.values
         }
         "ehlers_kama" => { EhlersKamaBuilder::default().period(period).apply_slice(&data_close)?.values }
-        
+
         "frama" => {
             let close = &data_close;
             let (high, low) = if let (Some(h), Some(l)) = (&req.high, &req.low) { (h.clone(), l.clone()) } else {
-                
+
                 let mut h=Vec::with_capacity(close.len()); let mut l=Vec::with_capacity(close.len());
                 for (i,&c) in close.iter().enumerate(){ if c.is_finite(){ let amp=0.002*((i%100) as f64/100.0+0.5); h.push(c*(1.0+amp)); l.push(c*(1.0-amp)); } else { h.push(f64::NAN); l.push(f64::NAN);} }
                 (h,l)
@@ -245,7 +245,7 @@ fn compute_ma_series_for(
             let fc = params.and_then(|p| p.get("fc")).and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             FramaBuilder::default().window(period).sc(sc).fc(fc).apply_slices(&high, &low, &close)?.values
         }
-        
+
         "vwap" => {
             let prices = &data_close;
             let timestamps: Vec<i64> = if let Some(ts) = &req.timestamps { ts.clone() } else {
@@ -255,13 +255,13 @@ fn compute_ma_series_for(
             let anchor = req.anchor.clone().unwrap_or_else(|| "1d".to_string());
             VwapBuilder::default().anchor(anchor).apply_slice(&timestamps, &volumes, &prices)?.values
         }
-        
+
         "volume_adjusted_ma" => {
             let prices = &data_close;
             let volume: Vec<f64> = if let Some(v) = &req.volume { v.clone() } else { vec![1.0; prices.len()] };
             VolumeAdjustedMaBuilder::default().length(period).apply_slices(&prices, &volume)?.values
         }
-        
+
         "vama" | "volatility_adjusted_ma" => {
             let base_p = period.max(2);
             let vol_p = (period / 2).max(2);
@@ -285,10 +285,10 @@ pub fn run_cpu(req: OptimizeRequest) -> Result<OptimizeResponse> {
     let rows = fast_periods.len();
     let cols = slow_periods.len();
 
-    
-    
-    
-    
+
+
+
+
     if fast_type.to_ascii_lowercase() == "alma" && slow_type.to_ascii_lowercase() == "alma" {
         fn values_or_range(p: &Option<JsonValue>, key: &str, default_val: f64) -> Vec<f64> {
             if let Some(j) = p {
@@ -326,7 +326,7 @@ pub fn run_cpu(req: OptimizeRequest) -> Result<OptimizeResponse> {
         let m = req.metrics.max(5).min(5);
         let mut values = vec![0f32; layers * rows * cols * m];
 
-        
+
         let mut fast_banks: Vec<Vec<Vec<f64>>> = Vec::with_capacity(f_ext);
         for &off in &f_offs {
             for &sig in &f_sigs {
@@ -340,7 +340,7 @@ pub fn run_cpu(req: OptimizeRequest) -> Result<OptimizeResponse> {
                 fast_banks.push(bank);
             }
         }
-        
+
         let mut slow_banks: Vec<Vec<Vec<f64>>> = Vec::with_capacity(s_ext);
         for &off in &s_offs {
             for &sig in &s_sigs {
@@ -390,13 +390,13 @@ pub fn run_cpu(req: OptimizeRequest) -> Result<OptimizeResponse> {
         return Ok(OptimizeResponse { meta, values, layers });
     }
 
-    
+
     if fast_type.to_ascii_lowercase() == "buff_averages" && slow_type.to_ascii_lowercase() == "buff_averages" {
         let prices = data;
         let volume: Vec<f64> = if let Some(v) = &req.volume { v.clone() } else { vec![1.0; prices.len()] };
         let m = req.metrics.max(5).min(5);
         let mut values = vec![0f32; rows * cols * m];
-        
+
         for (i_row, &fp) in fast_periods.iter().enumerate() {
             for (j_col, &sp) in slow_periods.iter().enumerate() {
                 let out = BuffAveragesBuilder::default()
@@ -421,7 +421,7 @@ pub fn run_cpu(req: OptimizeRequest) -> Result<OptimizeResponse> {
         return Ok(OptimizeResponse { meta, values, layers: 1 });
     }
 
-    
+
     let fast_bank: Vec<Vec<f64>> = fast_periods.par_iter().map(|&p|
         compute_ma_series_for(&fast_type, &req, p, true, None).unwrap()
     ).collect();
@@ -429,7 +429,7 @@ pub fn run_cpu(req: OptimizeRequest) -> Result<OptimizeResponse> {
         compute_ma_series_for(&slow_type, &req, p, false, None).unwrap()
     ).collect();
 
-    
+
     let m = req.metrics.max(5).min(5);
     let mut values = vec![0f32; rows * cols * m];
     values.par_chunks_mut(cols * m).enumerate().for_each(|(i_row, row_chunk)| {

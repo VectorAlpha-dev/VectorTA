@@ -1,14 +1,3 @@
-//! CUDA wrapper for the Bill Williams Alligator indicator.
-//!
-//! Mirrors ALMA/CWMA wrapper shape: policy enums, VRAM checks, PTX load via
-//! include_str!(concat!(env!("OUT_DIR"), "/alligator_kernel.ptx")), NON_BLOCKING
-//! stream, and public device entry points for:
-//!   - one-series × many-params (batch)
-//!   - many-series × one-param (time-major)
-//!
-//! Math category: Recurrence/IIR — three SMMA lines (jaw/teeth/lips) computed
-//! in one pass. Warmup/NaN semantics match the scalar path.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -29,7 +18,11 @@ pub enum CudaAlligatorError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -37,13 +30,19 @@ pub enum CudaAlligatorError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -133,9 +132,13 @@ impl CudaAlligator {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -174,8 +177,9 @@ impl CudaAlligator {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaAlligatorError::InvalidInput("all values are NaN".into()))?;
 
-        
-        fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAlligatorError> {
+        fn axis(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaAlligatorError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
             }
@@ -190,7 +194,9 @@ impl CudaAlligator {
                 let mut cur = start;
                 while cur >= end {
                     v.push(cur);
-                    if cur - end < step { break; }
+                    if cur - end < step {
+                        break;
+                    }
                     cur -= step;
                 }
                 if v.is_empty() {
@@ -235,7 +241,9 @@ impl CudaAlligator {
             }
         }
         if combos.is_empty() {
-            return Err(CudaAlligatorError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaAlligatorError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let len = data_f32.len();
         for c in &combos {
@@ -243,14 +251,20 @@ impl CudaAlligator {
             let pt = c.teeth_period.unwrap();
             let pl = c.lips_period.unwrap();
             if pj == 0 || pt == 0 || pl == 0 {
-                return Err(CudaAlligatorError::InvalidInput("period must be > 0".into()));
+                return Err(CudaAlligatorError::InvalidInput(
+                    "period must be > 0".into(),
+                ));
             }
             if pj > len || pt > len || pl > len {
-                return Err(CudaAlligatorError::InvalidInput("period exceeds data length".into()));
+                return Err(CudaAlligatorError::InvalidInput(
+                    "period exceeds data length".into(),
+                ));
             }
             let need = pj.max(pt).max(pl);
             if len - first_valid < need {
-                return Err(CudaAlligatorError::InvalidInput("not enough valid data".into()));
+                return Err(CudaAlligatorError::InvalidInput(
+                    "not enough valid data".into(),
+                ));
             }
         }
         Ok((combos, first_valid, len))
@@ -283,7 +297,9 @@ impl CudaAlligator {
         let mut func = self
             .module
             .get_function("alligator_batch_f32")
-            .map_err(|_| CudaAlligatorError::MissingKernelSymbol { name: "alligator_batch_f32" })?;
+            .map_err(|_| CudaAlligatorError::MissingKernelSymbol {
+                name: "alligator_batch_f32",
+            })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 128,
@@ -291,7 +307,7 @@ impl CudaAlligator {
         let grid_x = ((n as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -347,7 +363,6 @@ impl CudaAlligator {
         let (combos, first, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n = combos.len();
 
-        
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaAlligatorError::InvalidInput("prices_bytes overflow".into()))?;
@@ -517,7 +532,9 @@ impl CudaAlligator {
         let mut func = self
             .module
             .get_function("alligator_many_series_one_param_f32")
-            .map_err(|_| CudaAlligatorError::MissingKernelSymbol { name: "alligator_many_series_one_param_f32" })?;
+            .map_err(|_| CudaAlligatorError::MissingKernelSymbol {
+                name: "alligator_many_series_one_param_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 128,
@@ -525,7 +542,7 @@ impl CudaAlligator {
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
@@ -593,7 +610,9 @@ impl CudaAlligator {
             .ok_or_else(|| CudaAlligatorError::InvalidInput("prices_bytes overflow".into()))?;
         let first_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaAlligatorError::InvalidInput("first_valids bytes overflow".into()))?;
+            .ok_or_else(|| {
+                CudaAlligatorError::InvalidInput("first_valids bytes overflow".into())
+            })?;
         let outs_bytes = total_elems
             .checked_mul(3)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -608,7 +627,8 @@ impl CudaAlligator {
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_jaw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
-        let mut d_teeth_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
+        let mut d_teeth_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lips_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
         self.launch_many_series_kernel(
@@ -751,9 +771,12 @@ pub mod benches {
         let d_lo = DeviceBuffer::from_slice(&lip_o).expect("d_lo");
 
         let out_elems = n.checked_mul(len).expect("out elems overflow");
-        let d_jaw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_jaw");
-        let d_teeth: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_teeth");
-        let d_lips: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_lips");
+        let d_jaw: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_jaw");
+        let d_teeth: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_teeth");
+        let d_lips: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_lips");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(AlligatorBatchDevState {
@@ -820,7 +843,7 @@ pub mod benches {
             many_series: ManySeriesKernelPolicy::OneD { block_x: 256 },
         });
         let cols = 256usize;
-        let rows = 1_000_000usize / cols * cols; 
+        let rows = 1_000_000usize / cols * cols;
         let mut data_tm = vec![f32::NAN; cols * rows];
         for t in 8..rows {
             for j in 0..cols {
@@ -836,7 +859,8 @@ pub mod benches {
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
         let elems = cols * rows;
-        let d_jaw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_jaw_tm");
+        let d_jaw_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_jaw_tm");
         let d_teeth_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_teeth_tm");
         let d_lips_tm: DeviceBuffer<f32> =

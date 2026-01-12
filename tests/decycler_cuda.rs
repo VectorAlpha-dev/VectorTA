@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::decycler::{
     decycler_batch_with_kernel, decycler_with_kernel, DecyclerBatchRange, DecyclerInput,
     DecyclerParams,
@@ -102,7 +100,6 @@ fn decycler_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         k: Some(0.707),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for s in 0..num_series {
         let mut one = vec![f64::NAN; series_len];

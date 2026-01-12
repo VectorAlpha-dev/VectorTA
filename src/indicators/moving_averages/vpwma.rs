@@ -1,54 +1,11 @@
-//! # Variable Power Weighted Moving Average (VPWMA)
-//!
-//! The Variable Power Weighted Moving Average (VPWMA) adjusts the weights of each
-//! price data point in its calculation based on their recency. More recent data
-//! points receive higher weights according to the formula: weight = (period - k)^power,
-//! where k is the offset from the current position. By adjusting the power parameter,
-//! one can control how aggressively recent data points dominate the resulting average.
-//!
-//! ## Parameters
-//! - **period**: Number of data points in each calculation window (defaults to 14).
-//! - **power**: Exponent applied to the recency-based weight function. Higher
-//!   values give more impact to recent data points (defaults to 0.382).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: vpwma: All input data values are `NaN`.
-//! - **InvalidPeriod**: vpwma: `period` < 2 or exceeds the data length.
-//! - **NotEnoughValidData**: vpwma: Not enough valid data points for the requested `period`.
-//! - **InvalidPower**: vpwma: `power` is `NaN` or infinite.
-//!
-//! ## Returns
-//! - **`Ok(VpwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(VpwmaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - Decision: SIMD enabled (runtime-selected). AVX2 is currently fastest on our test host by >5% at 100k vs scalar; AVX512 is functional but slightly behind AVX2.
-//! - Scalar path: loop-jammed with 4 independent accumulators and `mul_add`, safe-only (no `unsafe`); ~15–25% faster than prior scalar in 100k baseline.
-//! - Batch: row-specific AVX2/AVX512 kernels pre-load weight registers; scalar batch is the reference.
-//!   Tried pre-reversing weights during batch precompute (to skip per-row reversal); it regressed on large inputs (1M), so reverted.
-//! - Streaming update: exact O(1) for integer powers (0..8) via polynomial moments; exact faster O(n) contiguous dot for fractional powers.
-//! - Memory optimization: Uses `alloc_with_nan_prefix` for zero-copy allocation.
-//!
-//! ## Bindings Test Status (Oct 27, 2025)
-//! - Python bindings: unit tests pass after loosening kernel-availability handling in
-//!   `tests/python/test_vpwma.py::test_vpwma_kernel_selection` to accept "not compiled in this build"
-//!   as a valid skip for AVX2/AVX512 on hosts without those kernels. Reference values and tolerances
-//!   match Rust tests (<= 1e-2; Python uses 1e-4).
-//! - WASM bindings: Node-based tests currently fail at module load on Node v24 with
-//!   `Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'env' imported from pkg/my_project_bg.wasm`.
-//!   This is a loader/build configuration issue (wasm imports `env.memory`) rather than an algorithm
-//!   mismatch. Suggested fixes: use the bundler target for wasm-pack or a JS loader that instantiates
-//!   the wasm with an explicit `{ env: { memory } }` import, or pin to a Node version/config that supports
-//!   ESM wasm imports for `env`. No changes to the VPWMA implementation are required.
-//! - CUDA wrapper: typed error enum, VRAM headroom check, and producing stream is synchronized before
-//!   returning device arrays so the Python CUDA Array Interface v3 can omit the `stream` key safely.
-
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::{vpwma_wrapper::DeviceArrayF32 as DeviceArrayF32Vpwma, CudaVpwma};
+use crate::cuda::moving_averages::{
+    vpwma_wrapper::DeviceArrayF32 as DeviceArrayF32Vpwma, CudaVpwma,
+};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
@@ -57,7 +14,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -75,7 +32,7 @@ use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 
 impl<'a> AsRef<[f64]> for VpwmaInput<'a> {
@@ -103,7 +60,10 @@ pub struct VpwmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VpwmaParams {
     pub period: Option<usize>,
     pub power: Option<f64>,
@@ -238,7 +198,11 @@ pub enum VpwmaError {
     #[error("vpwma: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vpwma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
 
 #[inline]
@@ -280,7 +244,6 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
         return Err(VpwmaError::InvalidPower { power });
     }
 
-    
     let win_len = period - 1;
     let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, win_len);
     weights.resize(win_len, 0.0);
@@ -293,7 +256,6 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
     }
     let inv_norm = 1.0 / norm;
 
-    
     let warm = first + period - 1;
     let mut out = alloc_with_nan_prefix(len, warm);
 
@@ -326,45 +288,33 @@ pub fn vpwma_with_kernel(input: &VpwmaInput, kernel: Kernel) -> Result<VpwmaOutp
     Ok(VpwmaOutput { values: out })
 }
 
-/// Compute VPWMA directly into a caller-provided buffer (no per-call allocations).
-///
-/// - Preserves the indicator's NaN warmup prefix exactly as the Vec-returning API
-///   (first valid index + `period - 1`).
-/// - The output slice length must equal the input length.
-/// - Dispatches with `Kernel::Auto` like `vpwma()`.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn vpwma_into(input: &VpwmaInput, out: &mut [f64]) -> Result<(), VpwmaError> {
-    // Reuse the module's zero-allocation compute path which also handles
-    
     vpwma_into_slice(out, input, Kernel::Auto)
 }
 #[inline]
 pub fn vpwma_scalar(
     data: &[f64],
-    weights: &[f64], 
+    weights: &[f64],
     period: usize,
     first_val: usize,
     inv_norm: f64,
     out: &mut [f64],
 ) {
-    let win_len = period - 1; 
+    let win_len = period - 1;
     if win_len == 0 {
         return;
     }
 
-    
-    let p8 = win_len & !7; 
-    let p4 = win_len & !3; 
+    let p8 = win_len & !7;
+    let p4 = win_len & !3;
 
-    
     for i in (first_val + win_len)..data.len() {
-        
         let mut s0 = 0.0f64;
         let mut s1 = 0.0f64;
         let mut s2 = 0.0f64;
         let mut s3 = 0.0f64;
 
-        
         let mut k = 0usize;
         while k < p8 {
             s0 = data[i - (k + 0)].mul_add(weights[k + 0], s0);
@@ -380,7 +330,6 @@ pub fn vpwma_scalar(
             k += 8;
         }
 
-        
         while k < p4 {
             s0 = data[i - (k + 0)].mul_add(weights[k + 0], s0);
             s1 = data[i - (k + 1)].mul_add(weights[k + 1], s1);
@@ -389,7 +338,6 @@ pub fn vpwma_scalar(
             k += 4;
         }
 
-        
         match win_len - k {
             3 => {
                 s0 = data[i - (k + 0)].mul_add(weights[k + 0], s0);
@@ -406,7 +354,6 @@ pub fn vpwma_scalar(
             _ => {}
         }
 
-        
         let sum = (s0 + s1) + (s2 + s3);
         out[i] = sum * inv_norm;
     }
@@ -440,7 +387,6 @@ unsafe fn vpwma_avx2(
         return;
     }
 
-    
     let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
     unsafe {
         wrev.set_len(win_len);
@@ -462,7 +408,6 @@ unsafe fn vpwma_avx2(
         _ => unreachable!(),
     };
 
-    
     const MAX_CHUNKS: usize = 1024;
     debug_assert!(chunks + (tail != 0) as usize <= MAX_CHUNKS);
     let mut wregs: [core::mem::MaybeUninit<__m256d>; MAX_CHUNKS] =
@@ -484,7 +429,6 @@ unsafe fn vpwma_avx2(
         let start = i + 1 - win_len;
         _mm_prefetch(data.as_ptr().add(start + 64) as *const i8, _MM_HINT_T0);
 
-        
         let mut s0 = _mm256_setzero_pd();
         let mut s1 = _mm256_setzero_pd();
         let mut s2 = _mm256_setzero_pd();
@@ -511,7 +455,6 @@ unsafe fn vpwma_avx2(
             s0 = _mm256_fmadd_pd(d_tail, w_tail, s0);
         }
 
-        
         let sum01 = _mm256_add_pd(s0, s1);
         let sum23 = _mm256_add_pd(s2, s3);
         let acc = _mm256_add_pd(sum01, sum23);
@@ -553,7 +496,6 @@ unsafe fn vpwma_avx512_core(
         return;
     }
 
-    
     let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
     wrev.set_len(win_len);
     for j in 0..win_len {
@@ -565,7 +507,6 @@ unsafe fn vpwma_avx512_core(
     let tail = win_len % STEP;
     let tmask: __mmask8 = (1u8 << tail).wrapping_sub(1);
 
-    
     const MAX_CHUNKS: usize = 512;
     debug_assert!(chunks + (tail != 0) as usize <= MAX_CHUNKS);
     let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX_CHUNKS] =
@@ -620,42 +561,33 @@ unsafe fn vpwma_avx512_core(
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 enum StreamMode {
-    /// Exact, O(1) per update for integer powers via polynomial moments.
-    /// w_k = (period - k)^deg = sum_{j=0}^deg a_j k^j  (binomial expansion)
-    /// Keeps {M_j} = sum_{k=0}^{m-1} k^j x_{t-k} and updates them with:
-    /// M_j' = [j==0 ? x_new : 0] + sum_{q=0}^j C(j,q) * (M_q - (m-1)^q * x_out)
     PolyInt {
-        deg: usize,                   // integer power (degree)
-        coeff: Vec<f64>,              // a_j for j=0..deg  (numerator = dot(coeff, moments))
-        binom_row_starts: Vec<usize>, // CSR-style offsets into `binom_vals`
-        binom_vals: Vec<f64>,         // concatenated C(j,q) for 0<=q<=j, j=0..deg
-        pow_m1: Vec<f64>,             // (m-1)^q for q=0..deg
-        moments: Vec<f64>,            // M_j, j=0..deg
-        moments_ready: bool,          // lazily built at first full window
+        deg: usize,
+        coeff: Vec<f64>,
+        binom_row_starts: Vec<usize>,
+        binom_vals: Vec<f64>,
+        pow_m1: Vec<f64>,
+        moments: Vec<f64>,
+        moments_ready: bool,
     },
 
-    /// Exact, O(n) per update for general (fractional) powers,
-    /// but with a much faster contiguous two-slice dot (no per-element modulo).
     ExactDot {
-        weights_rev: Vec<f64>, // reverse(weights) so index 0 multiplies oldest in window
-        win_len: usize,        // m = period - 1
+        weights_rev: Vec<f64>,
+        win_len: usize,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct VpwmaStream {
-    period: usize,    // ring length = m+1
-    inv_norm: f64,    // 1 / sum(weights)
-    buffer: Vec<f64>, // length = period
-    head: usize,      // next write index
-    filled: bool,     // becomes true when head cycles to 0
+    period: usize,
+    inv_norm: f64,
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
 
-    // kept for introspection/back-compat
-    weights: Vec<f64>, // original weights (length = m)
+    weights: Vec<f64>,
     mode: StreamMode,
 }
 
@@ -673,28 +605,22 @@ impl VpwmaStream {
             return Err(VpwmaError::InvalidPower { power });
         }
 
-        // Build (period - 1) weights (exact, once).
         let m = period - 1;
         let mut weights = Vec::with_capacity(m);
         let mut norm = 0.0;
         for k in 0..m {
-            // weight for k=0 (newest) .. k=m-1 (oldest)
             let w = (period as f64 - k as f64).powf(power);
             weights.push(w);
             norm += w;
         }
         let inv_norm = 1.0 / norm;
 
-        // Decide streaming mode:
-        // If `power` is an integer in [0..=8], use exact O(1) polynomial moments.
-        // Else use the exact (faster) O(n) contiguous dot.
         let p_rounded = power.round();
         let is_near_int =
             (power - p_rounded).abs() <= 1e-12 && p_rounded >= 0.0 && p_rounded <= 8.0;
         let mode = if is_near_int {
             let deg = p_rounded as usize;
 
-            // a_j = (-1)^j * C(deg, j) * (period)^(deg - j)
             let mut coeff = Vec::with_capacity(deg + 1);
             for j in 0..=deg {
                 let sign = if j & 1 == 0 { 1.0 } else { -1.0 };
@@ -702,7 +628,6 @@ impl VpwmaStream {
                 coeff.push(c);
             }
 
-            // Build binomial coefficients C(j,q) for j=0..deg in a compact CSR form.
             let mut binom_vals = Vec::new();
             let mut row_starts = Vec::with_capacity(deg + 2);
             row_starts.push(0);
@@ -713,7 +638,6 @@ impl VpwmaStream {
                 row_starts.push(binom_vals.len());
             }
 
-            // (m-1)^q, q=0..deg
             let mut pow_m1 = Vec::with_capacity(deg + 1);
             let mm1 = (m - 1) as f64;
             let mut p = 1.0;
@@ -732,8 +656,6 @@ impl VpwmaStream {
                 moments_ready: false,
             }
         } else {
-            // reverse(weights) so that index 0 multiplies the oldest element in the window,
-            // letting us dot against the window as a forward contiguous slice.
             let mut wrev = weights.clone();
             wrev.reverse();
             StreamMode::ExactDot {
@@ -758,15 +680,12 @@ impl VpwmaStream {
         self.period - 1
     }
 
-    /// O(1) for integer power via polynomial moments; otherwise exact O(n) with a faster contiguous dot.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Write new value at current head, then advance the ring.
         let prev_head = self.head;
         self.buffer[prev_head] = value;
         self.head = (self.head + 1) % self.period;
 
-        // Mark filled after the first full wrap.
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
@@ -784,22 +703,16 @@ impl VpwmaStream {
                 moments,
                 moments_ready,
             } => {
-                // The item that just fell OUT of the window is at index `self.head`.
                 let x_out = self.buffer[self.head];
 
                 if !*moments_ready {
-                    // First time we have a full window: build moments exactly from the ring.
                     Self::init_moments_from(&self.buffer, self.head, self.period, *deg, moments);
                     *moments_ready = true;
 
-                    // Return current value from moments (no recurrence yet).
                     let num = dot_unrolled(coeff, moments);
                     return Some(num * self.inv_norm);
                 }
 
-                // Update all moments using the binomial recurrence (O(deg^2), tiny).
-                // M_0' = M_0 + x_new - x_out
-                
                 let m0_new = moments[0] + value - x_out;
                 let mut next = vec![0.0; *deg + 1];
                 next[0] = m0_new;
@@ -823,7 +736,6 @@ impl VpwmaStream {
                 weights_rev,
                 win_len,
             } => {
-                
                 let y = Self::dot_window_fast_from(
                     &self.buffer,
                     self.head,
@@ -836,11 +748,6 @@ impl VpwmaStream {
         }
     }
 
-    
-
-    /// Initialize polynomial moments M_j for j=0..deg from the current full window.
-    /// Window of length m = period-1 includes indices: [(head+1) .. (head+1)+m-1] modulo period,
-    /// where (head+period-1) points to the NEWEST included.
     #[inline(always)]
     fn init_moments_from(
         buffer: &[f64],
@@ -850,14 +757,13 @@ impl VpwmaStream {
         moments: &mut [f64],
     ) {
         let m = period - 1;
-        let oldest = (head + 1) % period; 
+        let oldest = (head + 1) % period;
 
         let left_len = (period - oldest).min(m);
         let right_len = m - left_len;
 
         moments.fill(0.0);
 
-        
         for (pos, &x) in buffer[oldest..oldest + left_len].iter().enumerate() {
             let k = (m - 1 - pos) as f64;
             let mut kpow = 1.0;
@@ -866,7 +772,7 @@ impl VpwmaStream {
                 kpow *= k;
             }
         }
-        
+
         for (pos, &x) in buffer[..right_len].iter().enumerate() {
             let k = (right_len - 1 - pos) as f64;
             let mut kpow = 1.0;
@@ -877,8 +783,6 @@ impl VpwmaStream {
         }
     }
 
-    /// Faster exact dot for general powers: avoid per-element modulo by forming two contiguous
-    /// slices for the current window and using 4 accumulators.
     #[inline(always)]
     fn dot_window_fast_from(
         buffer: &[f64],
@@ -887,7 +791,7 @@ impl VpwmaStream {
         weights_rev: &[f64],
         win_len: usize,
     ) -> f64 {
-        let oldest = (head + 1) % period; 
+        let oldest = (head + 1) % period;
         let left_len = (period - oldest).min(win_len);
         let right_len = win_len - left_len;
 
@@ -897,7 +801,6 @@ impl VpwmaStream {
         let mut s3 = 0.0f64;
         let mut k = 0usize;
 
-        
         let a = &buffer[oldest..oldest + left_len];
         let w = &weights_rev[0..left_len];
         let p4 = left_len & !3;
@@ -914,7 +817,6 @@ impl VpwmaStream {
         }
         let mut sum = (s0 + s1) + (s2 + s3);
 
-        
         if right_len != 0 {
             let a = &buffer[0..right_len];
             let w = &weights_rev[left_len..left_len + right_len];
@@ -942,11 +844,8 @@ impl VpwmaStream {
     }
 }
 
-
-
 #[inline(always)]
 fn binom(n: usize, k: usize) -> f64 {
-    
     if k == 0 || k == n {
         return 1.0;
     }
@@ -1096,7 +995,6 @@ impl VpwmaBatchOutput {
 #[inline(always)]
 pub fn expand_grid_vpwma(r: &VpwmaBatchRange) -> Vec<VpwmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        
         if step == 0 || start == end {
             return vec![start];
         }
@@ -1107,28 +1005,38 @@ pub fn expand_grid_vpwma(r: &VpwmaBatchRange) -> Vec<VpwmaParams> {
                 vals.push(v);
                 match v.checked_add(step) {
                     Some(next) => {
-                        if next == v { break; }
+                        if next == v {
+                            break;
+                        }
                         v = next;
                     }
                     None => break,
                 }
             }
         } else {
-            
             let mut v = start;
             loop {
                 vals.push(v);
-                if v == end { break; }
+                if v == end {
+                    break;
+                }
                 let next = v.saturating_sub(step);
-                if next == v { break; }
+                if next == v {
+                    break;
+                }
                 v = next;
-                if v < end { break; }
+                if v < end {
+                    break;
+                }
             }
         }
-        if vals.is_empty() { vec![start] } else { vals }
+        if vals.is_empty() {
+            vec![start]
+        } else {
+            vals
+        }
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return vec![start];
         }
@@ -1138,18 +1046,28 @@ pub fn expand_grid_vpwma(r: &VpwmaBatchRange) -> Vec<VpwmaParams> {
             while x <= end + 1e-12 {
                 vals.push(x);
                 x += step;
-                if !x.is_finite() { break; }
+                if !x.is_finite() {
+                    break;
+                }
             }
         } else {
             let mut x = start;
             while x >= end - 1e-12 {
                 vals.push(x);
                 x -= step.abs();
-                if !x.is_finite() { break; }
-                if x < end { break; }
+                if !x.is_finite() {
+                    break;
+                }
+                if x < end {
+                    break;
+                }
             }
         }
-        if vals.is_empty() { vec![start] } else { vals }
+        if vals.is_empty() {
+            vec![start]
+        } else {
+            vals
+        }
     }
     let periods = axis_usize(r.period);
     let powers = axis_f64(r.power);
@@ -1201,7 +1119,11 @@ fn vpwma_batch_inner(
 
     let combos = expand_grid_vpwma(sweep);
     if combos.is_empty() {
-        return Err(VpwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(VpwmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     let first = data
@@ -1223,12 +1145,19 @@ fn vpwma_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    
-    rows.checked_mul(cols).ok_or(VpwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
-    
+    rows.checked_mul(cols).ok_or(VpwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows.checked_mul(max_p).ok_or(VpwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let cap = rows.checked_mul(max_p).ok_or(VpwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
@@ -1248,7 +1177,6 @@ fn vpwma_batch_inner(
         inv_norms[row] = 1.0 / norm;
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1256,7 +1184,6 @@ fn vpwma_batch_inner(
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
@@ -1279,7 +1206,6 @@ fn vpwma_batch_inner(
         }
     };
 
-    
     #[cfg(not(target_arch = "wasm32"))]
     {
         if parallel {
@@ -1300,7 +1226,6 @@ fn vpwma_batch_inner(
         }
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1332,7 +1257,11 @@ pub fn vpwma_batch_inner_into(
 
     let combos = expand_grid_vpwma(sweep);
     if combos.is_empty() {
-        return Err(VpwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(VpwmaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     let first = data
@@ -1354,11 +1283,18 @@ pub fn vpwma_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    rows.checked_mul(cols).ok_or(VpwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    rows.checked_mul(cols).ok_or(VpwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows.checked_mul(max_p).ok_or(VpwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let cap = rows.checked_mul(max_p).ok_or(VpwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
 
@@ -1378,7 +1314,6 @@ pub fn vpwma_batch_inner_into(
         inv_norms[row] = 1.0 / norm;
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1388,7 +1323,6 @@ pub fn vpwma_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_w.as_ptr().add(row * max_p);
@@ -1444,7 +1378,10 @@ pub fn vpwma_into_slice(
     }
 
     if dst.len() != data.len() {
-        return Err(VpwmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(VpwmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     let first = data
@@ -1470,7 +1407,6 @@ pub fn vpwma_into_slice(
         return Err(VpwmaError::InvalidPower { power });
     }
 
-    
     let win_len = period - 1;
     let weights: AVec<f64> = AVec::from_iter(
         CACHELINE_ALIGN,
@@ -1479,18 +1415,15 @@ pub fn vpwma_into_slice(
     let norm: f64 = weights.iter().sum();
     let inv_norm = 1.0 / norm;
 
-    
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
-    
     for v in &mut dst[..first + period - 1] {
         *v = f64::NAN;
     }
 
-    
     unsafe {
         match chosen {
             Kernel::Scalar => vpwma_scalar(data, &weights, period, first, inv_norm, dst),
@@ -1514,19 +1447,17 @@ unsafe fn vpwma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    _stride: usize,    
-    w_ptr: *const f64, 
+    _stride: usize,
+    w_ptr: *const f64,
     inv_n: f64,
     out: &mut [f64],
 ) {
     let win_len = period - 1;
     let p4 = win_len & !3;
 
-    
     for i in (first + win_len)..data.len() {
         let mut sum = 0.0;
 
-        
         for k in (0..p4).step_by(4) {
             sum += *data.get_unchecked(i - k) * *w_ptr.add(k)
                 + *data.get_unchecked(i - (k + 1)) * *w_ptr.add(k + 1)
@@ -1534,7 +1465,6 @@ unsafe fn vpwma_row_scalar(
                 + *data.get_unchecked(i - (k + 3)) * *w_ptr.add(k + 3);
         }
 
-        
         for k in p4..win_len {
             sum += *data.get_unchecked(i - k) * *w_ptr.add(k);
         }
@@ -1560,7 +1490,6 @@ unsafe fn vpwma_row_avx2(
         return;
     }
 
-    
     const STEP: usize = 4;
     let chunks = win_len / STEP;
     let tail = win_len % STEP;
@@ -1572,14 +1501,12 @@ unsafe fn vpwma_row_avx2(
         _ => unreachable!(),
     };
 
-    
     let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
     wrev.set_len(win_len);
     for j in 0..win_len {
         *wrev.get_unchecked_mut(j) = *w_ptr.add(win_len - 1 - j);
     }
 
-    
     const MAX_CHUNKS: usize = 1024;
     debug_assert!(chunks <= MAX_CHUNKS);
     let mut wregs: [core::mem::MaybeUninit<__m256d>; MAX_CHUNKS] =
@@ -1651,13 +1578,11 @@ pub unsafe fn vpwma_row_avx512(
     let tail = win_len % STEP;
     let tmask: __mmask8 = (1u8 << tail).wrapping_sub(1);
 
-    
-    
     const MAX_CHUNKS: usize = 512;
     debug_assert!(chunks + (tail != 0) as usize <= MAX_CHUNKS);
     let mut wregs: [core::mem::MaybeUninit<__m512d>; MAX_CHUNKS] =
         core::mem::MaybeUninit::uninit().assume_init();
-    
+
     let mut wrev: Vec<f64> = Vec::with_capacity(win_len);
     wrev.set_len(win_len);
     for j in 0..win_len {
@@ -1697,7 +1622,6 @@ pub unsafe fn vpwma_row_avx512(
     _mm_sfence();
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1706,7 +1630,6 @@ mod tests {
 
     #[test]
     fn test_vpwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253u32 {
@@ -1717,20 +1640,16 @@ mod tests {
         let params = VpwmaParams::default();
         let input = VpwmaInput::from_slice(&data, params);
 
-        
         let base = vpwma_with_kernel(&input, Kernel::Auto)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             vpwma_into(&input, &mut out)?;
         }
 
-        
         assert_eq!(base.len(), out.len());
 
-        
         for (i, (a, b)) in base.iter().zip(out.iter()).enumerate() {
             let ok = if a.is_nan() && b.is_nan() {
                 true
@@ -1981,7 +1900,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_vpwma_no_poison(
         test_name: &str,
@@ -1992,7 +1910,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_periods = vec![2, 5, 10, 14, 30, 50];
         let test_powers = vec![0.1, 0.382, 0.5, 1.0, 2.0];
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
@@ -2007,16 +1924,13 @@ mod tests {
                     let input = VpwmaInput::from_candles(&candles, source, params);
                     let output = vpwma_with_kernel(&input, kernel)?;
 
-                    
                     for (i, &val) in output.values.iter().enumerate() {
-                        
                         if val.is_nan() {
                             continue;
                         }
 
                         let bits = val.to_bits();
 
-                        
                         if bits == 0x11111111_11111111 {
                             panic!(
                                 "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={}, power={}, source={})",
@@ -2024,7 +1938,6 @@ mod tests {
                             );
                         }
 
-                        
                         if bits == 0x22222222_22222222 {
                             panic!(
                                 "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={}, power={}, source={})",
@@ -2032,7 +1945,6 @@ mod tests {
                             );
                         }
 
-                        
                         if bits == 0x33333333_33333333 {
                             panic!(
                                 "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={}, power={}, source={})",
@@ -2047,7 +1959,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_vpwma_no_poison(
         _test_name: &str,
@@ -2065,7 +1976,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2073,7 +1983,7 @@ mod tests {
                     period.max(2)..400,
                 ),
                 Just(period),
-                0.1f64..10.0f64, 
+                0.1f64..10.0f64,
             )
         });
 
@@ -2089,10 +1999,8 @@ mod tests {
                 let VpwmaOutput { values: ref_out } =
                     vpwma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len());
 
-                
                 let expected_warmup = period - 1;
                 for i in 0..expected_warmup.min(data.len()) {
                     prop_assert!(
@@ -2103,8 +2011,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let mut weights = Vec::with_capacity(period - 1);
                 let mut weight_sum = 0.0;
                 for k in 0..(period - 1) {
@@ -2112,20 +2018,18 @@ mod tests {
                     weights.push(w);
                     weight_sum += w;
                 }
-                
+
                 prop_assert!(
                     (weight_sum - 0.0).abs() > 1e-10,
                     "Weight sum should be non-zero, got {}",
                     weight_sum
                 );
 
-                
                 for i in expected_warmup..data.len() {
                     if out[i].is_nan() {
                         continue;
                     }
 
-                    
                     let window_start = i.saturating_sub(period - 1);
                     let window = &data[window_start..=i];
                     let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -2141,16 +2045,9 @@ mod tests {
                     );
                 }
 
-                
-                
-
-                
                 if period == 2 && data.len() >= 2 {
-                    
-                    
                     for i in 1..data.len() {
                         if !out[i].is_nan() && !data[i].is_nan() {
-                            
                             prop_assert!(
                                 (out[i] - data[i]).abs() <= 1e-9,
                                 "Period=2 mismatch at idx {}: {} vs {}",
@@ -2162,7 +2059,6 @@ mod tests {
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.len() > 0 {
                     let constant_val = data[0];
                     for i in expected_warmup..data.len() {
@@ -2178,12 +2074,10 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2195,12 +2089,10 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    
                     let max_ulp = if matches!(kernel, Kernel::Avx512) {
                         20
                     } else {
@@ -2316,7 +2208,7 @@ mod tests {
                     let output = VpwmaBatchBuilder::new()
                         .kernel(kernel)
                         .period_range(p_start, p_end, p_step)
-                        .power_range(pow_start, pow_end, pow_step) 
+                        .power_range(pow_start, pow_end, pow_step)
                         .apply_candles(&c, source)?;
 
                     for (idx, &val) in output.values.iter().enumerate() {
@@ -2345,7 +2237,7 @@ mod tests {
         }
         Ok(())
     }
-    
+
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2361,33 +2253,7 @@ mod tests {
 #[cfg(feature = "python")]
 #[pyfunction(name = "vpwma")]
 #[pyo3(signature = (data, period, power, kernel=None))]
-/// Compute the Variable Power Weighted Moving Average (VPWMA) of the input data.
-///
-/// VPWMA adjusts the weights of each price data point based on their respective
-/// positions, with the weight raised to a specified power to control how
-/// aggressively recent data points dominate the average.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Number of data points in the moving average window (must be >= 2).
-/// power : float
-///     Exponent applied to the weight function (typically 0.382).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of VPWMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period < 2, power is NaN/infinite, etc).
+
 pub fn vpwma_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2397,19 +2263,16 @@ pub fn vpwma_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    let slice_in = data.as_slice()?; 
+    let slice_in = data.as_slice()?;
 
-    
     let kern = validate_kernel(kernel, false)?;
 
-    
     let params = VpwmaParams {
         period: Some(period),
         power: Some(power),
     };
     let vpwma_in = VpwmaInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| vpwma_with_kernel(&vpwma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2437,8 +2300,6 @@ impl VpwmaStreamPy {
         Ok(VpwmaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated VPWMA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2447,24 +2308,7 @@ impl VpwmaStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "vpwma_batch")]
 #[pyo3(signature = (data, period_range, power_range, kernel=None))]
-/// Compute VPWMA for multiple parameter combinations in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// power_range : tuple
-///     (start, end, step) for power values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array), 'periods', and 'powers' arrays.
+
 pub fn vpwma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2482,22 +2326,17 @@ pub fn vpwma_batch_py<'py>(
         power: power_range,
     };
 
-    
     let combos = expand_grid_vpwma(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = py
         .allow_threads(|| {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2509,19 +2348,15 @@ pub fn vpwma_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            
             vpwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
 
-    
     let reshaped = out_arr.reshape([rows, cols])?;
     dict.set_item("values", reshaped)?;
 
-    
     let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
     let powers: Vec<f64> = combos.iter().map(|c| c.power.unwrap()).collect();
 
@@ -2545,7 +2380,7 @@ impl DeviceArrayF32VpwmaPy {
         let d = PyDict::new(py);
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
-        // Explicit byte strides for contiguous row-major FP32
+
         d.set_item(
             "strides",
             (
@@ -2554,13 +2389,12 @@ impl DeviceArrayF32VpwmaPy {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producing stream is synchronized before returning; omit per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA; use allocation device id on the handle
         (2, self.inner.device_id as i32)
     }
 
@@ -2573,7 +2407,6 @@ impl DeviceArrayF32VpwmaPy {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Validate `dl_device` hint if provided against the allocation device.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2594,7 +2427,6 @@ impl DeviceArrayF32VpwmaPy {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let dummy = {
             use cust::memory::DeviceBuffer;
             DeviceArrayF32Vpwma {
@@ -2692,7 +2524,7 @@ pub fn vpwma_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32VpwmaPy { inner })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_js(data: &[f64], period: usize, power: f64) -> Result<Vec<f64>, JsValue> {
     let params = VpwmaParams {
@@ -2707,7 +2539,7 @@ pub fn vpwma_js(data: &[f64], period: usize, power: f64) -> Result<Vec<f64>, JsV
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_batch_js(
     data: &[f64],
@@ -2723,13 +2555,12 @@ pub fn vpwma_batch_js(
         power: (power_start, power_end, power_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     vpwma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_batch_metadata_js(
     period_start: usize,
@@ -2755,7 +2586,7 @@ pub fn vpwma_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2764,7 +2595,7 @@ pub fn vpwma_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2772,7 +2603,7 @@ pub fn vpwma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_into(
     in_ptr: *const f64,
@@ -2814,7 +2645,7 @@ pub fn vpwma_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2828,7 +2659,7 @@ pub struct VpwmaContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl VpwmaContext {
@@ -2953,14 +2784,14 @@ impl VpwmaContext {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VpwmaBatchConfig {
     pub period_range: (usize, usize, usize),
     pub power_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VpwmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2969,7 +2800,7 @@ pub struct VpwmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = vpwma_batch)]
 pub fn vpwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: VpwmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2994,7 +2825,7 @@ pub fn vpwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpwma_batch_into(
     in_ptr: *const f64,
@@ -3022,7 +2853,7 @@ pub fn vpwma_batch_into(
         let cols = data_len;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-        // resolve Auto→SIMD like Python path
+
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,

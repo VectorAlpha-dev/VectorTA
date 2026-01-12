@@ -1,25 +1,3 @@
-//! # MESA Adaptive Moving Average (MAMA)
-//!
-//! The MESA Adaptive Moving Average (MAMA) adapts its smoothing factor based on the phase and amplitude
-//! of the underlying data, offering low lag and dynamic adaptation. Two series are output: MAMA and FAMA.
-//!
-//! ## Parameters
-//! - **fast_limit**: Upper bound for the adaptive smoothing factor (defaults to 0.5)
-//! - **slow_limit**: Lower bound for the adaptive smoothing factor (defaults to 0.05)
-//!
-//! ## Returns
-//! - **`Ok(MamaOutput)`** on success, containing two `Vec<f64>`: `mama_values` and `fama_values`.
-//! - **`Err(MamaError)`** otherwise.
-//!
-//! ## Developer Status
-//! - **SIMD status**: AVX2/AVX512 implemented and correct, but underperform scalar; Auto short-circuits to Scalar. Explicit Avx2/Avx512 remain for benches.
-//! - **Scalar kernel**: Optimized (ring=8 mask instead of `% 7`, fused multiply-add where applicable)
-//! - **Streaming update**: O(1) per update (ring-based; no slice rebuild)
-//!
-//! Decision: SIMD underperforms; scalar kept as reference. Streaming path now uses
-//! an O(1) ring-buffer kernel matching the scalar math and warmup behavior.
-//! - **Memory**: Zero-copy/uninitialized helpers in use
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -37,7 +15,7 @@ use std::error::Error;
 use std::f64::consts::PI;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -56,7 +34,10 @@ pub struct MamaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct MamaParams {
     pub fast_limit: Option<f64>,
     pub slow_limit: Option<f64>,
@@ -118,8 +99,6 @@ impl<'a> MamaInput<'a> {
         self.params.slow_limit.unwrap_or(0.05)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct MamaBuilder {
@@ -186,8 +165,6 @@ impl MamaBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum MamaError {
     #[error("mama: empty input data")]
@@ -210,8 +187,6 @@ pub enum MamaError {
     InvalidSlowLimit { slow_limit: f64 },
 }
 
-
-
 #[inline]
 pub fn mama(input: &MamaInput) -> Result<MamaOutput, MamaError> {
     mama_with_kernel(input, Kernel::Auto)
@@ -221,20 +196,7 @@ pub fn mama(input: &MamaInput) -> Result<MamaOutput, MamaError> {
 fn mama_prepare<'a>(
     input: &'a MamaInput,
     kernel: Kernel,
-) -> Result<
-    (
-        
-        &'a [f64],
-        // fast_limit
-        f64,
-        // slow_limit
-        f64,
-        // chosen
-        Kernel,
-    ),
-    MamaError,
-> {
-    // ---------- 0. validate ----------------------------------------
+) -> Result<(&'a [f64], f64, f64, Kernel), MamaError> {
     let data = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -256,8 +218,6 @@ fn mama_prepare<'a>(
         return Err(MamaError::InvalidSlowLimit { slow_limit });
     }
 
-    // ---------- kernel selection ----------
-    // Scalar is faster for this indicator; short-circuit Auto → Scalar.
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -271,13 +231,10 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
     let len = data.len();
     const WARM: usize = 10;
 
-    // allocate with NaN prefix exactly once
     let mut mama_values = alloc_with_nan_prefix(len, WARM);
     let mut fama_values = alloc_with_nan_prefix(len, WARM);
 
-    // ---------- run kernel in-place -----------------
     unsafe {
-        // For WASM, use SIMD128 when available instead of scalar
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -288,7 +245,7 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
                     &mut mama_values,
                     &mut fama_values,
                 );
-                // keep NaN prefix before returning
+
                 for v in &mut mama_values[..WARM] {
                     *v = f64::NAN;
                 }
@@ -303,7 +260,6 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
         }
 
         match chosen {
-            // ---- scalar (one-row) ----------------------------------
             Kernel::Scalar | Kernel::ScalarBatch => {
                 mama_scalar_inplace(
                     data,
@@ -314,7 +270,6 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
                 );
             }
 
-            // ---- AVX2 (routed to scalar for this indicator) -------
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 mama_scalar_inplace(
@@ -336,7 +291,6 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
                 );
             }
 
-            // ---- AVX-512 (routed to scalar for this indicator) ----
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 mama_scalar_inplace(
@@ -362,7 +316,6 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
         }
     }
 
-    // keep NaN prefix; do NOT touch the rest
     for v in &mut mama_values[..WARM] {
         *v = f64::NAN;
     }
@@ -376,7 +329,6 @@ pub fn mama_with_kernel(input: &MamaInput, kernel: Kernel) -> Result<MamaOutput,
     })
 }
 
-/// Compute MAMA directly into pre-allocated output slices (zero-copy)
 pub fn mama_compute_into(
     input: &MamaInput,
     kernel: Kernel,
@@ -385,7 +337,6 @@ pub fn mama_compute_into(
 ) -> Result<(), MamaError> {
     let (data, fast_limit, slow_limit, chosen) = mama_prepare(input, kernel)?;
 
-    // ---------- validate output buffer sizes -----------------------
     if out_mama.len() != data.len() || out_fama.len() != data.len() {
         return Err(MamaError::OutputLengthMismatch {
             expected: data.len(),
@@ -393,12 +344,7 @@ pub fn mama_compute_into(
         });
     }
 
-    // MAMA produces values from the first data point
-    // No NaN warmup period needed as the algorithm starts immediately
-
-    // ---------- run kernel in-place --------------------------------
     unsafe {
-        // For WASM, use SIMD128 when available instead of scalar
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -408,18 +354,15 @@ pub fn mama_compute_into(
         }
 
         match chosen {
-            // ---- scalar (one-row) ----------------------------------
             Kernel::Scalar | Kernel::ScalarBatch => {
                 mama_scalar_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
             }
 
-            // ---- AVX2 ---------------------------------------------
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
                 mama_avx2_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
             }
 
-            // ---- AVX-512 ------------------------------------------
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 mama_avx512_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
@@ -432,12 +375,7 @@ pub fn mama_compute_into(
     Ok(())
 }
 
-/// Computes MAMA into caller-provided buffers without allocating.
-///
-/// - Preserves the indicator's NaN warmup (first 10 elements) in both outputs.
-/// - Both `out_mama` and `out_fama` must have the same length as `input`.
-/// - Uses `Kernel::Auto` for kernel selection (short-circuited to Scalar for this indicator).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn mama_into(
     input: &MamaInput,
@@ -452,7 +390,6 @@ pub fn mama_into(
         });
     }
 
-    
     mama_compute_into(input, Kernel::Auto, out_mama, out_fama)?;
 
     const WARM: usize = 10;
@@ -466,9 +403,6 @@ pub fn mama_into(
     Ok(())
 }
 
-/// Computes MAMA directly into provided output slices, avoiding allocation.
-/// The output slices must be the same length as the input data.
-/// This is the preferred method for WASM bindings to minimize allocations.
 #[inline]
 pub fn mama_into_slice(
     dst_mama: &mut [f64],
@@ -525,20 +459,16 @@ pub unsafe fn mama_avx2(
 #[target_feature(enable = "avx512f,avx512dq,fma")]
 #[inline]
 unsafe fn hilbert4_avx512(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
-    
-    
     let v_x = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, x6, x4, x2, x0);
 
-    
     const H3: f64 = -0.096_2;
     const H2: f64 = -0.576_9;
     const H1: f64 = 0.576_9;
     const H0: f64 = 0.096_2;
     let v_h = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, H3, H2, H1, H0);
 
-    
-    let v_mul = _mm512_mul_pd(v_x, v_h); 
-    _mm512_reduce_add_pd(v_mul) 
+    let v_mul = _mm512_mul_pd(v_x, v_h);
+    _mm512_reduce_add_pd(v_mul)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -554,11 +484,9 @@ pub unsafe fn mama_avx512_inplace(
     debug_assert_eq!(data.len(), out_mama.len());
     debug_assert_eq!(data.len(), out_fama.len());
 
-    
-    const LEN: usize = 8; 
+    const LEN: usize = 8;
     const MASK: usize = LEN - 1;
 
-    
     #[repr(align(64))]
     struct A([f64; LEN]);
     let first = data[0];
@@ -569,7 +497,6 @@ pub unsafe fn mama_avx512_inplace(
 
     const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 
-    
     let (mut idx, mut prev_mesa, mut prev_phase) = (0usize, 0.0, 0.0);
     let (mut prev_mama, mut prev_fama) = (first, first);
     let (mut prev_i2, mut prev_q2) = (0.0, 0.0);
@@ -580,9 +507,7 @@ pub unsafe fn mama_avx512_inplace(
         unsafe { *buf.get_unchecked((p.wrapping_sub(k)) & MASK) }
     }
 
-    
     for (i, &price) in data.iter().enumerate() {
-        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
@@ -590,7 +515,6 @@ pub unsafe fn mama_avx512_inplace(
             0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         smooth[idx] = smooth_val;
 
-        
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
         let dt_val = amp
             * hilbert4_avx512(
@@ -601,7 +525,6 @@ pub unsafe fn mama_avx512_inplace(
             );
         detrender[idx] = dt_val;
 
-        
         let i1 = lag(&detrender, idx, 3);
         i1_buf[idx] = i1;
 
@@ -614,7 +537,6 @@ pub unsafe fn mama_avx512_inplace(
             );
         q1_buf[idx] = q1;
 
-        
         let j_i = amp
             * hilbert4_avx512(
                 i1_buf[idx],
@@ -630,7 +552,6 @@ pub unsafe fn mama_avx512_inplace(
                 lag(&q1_buf, idx, 6),
             );
 
-        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let old_i2 = prev_i2;
@@ -645,7 +566,6 @@ pub unsafe fn mama_avx512_inplace(
         prev_re = re;
         prev_im = im;
 
-        
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
@@ -659,7 +579,6 @@ pub unsafe fn mama_avx512_inplace(
         mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * DEG_PER_RAD
         } else {
@@ -674,7 +593,6 @@ pub unsafe fn mama_avx512_inplace(
         let mut alpha = fast_limit / dp;
         alpha = alpha.clamp(slow_limit, fast_limit);
 
-        
         let cur_mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
         let cur_fama = (0.5 * alpha).mul_add(cur_mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = cur_mama;
@@ -691,22 +609,20 @@ pub unsafe fn mama_avx512_inplace(
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 unsafe fn hilbert4_avx2(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
-    
     let v_x = _mm256_set_pd(x6, x4, x2, x0);
-    
+
     const H3: f64 = -0.096_2;
     const H2: f64 = -0.576_9;
     const H1: f64 = 0.576_9;
     const H0: f64 = 0.096_2;
     let v_h = _mm256_set_pd(H3, H2, H1, H0);
 
-    
-    let v_mul = _mm256_mul_pd(v_x, v_h); 
-    let v_sum = _mm256_hadd_pd(v_mul, v_mul); 
-                                              
+    let v_mul = _mm256_mul_pd(v_x, v_h);
+    let v_sum = _mm256_hadd_pd(v_mul, v_mul);
+
     let v_fold = _mm256_permute2f128_pd(v_sum, v_sum, 0x1);
-    let v_res = _mm256_add_pd(v_sum, v_fold); 
-    _mm256_cvtsd_f64(v_res) 
+    let v_res = _mm256_add_pd(v_sum, v_fold);
+    _mm256_cvtsd_f64(v_res)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -721,19 +637,14 @@ pub unsafe fn mama_avx2_inplace(
     debug_assert_eq!(data.len(), out_mama.len());
     debug_assert_eq!(data.len(), out_fama.len());
 
-    
-    
-    
-    const RING_LEN: usize = 8; 
+    const RING_LEN: usize = 8;
     const MASK: usize = RING_LEN - 1;
 
-    
     const W0: f64 = 4.0;
     const W1: f64 = 3.0;
     const W2: f64 = 2.0;
     const W3: f64 = 1.0;
 
-    
     const H0: f64 = 0.096_2;
     const H1: f64 = 0.576_9;
     const H2: f64 = -0.576_9;
@@ -741,18 +652,12 @@ pub unsafe fn mama_avx2_inplace(
 
     const DEG_PER_RAD: f64 = 180.0 / std::f64::consts::PI;
 
-    
-    
-    
     let first = data[0];
     let mut smooth = [first; RING_LEN];
     let mut detrender = [first; RING_LEN];
     let mut i1_buf = [first; RING_LEN];
     let mut q1_buf = [first; RING_LEN];
 
-    
-    
-    
     let mut idx = 0usize;
     let mut prev_mesa = 0.0;
     let mut prev_phase = 0.0;
@@ -763,29 +668,21 @@ pub unsafe fn mama_avx2_inplace(
     let mut prev_re = 0.0;
     let mut prev_im = 0.0;
 
-    
     #[inline(always)]
     fn lag(buf: &[f64; RING_LEN], p: usize, k: usize) -> f64 {
         buf[(p.wrapping_sub(k)) & MASK]
     }
 
-    
-    
-    
     for (i, &price) in data.iter().enumerate() {
-        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
 
-        
         let smooth_val = W0.mul_add(price, W1.mul_add(s1, W2.mul_add(s2, s3))) * 0.1;
         smooth[idx] = smooth_val;
 
-        
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
 
-        
         let dt_val = amp
             * hilbert4_avx2(
                 smooth[idx],
@@ -795,8 +692,7 @@ pub unsafe fn mama_avx2_inplace(
             );
         detrender[idx] = dt_val;
 
-        
-        let i1 = lag(&detrender, idx, 3); 
+        let i1 = lag(&detrender, idx, 3);
         i1_buf[idx] = i1;
 
         let q1 = amp
@@ -808,7 +704,6 @@ pub unsafe fn mama_avx2_inplace(
             );
         q1_buf[idx] = q1;
 
-        
         let j_i = amp
             * hilbert4_avx2(
                 i1_buf[idx],
@@ -824,7 +719,6 @@ pub unsafe fn mama_avx2_inplace(
                 lag(&q1_buf, idx, 6),
             );
 
-        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let old_i2 = prev_i2;
@@ -839,7 +733,6 @@ pub unsafe fn mama_avx2_inplace(
         prev_re = re;
         prev_im = im;
 
-        
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
@@ -854,7 +747,6 @@ pub unsafe fn mama_avx2_inplace(
         mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * DEG_PER_RAD
         } else {
@@ -869,7 +761,6 @@ pub unsafe fn mama_avx2_inplace(
         let mut alpha = fast_limit / dp;
         alpha = alpha.clamp(slow_limit, fast_limit);
 
-        
         let cur_mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
         let cur_fama = (0.5 * alpha).mul_add(cur_mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = cur_mama;
@@ -878,8 +769,7 @@ pub unsafe fn mama_avx2_inplace(
         out_mama[i] = cur_mama;
         out_fama[i] = cur_fama;
 
-        
-        idx = (idx + 1) & MASK; 
+        idx = (idx + 1) & MASK;
     }
 }
 #[inline(always)]
@@ -899,11 +789,9 @@ pub fn mama_scalar_inplace(
     debug_assert_eq!(data.len(), out_fama.len());
     let len = data.len();
 
-    
-    const RING: usize = 8; 
+    const RING: usize = 8;
     const MASK: usize = RING - 1;
 
-    
     const H0: f64 = 0.096_2;
     const H1: f64 = 0.576_9;
     const H2: f64 = -0.576_9;
@@ -922,13 +810,11 @@ pub fn mama_scalar_inplace(
 
     let first = data[0];
 
-    
     let mut smooth = [first; RING];
     let mut detrender = [first; RING];
     let mut i1_buf = [first; RING];
     let mut q1_buf = [first; RING];
 
-    
     let mut idx = 0usize;
     let mut prev_mesa = 0.0;
     let mut prev_phase = 0.0;
@@ -940,7 +826,6 @@ pub fn mama_scalar_inplace(
     let mut prev_im = 0.0;
 
     for (i, &price) in data.iter().enumerate() {
-        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
@@ -948,10 +833,8 @@ pub fn mama_scalar_inplace(
             0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         smooth[idx] = smooth_val;
 
-        
         let amp = 0.075_f64.mul_add(prev_mesa, 0.54);
 
-        
         let dt = amp
             * hilbert4(
                 smooth[idx],
@@ -961,7 +844,6 @@ pub fn mama_scalar_inplace(
             );
         detrender[idx] = dt;
 
-        
         let i1 = lag(&detrender, idx, 3);
         i1_buf[idx] = i1;
         let q1 = amp
@@ -973,7 +855,6 @@ pub fn mama_scalar_inplace(
             );
         q1_buf[idx] = q1;
 
-        
         let j_i = amp
             * hilbert4(
                 i1_buf[idx],
@@ -989,7 +870,6 @@ pub fn mama_scalar_inplace(
                 lag(&q1_buf, idx, 6),
             );
 
-        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
         let i2s = 0.2_f64.mul_add(i2, 0.8 * prev_i2);
@@ -1001,7 +881,6 @@ pub fn mama_scalar_inplace(
         prev_re = re;
         prev_im = im;
 
-        
         let mut mesa = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
@@ -1022,7 +901,6 @@ pub fn mama_scalar_inplace(
         mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
         prev_mesa = mesa;
 
-        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * DEG_PER_RAD
         } else {
@@ -1042,7 +920,6 @@ pub fn mama_scalar_inplace(
             alpha = fast_limit;
         }
 
-        
         let mama = alpha.mul_add(price, (1.0 - alpha) * prev_mama);
         let fama = (0.5 * alpha).mul_add(mama, (1.0 - 0.5 * alpha) * prev_fama);
         prev_mama = mama;
@@ -1051,7 +928,6 @@ pub fn mama_scalar_inplace(
         out_mama[i] = mama;
         out_fama[i] = fama;
 
-        
         idx = (idx + 1) & MASK;
     }
 }
@@ -1072,7 +948,6 @@ unsafe fn mama_simd128_inplace(
 
     let len = data.len();
 
-    
     let mut smooth_buf = [data[0]; 7];
     let mut detrender_buf = [data[0]; 7];
     let mut i1_buf = [data[0]; 7];
@@ -1087,11 +962,9 @@ unsafe fn mama_simd128_inplace(
     let mut prev_im = 0.0;
     let mut prev_phase = 0.0;
 
-    
     let hilbert_weights = f64x2(0.0962, 0.5769);
     let neg_hilbert_weights = f64x2(-0.5769, -0.0962);
 
-    
     let smooth_weights = f64x2(4.0, 3.0);
     let smooth_weights2 = f64x2(2.0, 1.0);
     let smooth_div = f64x2_splat(0.1);
@@ -1105,28 +978,23 @@ unsafe fn mama_simd128_inplace(
         weights: v128,
         neg_weights: v128,
     ) -> f64 {
-        
         let v1 = f64x2(x0, x2);
         let v2 = f64x2(x4, x6);
 
-        
         let prod1 = f64x2_mul(v1, weights);
         let prod2 = f64x2_mul(v2, neg_weights);
         let sum = f64x2_add(prod1, prod2);
 
-        
         f64x2_extract_lane::<0>(sum) + f64x2_extract_lane::<1>(sum)
     }
 
     for i in 0..len {
         let price = data[i];
 
-        
         let s1 = if i >= 1 { data[i - 1] } else { price };
         let s2 = if i >= 2 { data[i - 2] } else { price };
         let s3 = if i >= 3 { data[i - 3] } else { price };
 
-        
         let v1 = f64x2(price, s1);
         let v2 = f64x2(s2, s3);
         let prod1 = f64x2_mul(v1, smooth_weights);
@@ -1137,7 +1005,6 @@ unsafe fn mama_simd128_inplace(
         let idx = i % 7;
         smooth_buf[idx] = smooth_val;
 
-        
         let x0 = smooth_buf[idx];
         let x2 = smooth_buf[(idx + 5) % 7];
         let x4 = smooth_buf[(idx + 3) % 7];
@@ -1148,9 +1015,8 @@ unsafe fn mama_simd128_inplace(
             hilbert_simd128(x0, x2, x4, x6, hilbert_weights, neg_hilbert_weights) * mesa_mult;
         detrender_buf[idx] = dt_val;
 
-        
         let i1_val = if i >= 3 {
-            detrender_buf[(idx + 4) % 7] 
+            detrender_buf[(idx + 4) % 7]
         } else {
             dt_val
         };
@@ -1164,7 +1030,6 @@ unsafe fn mama_simd128_inplace(
             hilbert_simd128(d0, d2, d4, d6, hilbert_weights, neg_hilbert_weights) * mesa_mult;
         q1_buf[idx] = q1_val;
 
-        
         let j_i = {
             let i0 = i1_buf[idx];
             let i2 = i1_buf[(idx + 5) % 7];
@@ -1180,7 +1045,6 @@ unsafe fn mama_simd128_inplace(
             hilbert_simd128(q0, q2, q4, q6, hilbert_weights, neg_hilbert_weights) * mesa_mult
         };
 
-        
         let i2 = i1_val - j_q;
         let q2 = q1_val + j_i;
         let i2_sm = 0.2 * i2 + 0.8 * prev_i2_sm;
@@ -1192,14 +1056,12 @@ unsafe fn mama_simd128_inplace(
         prev_re = re;
         prev_im = im;
 
-        
         let mut mesa_period = if re != 0.0 && im != 0.0 {
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
             prev_mesa_period
         };
 
-        
         if mesa_period > 1.5 * prev_mesa_period {
             mesa_period = 1.5 * prev_mesa_period;
         }
@@ -1213,27 +1075,23 @@ unsafe fn mama_simd128_inplace(
             mesa_period = 50.0;
         }
 
-        
         let phase = if i1_val != 0.0 {
             atan_fast(q1_val / i1_val) * 180.0 / std::f64::consts::PI
         } else {
             prev_phase
         };
 
-        
         let mut dp = prev_phase - phase;
         if dp < 1.0 {
             dp = 1.0;
         }
         prev_phase = phase;
 
-        
         let mut alpha = fast_limit / dp;
         alpha = alpha.clamp(slow_limit, fast_limit);
 
         prev_mesa_period = mesa_period;
 
-        
         let mama_val = alpha * price + (1.0 - alpha) * prev_mama;
         let fama_val = 0.5 * alpha * mama_val + (1.0 - 0.5 * alpha) * prev_fama;
 
@@ -1245,23 +1103,19 @@ unsafe fn mama_simd128_inplace(
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct MamaStream {
     fast_limit: f64,
     slow_limit: f64,
 
-    
     smooth: [f64; 8],
     detrender: [f64; 8],
     i1_buf: [f64; 8],
     q1_buf: [f64; 8],
-    idx: usize, 
+    idx: usize,
 
-    
-    prev_mesa: f64,  
-    prev_phase: f64, 
+    prev_mesa: f64,
+    prev_phase: f64,
     prev_mama: f64,
     prev_fama: f64,
     prev_i2: f64,
@@ -1269,14 +1123,12 @@ pub struct MamaStream {
     prev_re: f64,
     prev_im: f64,
 
-    
-    last1: f64, 
-    last2: f64, 
-    last3: f64, 
+    last1: f64,
+    last2: f64,
+    last3: f64,
 
-    
-    seeded: bool, 
-    seen: usize,  
+    seeded: bool,
+    seen: usize,
 }
 
 impl MamaStream {
@@ -1318,7 +1170,6 @@ impl MamaStream {
         })
     }
 
-    /// Push one new price. Returns (MAMA, FAMA) after the warmup (10 ticks), else None.
     #[inline]
     pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
         const RING: usize = 8;
@@ -1331,7 +1182,6 @@ impl MamaStream {
 
         #[inline(always)]
         fn hilbert4(x0: f64, x2: f64, x4: f64, x6: f64) -> f64 {
-            
             H0.mul_add(x0, H1.mul_add(x2, H2.mul_add(x4, H3 * x6)))
         }
         #[inline(always)]
@@ -1339,9 +1189,7 @@ impl MamaStream {
             buf[(pos.wrapping_sub(k)) & (N - 1)]
         }
 
-        
         if !self.seeded {
-            
             self.smooth = [price; RING];
             self.detrender = [price; RING];
             self.i1_buf = [price; RING];
@@ -1363,17 +1211,13 @@ impl MamaStream {
 
             self.seeded = true;
 
-            
             let _ = self.process_one(price, hilbert4, lag::<RING>, DEG_PER_RAD);
 
-            
             return None;
         }
 
-        
         let (mama, fama) = self.process_one(price, hilbert4, lag::<RING>, DEG_PER_RAD);
 
-        
         self.seen += 1;
         if self.seen < 10 {
             return None;
@@ -1389,10 +1233,9 @@ impl MamaStream {
         lag: impl Fn(&[f64; 8], usize, usize) -> f64,
         deg_per_rad: f64,
     ) -> (f64, f64) {
-        const MASK: usize = 7; 
+        const MASK: usize = 7;
         let i = self.idx;
 
-        
         let s1 = if self.seen >= 1 { self.last1 } else { price };
         let s2 = if self.seen >= 2 { self.last2 } else { price };
         let s3 = if self.seen >= 3 { self.last3 } else { price };
@@ -1400,10 +1243,8 @@ impl MamaStream {
             0.1 * (4.0_f64.mul_add(price, 3.0_f64.mul_add(s1, 2.0_f64.mul_add(s2, s3))));
         self.smooth[i] = smooth_val;
 
-        
         let amp = 0.075_f64.mul_add(self.prev_mesa, 0.54);
 
-        
         let dt = amp
             * hilbert4(
                 self.smooth[i],
@@ -1413,7 +1254,6 @@ impl MamaStream {
             );
         self.detrender[i] = dt;
 
-        
         let i1 = lag(&self.detrender, i, 3);
         self.i1_buf[i] = i1;
 
@@ -1426,7 +1266,6 @@ impl MamaStream {
             );
         self.q1_buf[i] = q1;
 
-        
         let j_i = amp
             * hilbert4(
                 self.i1_buf[i],
@@ -1442,7 +1281,6 @@ impl MamaStream {
                 lag(&self.q1_buf, i, 6),
             );
 
-        
         let i2 = i1 - j_q;
         let q2 = q1 + j_i;
 
@@ -1459,14 +1297,12 @@ impl MamaStream {
         self.prev_re = re;
         self.prev_im = im;
 
-        
         let mut mesa = if re != 0.0 && im != 0.0 {
-            
             2.0 * std::f64::consts::PI / atan_fast(im / re)
         } else {
             self.prev_mesa
         };
-        
+
         mesa = mesa
             .min(1.5 * self.prev_mesa)
             .max(0.67 * self.prev_mesa)
@@ -1475,7 +1311,6 @@ impl MamaStream {
         mesa = 0.2_f64.mul_add(mesa, 0.8 * self.prev_mesa);
         self.prev_mesa = mesa;
 
-        
         let phase = if i1 != 0.0 {
             atan_fast(q1 / i1) * deg_per_rad
         } else {
@@ -1495,7 +1330,6 @@ impl MamaStream {
             alpha = self.fast_limit;
         }
 
-        
         let one_minus_alpha = 1.0 - alpha;
         let mama = alpha.mul_add(price, one_minus_alpha * self.prev_mama);
 
@@ -1505,7 +1339,6 @@ impl MamaStream {
         self.prev_mama = mama;
         self.prev_fama = fama;
 
-        
         self.idx = (self.idx + 1) & MASK;
         self.last3 = self.last2;
         self.last2 = self.last1;
@@ -1514,8 +1347,6 @@ impl MamaStream {
         (mama, fama)
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct MamaBatchRange {
@@ -1616,12 +1447,10 @@ impl MamaBatchOutput {
 #[inline(always)]
 pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, MamaError> {
-        
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return Ok(vec![start]);
         }
 
-        
         let mut step_signed = step;
         if end < start && step_signed > 0.0 {
             step_signed = -step_signed;
@@ -1629,7 +1458,6 @@ pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
             step_signed = -step_signed;
         }
 
-        
         let mut v = Vec::new();
         let eps = 1e-12_f64;
         let mut x = start;
@@ -1646,11 +1474,7 @@ pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
         }
 
         if v.is_empty() {
-            return Err(MamaError::InvalidRange {
-                start,
-                end,
-                step,
-            });
+            return Err(MamaError::InvalidRange { start, end, step });
         }
         Ok(v)
     }
@@ -1658,7 +1482,6 @@ pub fn expand_grid(r: &MamaBatchRange) -> Result<Vec<MamaParams>, MamaError> {
     let fast_limits = axis_f64(r.fast_limit)?;
     let slow_limits = axis_f64(r.slow_limit)?;
 
-    
     let cap = fast_limits
         .len()
         .checked_mul(slow_limits.len())
@@ -1686,12 +1509,11 @@ pub fn mama_batch_with_kernel(
     k: Kernel,
 ) -> Result<MamaBatchOutput, MamaError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MamaError::InvalidKernelForBatch(other)),
     };
-    
+
     let simd = Kernel::Scalar;
     mama_batch_par_slice(data, sweep, simd)
 }
@@ -1720,7 +1542,6 @@ fn mama_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<MamaBatchOutput, MamaError> {
-    
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(MamaError::InvalidRange {
@@ -1736,7 +1557,6 @@ fn mama_batch_inner(
         });
     }
 
-    
     for combo in &combos {
         let fast_limit = combo.fast_limit.unwrap_or(0.5);
         let slow_limit = combo.slow_limit.unwrap_or(0.05);
@@ -1749,26 +1569,19 @@ fn mama_batch_inner(
         }
     }
 
-    
     let rows = combos.len();
     let cols = data.len();
 
-    
     let mut raw_mama = make_uninit_matrix(rows, cols);
     let mut raw_fama = make_uninit_matrix(rows, cols);
 
-    
     let warm_prefixes = vec![10; rows];
     unsafe {
         init_matrix_prefixes(&mut raw_mama, cols, &warm_prefixes);
         init_matrix_prefixes(&mut raw_fama, cols, &warm_prefixes);
     }
 
-    
-    
-    
     let delta_phase: Vec<f64> = {
-        
         const RING: usize = 8;
         const MASK: usize = RING - 1;
         const H0: f64 = 0.096_2;
@@ -1786,7 +1599,7 @@ fn mama_batch_inner(
             buf[(pos.wrapping_sub(k)) & (N - 1)]
         }
 
-        let mut out = vec![1.0; cols]; 
+        let mut out = vec![1.0; cols];
         if cols == 0 {
             out
         } else {
@@ -1881,7 +1694,6 @@ fn mama_batch_inner(
                 mesa = 0.2_f64.mul_add(mesa, 0.8 * prev_mesa);
                 prev_mesa = mesa;
 
-                
                 let phase = if i1 != 0.0 {
                     atan_fast(q1 / i1) * DEG_PER_RAD
                 } else {
@@ -1900,7 +1712,6 @@ fn mama_batch_inner(
         }
     };
 
-    
     let do_row = |row: usize, dst_m: &mut [MaybeUninit<f64>], dst_f: &mut [MaybeUninit<f64>]| unsafe {
         let prm = &combos[row];
         let fast = prm.fast_limit.unwrap_or(0.5);
@@ -1909,7 +1720,6 @@ fn mama_batch_inner(
         let out_m = core::slice::from_raw_parts_mut(dst_m.as_mut_ptr() as *mut f64, dst_m.len());
         let out_f = core::slice::from_raw_parts_mut(dst_f.as_mut_ptr() as *mut f64, dst_f.len());
 
-        
         let mut prev_mama = data[0];
         let mut prev_fama = data[0];
         for i in 0..cols {
@@ -1930,14 +1740,12 @@ fn mama_batch_inner(
             out_f[i] = fama;
         }
 
-        
         for j in 0..10.min(out_m.len()) {
             out_m[j] = f64::NAN;
             out_f[j] = f64::NAN;
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1968,8 +1776,6 @@ fn mama_batch_inner(
         }
     }
 
-    
-    
     let mut guard_m = core::mem::ManuallyDrop::new(raw_mama);
     let mut guard_f = core::mem::ManuallyDrop::new(raw_fama);
 
@@ -1988,7 +1794,6 @@ fn mama_batch_inner(
         )
     };
 
-    
     Ok(MamaBatchOutput {
         mama_values,
         fama_values,
@@ -1998,7 +1803,6 @@ fn mama_batch_inner(
     })
 }
 
-/// Batch compute MAMA directly into pre-allocated output slices (zero-copy)
 pub fn mama_batch_inner_into(
     data: &[f64],
     sweep: &MamaBatchRange,
@@ -2007,7 +1811,6 @@ pub fn mama_batch_inner_into(
     out_mama: &mut [f64],
     out_fama: &mut [f64],
 ) -> Result<Vec<MamaParams>, MamaError> {
-    
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(MamaError::InvalidRange {
@@ -2023,7 +1826,6 @@ pub fn mama_batch_inner_into(
         });
     }
 
-    
     for combo in &combos {
         let fast_limit = combo.fast_limit.unwrap_or(0.5);
         let slow_limit = combo.slow_limit.unwrap_or(0.05);
@@ -2039,14 +1841,11 @@ pub fn mama_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(MamaError::InvalidRange {
-            start: sweep.fast_limit.0,
-            end: sweep.fast_limit.1,
-            step: sweep.fast_limit.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(MamaError::InvalidRange {
+        start: sweep.fast_limit.0,
+        end: sweep.fast_limit.1,
+        step: sweep.fast_limit.2,
+    })?;
     if out_mama.len() != expected || out_fama.len() != expected {
         return Err(MamaError::OutputLengthMismatch {
             expected,
@@ -2054,7 +1853,6 @@ pub fn mama_batch_inner_into(
         });
     }
 
-    
     let out_mama_uninit = unsafe {
         std::slice::from_raw_parts_mut(
             out_mama.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -2068,20 +1866,17 @@ pub fn mama_batch_inner_into(
         )
     };
 
-    
     let warm_prefixes = vec![10; rows];
     unsafe {
         init_matrix_prefixes(out_mama_uninit, cols, &warm_prefixes);
         init_matrix_prefixes(out_fama_uninit, cols, &warm_prefixes);
     }
 
-    
     let do_row = |row: usize, dst_m: &mut [MaybeUninit<f64>], dst_f: &mut [MaybeUninit<f64>]| unsafe {
         let prm = &combos[row];
         let fast = prm.fast_limit.unwrap_or(0.5);
         let slow = prm.slow_limit.unwrap_or(0.05);
 
-        
         let out_m = core::slice::from_raw_parts_mut(dst_m.as_mut_ptr() as *mut f64, dst_m.len());
         let out_f = core::slice::from_raw_parts_mut(dst_f.as_mut_ptr() as *mut f64, dst_f.len());
 
@@ -2094,14 +1889,12 @@ pub fn mama_batch_inner_into(
             _ => unreachable!(),
         }
 
-        
         for j in 0..10.min(out_m.len()) {
             out_m[j] = f64::NAN;
             out_f[j] = f64::NAN;
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2134,8 +1927,6 @@ pub fn mama_batch_inner_into(
 
     Ok(combos)
 }
-
-
 
 #[inline(always)]
 pub unsafe fn mama_row_scalar(
@@ -2171,8 +1962,6 @@ pub unsafe fn mama_row_avx512(
 ) {
     mama_avx512_inplace(data, fast_limit, slow_limit, out_mama, out_fama);
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2318,7 +2107,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_mama_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2326,11 +2114,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_cases = vec![
-            
             MamaParams::default(),
-            
             MamaParams {
                 fast_limit: Some(0.3),
                 slow_limit: Some(0.03),
@@ -2351,7 +2136,6 @@ mod tests {
                 fast_limit: Some(0.7),
                 slow_limit: Some(0.07),
             },
-            
             MamaParams {
                 fast_limit: Some(0.8),
                 slow_limit: Some(0.01),
@@ -2370,16 +2154,13 @@ mod tests {
             let input = MamaInput::from_candles(&candles, "close", params.clone());
             let output = mama_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.mama_values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2387,7 +2168,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2395,7 +2175,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in mama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2404,16 +2183,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.fama_values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2421,7 +2197,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2429,7 +2204,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in fama_values with params fast_limit={:?}, slow_limit={:?}",
@@ -2442,7 +2216,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_mama_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2451,27 +2224,19 @@ mod tests {
     fn check_mama_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
-        let strat = (10usize..=200) 
-            .prop_flat_map(|len| {
-                (
-                    
-                    prop::collection::vec(
-                        (-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
-                        len,
-                    ),
-                    
-                    (0.01f64..0.99f64)
-                        .prop_filter("valid fast_limit", |x| x.is_finite() && *x > 0.0),
-                    
-                    (0.001f64..0.5f64)
-                        .prop_filter("valid slow_limit", |x| x.is_finite() && *x > 0.0),
-                )
-            });
+        let strat = (10usize..=200).prop_flat_map(|len| {
+            (
+                prop::collection::vec(
+                    (-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
+                    len,
+                ),
+                (0.01f64..0.99f64).prop_filter("valid fast_limit", |x| x.is_finite() && *x > 0.0),
+                (0.001f64..0.5f64).prop_filter("valid slow_limit", |x| x.is_finite() && *x > 0.0),
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, fast_limit, slow_limit)| {
-                
                 let slow = slow_limit.min(fast_limit * 0.9);
 
                 let params = MamaParams {
@@ -2480,22 +2245,17 @@ mod tests {
                 };
                 let input = MamaInput::from_slice(&data, params);
 
-                
                 let result = mama_with_kernel(&input, kernel).unwrap();
                 let mama_out = &result.mama_values;
                 let fama_out = &result.fama_values;
 
-                
                 let ref_result = mama_with_kernel(&input, Kernel::Scalar).unwrap();
                 let ref_mama = &ref_result.mama_values;
                 let ref_fama = &ref_result.fama_values;
 
-                
                 prop_assert_eq!(mama_out.len(), data.len(), "MAMA output length mismatch");
                 prop_assert_eq!(fama_out.len(), data.len(), "FAMA output length mismatch");
 
-                
-                
                 const WARMUP: usize = 10;
                 for i in 0..data.len() {
                     if i < WARMUP {
@@ -2527,15 +2287,13 @@ mod tests {
                     }
                 }
 
-                
                 let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
                 let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let data_range = data_max - data_min;
-                
-                let tolerance = data_range * 0.2 + 10.0; 
+
+                let tolerance = data_range * 0.2 + 10.0;
 
                 for i in WARMUP..data.len() {
-                    
                     prop_assert!(
                         mama_out[i] >= data_min - tolerance && mama_out[i] <= data_max + tolerance,
                         "MAMA at index {} ({}) outside bounds [{}, {}]",
@@ -2554,11 +2312,9 @@ mod tests {
                     );
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
-                    
                     let constant_val = data[0];
-                    
+
                     for i in 10..data.len() {
                         prop_assert!(
                             (mama_out[i] - constant_val).abs() < 1e-6,
@@ -2577,15 +2333,10 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if data.len() > 30 {
-                    
                     let mama_variance = variance(&mama_out[10..]);
                     let fama_variance = variance(&fama_out[10..]);
 
-                    
                     prop_assert!(
                         mama_variance >= 0.0 && mama_variance.is_finite(),
                         "MAMA variance should be finite and non-negative: {}",
@@ -2597,10 +2348,8 @@ mod tests {
                         fama_variance
                     );
 
-                    
                     let data_variance = variance(&data);
                     if data_variance > 1e-6 {
-                        
                         prop_assert!(
                             mama_variance < data_variance * 100.0,
                             "MAMA variance ({}) too large relative to data variance ({})",
@@ -2616,12 +2365,7 @@ mod tests {
                     }
                 }
 
-                
-                
-                
-                
                 for i in WARMUP..data.len() {
-                    
                     prop_assert!(
                         mama_out[i].is_finite(),
                         "MAMA kernel {:?} produced non-finite value at idx {}: {}",
@@ -2636,26 +2380,18 @@ mod tests {
                         i,
                         fama_out[i]
                     );
-
-                    
-                    
                 }
 
-                
                 if data.len() > 50 && fast_limit > slow * 2.0 && variance(&data) > 1e-6 {
-                    
                     let alt_params = MamaParams {
                         fast_limit: Some(fast_limit * 0.5),
                         slow_limit: Some(slow),
                     };
                     let alt_input = MamaInput::from_slice(&data, alt_params);
                     if let Ok(alt_result) = mama_with_kernel(&alt_input, kernel) {
-                        
-                        
                         let mama_var = variance(&mama_out[20..]);
                         let alt_var = variance(&alt_result.mama_values[20..]);
 
-                        
                         if mama_var > 1e-6 && alt_var > 1e-6 {
                             prop_assert!(
                                 (mama_var - alt_var).abs() > 1e-12,
@@ -2665,19 +2401,14 @@ mod tests {
                     }
                 }
 
-                
-                
-                
-                
                 if (fast_limit - slow).abs() < 0.01 && data.len() > 20 {
-                    
                     for i in 10..data.len() {
                         prop_assert!(
                             mama_out[i].is_finite() && fama_out[i].is_finite(),
                             "MAMA/FAMA should remain finite even with close limits at idx {}",
                             i
                         );
-                        
+
                         prop_assert!(
                             mama_out[i].abs() < data_max.abs() * 100.0 + 1000.0,
                             "MAMA should not diverge with close limits"
@@ -2689,15 +2420,12 @@ mod tests {
                     }
                 }
 
-                
                 let is_monotonic_inc = data.windows(2).all(|w| w[1] >= w[0] - 1e-9);
                 let is_monotonic_dec = data.windows(2).all(|w| w[1] <= w[0] + 1e-9);
 
                 if (is_monotonic_inc || is_monotonic_dec) && data.len() > 20 {
-                    
                     for i in 11..data.len() {
                         if is_monotonic_inc {
-                            
                             prop_assert!(
                                 mama_out[i] >= mama_out[i - 10] - tolerance * 0.1,
                                 "MAMA should follow increasing trend at idx {}",
@@ -2705,7 +2433,6 @@ mod tests {
                             );
                         }
                         if is_monotonic_dec {
-                            
                             prop_assert!(
                                 mama_out[i] <= mama_out[i - 10] + tolerance * 0.1,
                                 "MAMA should follow decreasing trend at idx {}",
@@ -2722,7 +2449,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn variance(data: &[f64]) -> f64 {
         if data.is_empty() {
             return 0.0;
@@ -2777,7 +2503,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2785,17 +2510,11 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
             ((0.2, 0.4, 0.1), (0.02, 0.04, 0.01)),
-            
             ((0.3, 0.7, 0.2), (0.03, 0.07, 0.02)),
-            
             ((0.4, 0.9, 0.1), (0.01, 0.09, 0.02)),
-            
             ((0.5, 0.8, 0.15), (0.01, 0.03, 0.01)),
-            
             ((0.2, 0.6, 0.05), (0.02, 0.08, 0.01)),
         ];
 
@@ -2806,9 +2525,7 @@ mod tests {
                 .slow_limit_range(slow_range.0, slow_range.1, slow_range.2)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.mama_values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2818,7 +2535,6 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2826,7 +2542,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2834,7 +2549,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} in mama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2843,9 +2557,7 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.fama_values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2855,7 +2567,6 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2863,7 +2574,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2871,7 +2581,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} in fama_values (params: fast_limit={:?}, slow_limit={:?})",
@@ -2884,16 +2593,13 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
     }
 
-    
     #[test]
     fn test_mama_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let data: Vec<f64> = (0..n)
             .map(|i| {
@@ -2904,22 +2610,18 @@ mod tests {
 
         let input = MamaInput::from_slice(&data, MamaParams::default());
 
-        
         let baseline = mama(&input)?;
 
-        
         let mut out_mama = vec![0.0; n];
         let mut out_fama = vec![0.0; n];
         #[allow(unused_variables)]
         {
-            
-            #[cfg(not(feature = "wasm"))]
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
             {
                 super::mama_into(&input, &mut out_mama, &mut out_fama)?;
             }
-            #[cfg(feature = "wasm")]
+            #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
             {
-                
                 super::mama_into_slice(&mut out_mama, &mut out_fama, &input, Kernel::Auto)?;
             }
         }
@@ -2953,7 +2655,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
 #[cfg(feature = "python")]
 mod python_bindings {
     use super::*;
@@ -2961,24 +2662,24 @@ mod python_bindings {
     use crate::cuda::cuda_available;
     #[cfg(feature = "cuda")]
     use crate::cuda::moving_averages::{CudaMama, DeviceMamaPair};
+    use crate::utilities::kernel_validation::validate_kernel;
     #[cfg(feature = "cuda")]
     use cust::context::Context;
     #[cfg(feature = "cuda")]
     use cust::memory::DeviceBuffer;
-    #[cfg(feature = "cuda")]
-    use std::os::raw::c_void;
-    #[cfg(feature = "cuda")]
-    use std::sync::Arc;
-    use crate::utilities::kernel_validation::validate_kernel;
     #[cfg(feature = "cuda")]
     use numpy::PyReadonlyArray2;
     use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1};
     use pyo3::exceptions::PyValueError;
     use pyo3::prelude::*;
     use pyo3::types::PyDictMethods;
-    
-    use pyo3::{pyclass, pymethods};
+    #[cfg(feature = "cuda")]
+    use std::os::raw::c_void;
+    #[cfg(feature = "cuda")]
+    use std::sync::Arc;
+
     use pyo3::types::PyDict;
+    use pyo3::{pyclass, pymethods};
     use std::collections::HashMap;
 
     #[pyfunction]
@@ -3000,7 +2701,7 @@ mod python_bindings {
         let kern = validate_kernel(kernel, false)?;
 
         let len = slice_in.len();
-        // pre-allocate numpy arrays and fill them directly (no copies)
+
         let out_m = unsafe { PyArray1::<f64>::new(py, [len], false) };
         let out_f = unsafe { PyArray1::<f64>::new(py, [len], false) };
         let sm = unsafe { out_m.as_slice_mut()? };
@@ -3028,26 +2729,20 @@ mod python_bindings {
             slow_limit: slow_limit_range,
         };
 
-        // 1. Expand grid once to know rows*cols
-        let combos = expand_grid(&sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = combos.len();
         let cols = slice_in.len();
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-        // 2. Pre-allocate NumPy arrays
         let mama_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
         let fama_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
         let mama_slice = unsafe { mama_arr.as_slice_mut()? };
         let fama_slice = unsafe { fama_arr.as_slice_mut()? };
 
-        // 3. Heavy work without the GIL
         let kern = validate_kernel(kernel, true)?;
 
-        // For MAMA specifically, the scalar implementation is the reference and fastest.
-        // Ensure Python batch Auto follows the same Auto → Scalar behavior as single-series.
         let combos = py
             .allow_threads(|| -> Result<Vec<MamaParams>, MamaError> {
                 let simd = match kern {
@@ -3056,16 +2751,14 @@ mod python_bindings {
                     Kernel::Avx512Batch => Kernel::Avx512,
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                     Kernel::Avx2Batch => Kernel::Avx2,
-                    // If SIMD isn't compiled in, or any other batch variant is requested,
-                    
+
                     _ => Kernel::Scalar,
                 };
-                
+
                 mama_batch_inner_into(slice_in, &sweep, simd, true, mama_slice, fama_slice)
             })
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        
         let dict = PyDict::new(py);
         dict.set_item("mama", mama_arr.reshape((rows, cols))?)?;
         dict.set_item("fama", fama_arr.reshape((rows, cols))?)?;
@@ -3110,18 +2803,32 @@ mod python_bindings {
         };
 
         let (pair, ctx, dev_id) = py.allow_threads(|| {
-            let cuda = CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let cuda =
+                CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let ctx = cuda.context_arc();
             let dev_id = cuda.device_id();
-            let pair = cuda.mama_batch_dev(slice_in, &sweep)
+            let pair = cuda
+                .mama_batch_dev(slice_in, &sweep)
                 .map_err(|e| PyValueError::new_err(e.to_string()))?;
             Ok::<_, PyErr>((pair, ctx, dev_id))
         })?;
 
         let DeviceMamaPair { mama, fama } = pair;
         Ok((
-            DeviceArrayF32Py { buf: Some(mama.buf), rows: mama.rows, cols: mama.cols, _ctx: ctx.clone(), device_id: dev_id },
-            DeviceArrayF32Py { buf: Some(fama.buf), rows: fama.rows, cols: fama.cols, _ctx: ctx, device_id: dev_id },
+            DeviceArrayF32Py {
+                buf: Some(mama.buf),
+                rows: mama.rows,
+                cols: mama.cols,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+            DeviceArrayF32Py {
+                buf: Some(fama.buf),
+                rows: fama.rows,
+                cols: fama.cols,
+                _ctx: ctx,
+                device_id: dev_id,
+            },
         ))
     }
 
@@ -3153,7 +2860,8 @@ mod python_bindings {
         let slow = slow_limit as f32;
 
         let (pair, ctx, dev_id) = py.allow_threads(|| {
-            let cuda = CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let cuda =
+                CudaMama::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
             let ctx = cuda.context_arc();
             let dev_id = cuda.device_id();
             let pair = cuda
@@ -3164,8 +2872,20 @@ mod python_bindings {
 
         let DeviceMamaPair { mama, fama } = pair;
         Ok((
-            DeviceArrayF32Py { buf: Some(mama.buf), rows: mama.rows, cols: mama.cols, _ctx: ctx.clone(), device_id: dev_id },
-            DeviceArrayF32Py { buf: Some(fama.buf), rows: fama.rows, cols: fama.cols, _ctx: ctx, device_id: dev_id },
+            DeviceArrayF32Py {
+                buf: Some(mama.buf),
+                rows: mama.rows,
+                cols: mama.cols,
+                _ctx: ctx.clone(),
+                device_id: dev_id,
+            },
+            DeviceArrayF32Py {
+                buf: Some(fama.buf),
+                rows: fama.rows,
+                cols: fama.cols,
+                _ctx: ctx,
+                device_id: dev_id,
+            },
         ))
     }
 
@@ -3194,25 +2914,23 @@ mod python_bindings {
     }
 }
 
-
 #[cfg(feature = "python")]
 pub use python_bindings::{mama_batch_py, mama_py, MamaStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub use python_bindings::{mama_cuda_batch_dev_py, mama_cuda_many_series_one_param_dev_py};
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MamaResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "mama")]
 pub fn mama_js(data: &[f64], fast_limit: f64, slow_limit: f64) -> Result<JsValue, JsValue> {
     let params = MamaParams {
@@ -3226,8 +2944,7 @@ pub fn mama_js(data: &[f64], fast_limit: f64, slow_limit: f64) -> Result<JsValue
     mama_into_slice(&mut mama, &mut fama, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
-    let mut values = mama; 
+    let mut values = mama;
     values.extend_from_slice(&fama);
 
     let out = MamaResult {
@@ -3239,7 +2956,7 @@ pub fn mama_js(data: &[f64], fast_limit: f64, slow_limit: f64) -> Result<JsValue
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "mama_into")]
 pub fn mama_into(
     in_ptr: *const f64,
@@ -3266,7 +2983,7 @@ pub fn mama_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MamaBatchJsOutput {
     pub mama: Vec<f64>,
@@ -3276,7 +2993,7 @@ pub struct MamaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "mama_batch")]
 pub fn mama_batch_js(
     data: &[f64],
@@ -3323,7 +3040,7 @@ pub fn mama_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mama_batch_metadata_js(
     fast_limit_start: f64,
@@ -3349,7 +3066,7 @@ pub fn mama_batch_metadata_js(
     metadata
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mama_batch_rows_cols_js(
     fast_limit_start: f64,
@@ -3369,20 +3086,18 @@ pub fn mama_batch_rows_cols_js(
     vec![combos.len(), data_len]
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mama_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mama_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -3390,7 +3105,7 @@ pub fn mama_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mama_batch_into(
     in_ptr: *const f64,
@@ -3423,302 +3138,370 @@ pub fn mama_batch_into(
         let cols = len;
         let total_elements = rows * cols;
 
-        
         let out_mama = std::slice::from_raw_parts_mut(out_mama_ptr, total_elements);
         out_mama.copy_from_slice(&batch_output.mama_values);
 
-        
         let out_fama = std::slice::from_raw_parts_mut(out_fama_ptr, total_elements);
         out_fama.copy_from_slice(&batch_output.fama_values);
 
         Ok(rows)
     }
 }
-    
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    #[pyo3::pyclass(module = "ta_indicators.cuda", unsendable)]
-    pub struct DeviceArrayF32Py {
-        pub(crate) buf: Option<cust::memory::DeviceBuffer<f32>>, 
-        pub(crate) rows: usize,
-        pub(crate) cols: usize,
-        pub(crate) _ctx: std::sync::Arc<cust::context::Context>,
-        pub(crate) device_id: u32,
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyo3::pyclass(module = "ta_indicators.cuda", unsendable)]
+pub struct DeviceArrayF32Py {
+    pub(crate) buf: Option<cust::memory::DeviceBuffer<f32>>,
+    pub(crate) rows: usize,
+    pub(crate) cols: usize,
+    pub(crate) _ctx: std::sync::Arc<cust::context::Context>,
+    pub(crate) device_id: u32,
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyo3::pymethods]
+impl DeviceArrayF32Py {
+    #[getter]
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: pyo3::Python<'py>,
+    ) -> pyo3::PyResult<pyo3::prelude::Bound<'py, pyo3::types::PyDict>> {
+        let d = pyo3::types::PyDict::new(py);
+        pyo3::types::PyDictMethods::set_item(&d, "shape", (self.rows, self.cols))?;
+        pyo3::types::PyDictMethods::set_item(&d, "typestr", "<f4")?;
+        pyo3::types::PyDictMethods::set_item(
+            &d,
+            "strides",
+            (
+                self.cols * std::mem::size_of::<f32>(),
+                std::mem::size_of::<f32>(),
+            ),
+        )?;
+        let ptr = self
+            .buf
+            .as_ref()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__")
+            })?
+            .as_device_ptr()
+            .as_raw() as usize;
+        pyo3::types::PyDictMethods::set_item(&d, "data", (ptr, false))?;
+        pyo3::types::PyDictMethods::set_item(&d, "version", 3)?;
+        Ok(d)
     }
 
-    #[cfg(all(feature = "python", feature = "cuda"))]
-    #[pyo3::pymethods]
-    impl DeviceArrayF32Py {
-        #[getter]
-        fn __cuda_array_interface__<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::prelude::Bound<'py, pyo3::types::PyDict>> {
-            let d = pyo3::types::PyDict::new(py);
-            pyo3::types::PyDictMethods::set_item(&d, "shape", (self.rows, self.cols))?;
-            pyo3::types::PyDictMethods::set_item(&d, "typestr", "<f4")?;
-            pyo3::types::PyDictMethods::set_item(
-                &d,
-                "strides",
-                (
-                    self.cols * std::mem::size_of::<f32>(),
-                    std::mem::size_of::<f32>(),
-                ),
-            )?;
-            let ptr = self
-                .buf
-                .as_ref()
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__"))?
-                .as_device_ptr()
-                .as_raw() as usize;
-            pyo3::types::PyDictMethods::set_item(&d, "data", (ptr, false))?;
-            pyo3::types::PyDictMethods::set_item(&d, "version", 3)?; // producer stream synchronized before return
-            Ok(d)
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
+
+    #[cfg(feature = "mama_legacy_dlpack")]
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack_legacy__<'py>(
+        &mut self,
+        py: pyo3::Python<'py>,
+        stream: Option<&pyo3::types::PyAny>,
+        max_version: Option<&pyo3::types::PyAny>,
+        dl_device: Option<&pyo3::types::PyAny>,
+        copy: Option<&pyo3::types::PyAny>,
+    ) -> pyo3::PyResult<pyo3::PyObject> {
+        use std::os::raw::c_char;
+
+        let buf = self.buf.take().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("__dlpack__ may only be called once")
+        })?;
+
+        #[repr(C)]
+        struct DLDevice {
+            device_type: i32,
+            device_id: i32,
+        }
+        #[repr(C)]
+        struct DLDataType {
+            code: u8,
+            bits: u8,
+            lanes: u16,
+        }
+        #[repr(C)]
+        struct DLTensor {
+            data: *mut std::ffi::c_void,
+            device: DLDevice,
+            ndim: i32,
+            dtype: DLDataType,
+            shape: *mut i64,
+            strides: *mut i64,
+            byte_offset: u64,
+        }
+        #[repr(C)]
+        struct DLManagedTensor {
+            dl_tensor: DLTensor,
+            manager_ctx: *mut std::ffi::c_void,
+            deleter: Option<extern "C" fn(*mut DLManagedTensor)>,
+        }
+        #[repr(C)]
+        struct DLVersion {
+            major: i32,
+            minor: i32,
+        }
+        #[repr(C)]
+        struct DLManagedTensorVersioned {
+            dl_managed_tensor: DLManagedTensor,
+            version: DLVersion,
         }
 
-        fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+        struct HolderLegacy {
+            managed: DLManagedTensor,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            buf: cust::memory::DeviceBuffer<f32>,
+            retained: cust::sys::CUcontext,
+            device_id: i32,
+        }
+        struct HolderV1 {
+            managed: DLManagedTensorVersioned,
+            shape: [i64; 2],
+            strides: [i64; 2],
+            buf: cust::memory::DeviceBuffer<f32>,
+            retained: cust::sys::CUcontext,
+            device_id: i32,
+        }
 
-        #[cfg(feature = "mama_legacy_dlpack")]
-        #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
-        fn __dlpack_legacy__<'py>(
-            &mut self,
-            py: pyo3::Python<'py>,
-            stream: Option<&pyo3::types::PyAny>,
-            max_version: Option<&pyo3::types::PyAny>,
-            dl_device: Option<&pyo3::types::PyAny>,
-            copy: Option<&pyo3::types::PyAny>,
-        ) -> pyo3::PyResult<pyo3::PyObject> {
-            use std::os::raw::c_char;
-
-            // Move ownership of the device buffer into the DLManagedTensor
-            let buf = self
-                .buf
-                .take()
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("__dlpack__ may only be called once"))?;
-
-            // DLPack FFI structs (v0 legacy + v1.x)
-            #[repr(C)]
-            struct DLDevice { device_type: i32, device_id: i32 }
-            #[repr(C)]
-            struct DLDataType { code: u8, bits: u8, lanes: u16 }
-            #[repr(C)]
-            struct DLTensor {
-                data: *mut std::ffi::c_void,
-                device: DLDevice,
-                ndim: i32,
-                dtype: DLDataType,
-                shape: *mut i64,
-                strides: *mut i64,
-                byte_offset: u64,
+        unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
+            if p.is_null() {
+                return;
             }
-            #[repr(C)]
-            struct DLManagedTensor { dl_tensor: DLTensor, manager_ctx: *mut std::ffi::c_void, deleter: Option<extern "C" fn(*mut DLManagedTensor)> }
-            #[repr(C)]
-            struct DLVersion { major: i32, minor: i32 }
-            #[repr(C)]
-            struct DLManagedTensorVersioned { dl_managed_tensor: DLManagedTensor, version: DLVersion }
-
-            struct HolderLegacy {
-                managed: DLManagedTensor,
-                shape: [i64; 2],
-                strides: [i64; 2],
-                buf: cust::memory::DeviceBuffer<f32>,
-                retained: cust::sys::CUcontext,
-                device_id: i32,
-            }
-            struct HolderV1 {
-                managed: DLManagedTensorVersioned,
-                shape: [i64; 2],
-                strides: [i64; 2],
-                buf: cust::memory::DeviceBuffer<f32>,
-                retained: cust::sys::CUcontext,
-                device_id: i32,
-            }
-
-            unsafe extern "C" fn deleter_legacy(p: *mut DLManagedTensor) {
-                if p.is_null() { return; }
-                let holder = (*p).manager_ctx as *mut HolderLegacy;
-                if !holder.is_null() {
-                    let ctx = (*holder).retained;
-                    if !ctx.is_null() {
-                        let _ = cust::sys::cuCtxPushCurrent(ctx);
-                        let dev = (*holder).device_id;
-                        drop(Box::from_raw(holder));
-                        let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
-                        let _ = cust::sys::cuCtxPopCurrent(&mut _out);
-                        let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
-                    }
-                }
-                drop(Box::from_raw(p));
-            }
-            unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
-                if p.is_null() { return; }
-                let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
-                if !holder.is_null() {
-                    let ctx = (*holder).retained;
-                    if !ctx.is_null() {
-                        let _ = cust::sys::cuCtxPushCurrent(ctx);
-                        let dev = (*holder).device_id;
-                        drop(Box::from_raw(holder));
-                        let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
-                        let _ = cust::sys::cuCtxPopCurrent(&mut _out);
-                        let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
-                    }
-                }
-                drop(Box::from_raw(p));
-            }
-
-            unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
-                let name = b"dltensor\0";
-                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char) as *mut DLManagedTensor;
-                if !ptr.is_null() {
-                    if let Some(del) = (*ptr).deleter { del(ptr); }
-                    let used = b"used_dltensor\0";
-                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            let holder = (*p).manager_ctx as *mut HolderLegacy;
+            if !holder.is_null() {
+                let ctx = (*holder).retained;
+                if !ctx.is_null() {
+                    let _ = cust::sys::cuCtxPushCurrent(ctx);
+                    let dev = (*holder).device_id;
+                    drop(Box::from_raw(holder));
+                    let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                    let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                    let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
                 }
             }
-            unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
-                let name = b"dltensor_versioned\0";
-                let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char) as *mut DLManagedTensorVersioned;
-                if !ptr.is_null() {
-                    let mt = &mut (*ptr).dl_managed_tensor;
-                    if let Some(del) = mt.deleter { del(mt); }
-                    let used = b"used_dltensor_versioned\0";
-                    pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            drop(Box::from_raw(p));
+        }
+        unsafe extern "C" fn deleter_v1(p: *mut DLManagedTensorVersioned) {
+            if p.is_null() {
+                return;
+            }
+            let holder = (*p).dl_managed_tensor.manager_ctx as *mut HolderV1;
+            if !holder.is_null() {
+                let ctx = (*holder).retained;
+                if !ctx.is_null() {
+                    let _ = cust::sys::cuCtxPushCurrent(ctx);
+                    let dev = (*holder).device_id;
+                    drop(Box::from_raw(holder));
+                    let mut _out: cust::sys::CUcontext = std::ptr::null_mut();
+                    let _ = cust::sys::cuCtxPopCurrent(&mut _out);
+                    let _ = cust::sys::cuDevicePrimaryCtxRelease(dev);
                 }
             }
+            drop(Box::from_raw(p));
+        }
 
-            // Retain primary context for the allocation device so that frees occur with a valid context
-            let alloc_dev = self.device_id as i32;
-            let mut retained: cust::sys::CUcontext = std::ptr::null_mut();
-            unsafe { let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained, alloc_dev); }
+        unsafe extern "C" fn cap_destructor_legacy(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char)
+                as *mut DLManagedTensor;
+            if !ptr.is_null() {
+                if let Some(del) = (*ptr).deleter {
+                    del(ptr);
+                }
+                let used = b"used_dltensor\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
+        unsafe extern "C" fn cap_destructor_v1(capsule: *mut pyo3::ffi::PyObject) {
+            let name = b"dltensor_versioned\0";
+            let ptr = pyo3::ffi::PyCapsule_GetPointer(capsule, name.as_ptr() as *const c_char)
+                as *mut DLManagedTensorVersioned;
+            if !ptr.is_null() {
+                let mt = &mut (*ptr).dl_managed_tensor;
+                if let Some(del) = mt.deleter {
+                    del(mt);
+                }
+                let used = b"used_dltensor_versioned\0";
+                pyo3::ffi::PyCapsule_SetName(capsule, used.as_ptr() as *const _);
+            }
+        }
 
-            let rows = self.rows as i64;
-            let cols = self.cols as i64;
-            let data_ptr: *mut std::ffi::c_void = if self.rows == 0 || self.cols == 0 {
-                std::ptr::null_mut()
-            } else {
-                buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
-            };
+        let alloc_dev = self.device_id as i32;
+        let mut retained: cust::sys::CUcontext = std::ptr::null_mut();
+        unsafe {
+            let _ = cust::sys::cuDevicePrimaryCtxRetain(&mut retained, alloc_dev);
+        }
 
-            let want_v1 = if let Some(v) = max_version {
-                v.getattr("__iter").ok().and_then(|_| v.extract::<(i32,i32)>().ok()).map(|(maj, _)| maj >= 1).unwrap_or(false)
-            } else { false };
+        let rows = self.rows as i64;
+        let cols = self.cols as i64;
+        let data_ptr: *mut std::ffi::c_void = if self.rows == 0 || self.cols == 0 {
+            std::ptr::null_mut()
+        } else {
+            buf.as_device_ptr().as_raw() as *mut std::ffi::c_void
+        };
 
-            if want_v1 {
-                let mut holder = Box::new(HolderV1 {
-                    managed: DLManagedTensorVersioned {
-                        dl_managed_tensor: DLManagedTensor {
-                            dl_tensor: DLTensor {
-                                data: data_ptr,
-                                device: DLDevice { device_type: 2, device_id: alloc_dev },
-                                ndim: 2,
-                                dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
-                                shape: std::ptr::null_mut(),
-                                strides: std::ptr::null_mut(),
-                                byte_offset: 0,
-                            },
-                            manager_ctx: std::ptr::null_mut(),
-                            deleter: Some(|mt| {
-                                if !mt.is_null() {
-                                    let outer = (mt as *mut u8).offset(-(std::mem::size_of::<DLVersion>() as isize)) as *mut DLManagedTensorVersioned;
-                                    deleter_v1(outer);
-                                }
-                            }),
-                        },
-                        version: DLVersion { major: 1, minor: 0 },
-                    },
-                    shape: [rows, cols],
-                    strides: [cols, 1],
-                    buf,
-                    retained,
-                    device_id: alloc_dev,
-                });
-                holder.managed.dl_managed_tensor.dl_tensor.shape = holder.shape.as_mut_ptr();
-                holder.managed.dl_managed_tensor.dl_tensor.strides = holder.strides.as_mut_ptr();
-                holder.managed.dl_managed_tensor.manager_ctx = &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
-                let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
-                let _leak = Box::into_raw(holder);
-                let name = b"dltensor_versioned\0";
-                let cap = unsafe { pyo3::ffi::PyCapsule_New(mt_ptr as *mut std::ffi::c_void, name.as_ptr() as *const c_char, Some(cap_destructor_v1)) };
-                if cap.is_null() { return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule")); }
-                Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
-            } else {
-                let mut holder = Box::new(HolderLegacy {
-                    managed: DLManagedTensor {
+        let want_v1 = if let Some(v) = max_version {
+            v.getattr("__iter")
+                .ok()
+                .and_then(|_| v.extract::<(i32, i32)>().ok())
+                .map(|(maj, _)| maj >= 1)
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if want_v1 {
+            let mut holder = Box::new(HolderV1 {
+                managed: DLManagedTensorVersioned {
+                    dl_managed_tensor: DLManagedTensor {
                         dl_tensor: DLTensor {
                             data: data_ptr,
-                            device: DLDevice { device_type: 2, device_id: alloc_dev },
+                            device: DLDevice {
+                                device_type: 2,
+                                device_id: alloc_dev,
+                            },
                             ndim: 2,
-                            dtype: DLDataType { code: 2, bits: 32, lanes: 1 },
+                            dtype: DLDataType {
+                                code: 2,
+                                bits: 32,
+                                lanes: 1,
+                            },
                             shape: std::ptr::null_mut(),
                             strides: std::ptr::null_mut(),
                             byte_offset: 0,
                         },
                         manager_ctx: std::ptr::null_mut(),
-                        deleter: Some(deleter_legacy),
+                        deleter: Some(|mt| {
+                            if !mt.is_null() {
+                                let outer = (mt as *mut u8)
+                                    .offset(-(std::mem::size_of::<DLVersion>() as isize))
+                                    as *mut DLManagedTensorVersioned;
+                                deleter_v1(outer);
+                            }
+                        }),
                     },
-                    shape: [rows, cols],
-                    strides: [cols, 1],
-                    buf,
-                    retained,
-                    device_id: alloc_dev,
-                });
-                holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
-                holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
-                holder.managed.manager_ctx = &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
-                let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
-                let _leak = Box::into_raw(holder);
-                let name = b"dltensor\0";
-                let cap = unsafe { pyo3::ffi::PyCapsule_New(mt_ptr as *mut std::ffi::c_void, name.as_ptr() as *const c_char, Some(cap_destructor_legacy)) };
-                if cap.is_null() { return Err(pyo3::exceptions::PyValueError::new_err("failed to create DLPack capsule")); }
-                Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
+                    version: DLVersion { major: 1, minor: 0 },
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                buf,
+                retained,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_managed_tensor.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_managed_tensor.dl_tensor.strides = holder.strides.as_mut_ptr();
+            holder.managed.dl_managed_tensor.manager_ctx =
+                &mut *holder as *mut HolderV1 as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensorVersioned = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor_versioned\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_v1),
+                )
+            };
+            if cap.is_null() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
             }
+            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
+        } else {
+            let mut holder = Box::new(HolderLegacy {
+                managed: DLManagedTensor {
+                    dl_tensor: DLTensor {
+                        data: data_ptr,
+                        device: DLDevice {
+                            device_type: 2,
+                            device_id: alloc_dev,
+                        },
+                        ndim: 2,
+                        dtype: DLDataType {
+                            code: 2,
+                            bits: 32,
+                            lanes: 1,
+                        },
+                        shape: std::ptr::null_mut(),
+                        strides: std::ptr::null_mut(),
+                        byte_offset: 0,
+                    },
+                    manager_ctx: std::ptr::null_mut(),
+                    deleter: Some(deleter_legacy),
+                },
+                shape: [rows, cols],
+                strides: [cols, 1],
+                buf,
+                retained,
+                device_id: alloc_dev,
+            });
+            holder.managed.dl_tensor.shape = holder.shape.as_mut_ptr();
+            holder.managed.dl_tensor.strides = holder.strides.as_mut_ptr();
+            holder.managed.manager_ctx = &mut *holder as *mut HolderLegacy as *mut std::ffi::c_void;
+            let mt_ptr: *mut DLManagedTensor = &mut holder.managed;
+            let _leak = Box::into_raw(holder);
+            let name = b"dltensor\0";
+            let cap = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    mt_ptr as *mut std::ffi::c_void,
+                    name.as_ptr() as *const c_char,
+                    Some(cap_destructor_legacy),
+                )
+            };
+            if cap.is_null() {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "failed to create DLPack capsule",
+                ));
+            }
+            Ok(unsafe { pyo3::PyObject::from_owned_ptr(py, cap) })
         }
+    }
 
-        #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
-        fn __dlpack__<'py>(
-            &mut self,
-            py: pyo3::Python<'py>,
-            stream: Option<pyo3::PyObject>,
-            max_version: Option<pyo3::PyObject>,
-            dl_device: Option<pyo3::PyObject>,
-            copy: Option<pyo3::PyObject>,
-        ) -> pyo3::PyResult<pyo3::PyObject> {
-            use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+    #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
+    fn __dlpack__<'py>(
+        &mut self,
+        py: pyo3::Python<'py>,
+        stream: Option<pyo3::PyObject>,
+        max_version: Option<pyo3::PyObject>,
+        dl_device: Option<pyo3::PyObject>,
+        copy: Option<pyo3::PyObject>,
+    ) -> pyo3::PyResult<pyo3::PyObject> {
+        use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-            // Compute target device id and validate `dl_device` hint if provided.
-            let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
-            if let Some(dev_obj) = dl_device.as_ref() {
-                if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
-                    if dev_ty != kdl || dev_id != alloc_dev {
-                        let wants_copy = copy
-                            .as_ref()
-                            .and_then(|c| c.extract::<bool>(py).ok())
-                            .unwrap_or(false);
-                        if wants_copy {
-                            return Err(pyo3::exceptions::PyValueError::new_err(
-                                "device copy not implemented for __dlpack__",
-                            ));
-                        } else {
-                            return Err(pyo3::exceptions::PyValueError::new_err(
-                                "dl_device mismatch for __dlpack__",
-                            ));
-                        }
+        let (kdl, alloc_dev) = self.__dlpack_device__();
+        if let Some(dev_obj) = dl_device.as_ref() {
+            if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
+                if dev_ty != kdl || dev_id != alloc_dev {
+                    let wants_copy = copy
+                        .as_ref()
+                        .and_then(|c| c.extract::<bool>(py).ok())
+                        .unwrap_or(false);
+                    if wants_copy {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "device copy not implemented for __dlpack__",
+                        ));
+                    } else {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "dl_device mismatch for __dlpack__",
+                        ));
                     }
                 }
             }
-            let _ = stream;
-
-            // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-            let buf = self
-                .buf
-                .take()
-                .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                    "__dlpack__ may only be called once",
-                ))?;
-
-            let rows = self.rows;
-            let cols = self.cols;
-
-            let max_version_bound = max_version.map(|obj| obj.into_bound(py));
-
-            export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
         }
+        let _ = stream;
+
+        let buf = self.buf.take().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("__dlpack__ may only be called once")
+        })?;
+
+        let rows = self.rows;
+        let cols = self.cols;
+
+        let max_version_bound = max_version.map(|obj| obj.into_bound(py));
+
+        export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
+}

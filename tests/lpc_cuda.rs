@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::lpc::{
     lpc_batch_with_kernel, lpc_with_kernel, LpcBatchRange, LpcInput, LpcParams,
 };
@@ -58,7 +56,7 @@ fn lpc_cuda_batch_matches_cpu_fixed() -> Result<(), Box<dyn std::error::Error>> 
         max_cycle_limit: 60,
     };
     let cpu = lpc_batch_with_kernel(&h, &l, &c, &s, &sweep, Kernel::ScalarBatch)?;
-    let rows = cpu.rows; 
+    let rows = cpu.rows;
     let cols = cpu.cols;
 
     let hf32: Vec<f32> = h.iter().map(|&v| v as f32).collect();
@@ -80,14 +78,12 @@ fn lpc_cuda_batch_matches_cpu_fixed() -> Result<(), Box<dyn std::error::Error>> 
     let mut glo = vec![0f32; triplet.hist.len()];
     triplet.hist.buf.copy_to(&mut glo)?;
 
-    
     let tol = 5e-4;
     for combo in 0..combos.len() {
-        
         let cpu_f_row = (combo * 3 + 0) * cols;
         let cpu_hi_row = (combo * 3 + 1) * cols;
         let cpu_lo_row = (combo * 3 + 2) * cols;
-        let gpu_f_row = combo * cols; 
+        let gpu_f_row = combo * cols;
         for j in 0..cols {
             let cf = cpu.values[cpu_f_row + j];
             let ch = cpu.values[cpu_hi_row + j];
@@ -123,8 +119,8 @@ fn lpc_cuda_many_series_one_param_matches_cpu_fixed() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 16usize; 
-    let rows = 2048usize; 
+    let cols = 16usize;
+    let rows = 2048usize;
     let mut h_tm = vec![f64::NAN; cols * rows];
     let mut l_tm = vec![f64::NAN; cols * rows];
     let mut c_tm = vec![f64::NAN; cols * rows];
@@ -140,7 +136,6 @@ fn lpc_cuda_many_series_one_param_matches_cpu_fixed() -> Result<(), Box<dyn std:
         }
     }
 
-    
     let period = 21usize;
     let tr_mult = 1.1;
     let mut cpu_f_tm = vec![f64::NAN; cols * rows];

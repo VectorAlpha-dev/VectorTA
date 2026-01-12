@@ -1,38 +1,3 @@
-//! # AlphaTrend (AT)
-//!
-//! A trend-following indicator that creates dynamic support/resistance bands using ATR
-//! and either RSI or MFI to determine trend direction. Developed by KivancOzbilgic.
-//!
-//! ## Parameters
-//! - **coeff**: Multiplier for ATR bands (default: 1.0)
-//! - **period**: Common period for ATR, RSI/MFI calculations (default: 14)
-//! - **no_volume**: Use RSI instead of MFI when true (default: false)
-//!
-//! ## Returns
-//! - **`Ok(AlphaTrendOutput)`** on success, containing `k1` and `k2` vectors of length matching the input.
-//! - **`Err(AlphaTrendError)`** otherwise.
-//!
-//! ## Decision Log
-//! SIMD enabled for TR/HLC3; CUDA batch/many-series kernels with CAI v3 + DLPack v1.x Python VRAM handles; row-specific batch kernels deferred pending profiling.
-//!
-//! ## Developer Status
-//! - SIMD implemented for TR/HLC3 (AVX2/AVX512), ATR+line kept scalar due to recurrence.
-//! - Runtime selection: Auto keeps kernel detection (SIMD measured >5% faster at 100k/1M here).
-//! - Row-specific batch kernels: not implemented; opportunity exists to precompute TR and
-//!   momentum per unique period across rows. Deferred to a follow-up.
-//! - Streaming update: O(1) kernel implemented (ATR via SMA ring, RSI-RMA/MFI sums).
-//!   Emits Some((k1,k2)) after warmup+2 bars; matches scalar semantics.
-//! - Memory: uses zero-copy/uninit helpers (alloc_with_nan_prefix, make_uninit_matrix).
-//!
-//! Binding test status (Oct 27, 2025):
-//! - WASM binding unit tests for AlphaTrend pass and match Rust reference values at 1e-6 abs tol.
-//! - Python binding unit tests mostly pass; however, `TestAlphaTrend.test_alphatrend_stream`
-//!   fails because the streaming path currently returns `k2` with a 1-bar lag vs. the batch
-//!   semantics (observed at early indices: stream `k2[i] == k1[i-1]` while batch `k2[i] == k1[i-2]`).
-//!   Root cause: in `AlphaTrendStream::update`, `prev2` is updated before being returned. Proposed fix:
-//!   return the previous `prev2` for `k2` (i.e., capture `k2 = prev2` before advancing `prev1/prev2`).
-//!   No changes applied pending confirmation.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -42,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -71,15 +36,15 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::alphatrend_wrapper::CudaAlphaTrend;
 use crate::indicators::mfi::{mfi_with_kernel, MfiInput, MfiParams};
+use crate::indicators::rsi::{rsi_with_kernel, RsiInput, RsiParams};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-use crate::indicators::rsi::{rsi_with_kernel, RsiInput, RsiParams};
 
 impl<'a> AsRef<[f64]> for AlphaTrendInput<'a> {
     #[inline(always)]
@@ -107,12 +72,15 @@ pub enum AlphaTrendData<'a> {
 
 #[derive(Debug, Clone)]
 pub struct AlphaTrendOutput {
-    pub k1: Vec<f64>, // Current AlphaTrend line
-    pub k2: Vec<f64>, // AlphaTrend[2] - lagged by 2 bars
+    pub k1: Vec<f64>,
+    pub k2: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AlphaTrendParams {
     pub coeff: Option<f64>,
     pub period: Option<usize>,
@@ -305,7 +273,11 @@ pub enum AlphaTrendError {
     MfiError { msg: String },
 
     #[error("alphatrend: Invalid range (usize): start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("alphatrend: Invalid range (f64): start={start} end={end} step={step}")]
     InvalidRangeF64 { start: f64, end: f64, step: f64 },
@@ -333,7 +305,7 @@ pub fn alphatrend_with_kernel(
     let warm = first + period - 1;
 
     let mut k1 = alloc_with_nan_prefix(len, warm);
-    let mut k2 = alloc_with_nan_prefix(len, warm + 2); 
+    let mut k2 = alloc_with_nan_prefix(len, warm + 2);
 
     alphatrend_compute_into(
         open, high, low, close, volume, coeff, period, no_volume, first, chosen, &mut k1, &mut k2,
@@ -342,20 +314,13 @@ pub fn alphatrend_with_kernel(
     Ok(AlphaTrendOutput { k1, k2 })
 }
 
-/// Writes AlphaTrend outputs into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix semantics).
-/// - The `out_k1` and `out_k2` slice lengths must equal the input length.
-/// - Uses `Kernel::Auto` dispatch to select the best available kernel.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn alphatrend_into(
     input: &AlphaTrendInput,
     out_k1: &mut [f64],
     out_k2: &mut [f64],
 ) -> Result<(), AlphaTrendError> {
-    
-    
     alphatrend_into_slices(out_k1, out_k2, input, Kernel::Auto)
 }
 
@@ -547,11 +512,10 @@ pub fn alphatrend_scalar(
     let len = close.len();
     let warmup = first_val + period - 1;
 
-    // true_range: uninit then fill [first_val..)
     let mut tr_mu = make_uninit_matrix(1, len);
     let tr: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, len) };
-    // first bar
+
     if first_val < len {
         tr[first_val] = high[first_val] - low[first_val];
     }
@@ -562,7 +526,6 @@ pub fn alphatrend_scalar(
         tr[i] = hl.max(hc).max(lc);
     }
 
-    // Momentum series (RSI if no_volume, else MFI using HLC3)
     let momentum_values: Vec<f64> = if no_volume {
         let rsi_params = RsiParams {
             period: Some(period),
@@ -572,7 +535,6 @@ pub fn alphatrend_scalar(
             .map_err(|e| AlphaTrendError::RsiError { msg: e.to_string() })?
             .values
     } else {
-        // hlc3 without bulk init
         let mut hlc3_mu = make_uninit_matrix(1, len);
         let hlc3: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(hlc3_mu.as_mut_ptr() as *mut f64, len) };
@@ -587,21 +549,20 @@ pub fn alphatrend_scalar(
             .map_err(|e| AlphaTrendError::MfiError { msg: e.to_string() })?
             .values
     };
-    // O(n) ATR via sliding window + direct AlphaTrend writes
+
     if warmup < len {
         let mut sum = 0.0f64;
         for j in first_val..=warmup {
             sum += tr[j];
         }
 
-        // Track previous alpha values for k2 (lag-2)
         let mut prev_alpha = f64::NAN;
         let mut prev1 = f64::NAN;
         let mut prev2 = f64::NAN;
 
         for i in warmup..len {
             let a = sum / period as f64;
-            // up = low - coeff*ATR, down = high + coeff*ATR
+
             let up_t = low[i] - a * coeff;
             let down_t = high[i] + a * coeff;
             let m_check = momentum_values[i] >= 50.0;
@@ -613,14 +574,12 @@ pub fn alphatrend_scalar(
                     down_t
                 }
             } else if m_check {
-                // rising regime
                 if up_t < prev_alpha {
                     prev_alpha
                 } else {
                     up_t
                 }
             } else {
-                // falling regime
                 if down_t > prev_alpha {
                     prev_alpha
                 } else {
@@ -633,19 +592,16 @@ pub fn alphatrend_scalar(
                 out_k2[i] = prev2;
             }
 
-            // advance rings
             prev2 = prev1;
             prev1 = cur;
             prev_alpha = cur;
 
-            // slide window to next bar
             if i + 1 < len {
                 sum += tr[i + 1] - tr[i + 1 - period];
             }
         }
     }
 
-    // Minimal prefix clearing (matches alloc prefixes)
     for v in &mut out_k1[..warmup.min(len)] {
         *v = f64::NAN;
     }
@@ -683,7 +639,6 @@ unsafe fn alphatrend_avx2(
     let warmup = first_val + period - 1;
     let p_f = period as f64;
 
-    // --------- TR buffer ----------
     let mut tr_mu = make_uninit_matrix(1, len);
     let tr: &mut [f64] = core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, len);
 
@@ -719,7 +674,6 @@ unsafe fn alphatrend_avx2(
         i += 1;
     }
 
-    // --------- Momentum (RSI/MFI). Vectorize HLC3 if needed ----------
     let momentum_values: Vec<f64> = if no_volume {
         let rsi_params = RsiParams {
             period: Some(period),
@@ -760,7 +714,6 @@ unsafe fn alphatrend_avx2(
             .values
     };
 
-    // --------- O(n) ATR + AlphaTrend + K2 (scalar due to recurrence) ----------
     let mut sum = 0.0f64;
     {
         let mut j = first_val;
@@ -865,7 +818,6 @@ unsafe fn alphatrend_avx512(
     let warmup = first_val + period - 1;
     let p_f = period as f64;
 
-    // --------- TR buffer ----------
     let mut tr_mu = make_uninit_matrix(1, len);
     let tr: &mut [f64] = core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, len);
 
@@ -901,7 +853,6 @@ unsafe fn alphatrend_avx512(
         i += 1;
     }
 
-    // --------- Momentum (RSI/MFI). Vectorize HLC3 if needed ----------
     let momentum_values: Vec<f64> = if no_volume {
         let rsi_params = RsiParams {
             period: Some(period),
@@ -942,7 +893,6 @@ unsafe fn alphatrend_avx512(
             .values
     };
 
-    // --------- O(n) ATR + AlphaTrend + K2 (scalar due to recurrence) ----------
     let mut sum = 0.0f64;
     {
         let mut j = first_val;
@@ -1037,30 +987,23 @@ unsafe fn alphatrend_simd128(
 ) -> Result<(), AlphaTrendError> {
     use core::arch::wasm32::*;
 
-    // WASM SIMD128 implementation stub - falls back to scalar for now
-    // Future optimization: implement SIMD128-accelerated calculations
     alphatrend_scalar(
         open, high, low, close, volume, coeff, period, no_volume, first_val, out_k1, out_k2,
     )
 }
 
-/// Decision: O(1) streaming enabled. ATR as SMA(TR), RSI via Wilder RMA or MFI window sums.
-/// Returns Some((k1,k2)) once ATR seeded and 2-bar lag available (> period + 1 bars).
 #[derive(Debug, Clone)]
 pub struct AlphaTrendStream {
-    // --- Params ---
     coeff: f64,
     period: usize,
     inv_period: f64,
     no_volume: bool,
 
-    // --- Rolling ATR (SMA of TR) ---
-    tr_ring: Vec<f64>, // length = period
+    tr_ring: Vec<f64>,
     tr_sum: f64,
     tr_idx: usize,
     tr_filled: usize,
 
-    // --- RSI state (Wilder RMA) ---
     rsi_seeded: bool,
     rsi_init_gains: f64,
     rsi_init_losses: f64,
@@ -1068,20 +1011,17 @@ pub struct AlphaTrendStream {
     rsi_avg_gain: f64,
     rsi_avg_loss: f64,
 
-    // --- MFI state (window sums) ---
-    mfi_pos_ring: Vec<f64>, // length = period
-    mfi_neg_ring: Vec<f64>, // length = period
+    mfi_pos_ring: Vec<f64>,
+    mfi_neg_ring: Vec<f64>,
     mfi_pos_sum: f64,
     mfi_neg_sum: f64,
     mfi_idx: usize,
     mfi_filled: usize,
     prev_tp: f64,
 
-    // --- Previous prices ---
     prev_close: f64,
     have_prev: bool,
 
-    // --- AlphaTrend sticky state & lag ---
     prev_alpha: f64,
     prev1: f64,
     prev2: f64,
@@ -1140,11 +1080,8 @@ impl AlphaTrendStream {
         })
     }
 
-    /// O(1) update. Returns Some((k1, k2)) once both are defined
-    /// (i.e., after alpha_count >= 3 ⇒ after period + 2 bars from start).
     #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<(f64, f64)> {
-        // Skip malformed bars without mutating state
         if !(high.is_finite() && low.is_finite() && close.is_finite() && volume.is_finite()) {
             return None;
         }
@@ -1152,8 +1089,6 @@ impl AlphaTrendStream {
             return None;
         }
 
-        // ---------- True Range & ATR (SMA) ----------
-        // TR = max(high-low, |high-prev_close|, |low-prev_close|)
         let tr = if self.have_prev {
             let hl = high - low;
             let hc = (high - self.prev_close).abs();
@@ -1193,11 +1128,9 @@ impl AlphaTrendStream {
             f64::NAN
         };
 
-        // ---------- Momentum regime: RSI or MFI (>=50 test without division) ----------
         let mut m_ge_50 = false;
 
         if self.no_volume {
-            // RSI path (Wilder RMA)
             let (gain, loss) = if self.have_prev {
                 let d = close - self.prev_close;
                 if d >= 0.0 {
@@ -1236,7 +1169,6 @@ impl AlphaTrendStream {
                 m_ge_50 = false;
             }
         } else {
-            // MFI path (window sums using Typical Price)
             let tp = (high + low + close) / 3.0;
             if self.have_prev {
                 let mf = (tp * volume).max(0.0);
@@ -1280,13 +1212,11 @@ impl AlphaTrendStream {
             self.prev_tp = tp;
         }
 
-        // ---------- AlphaTrend bands & sticky regime ----------
         let mut emitted = false;
         let mut cur = f64::NAN;
         let mut k2_out = f64::NAN;
 
         if atr_ready {
-            // up = low - coeff*ATR, down = high + coeff*ATR
             let up = (-self.coeff).mul_add(atr, low);
             let dn = self.coeff.mul_add(atr, high);
 
@@ -1310,7 +1240,6 @@ impl AlphaTrendStream {
                 }
             };
 
-            // Capture 2-bar lag BEFORE shifting so K2 matches batch semantics
             let k2_emit = self.prev2;
             self.prev2 = self.prev1;
             self.prev1 = cur;
@@ -1320,19 +1249,16 @@ impl AlphaTrendStream {
             k2_out = k2_emit;
         }
 
-        // advance shared previous values
         self.prev_close = close;
         self.have_prev = true;
 
         if emitted && self.alpha_count >= 3 {
-            // Emit the captured 2-bar lag
             Some((cur, k2_out))
         } else {
             None
         }
     }
 
-    /// Historical warmup for k1 only (consistent with batch path): period - 1
     #[inline(always)]
     pub fn get_warmup_period(&self) -> usize {
         self.period - 1
@@ -1408,15 +1334,15 @@ impl AlphaTrendStreamPy {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AlphaTrendJsOutput {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_js(
     open: &[f64],
@@ -1441,7 +1367,6 @@ pub fn alphatrend_js(
     alphatrend_into_slices(&mut k1, &mut k2, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let mut values = Vec::with_capacity(k1.len() * 2);
     values.extend_from_slice(&k1);
     values.extend_from_slice(&k2);
@@ -1455,7 +1380,7 @@ pub fn alphatrend_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_alloc_flat(n: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(2 * n);
@@ -1464,7 +1389,7 @@ pub fn alphatrend_alloc_flat(n: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_free_flat(ptr: *mut f64, n: usize) {
     unsafe {
@@ -1472,7 +1397,7 @@ pub fn alphatrend_free_flat(ptr: *mut f64, n: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_into_flat(
     open_ptr: *const f64,
@@ -1516,24 +1441,22 @@ pub fn alphatrend_into_flat(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(note = "Use alphatrend_alloc_flat/alphatrend_into_flat")]
 pub fn alphatrend_alloc(_len: usize) -> *mut f64 {
     core::ptr::null_mut()
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(note = "Use alphatrend_free_flat")]
 pub fn alphatrend_free(_ptr: *mut f64, _len: usize) {}
 
-
-
 #[derive(Clone, Debug)]
 pub struct AlphaTrendBatchRange {
-    pub coeff: (f64, f64, f64),        
-    pub period: (usize, usize, usize), 
+    pub coeff: (f64, f64, f64),
+    pub period: (usize, usize, usize),
     pub no_volume: bool,
 }
 
@@ -1674,8 +1597,12 @@ impl AlphaTrendBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Result<Vec<AlphaTrendParams>, AlphaTrendError> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, AlphaTrendError> {
+fn expand_grid_alphatrend(
+    r: &AlphaTrendBatchRange,
+) -> Result<Vec<AlphaTrendParams>, AlphaTrendError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, AlphaTrendError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1685,19 +1612,27 @@ fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Result<Vec<AlphaTrendPara
             while cur <= end {
                 v.push(cur);
                 cur = cur.saturating_add(step);
-                if cur == *v.last().unwrap() { break; }
+                if cur == *v.last().unwrap() {
+                    break;
+                }
             }
         } else {
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
                 let next = cur.saturating_sub(step);
-                if next == cur { break; }
+                if next == cur {
+                    break;
+                }
                 cur = next;
-                if cur == 0 && end > 0 { break; }
+                if cur == 0 && end > 0 {
+                    break;
+                }
             }
         }
-        if v.is_empty() { return Err(AlphaTrendError::InvalidRange { start, end, step }); }
+        if v.is_empty() {
+            return Err(AlphaTrendError::InvalidRange { start, end, step });
+        }
         Ok(v)
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, AlphaTrendError> {
@@ -1714,14 +1649,18 @@ fn expand_grid_alphatrend(r: &AlphaTrendBatchRange) -> Result<Vec<AlphaTrendPara
             }
         } else {
             let st = if step > 0.0 { -step } else { step };
-            if st.abs() < 1e-12 { return Ok(vec![start]); }
+            if st.abs() < 1e-12 {
+                return Ok(vec![start]);
+            }
             let mut x = start;
             while x >= end - 1e-12 {
                 out.push(x);
-                x += st; 
+                x += st;
             }
         }
-        if out.is_empty() { return Err(AlphaTrendError::InvalidRangeF64 { start, end, step }); }
+        if out.is_empty() {
+            return Err(AlphaTrendError::InvalidRangeF64 { start, end, step });
+        }
         Ok(out)
     }
 
@@ -1884,11 +1823,9 @@ fn alphatrend_batch_inner(
         return Err(AlphaTrendError::EmptyInputData);
     }
 
-    
     let mut k1_mu = make_uninit_matrix(rows, cols);
     let mut k2_mu = make_uninit_matrix(rows, cols);
 
-    
     let first = candles
         .close
         .iter()
@@ -1903,7 +1840,6 @@ fn alphatrend_batch_inner(
     init_matrix_prefixes(&mut k1_mu, cols, &warm_k1);
     init_matrix_prefixes(&mut k2_mu, cols, &warm_k2);
 
-    
     let mut k1_guard = core::mem::ManuallyDrop::new(k1_mu);
     let mut k2_guard = core::mem::ManuallyDrop::new(k2_mu);
     let out_k1: &mut [f64] = unsafe {
@@ -1953,7 +1889,6 @@ fn alphatrend_batch_inner(
         do_row(row, k1r, k2r)?;
     }
 
-    
     let values_k1 = unsafe {
         Vec::from_raw_parts(
             k1_guard.as_mut_ptr() as *mut f64,
@@ -1977,7 +1912,6 @@ fn alphatrend_batch_inner(
         cols,
     })
 }
-
 
 #[inline(always)]
 pub fn alphatrend_batch_inner_into_slices(
@@ -2008,13 +1942,18 @@ pub fn alphatrend_batch_inner_into_slices(
         .checked_mul(cols)
         .ok_or_else(|| AlphaTrendError::InvalidInput("rows*cols overflow".into()))?;
     if k1_slice.len() != total {
-        return Err(AlphaTrendError::OutputLengthMismatch { expected: total, got: k1_slice.len() });
+        return Err(AlphaTrendError::OutputLengthMismatch {
+            expected: total,
+            got: k1_slice.len(),
+        });
     }
     if k2_slice.len() != total {
-        return Err(AlphaTrendError::OutputLengthMismatch { expected: total, got: k2_slice.len() });
+        return Err(AlphaTrendError::OutputLengthMismatch {
+            expected: total,
+            got: k2_slice.len(),
+        });
     }
 
-    
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2026,9 +1965,6 @@ pub fn alphatrend_batch_inner_into_slices(
         _ => detect_best_kernel(),
     };
 
-    
-    
-    
     let first = close
         .iter()
         .position(|x| !x.is_nan())
@@ -2055,8 +1991,6 @@ pub fn alphatrend_batch_inner_into_slices(
     init_matrix_prefixes(k1_uninit, cols, &warm_k1);
     init_matrix_prefixes(k2_uninit, cols, &warm_k2);
 
-    
-    
     let mut tr_mu = make_uninit_matrix(1, cols);
     let tr: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(tr_mu.as_mut_ptr() as *mut f64, cols) };
@@ -2070,7 +2004,6 @@ pub fn alphatrend_batch_inner_into_slices(
         tr[i] = hl.max(hc).max(lc);
     }
 
-    
     let use_rsi = sweep.no_volume;
     let hlc3_opt: Option<Vec<f64>> = if use_rsi {
         None
@@ -2081,7 +2014,7 @@ pub fn alphatrend_batch_inner_into_slices(
         for i in 0..cols {
             hlc3[i] = (high[i] + low[i] + close[i]) / 3.0;
         }
-        
+
         let v = unsafe {
             Vec::from_raw_parts(
                 hlc3_mu.as_mut_ptr() as *mut f64,
@@ -2093,7 +2026,6 @@ pub fn alphatrend_batch_inner_into_slices(
         Some(v)
     };
 
-    
     use std::collections::HashMap;
     let mut unique_periods: Vec<usize> = combos.iter().map(|p| p.period.unwrap_or(14)).collect();
     unique_periods.sort_unstable();
@@ -2102,7 +2034,6 @@ pub fn alphatrend_batch_inner_into_slices(
     let mut momentum_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(unique_periods.len());
     for &p in &unique_periods {
         if p == 0 || p > cols {
-            
             return Err(AlphaTrendError::InvalidPeriod {
                 period: p,
                 data_len: cols,
@@ -2126,7 +2057,6 @@ pub fn alphatrend_batch_inner_into_slices(
         }
     }
 
-    
     let do_row =
         |row: usize, k1_row: &mut [f64], k2_row: &mut [f64]| -> Result<(), AlphaTrendError> {
             let params = &combos[row];
@@ -2143,13 +2073,11 @@ pub fn alphatrend_batch_inner_into_slices(
             }
             let warmup = first + period - 1;
             if warmup >= cols {
-                
                 return Ok(());
             }
 
             let mom = momentum_map.get(&period).expect("momentum precomputed");
 
-            
             let mut sum = 0.0f64;
             for j in first..=warmup {
                 sum += tr[j];
@@ -2194,7 +2122,6 @@ pub fn alphatrend_batch_inner_into_slices(
                 prev1 = cur;
                 prev_alpha = cur;
 
-                
                 if i + 1 < cols {
                     sum += tr[i + 1] - tr[i + 1 - period];
                 }
@@ -2232,8 +2159,6 @@ pub fn alphatrend_batch_inner_into_slices(
     Ok(())
 }
 
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "alphatrend_batch")]
 #[pyo3(signature = (open, high, low, close, volume, coeff_range, period_range, no_volume=false, kernel=None))]
@@ -2270,7 +2195,6 @@ pub fn alphatrend_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    
     let rows = {
         fn axis_usize((s, e, st): (usize, usize, usize)) -> usize {
             if st == 0 || s == e {
@@ -2294,7 +2218,6 @@ pub fn alphatrend_batch_py<'py>(
     let k1_slice = unsafe { out_k1.as_slice_mut()? };
     let k2_slice = unsafe { out_k2.as_slice_mut()? };
 
-    
     py.allow_threads(|| {
         alphatrend_batch_inner_into_slices(o, h, l, c, v, &sweep, kern, true, k1_slice, k2_slice)
     })
@@ -2306,9 +2229,8 @@ pub fn alphatrend_batch_py<'py>(
     dict.set_item("rows", rows)?;
     dict.set_item("cols", len)?;
 
-    
-    let combos = expand_grid_alphatrend(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos =
+        expand_grid_alphatrend(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let combo_list = PyList::new(
         py,
         combos.iter().map(|c| {
@@ -2324,8 +2246,6 @@ pub fn alphatrend_batch_py<'py>(
 
     Ok(dict.into())
 }
-
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "alphatrend_cuda_batch_dev")]
@@ -2378,7 +2298,7 @@ pub fn alphatrend_cuda_batch_dev_py<'py>(
     let rows = batch.k1.rows;
     let cols = batch.k1.cols;
     let dict = PyDict::new(py);
-    // Move the device buffers into Python wrappers that keep context alive and support DLPack
+
     let k1_py = AtDeviceArrayF32Py {
         buf: Some(batch.k1.buf),
         rows,
@@ -2438,23 +2358,35 @@ pub fn alphatrend_cuda_many_series_one_param_dev_py<'py>(
     let (k1, k2, ctx_guard, dev_id) = py.allow_threads(|| {
         let cuda =
             CudaAlphaTrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda.alphatrend_many_series_one_param_time_major_dev(
-            h, l, c, v, cols, rows, coeff, period, no_volume,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda
+            .alphatrend_many_series_one_param_time_major_dev(
+                h, l, c, v, cols, rows, coeff, period, no_volume,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out.0, out.1, cuda.context_arc(), cuda.device_id()))
     })?;
     Ok((
-        AtDeviceArrayF32Py { buf: Some(k1.buf), rows: k1.rows, cols: k1.cols, _ctx: ctx_guard.clone(), device_id: dev_id },
-        AtDeviceArrayF32Py { buf: Some(k2.buf), rows: k2.rows, cols: k2.cols, _ctx: ctx_guard, device_id: dev_id },
+        AtDeviceArrayF32Py {
+            buf: Some(k1.buf),
+            rows: k1.rows,
+            cols: k1.cols,
+            _ctx: ctx_guard.clone(),
+            device_id: dev_id,
+        },
+        AtDeviceArrayF32Py {
+            buf: Some(k2.buf),
+            rows: k2.rows,
+            cols: k2.cols,
+            _ctx: ctx_guard,
+            device_id: dev_id,
+        },
     ))
 }
 
-// ------------------------ Python CUDA device handle ------------------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct AtDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -2483,13 +2415,13 @@ impl AtDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        (2, self.device_id as i32) 
+        (2, self.device_id as i32)
     }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
@@ -2501,7 +2433,6 @@ impl AtDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2522,7 +2453,6 @@ impl AtDeviceArrayF32Py {
         }
         let _ = stream;
 
-        
         let buf = self
             .buf
             .take()
@@ -2536,18 +2466,16 @@ impl AtDeviceArrayF32Py {
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AlphaTrendBatchJsOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<AlphaTrendParams>,
-    pub rows: usize, 
-    pub cols: usize, 
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = alphatrend_batch)]
 pub fn alphatrend_batch_js(
     open: &[f64],
@@ -2568,12 +2496,10 @@ pub fn alphatrend_batch_js(
         period: (period_start, period_end, period_step),
         no_volume,
     };
-    let combos = expand_grid_alphatrend(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid_alphatrend(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = close.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
@@ -2594,7 +2520,6 @@ pub fn alphatrend_batch_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let total_values = rows
         .checked_mul(2)
         .and_then(|r2| r2.checked_mul(cols))
@@ -2616,7 +2541,7 @@ pub fn alphatrend_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_batch_into_flat(
     open_ptr: *const f64,
@@ -2654,14 +2579,14 @@ pub fn alphatrend_batch_into_flat(
             period: (period_start, period_end, period_step),
             no_volume,
         };
-        let combos = expand_grid_alphatrend(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos =
+            expand_grid_alphatrend(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
-        
+
         let k1 = core::slice::from_raw_parts_mut(out_ptr, total);
         let k2 = core::slice::from_raw_parts_mut(out_ptr.add(total), total);
 
@@ -2679,11 +2604,11 @@ pub fn alphatrend_batch_into_flat(
         )
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(rows) 
+        Ok(rows)
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AlphaTrendBatchConfig {
     pub coeff_range: (f64, f64, f64),
@@ -2691,7 +2616,7 @@ pub struct AlphaTrendBatchConfig {
     pub no_volume: bool,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = alphatrend_batch_unified)]
 pub fn alphatrend_batch_unified_js(
     open: &[f64],
@@ -2714,7 +2639,6 @@ pub fn alphatrend_batch_unified_js(
         alphatrend_batch_slice(open, high, low, close, volume, &sweep, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let rows2 = output.rows * 2;
     let cols = output.cols;
     let total_values = rows2
@@ -2738,7 +2662,7 @@ pub fn alphatrend_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn alphatrend_into(
     in_ptr: *const f64,
@@ -2788,7 +2712,7 @@ pub fn alphatrend_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2801,7 +2725,7 @@ pub struct AlphaTrendContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl AlphaTrendContext {
@@ -2860,7 +2784,6 @@ impl AlphaTrendContext {
             };
             let input = AlphaTrendInput::from_slices(open, high, low, close, volume, params);
 
-            
             if close_ptr == out_k1_ptr || close_ptr == out_k2_ptr {
                 let mut temp_k1 = vec![0.0; len];
                 let mut temp_k2 = vec![0.0; len];
@@ -2897,7 +2820,6 @@ mod tests {
         let input = AlphaTrendInput::from_candles(&candles, AlphaTrendParams::default());
         let result = alphatrend_with_kernel(&input, kernel)?;
 
-        
         let expected_k1 = [
             60243.00,
             60243.00,
@@ -2906,7 +2828,6 @@ mod tests {
             59937.21428571,
         ];
 
-        
         let expected_k2 = [
             60542.42857143,
             60454.14285714,
@@ -2917,7 +2838,6 @@ mod tests {
 
         let start = result.k1.len().saturating_sub(5);
 
-        
         for (i, &val) in result.k1[start..].iter().enumerate() {
             let diff = (val - expected_k1[i]).abs();
             assert!(
@@ -2932,7 +2852,6 @@ mod tests {
             );
         }
 
-        
         for (i, &val) in result.k2[start..].iter().enumerate() {
             let diff = (val - expected_k2[i]).abs();
             assert!(
@@ -3093,7 +3012,7 @@ mod tests {
         test_name: &str,
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        let data = vec![1.0; 20]; 
+        let data = vec![1.0; 20];
         let params = AlphaTrendParams {
             coeff: Some(-1.0),
             period: Some(14),
@@ -3114,7 +3033,7 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         let open = vec![10.0, 20.0, 30.0];
-        let high = vec![12.0, 22.0]; 
+        let high = vec![12.0, 22.0];
         let low = vec![8.0, 18.0, 28.0];
         let close = vec![11.0, 21.0, 31.0];
         let volume = vec![100.0, 200.0, 300.0];
@@ -3142,13 +3061,12 @@ mod tests {
         let first_input = AlphaTrendInput::from_candles(&candles, first_params);
         let first_result = alphatrend_with_kernel(&first_input, kernel)?;
 
-        
         let second_params = AlphaTrendParams {
             coeff: Some(1.0),
             period: Some(14),
-            no_volume: Some(true), 
+            no_volume: Some(true),
         };
-        
+
         let k1 = &first_result.k1;
         let synthetic_high: Vec<f64> = k1
             .iter()
@@ -3195,7 +3113,6 @@ mod tests {
         assert_eq!(res.k1.len(), candles.close.len());
         assert_eq!(res.k2.len(), candles.close.len());
 
-        
         if res.k1.len() > 240 {
             for (i, &val) in res.k1[240..].iter().enumerate() {
                 assert!(
@@ -3210,7 +3127,6 @@ mod tests {
     }
 
     fn check_alphatrend_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        
         let params = AlphaTrendParams {
             coeff: Some(1.0),
             period: Some(14),
@@ -3220,7 +3136,6 @@ mod tests {
         let mut stream = AlphaTrendStream::try_new(params)?;
         let warmup = stream.get_warmup_period();
 
-        
         for i in 0..30 {
             let high = 100.0 + i as f64 + 2.0;
             let low = 100.0 + i as f64 - 2.0;
@@ -3229,7 +3144,6 @@ mod tests {
 
             let result = stream.update(high, low, close, volume);
             if i + 1 >= warmup + 3 {
-                
                 let some = result.expect("streaming should emit after warmup+2");
                 assert!(
                     some.0.is_finite() && some.1.is_finite(),
@@ -3351,14 +3265,13 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                0.1f64..5.0f64, 
-                any::<bool>(),  
+                0.1f64..5.0f64,
+                any::<bool>(),
             )
         });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(close_data, period, coeff, no_volume)| {
-                
                 let high: Vec<f64> = close_data.iter().map(|&c| c + 5.0).collect();
                 let low: Vec<f64> = close_data.iter().map(|&c| c - 5.0).collect();
                 let open = close_data.clone();
@@ -3375,7 +3288,6 @@ mod tests {
                 let result = alphatrend_with_kernel(&input, kernel).unwrap();
                 let ref_result = alphatrend_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 0..close_data.len() {
                     let y = result.k1[i];
                     let r = ref_result.k1[i];
@@ -3395,7 +3307,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in 0..close_data.len() {
                     let y = result.k2[i];
                     let r = ref_result.k2[i];
@@ -3422,7 +3333,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_alphatrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3454,7 +3364,6 @@ mod tests {
         }
     }
 
-    
     generate_all_alphatrend_tests!(
         check_alphatrend_accuracy,
         check_alphatrend_partial_params,
@@ -3475,7 +3384,7 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_alphatrend_tests!(check_alphatrend_property);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_alphatrend_into_matches_api() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -3483,19 +3392,15 @@ mod tests {
 
         let input = AlphaTrendInput::from_candles(&candles, AlphaTrendParams::default());
 
-        
         let baseline = alphatrend(&input)?;
 
-        
         let mut out_k1 = vec![0.0; candles.close.len()];
         let mut out_k2 = vec![0.0; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             alphatrend_into(&input, &mut out_k1, &mut out_k2)?;
         }
 
-        
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             if a.is_nan() && b.is_nan() {
                 true
@@ -3525,7 +3430,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
@@ -3538,11 +3442,9 @@ mod tests {
 
         assert_eq!(output.cols, c.close.len());
 
-        
         let k1_start = row * output.cols;
         let k2_start = row * output.cols;
 
-        
         let expected_k1 = [
             60243.00,
             60243.00,
@@ -3574,10 +3476,9 @@ mod tests {
 
         let output = alphatrend_batch_with_kernel(&c, &sweep, kernel)?;
 
-        
-        let coeff_count = ((2.0 - 1.0) / 0.5) as usize + 1; 
-        let period_count = ((20 - 10) / 5) as usize + 1; 
-        let expected_combos = coeff_count * period_count; 
+        let coeff_count = ((2.0 - 1.0) / 0.5) as usize + 1;
+        let period_count = ((20 - 10) / 5) as usize + 1;
+        let expected_combos = coeff_count * period_count;
 
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
@@ -3658,7 +3559,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {

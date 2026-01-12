@@ -1,25 +1,3 @@
-//! # Inverse Fisher Transform RSI (IFT RSI)
-//!
-//! Applies Inverse Fisher Transform to a WMA-smoothed RSI series.
-//! The indicator first calculates RSI (Wilder SMMA), smooths it with WMA (weights 1..N),
-//! then applies tanh(.) to normalize values between -1 and 1.
-//!
-//! ## Parameters
-//! - **rsi_period**: Period for RSI calculation (default: 5)
-//! - **wma_period**: Period for WMA smoothing (default: 9)
-//!
-//! ## Inputs
-//! - Single data slice (typically close prices)
-//!
-//! ## Returns
-//! - **Ok(IftRsiOutput)** containing values (Vec<f64>) representing transformed RSI between -1 and 1
-//! - Output length matches input data length with NaN padding for warmup period
-//!
-//! ## Decision Log
-//! - Scalar path optimized (Wilder SMMA + O(1) LWMA), ~13% faster at 100k samples vs previous scalar baseline.
-//! - SIMD disabled (stubs call scalar); recurrence/IIR structure and O(1) LWMA leave little room for SIMD speedups.
-//! - CUDA enabled for batch and many-series variants; wrappers enforce VRAM checks, typed errors, and Python CAI v3/DLPack v1.x interop.
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -31,22 +9,22 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::rsi::{rsi, RsiError, RsiInput, RsiParams};
 use crate::indicators::wma::{wma, WmaError, WmaInput, WmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
 use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -80,7 +58,10 @@ pub struct IftRsiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct IftRsiParams {
     pub rsi_period: Option<usize>,
     pub wma_period: Option<usize>,
@@ -226,7 +207,11 @@ pub enum IftRsiError {
     #[error("ift_rsi: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("ift_rsi: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
 
 #[inline]
@@ -267,17 +252,14 @@ pub fn ift_rsi_with_kernel(
             valid: len - first,
         });
     }
-    
-    
+
     if kernel.is_batch() {
         return Err(IftRsiError::WrongKernelForBatch);
     }
 
-    
     let warmup_period = first + rsi_period + wma_period - 1;
     let mut out = alloc_with_nan_prefix(len, warmup_period);
 
-    
     unsafe {
         ift_rsi_scalar_classic(data, rsi_period, wma_period, first, &mut out)?;
     }
@@ -285,12 +267,7 @@ pub fn ift_rsi_with_kernel(
     Ok(IftRsiOutput { values: out })
 }
 
-/// Writes IFT-RSI values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API.
-/// - The output slice length must equal the input data length.
-/// - Uses `Kernel::Auto` dispatch (mirrors module default).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ift_rsi_into(input: &IftRsiInput, out: &mut [f64]) -> Result<(), IftRsiError> {
     let data: &[f64] = match &input.data {
@@ -299,7 +276,10 @@ pub fn ift_rsi_into(input: &IftRsiInput, out: &mut [f64]) -> Result<(), IftRsiEr
     };
 
     if out.len() != data.len() {
-        return Err(IftRsiError::OutputLengthMismatch { expected: data.len(), got: out.len() });
+        return Err(IftRsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
     }
 
     let kern = Kernel::Auto;
@@ -358,7 +338,6 @@ pub fn ift_rsi_scalar(
     ift_rsi_compute_into(data, rsi_period, wma_period, first_valid, out)
 }
 
-/// Write directly to output slice - no allocations
 pub fn ift_rsi_into_slice(
     dst: &mut [f64],
     input: &IftRsiInput,
@@ -374,7 +353,10 @@ pub fn ift_rsi_into_slice(
     }
 
     if dst.len() != data.len() {
-        return Err(IftRsiError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(IftRsiError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     let first = data
@@ -392,13 +374,11 @@ pub fn ift_rsi_into_slice(
         });
     }
 
-    
     let warmup_period = (first + rsi_period + wma_period - 1).min(dst.len());
     for v in &mut dst[..warmup_period] {
         *v = f64::NAN;
     }
 
-    
     unsafe {
         return ift_rsi_scalar_classic(data, rsi_period, wma_period, first, dst);
     }
@@ -570,7 +550,11 @@ fn expand_grid(r: &IftRsiBatchRange) -> Result<Vec<IftRsiParams>, IftRsiError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let vals: Vec<usize> = (lo..=hi).step_by(step).collect();
         if vals.is_empty() {
             return Err(IftRsiError::InvalidRange { start, end, step });
@@ -579,18 +563,22 @@ fn expand_grid(r: &IftRsiBatchRange) -> Result<Vec<IftRsiParams>, IftRsiError> {
     }
     let rsi_periods = axis_usize(r.rsi_period)?;
     let wma_periods = axis_usize(r.wma_period)?;
-    let cap = rsi_periods
-        .len()
-        .checked_mul(wma_periods.len())
-        .ok_or(IftRsiError::InvalidRange {
-            start: r.rsi_period.0,
-            end: r.rsi_period.1,
-            step: r.rsi_period.2,
-        })?;
+    let cap =
+        rsi_periods
+            .len()
+            .checked_mul(wma_periods.len())
+            .ok_or(IftRsiError::InvalidRange {
+                start: r.rsi_period.0,
+                end: r.rsi_period.1,
+                step: r.rsi_period.2,
+            })?;
     let mut out = Vec::with_capacity(cap);
     for &rsi_p in &rsi_periods {
         for &wma_p in &wma_periods {
-            out.push(IftRsiParams { rsi_period: Some(rsi_p), wma_period: Some(wma_p) });
+            out.push(IftRsiParams {
+                rsi_period: Some(rsi_p),
+                wma_period: Some(wma_p),
+            });
         }
     }
     Ok(out)
@@ -644,23 +632,19 @@ fn ift_rsi_batch_inner(
         step: sweep.rsi_period.2,
     })?;
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.rsi_period.unwrap() + c.wma_period.unwrap() - 1)
         .collect();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let sliced = &data[first..];
     let n = sliced.len();
     let mut gains = Vec::with_capacity(n.saturating_sub(1));
@@ -675,7 +659,7 @@ fn ift_rsi_batch_inner(
             losses.push(-d);
         }
     }
-    
+
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -685,7 +669,7 @@ fn ift_rsi_batch_inner(
         pg.push(pg[i] + gains[i]);
         pl.push(pl[i] + losses[i]);
     }
-    
+
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -695,7 +679,7 @@ fn ift_rsi_batch_inner(
         pg.push(pg[i] + gains[i]);
         pl.push(pl[i] + losses[i]);
     }
-    
+
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -705,7 +689,7 @@ fn ift_rsi_batch_inner(
         pg.push(pg[i] + gains[i]);
         pl.push(pl[i] + losses[i]);
     }
-    
+
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -752,7 +736,6 @@ fn ift_rsi_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -802,7 +785,6 @@ fn ift_rsi_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = (first + combo.rsi_period.unwrap() + combo.wma_period.unwrap() - 1).min(cols);
         let row_start = row * cols;
@@ -811,7 +793,6 @@ fn ift_rsi_batch_inner_into(
         }
     }
 
-    
     let sliced = &data[first..];
     let n = sliced.len();
     let mut gains = Vec::with_capacity(n.saturating_sub(1));
@@ -826,7 +807,7 @@ fn ift_rsi_batch_inner_into(
             losses.push(-d);
         }
     }
-    
+
     let n1 = gains.len();
     let mut pg = Vec::with_capacity(n1 + 1);
     let mut pl = Vec::with_capacity(n1 + 1);
@@ -883,7 +864,6 @@ unsafe fn ift_rsi_row_scalar(
     wma_period: usize,
     out: &mut [f64],
 ) {
-    
     let sliced = &data[first..];
     let n = sliced.len();
     if n == 0 {
@@ -913,7 +893,7 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     first: usize,
     out: &mut [f64],
 ) {
-    let n1 = gains.len(); 
+    let n1 = gains.len();
     if rsi_period == 0 || wma_period == 0 {
         return;
     }
@@ -921,7 +901,6 @@ unsafe fn ift_rsi_row_scalar_precomputed(
         return;
     }
 
-    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     for i in 0..rsi_period {
@@ -934,7 +913,6 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     let alpha = 1.0f64 / rp_f;
     let beta = 1.0f64 - alpha;
 
-    
     let wp = wma_period;
     let wp_f = wp as f64;
     let denom = 0.5f64 * wp_f * (wp_f + 1.0);
@@ -945,12 +923,10 @@ unsafe fn ift_rsi_row_scalar_precomputed(
     let mut sum = 0.0f64;
     let mut num = 0.0f64;
 
-    
     let mut i = rsi_period;
     while i <= n1 {
-        
         if i > rsi_period {
-            let g = *gains.get_unchecked(i - 1); 
+            let g = *gains.get_unchecked(i - 1);
             let l = *losses.get_unchecked(i - 1);
             avg_gain = f64::mul_add(avg_gain, beta, alpha * g);
             avg_loss = f64::mul_add(avg_loss, beta, alpha * l);
@@ -1017,7 +993,6 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
         return;
     }
 
-    
     let sum_gain = *pg.get_unchecked(rsi_period) - *pg.get_unchecked(0);
     let sum_loss = *pl.get_unchecked(rsi_period) - *pl.get_unchecked(0);
     let rp_f = rsi_period as f64;
@@ -1026,7 +1001,6 @@ unsafe fn ift_rsi_row_scalar_precomputed_ps(
     let alpha = 1.0f64 / rp_f;
     let beta = 1.0f64 - alpha;
 
-    
     let wp = wma_period;
     let wp_f = wp as f64;
     let denom = 0.5f64 * wp_f * (wp_f + 1.0);
@@ -1142,11 +1116,9 @@ unsafe fn ift_rsi_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct IftRsiStream {
-    
     rsi_period: usize,
     wma_period: usize,
 
-    
     prev: f64,
     have_prev: bool,
     seed_g: f64,
@@ -1158,7 +1130,6 @@ pub struct IftRsiStream {
     alpha: f64,
     beta: f64,
 
-    
     buf: Vec<f64>,
     head: usize,
     filled: usize,
@@ -1206,9 +1177,6 @@ impl IftRsiStream {
         })
     }
 
-    /// Push one price. Returns IFT-RSI once both warmups complete:
-    /// after rsi_period diffs and wma_period transformed values.
-    /// On NaN input we reset the state and return None.
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         if !value.is_finite() {
@@ -1216,40 +1184,33 @@ impl IftRsiStream {
             return None;
         }
 
-        
         if !self.have_prev {
             self.prev = value;
             self.have_prev = true;
             return None;
         }
 
-        
         let d = value - self.prev;
         self.prev = value;
         let gain = if d > 0.0 { d } else { 0.0 };
         let loss = if d < 0.0 { -d } else { 0.0 };
 
-        
         if !self.seeded {
             self.seed_g += gain;
             self.seed_l += loss;
             self.seed_cnt += 1;
             if self.seed_cnt < self.rsi_period {
-                return None; 
+                return None;
             }
-            
+
             self.avg_gain = self.seed_g / (self.rsi_period as f64);
             self.avg_loss = self.seed_l / (self.rsi_period as f64);
             self.seeded = true;
-
-            
         } else {
-            
             self.avg_gain = f64::mul_add(self.avg_gain, self.beta, self.alpha * gain);
             self.avg_loss = f64::mul_add(self.avg_loss, self.beta, self.alpha * loss);
         }
 
-        
         let rs = if self.avg_loss != 0.0 {
             self.avg_gain / self.avg_loss
         } else {
@@ -1258,9 +1219,7 @@ impl IftRsiStream {
         let rsi = 100.0 - 100.0 / (1.0 + rs);
         let x = 0.1 * (rsi - 50.0);
 
-        
         if self.filled < self.wma_period {
-            
             self.sum += x;
             self.num = f64::mul_add((self.filled as f64) + 1.0, x, self.num);
             self.buf[self.head] = x;
@@ -1276,7 +1235,6 @@ impl IftRsiStream {
             }
             return None;
         } else {
-            
             let x_old = self.buf[self.head];
             self.buf[self.head] = x;
             self.head += 1;
@@ -1284,7 +1242,6 @@ impl IftRsiStream {
                 self.head = 0;
             }
 
-            
             let sum_prev = self.sum;
             self.num = f64::mul_add(self.wp_f, x, self.num) - sum_prev;
             self.sum = sum_prev + x - x_old;
@@ -1296,7 +1253,6 @@ impl IftRsiStream {
 
     #[inline]
     fn reset_soft(&mut self) {
-        
         self.have_prev = false;
         self.seed_g = 0.0;
         self.seed_l = 0.0;
@@ -1320,10 +1276,6 @@ fn tanh_kernel(x: f64) -> f64 {
     x.tanh()
 }
 
-/// Optimized single-pass scalar kernel:
-/// - Inline Wilder RSI (SMMA) with FMA
-/// - Inline LWMA using O(1) rolling recurrence for numerator/sum
-/// - Writes outputs only after the full warmup (caller pre-fills NaNs)
 #[inline]
 pub unsafe fn ift_rsi_scalar_classic(
     data: &[f64],
@@ -1343,18 +1295,15 @@ pub unsafe fn ift_rsi_scalar_classic(
         return Ok(());
     }
 
-    
     if rsi_period + wma_period - 1 >= n {
         return Ok(());
     }
 
-    
     let rp = rsi_period;
     let rp_f = rp as f64;
     let alpha = 1.0f64 / rp_f;
     let beta = 1.0f64 - alpha;
 
-    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     {
@@ -1364,7 +1313,7 @@ pub unsafe fn ift_rsi_scalar_classic(
             if d > 0.0 {
                 avg_gain += d;
             } else {
-                avg_loss -= d; 
+                avg_loss -= d;
             }
             i += 1;
         }
@@ -1372,26 +1321,21 @@ pub unsafe fn ift_rsi_scalar_classic(
         avg_loss /= rp_f;
     }
 
-    
     let wp = wma_period;
     let wp_f = wp as f64;
     let denom = 0.5f64 * wp_f * (wp_f + 1.0);
     let denom_rcp = 1.0f64 / denom;
 
-    
     let mut buf: Vec<f64> = vec![0.0; wp];
     let mut head: usize = 0;
     let mut filled: usize = 0;
 
-    
-    let mut sum = 0.0f64; 
-    let mut num = 0.0f64; 
+    let mut sum = 0.0f64;
+    let mut num = 0.0f64;
 
-    
-    let mut i = rp; 
+    let mut i = rp;
     while i < n {
         if i > rp {
-            
             let d = *sliced.get_unchecked(i) - *sliced.get_unchecked(i - 1);
             let gain = if d > 0.0 { d } else { 0.0 };
             let loss = if d < 0.0 { -d } else { 0.0 };
@@ -1399,7 +1343,6 @@ pub unsafe fn ift_rsi_scalar_classic(
             avg_loss = f64::mul_add(avg_loss, beta, alpha * loss);
         }
 
-        
         let rs = if avg_loss != 0.0 {
             avg_gain / avg_loss
         } else {
@@ -1409,7 +1352,6 @@ pub unsafe fn ift_rsi_scalar_classic(
         let x = 0.1f64 * (rsi - 50.0);
 
         if filled < wp {
-            
             sum += x;
             num = f64::mul_add((filled as f64) + 1.0, x, num);
             *buf.get_unchecked_mut(head) = x;
@@ -1424,7 +1366,6 @@ pub unsafe fn ift_rsi_scalar_classic(
                 *out.get_unchecked_mut(first_valid + i) = wma.tanh();
             }
         } else {
-            
             let x_old = *buf.get_unchecked(head);
             *buf.get_unchecked_mut(head) = x;
             head += 1;
@@ -1433,8 +1374,8 @@ pub unsafe fn ift_rsi_scalar_classic(
             }
 
             let sum_t = sum;
-            num = f64::mul_add(wp_f, x, num) - sum_t; 
-            sum = sum_t + x - x_old; 
+            num = f64::mul_add(wp_f, x, num) - sum_t;
+            sum = sum_t + x - x_old;
 
             let wma = num * denom_rcp;
             *out.get_unchecked_mut(first_valid + i) = wma.tanh();
@@ -1468,14 +1409,12 @@ mod tests {
 
     #[test]
     fn test_ift_rsi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
-            if i < 3 { 
+            if i < 3 {
                 data.push(f64::NAN);
             } else {
-                
                 let x = (i as f64).sin() * 5.0 + 100.0 + ((i % 7) as f64);
                 data.push(x);
             }
@@ -1483,10 +1422,8 @@ mod tests {
 
         let input = IftRsiInput::from_slice(&data, IftRsiParams::default());
 
-        
         let baseline = ift_rsi(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
         ift_rsi_into(&input, &mut out)?;
 
@@ -1495,13 +1432,7 @@ mod tests {
             let a = baseline[i];
             let b = out[i];
             let equal = (a.is_nan() && b.is_nan()) || (a == b);
-            assert!(
-                equal,
-                "Mismatch at {}: baseline={}, into={}",
-                i,
-                a,
-                b
-            );
+            assert!(equal, "Mismatch at {}: baseline={}, into={}", i, a, b);
         }
         Ok(())
     }
@@ -1513,7 +1444,6 @@ mod tests {
         let input = IftRsiInput::from_candles(&candles, "close", IftRsiParams::default());
         let result = ift_rsi_with_kernel(&input, kernel)?;
 
-        
         let expected_last_five = [
             -0.35919800205778424,
             -0.3275464113984847,
@@ -1662,7 +1592,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            IftRsiParams::default(), 
+            IftRsiParams::default(),
             IftRsiParams {
                 rsi_period: Some(2),
                 wma_period: Some(2),
@@ -1715,12 +1645,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1770,7 +1699,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ift_rsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1778,17 +1707,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=50, 2usize..=50)
             .prop_flat_map(|(rsi_period, wma_period)| {
-                let min_len = (rsi_period + wma_period) * 2; 
+                let min_len = (rsi_period + wma_period) * 2;
                 (
-                    
                     (100.0f64..5000.0f64, 0.01f64..0.1f64),
-                    
                     -0.02f64..0.02f64,
-                    
                     Just(rsi_period),
                     Just(wma_period),
                     min_len..400,
@@ -1796,14 +1720,12 @@ mod tests {
             })
             .prop_map(
                 |((base_price, volatility), trend, rsi_period, wma_period, len)| {
-                    
                     let mut prices = Vec::with_capacity(len);
                     let mut current_price = base_price;
 
                     for i in 0..len {
-                        
                         current_price *= 1.0 + trend;
-                        
+
                         let noise = 1.0 + (i as f64 * 0.1).sin() * volatility;
                         prices.push(current_price * noise);
                     }
@@ -1821,16 +1743,12 @@ mod tests {
                 };
                 let input = IftRsiInput::from_slice(&data, params);
 
-                
                 let IftRsiOutput { values: out } = ift_rsi_with_kernel(&input, kernel)?;
 
-                
                 let IftRsiOutput { values: ref_out } = ift_rsi_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 let warmup_period = rsi_period + wma_period - 1;
                 for i in 0..warmup_period.min(data.len()) {
                     prop_assert!(
@@ -1841,14 +1759,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup_period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
-                    
-                    
                     if y.is_finite() {
                         prop_assert!(
                             y >= -1.0 - 1e-9 && y <= 1.0 + 1e-9,
@@ -1858,7 +1772,6 @@ mod tests {
                         );
                     }
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y.to_bits(),
@@ -1880,19 +1793,13 @@ mod tests {
                         );
                     }
 
-                    
-                    
-                    
-                    
                     if i >= warmup_period + 10 {
                         let lookback = 10;
                         let recent_prices = &data[i - lookback..=i];
                         let price_change =
                             (recent_prices[lookback] - recent_prices[0]) / recent_prices[0];
 
-                        
                         if price_change > 0.05 && y.is_finite() {
-                            
                             prop_assert!(
 								y > 0.2,
 								"Strong uptrend should produce positive IFT RSI > 0.2, got {} at index {}",
@@ -1901,10 +1808,7 @@ mod tests {
 							);
                         }
 
-                        
-                        
                         if price_change < -0.05 && y.is_finite() {
-                            
                             prop_assert!(
 								y < -0.2,
 								"Strong downtrend should produce negative IFT RSI < -0.2, got {} at index {}",
@@ -1914,21 +1818,14 @@ mod tests {
                         }
                     }
 
-                    
                     if !data[..=i].iter().any(|x| x.is_nan()) {
                         prop_assert!(!y.is_nan(), "Unexpected NaN at index {} after warmup", i);
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && data.len() > warmup_period
                 {
-                    
-                    
-                    
-                    
-                    
                     for i in warmup_period..out.len() {
                         if out[i].is_finite() {
                             prop_assert!(
@@ -1941,7 +1838,6 @@ mod tests {
                     }
                 }
 
-                
                 let volatility = if data.len() > 2 {
                     let returns: Vec<f64> = data.windows(2).map(|w| (w[1] - w[0]) / w[0]).collect();
                     let mean_return = returns.iter().sum::<f64>() / returns.len() as f64;
@@ -1955,7 +1851,6 @@ mod tests {
                     0.0
                 };
 
-                
                 if volatility > 0.1 {
                     for &val in out.iter() {
                         if val.is_finite() {
@@ -1968,18 +1863,12 @@ mod tests {
                     }
                 }
 
-                
-                
-                
-                
                 if data.len() > warmup_period + 20 {
-                    
                     for check_idx in (warmup_period + 10..data.len()).step_by(20) {
                         if check_idx + 5 >= data.len() {
                             break;
                         }
 
-                        
                         let recent_window = &data[check_idx - 5..=check_idx];
                         let gains: f64 = recent_window
                             .windows(2)
@@ -1991,7 +1880,6 @@ mod tests {
                             .sum();
 
                         if gains > losses * 1.5 && out[check_idx].is_finite() {
-                            
                             prop_assert!(
 								out[check_idx] > -0.1,
 								"Bullish momentum (gains > losses*1.5) should yield IFT RSI > -0.1, got {} at index {}",
@@ -2001,8 +1889,6 @@ mod tests {
                         }
 
                         if losses > gains * 1.5 && out[check_idx].is_finite() {
-                            
-                            
                             prop_assert!(
 								out[check_idx] < 0.1,
 								"Bearish momentum (losses > gains*1.5) should yield IFT RSI < 0.1, got {} at index {}",
@@ -2083,16 +1969,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 2, 10, 2),     
-            (5, 25, 5, 5, 25, 5),     
-            (30, 60, 15, 30, 60, 15), 
-            (2, 5, 1, 2, 5, 1),       
-            (9, 15, 3, 9, 15, 3),     
-            (2, 2, 0, 2, 20, 2),      
-            (2, 20, 2, 9, 9, 0),      
+            (2, 10, 2, 2, 10, 2),
+            (5, 25, 5, 5, 25, 5),
+            (30, 60, 15, 30, 60, 15),
+            (2, 5, 1, 2, 5, 1),
+            (9, 15, 3, 9, 15, 3),
+            (2, 2, 0, 2, 20, 2),
+            (2, 20, 2, 9, 9, 0),
         ];
 
         for (cfg_idx, &(rsi_start, rsi_end, rsi_step, wma_start, wma_end, wma_step)) in
@@ -2114,7 +1998,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2170,7 +2053,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2318,7 +2201,6 @@ pub fn ift_rsi_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ift_rsi_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, rsi_range, wma_range, device_id=0))]
@@ -2335,7 +2217,10 @@ pub fn ift_rsi_cuda_batch_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in: &[f32] = data_f32.as_slice()?;
-    let sweep = IftRsiBatchRange { rsi_period: rsi_range, wma_period: wma_range };
+    let sweep = IftRsiBatchRange {
+        rsi_period: rsi_range,
+        wma_period: wma_range,
+    };
     let (inner, dev_id, ctx) = py.allow_threads(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -2343,10 +2228,15 @@ pub fn ift_rsi_cuda_batch_dev_py(
         let (dev, _combos) = cuda
             .ift_rsi_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?; 
+        cuda.synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
-    let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
+    let handle = DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    };
     Ok(handle)
 }
 
@@ -2369,7 +2259,10 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
     let flat_in: &[f32] = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let params = IftRsiParams { rsi_period: Some(rsi_period), wma_period: Some(wma_period) };
+    let params = IftRsiParams {
+        rsi_period: Some(rsi_period),
+        wma_period: Some(wma_period),
+    };
     let (inner, dev_id, ctx) = py.allow_threads(|| {
         let cuda = CudaIftRsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
@@ -2377,14 +2270,19 @@ pub fn ift_rsi_cuda_many_series_one_param_dev_py(
         let dev = cuda
             .ift_rsi_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda.synchronize().map_err(|e| PyValueError::new_err(e.to_string()))?;
+        cuda.synchronize()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, dev_id, ctx))
     })?;
-    let handle = DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) };
+    let handle = DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    };
     Ok(handle)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<Vec<f64>, JsValue> {
     let params = IftRsiParams {
@@ -2393,7 +2291,7 @@ pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<
     };
     let input = IftRsiInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; 
+    let mut output = vec![0.0; data.len()];
 
     let kernel = Kernel::Scalar;
 
@@ -2403,7 +2301,7 @@ pub fn ift_rsi_js(data: &[f64], rsi_period: usize, wma_period: usize) -> Result<
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ift_rsi_into(
     in_ptr: *const f64,
@@ -2427,7 +2325,6 @@ pub fn ift_rsi_into(
         let kernel = Kernel::Scalar;
 
         if in_ptr == out_ptr as *const f64 {
-            
             let mut temp = vec![0.0; len];
             ift_rsi_into_slice(&mut temp, &input, kernel)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2442,7 +2339,7 @@ pub fn ift_rsi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ift_rsi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2451,7 +2348,7 @@ pub fn ift_rsi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ift_rsi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2461,14 +2358,14 @@ pub fn ift_rsi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct IftRsiBatchConfig {
     pub rsi_period_range: (usize, usize, usize),
     pub wma_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct IftRsiBatchJsOutput {
     pub values: Vec<f64>,
@@ -2477,7 +2374,7 @@ pub struct IftRsiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ift_rsi_batch)]
 pub fn ift_rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: IftRsiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2507,7 +2404,7 @@ pub fn ift_rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ift_rsi_batch_into(
     in_ptr: *const f64,
@@ -2533,8 +2430,7 @@ pub fn ift_rsi_batch_into(
             wma_period: (wma_start, wma_end, wma_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::hma::{
     hma_batch_with_kernel, HmaBatchRange, HmaBuilder, HmaParams,
 };

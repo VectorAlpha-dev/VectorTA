@@ -1,10 +1,3 @@
-//! CUDA scaffolding for the Square Weighted Moving Average (SQWMA).
-//!
-//! The GPU path mirrors the scalar implementation: squared weights are generated
-//! once per parameter combination in shared memory and each thread processes a
-//! slice of the time axis. Both the one-series×many-params and many-series×one-
-//! param entry points are provided to match the ALMA CUDA API surface.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -30,11 +23,22 @@ pub enum CudaSqwmaError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Device mismatch: buffer device = {buf}, current context device = {current}")]
@@ -48,7 +52,7 @@ pub struct CudaSqwma {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    
+
     sm_count: i32,
     max_grid_x: u32,
     _warp_size: i32,
@@ -61,14 +65,12 @@ impl CudaSqwma {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        
         let sm_count = device.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)?;
         let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as u32;
         let warp_size = device.get_attribute(cust::device::DeviceAttribute::WarpSize)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sqwma_kernel.ptx"));
 
-        
         let module = match Module::from_ptx(
             ptx,
             &[
@@ -79,7 +81,7 @@ impl CudaSqwma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
 
@@ -97,10 +99,14 @@ impl CudaSqwma {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -111,18 +117,37 @@ impl CudaSqwma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { cust::memory::mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        cust::memory::mem_get_info().ok()
+    }
 
     #[inline]
-    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaSqwmaError> {
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaSqwmaError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
-        let (free, _total) = match Self::device_mem_info() { Some(v) => v, None => return Ok(()) };
-        let need = required_bytes
-            .checked_add(headroom_bytes)
-            .ok_or(CudaSqwmaError::InvalidInput("required_bytes overflow".into()))?;
-        if need <= free { Ok(()) } else { Err(CudaSqwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes }) }
+        let (free, _total) = match Self::device_mem_info() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let need =
+            required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or(CudaSqwmaError::InvalidInput(
+                    "required_bytes overflow".into(),
+                ))?;
+        if need <= free {
+            Ok(())
+        } else {
+            Err(CudaSqwmaError::OutOfMemory {
+                required: required_bytes,
+                free,
+                headroom: headroom_bytes,
+            })
+        }
     }
 
     pub fn sqwma_batch_dev(
@@ -282,7 +307,7 @@ impl CudaSqwma {
             .checked_add(periods_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSqwmaError::InvalidInput("required bytes overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
 
         Self::will_fit_checked(required, headroom)?;
 
@@ -337,7 +362,7 @@ impl CudaSqwma {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSqwmaError::InvalidInput("required bytes overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
 
         Self::will_fit_checked(required, headroom)?;
 
@@ -374,18 +399,18 @@ impl CudaSqwma {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSqwmaError> {
-        
         let _ = max_period;
 
-        let func = self
-            .module
-            .get_function("sqwma_batch_f32")
-            .map_err(|_| CudaSqwmaError::MissingKernelSymbol { name: "sqwma_batch_f32" })?;
+        let func = self.module.get_function("sqwma_batch_f32").map_err(|_| {
+            CudaSqwmaError::MissingKernelSymbol {
+                name: "sqwma_batch_f32",
+            }
+        })?;
         let block_x: u32 = Self::block_x();
         let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes: u32 = 0; 
+        let shared_bytes: u32 = 0;
 
         if grid_x > self.max_grid_x {
             return Err(CudaSqwmaError::LaunchConfigTooLarge {
@@ -430,12 +455,14 @@ impl CudaSqwma {
         let func = self
             .module
             .get_function("sqwma_many_series_one_param_f32")
-            .map_err(|_| CudaSqwmaError::MissingKernelSymbol { name: "sqwma_many_series_one_param_f32" })?;
+            .map_err(|_| CudaSqwmaError::MissingKernelSymbol {
+                name: "sqwma_many_series_one_param_f32",
+            })?;
         let block_x: u32 = Self::block_x();
         let grid_x: u32 = self.grid_x_for_series(series_len);
         let grid: GridSize = (grid_x, num_series as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes: u32 = 0; 
+        let shared_bytes: u32 = 0;
 
         if grid_x > self.max_grid_x {
             return Err(CudaSqwmaError::LaunchConfigTooLarge {
@@ -468,7 +495,6 @@ impl CudaSqwma {
         Ok(())
     }
 
-    
     #[inline]
     fn out_per_thread() -> u32 {
         if let Ok(s) = std::env::var("SQWMA_OUT_PER_THREAD") {
@@ -483,7 +509,6 @@ impl CudaSqwma {
     fn block_x() -> u32 {
         if let Ok(s) = std::env::var("SQWMA_BLOCK_X") {
             if let Ok(v) = s.parse::<u32>() {
-                
                 let v = (v / 32).max(1).min(32) * 32;
                 return v as u32;
             }
@@ -501,7 +526,7 @@ impl CudaSqwma {
         } else {
             ((series_len as u64) + tile - 1) / tile
         };
-        
+
         let target = (self.sm_count.max(1) as u32) * 32;
         let gx = std::cmp::max(
             1,
@@ -623,8 +648,6 @@ impl CudaSqwma {
     }
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -723,7 +746,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("sqwma many-series kernel");
-            self.cuda.stream.synchronize().expect("sqwma many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("sqwma many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -732,11 +758,12 @@ pub mod benches {
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
         let period = 64;
-        let inputs =
-            CudaSqwma::prepare_many_series_inputs(&data_tm, cols, rows, period).expect("sqwma prepare many");
+        let inputs = CudaSqwma::prepare_many_series_inputs(&data_tm, cols, rows, period)
+            .expect("sqwma prepare many");
 
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
-        let d_first_valids = DeviceBuffer::from_slice(&inputs.first_valids).expect("d_first_valids");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&inputs.first_valids).expect("d_first_valids");
         let d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
                 .expect("d_out_tm");
@@ -792,7 +819,9 @@ struct ManySeriesInputs {
 fn expand_grid_sqwma(range: &SqwmaBatchRange) -> Result<Vec<SqwmaParams>, CudaSqwmaError> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return Ok(vec![SqwmaParams { period: Some(start) }]);
+        return Ok(vec![SqwmaParams {
+            period: Some(start),
+        }]);
     }
     if start < end {
         let v: Vec<SqwmaParams> = (start..=end)
@@ -800,23 +829,31 @@ fn expand_grid_sqwma(range: &SqwmaBatchRange) -> Result<Vec<SqwmaParams>, CudaSq
             .map(|p| SqwmaParams { period: Some(p) })
             .collect();
         if v.is_empty() {
-            return Err(CudaSqwmaError::InvalidInput("invalid period range (empty)".into()));
+            return Err(CudaSqwmaError::InvalidInput(
+                "invalid period range (empty)".into(),
+            ));
         }
         return Ok(v);
     }
-    
+
     let mut v = Vec::new();
     let mut cur = start;
     loop {
         v.push(SqwmaParams { period: Some(cur) });
-        if cur == end { break; }
+        if cur == end {
+            break;
+        }
         cur = cur
             .checked_sub(step)
             .ok_or_else(|| CudaSqwmaError::InvalidInput("period underflow".into()))?;
-        if cur < end { break; }
+        if cur < end {
+            break;
+        }
     }
     if v.is_empty() {
-        return Err(CudaSqwmaError::InvalidInput("invalid period range (empty)".into()));
+        return Err(CudaSqwmaError::InvalidInput(
+            "invalid period range (empty)".into(),
+        ));
     }
     Ok(v)
 }

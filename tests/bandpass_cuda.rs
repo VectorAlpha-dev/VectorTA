@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::bandpass::{
     bandpass_batch_with_kernel, bandpass_with_kernel, BandPassBatchRange, BandPassInput,
     BandPassParams,
@@ -103,8 +101,8 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -116,7 +114,7 @@ fn bandpass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     let bandwidth = 0.3f64;
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
-    
+
     let price_tm_quant: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_bp_tm = vec![f64::NAN; cols * rows];
     let mut cpu_bpn_tm = vec![f64::NAN; cols * rows];

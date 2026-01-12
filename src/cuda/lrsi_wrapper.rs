@@ -1,10 +1,3 @@
-//! CUDA scaffolding for Laguerre RSI (LRSI)
-//!
-//! Mirrors ALMA wrapper conventions: policy enums, NON_BLOCKING stream, PTX
-//! load with DetermineTargetFromContext + OptLevel(O2) fallbacks, VRAM checks
-//! with ~64MB headroom, and optional bench profiles. Numeric semantics match
-//! the scalar Rust implementation in src/indicators/lrsi.rs (warmup/NaN rules).
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::{BatchKernelPolicy, ManySeriesKernelPolicy};
@@ -31,12 +24,25 @@ pub enum CudaLrsiError {
     InvalidInput(String),
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -51,7 +57,10 @@ pub struct CudaLrsiPolicy {
 
 impl Default for CudaLrsiPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -61,7 +70,7 @@ pub struct CudaLrsi {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaLrsiPolicy,
-    
+
     sm_count: u32,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
@@ -84,7 +93,8 @@ impl CudaLrsi {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -185,7 +195,6 @@ impl CudaLrsi {
         Ok(())
     }
 
-    
     pub fn lrsi_batch_dev(
         &mut self,
         high_f32: &[f32],
@@ -202,7 +211,6 @@ impl CudaLrsi {
             return Err(CudaLrsiError::InvalidInput("no alpha values".into()));
         }
 
-        
         let len = high_f32.len();
         let mut prices = vec![f32::NAN; len];
         let mut first = None;
@@ -221,7 +229,6 @@ impl CudaLrsi {
             )));
         }
 
-        
         let mut alphas = Vec::with_capacity(combos.len());
         for p in &combos {
             let a = p.alpha.unwrap_or(0.2);
@@ -231,7 +238,6 @@ impl CudaLrsi {
             alphas.push(a as f32);
         }
 
-        
         let in_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("size overflow".into()))?;
@@ -274,7 +280,11 @@ impl CudaLrsi {
 
         self.launch_batch_kernel(&d_prices, &d_alphas, len, first, combos.len(), &mut d_out)?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     fn launch_batch_kernel(
@@ -295,12 +305,11 @@ impl CudaLrsi {
             ));
         }
 
-        
         let policy_block = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => Some(block_x),
             _ => None,
         };
-        
+
         let (block_x, grid_x) = self.pick_block_grid(n_combos, policy_block, 256);
 
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -318,10 +327,11 @@ impl CudaLrsi {
         self.last_batch = Some(BatchKernelSelected::Plain { block_x });
         self.maybe_log_batch_debug();
 
-        let func = self
-            .module
-            .get_function("lrsi_batch_f32")
-            .map_err(|_| CudaLrsiError::MissingKernelSymbol { name: "lrsi_batch_f32" })?;
+        let func = self.module.get_function("lrsi_batch_f32").map_err(|_| {
+            CudaLrsiError::MissingKernelSymbol {
+                name: "lrsi_batch_f32",
+            }
+        })?;
 
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -361,7 +371,6 @@ impl CudaLrsi {
         }
     }
 
-    
     pub fn lrsi_many_series_one_param_time_major_dev(
         &mut self,
         high_tm_f32: &[f32],
@@ -385,7 +394,6 @@ impl CudaLrsi {
             return Err(CudaLrsiError::InvalidInput("alpha out of range".into()));
         }
 
-        
         let mut prices_tm = vec![f32::NAN; elems];
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
@@ -409,7 +417,6 @@ impl CudaLrsi {
             first_valids[s] = fv as i32;
         }
 
-        
         let in_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLrsiError::InvalidInput("prices byte size overflow".into()))?;
@@ -438,10 +445,8 @@ impl CudaLrsi {
 
         let d_prices_tm = DeviceBuffer::from_slice(&prices_tm)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(elems)
-                .map_err(CudaLrsiError::Cuda)?
-        };
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems).map_err(CudaLrsiError::Cuda)? };
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -452,7 +457,11 @@ impl CudaLrsi {
             &mut d_out_tm,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     fn launch_many_series_kernel(
@@ -563,14 +572,13 @@ fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, CudaLrsiError> {
     Ok(out)
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const LEN: usize = 1_000_000;
-    const ROWS: usize = 256; 
+    const ROWS: usize = 256;
 
     struct LrsiBatchState {
         cuda: CudaLrsi,

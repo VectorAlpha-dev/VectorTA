@@ -1,32 +1,21 @@
-//! CUDA wrapper for Choppiness Index (CHOP)
-//!
-//! Goals:
-//! - API parity with ALMA-style wrappers (PTX via OUT_DIR, NON_BLOCKING stream).
-//! - Batch (one series × many params) and many-series × one-param (time-major).
-//! - Warmup/NaN semantics identical to scalar implementation in `src/indicators/chop.rs`.
-//! - Category-appropriate optimization: host builds sparse tables for H/L (batch)
-//!   and host computes ATR prefix sums for many-series to keep kernels simple.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::chop::{ChopBatchRange, ChopParams};
-use crate::indicators::willr::build_willr_gpu_tables; 
+use crate::indicators::willr::build_willr_gpu_tables;
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::sync::Arc;
 use thiserror::Error;
 
-
 const CHOP_REG_RING_MAX: usize = 64;
 
-
-const PINNED_STAGING_THRESHOLD: usize = 1 << 20; 
+const PINNED_STAGING_THRESHOLD: usize = 1 << 20;
 
 #[derive(Debug, Error)]
 pub enum CudaChopError {
@@ -35,20 +24,30 @@ pub enum CudaChopError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle for CHOP with context guard and device id
 pub struct DeviceArrayF32 {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -58,9 +57,13 @@ pub struct DeviceArrayF32 {
 }
 impl DeviceArrayF32 {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaChop {
@@ -77,7 +80,7 @@ impl CudaChop {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/chop_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -87,18 +90,25 @@ impl CudaChop {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        Ok(Self { module, stream, context, device_id: device_id as u32 })
+        Ok(Self {
+            module,
+            stream,
+            context,
+            device_id: device_id as u32,
+        })
     }
 
     #[inline]
-    fn upload_slice_async<T: DeviceCopy>(&self, slice: &[T]) -> Result<DeviceBuffer<T>, CudaChopError> {
+    fn upload_slice_async<T: DeviceCopy>(
+        &self,
+        slice: &[T],
+    ) -> Result<DeviceBuffer<T>, CudaChopError> {
         use std::mem::size_of;
         let bytes = slice
             .len()
             .checked_mul(size_of::<T>())
             .ok_or_else(|| CudaChopError::InvalidInput("byte size overflow".into()))?;
         if bytes >= PINNED_STAGING_THRESHOLD {
-            
             let mut pinned: LockedBuffer<T> = unsafe { LockedBuffer::uninitialized(slice.len()) }?;
             pinned.as_mut_slice().copy_from_slice(slice);
 
@@ -108,8 +118,7 @@ impl CudaChop {
             }
             Ok(d)
         } else {
-            unsafe { DeviceBuffer::from_slice_async(slice, &self.stream) }
-                .map_err(Into::into)
+            unsafe { DeviceBuffer::from_slice_async(slice, &self.stream) }.map_err(Into::into)
         }
     }
 
@@ -127,17 +136,15 @@ impl CudaChop {
                     })
                 }
             }
-            Err(_) => Ok(()), 
+            Err(_) => Ok(()),
         }
     }
-
-    
 
     fn expand_grid(range: &ChopBatchRange) -> Result<Vec<ChopParams>, CudaChopError> {
         let (ps, pe, pt) = range.period;
         let (ss, se, st) = range.scalar;
         let (ds, de, dt) = range.drift;
-        
+
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]
         } else if ps < pe {
@@ -145,31 +152,83 @@ impl CudaChop {
         } else {
             let mut v = Vec::new();
             let mut x = ps;
-            while x >= pe { v.push(x); if x < pe + pt { break; } x -= pt; if x == 0 { break; } }
+            while x >= pe {
+                v.push(x);
+                if x < pe + pt {
+                    break;
+                }
+                x -= pt;
+                if x == 0 {
+                    break;
+                }
+            }
             v
         };
-        
+
         let scalars: Vec<f64> = if st.abs() < 1e-12 || (ss - se).abs() < f64::EPSILON {
             vec![ss]
         } else if ss <= se && st > 0.0 {
-            let mut v = Vec::new(); let mut x = ss; while x <= se + 1e-12 { v.push(x); x += st; } v
+            let mut v = Vec::new();
+            let mut x = ss;
+            while x <= se + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            v
         } else if ss >= se && st < 0.0 {
-            let mut v = Vec::new(); let mut x = ss; while x >= se - 1e-12 { v.push(x); x += st; } v
+            let mut v = Vec::new();
+            let mut x = ss;
+            while x >= se - 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            v
         } else {
-            return Err(CudaChopError::InvalidInput("scalar range step direction invalid".into()));
+            return Err(CudaChopError::InvalidInput(
+                "scalar range step direction invalid".into(),
+            ));
         };
         let drifts: Vec<usize> = if dt == 0 || ds == de {
             vec![ds]
-        } else if ds < de { (ds..=de).step_by(dt).collect() } else {
-            let mut v = Vec::new(); let mut x = ds; while x >= de { v.push(x); if x < de + dt { break; } x -= dt; if x == 0 { break; } } v
+        } else if ds < de {
+            (ds..=de).step_by(dt).collect()
+        } else {
+            let mut v = Vec::new();
+            let mut x = ds;
+            while x >= de {
+                v.push(x);
+                if x < de + dt {
+                    break;
+                }
+                x -= dt;
+                if x == 0 {
+                    break;
+                }
+            }
+            v
         };
-        let cap = periods.len()
+        let cap = periods
+            .len()
             .checked_mul(scalars.len())
             .and_then(|x| x.checked_mul(drifts.len()))
             .ok_or_else(|| CudaChopError::InvalidInput("rows*cols overflow".into()))?;
         let mut combos = Vec::with_capacity(cap);
-        for &p in &periods { for &s in &scalars { for &d in &drifts { combos.push(ChopParams{ period:Some(p), scalar:Some(s), drift:Some(d) }); } } }
-        if combos.is_empty() { return Err(CudaChopError::InvalidInput("no parameter combinations".into())); }
+        for &p in &periods {
+            for &s in &scalars {
+                for &d in &drifts {
+                    combos.push(ChopParams {
+                        period: Some(p),
+                        scalar: Some(s),
+                        drift: Some(d),
+                    });
+                }
+            }
+        }
+        if combos.is_empty() {
+            return Err(CudaChopError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         Ok(combos)
     }
 
@@ -182,12 +241,13 @@ impl CudaChop {
     ) -> Result<(DeviceArrayF32, Vec<ChopParams>), CudaChopError> {
         let n = close_f32.len();
         if n == 0 || high_f32.len() != n || low_f32.len() != n {
-            return Err(CudaChopError::InvalidInput("input slices are empty or mismatched".into()));
+            return Err(CudaChopError::InvalidInput(
+                "input slices are empty or mismatched".into(),
+            ));
         }
 
         let combos = Self::expand_grid(sweep)?;
 
-        
         let mut first = -1isize;
         for i in 0..n {
             let h = high_f32[i];
@@ -198,7 +258,9 @@ impl CudaChop {
                 break;
             }
         }
-        if first < 0 { return Err(CudaChopError::InvalidInput("all values are NaN".into())); }
+        if first < 0 {
+            return Err(CudaChopError::InvalidInput("all values are NaN".into()));
+        }
         let first = first as usize;
 
         let max_period = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
@@ -210,15 +272,12 @@ impl CudaChop {
             )));
         }
 
-        
         let tables = build_willr_gpu_tables(high_f32, low_f32);
 
-        
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let drifts_i32: Vec<i32> = combos.iter().map(|c| c.drift.unwrap() as i32).collect();
         let scalars_f32: Vec<f32> = combos.iter().map(|c| c.scalar.unwrap() as f32).collect();
 
-        
         let out_elems = combos
             .len()
             .checked_mul(n)
@@ -307,29 +366,28 @@ impl CudaChop {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
-        
-        let d_high    = self.upload_slice_async(high_f32)?;
-        let d_low     = self.upload_slice_async(low_f32)?;
-        let d_close   = self.upload_slice_async(close_f32)?;
+        let d_high = self.upload_slice_async(high_f32)?;
+        let d_low = self.upload_slice_async(low_f32)?;
+        let d_close = self.upload_slice_async(close_f32)?;
         let d_periods = self.upload_slice_async(&periods_i32)?;
-        let d_drifts  = self.upload_slice_async(&drifts_i32)?;
+        let d_drifts = self.upload_slice_async(&drifts_i32)?;
         let d_scalars = self.upload_slice_async(&scalars_f32)?;
 
-        let d_log2     = self.upload_slice_async(&tables.log2)?;
-        let d_offsets  = self.upload_slice_async(&tables.level_offsets)?;
-        let d_st_max   = self.upload_slice_async(&tables.st_max)?;
-        let d_st_min   = self.upload_slice_async(&tables.st_min)?;
+        let d_log2 = self.upload_slice_async(&tables.log2)?;
+        let d_offsets = self.upload_slice_async(&tables.level_offsets)?;
+        let d_st_max = self.upload_slice_async(&tables.st_max)?;
+        let d_st_min = self.upload_slice_async(&tables.st_min)?;
         let d_nan_psum = self.upload_slice_async(&tables.nan_psum)?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        
-        let mut func = self
-            .module
-            .get_function("chop_batch_f32")
-            .map_err(|_| CudaChopError::MissingKernelSymbol { name: "chop_batch_f32" })?;
+        let mut func = self.module.get_function("chop_batch_f32").map_err(|_| {
+            CudaChopError::MissingKernelSymbol {
+                name: "chop_batch_f32",
+            }
+        })?;
 
-        
         let shared_bytes: usize = if max_period <= CHOP_REG_RING_MAX {
             0
         } else {
@@ -343,7 +401,6 @@ impl CudaChop {
             func.set_cache_config(CacheConfig::PreferShared)
         };
 
-        
         let rows = combos.len();
         let mut launched = 0usize;
         while launched < rows {
@@ -379,10 +436,17 @@ impl CudaChop {
 
         self.stream.synchronize()?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows, cols: n, ctx: self.context.clone(), device_id: self.device_id }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: n,
+                ctx: self.context.clone(),
+                device_id: self.device_id,
+            },
+            combos,
+        ))
     }
-
-    
 
     pub fn chop_many_series_one_param_time_major_dev(
         &self,
@@ -396,7 +460,9 @@ impl CudaChop {
         if cols == 0 || rows == 0 {
             return Err(CudaChopError::InvalidInput("empty matrix".into()));
         }
-        let n = cols.checked_mul(rows).ok_or_else(|| CudaChopError::InvalidInput("rows*cols overflow".into()))?;
+        let n = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaChopError::InvalidInput("rows*cols overflow".into()))?;
         if high_tm_f32.len() != n || low_tm_f32.len() != n || close_tm_f32.len() != n {
             return Err(CudaChopError::InvalidInput(
                 "matrix inputs must have identical length".into(),
@@ -405,9 +471,10 @@ impl CudaChop {
         let period = params.period.unwrap_or(14);
         let drift = params.drift.unwrap_or(1);
         let scalar = params.scalar.unwrap_or(100.0) as f32;
-        if period == 0 || drift == 0 { return Err(CudaChopError::InvalidInput("invalid params".into())); }
+        if period == 0 || drift == 0 {
+            return Err(CudaChopError::InvalidInput("invalid params".into()));
+        }
 
-        
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
             let mut fv = -1;
@@ -423,16 +490,16 @@ impl CudaChop {
             first_valids[s] = fv;
         }
 
-        
         for s in 0..cols {
             let fv = first_valids[s];
-            if fv < 0 { return Err(CudaChopError::InvalidInput("all values are NaN".into())); }
+            if fv < 0 {
+                return Err(CudaChopError::InvalidInput("all values are NaN".into()));
+            }
             if rows - (fv as usize) < period {
                 return Err(CudaChopError::InvalidInput("not enough valid data".into()));
             }
         }
 
-        
         let atr_rows = rows
             .checked_add(1)
             .ok_or_else(|| CudaChopError::InvalidInput("rows overflow".into()))?;
@@ -447,18 +514,23 @@ impl CudaChop {
                 let mut prev_close = close_tm_f32[fv * cols + s] as f64;
                 let mut rma_atr: f64 = f64::NAN;
                 let mut sum_tr = 0.0f64;
-                let mut acc = 0.0f64; 
-                                      
-                                      
+                let mut acc = 0.0f64;
+
                 for r in fv..rows {
                     let hi = high_tm_f32[r * cols + s] as f64;
                     let lo = low_tm_f32[r * cols + s] as f64;
                     let cl = close_tm_f32[r * cols + s] as f64;
                     let rel = r - fv;
-                let tr = if rel == 0 { hi - lo } else { (hi - lo).max((hi - prev_close).abs().max((lo - prev_close).abs())) };
+                    let tr = if rel == 0 {
+                        hi - lo
+                    } else {
+                        (hi - lo).max((hi - prev_close).abs().max((lo - prev_close).abs()))
+                    };
                     if rel < drift {
                         sum_tr += tr;
-                        if rel == drift - 1 { rma_atr = sum_tr * inv_drift; }
+                        if rel == drift - 1 {
+                            rma_atr = sum_tr * inv_drift;
+                        }
                     } else {
                         rma_atr += inv_drift * (tr - rma_atr);
                     }
@@ -497,7 +569,6 @@ impl CudaChop {
             }
         }
 
-        
         let mut bytes: usize = 0;
         bytes = bytes
             .checked_add(
@@ -533,20 +604,21 @@ impl CudaChop {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
-        
-        let d_high  = self.upload_slice_async(high_tm_f32)?;
-        let d_low   = self.upload_slice_async(low_tm_f32)?;
-        let d_psum  = self.upload_slice_async(&atr_psum_tm)?;
+        let d_high = self.upload_slice_async(high_tm_f32)?;
+        let d_low = self.upload_slice_async(low_tm_f32)?;
+        let d_psum = self.upload_slice_async(&atr_psum_tm)?;
         let d_first = self.upload_slice_async(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
 
         let mut func = self
             .module
             .get_function("chop_many_series_one_param_f32")
-            .map_err(|_| CudaChopError::MissingKernelSymbol { name: "chop_many_series_one_param_f32" })?;
+            .map_err(|_| CudaChopError::MissingKernelSymbol {
+                name: "chop_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        
         let block: BlockSize = (256u32, 1u32, 1u32).into();
         let grid: GridSize = (((cols as u32 + 255) / 256).max(1), 1u32, 1u32).into();
         let stream = &self.stream;
@@ -568,10 +640,15 @@ impl CudaChop {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols, ctx: self.context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: self.context.clone(),
+            device_id: self.device_id,
+        })
     }
 
-    
     pub fn chop_batch_into_host_f32(
         &self,
         high_f32: &[f32],
@@ -585,7 +662,9 @@ impl CudaChop {
             return Err(CudaChopError::InvalidInput("out length mismatch".into()));
         }
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len()) }?;
-        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        unsafe {
+            arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
+        }
         self.stream.synchronize()?;
         self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
@@ -593,12 +672,11 @@ impl CudaChop {
     }
 }
 
-
 pub mod benches {
     use super::*;
-    use std::ffi::c_void;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
+    use std::ffi::c_void;
 
     const ONE_SERIES_LEN: usize = 50_000;
     const PARAM_SWEEP: usize = 128;
@@ -622,15 +700,13 @@ pub mod benches {
     }
 
     fn bytes_sparse_tables(n: usize) -> usize {
-        
-        
         let levels = (usize::BITS as usize).saturating_sub(n.max(1).leading_zeros() as usize);
         let st_elems = n.saturating_mul(levels);
-        
+
         let st_bytes = 2usize
             .saturating_mul(st_elems)
             .saturating_mul(std::mem::size_of::<f32>());
-        
+
         let meta_i32 = (n + 1).saturating_mul(2).saturating_add(levels + 1);
         let meta_bytes = meta_i32.saturating_mul(std::mem::size_of::<i32>());
         st_bytes + meta_bytes
@@ -640,13 +716,15 @@ pub mod benches {
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = PARAM_SWEEP * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let params_bytes = PARAM_SWEEP
-            * (std::mem::size_of::<i32>() + std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+            * (std::mem::size_of::<i32>()
+                + std::mem::size_of::<i32>()
+                + std::mem::size_of::<f32>());
         in_bytes + params_bytes + bytes_sparse_tables(ONE_SERIES_LEN) + out_bytes + 64 * 1024 * 1024
     }
 
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_COLS * MANY_ROWS;
-        let in_bytes = 2 * elems * std::mem::size_of::<f32>(); 
+        let in_bytes = 2 * elems * std::mem::size_of::<f32>();
         let psum_bytes = (MANY_ROWS + 1) * MANY_COLS * std::mem::size_of::<f32>();
         let first_bytes = MANY_COLS * std::mem::size_of::<i32>();
         let out_bytes = elems * std::mem::size_of::<f32>();
@@ -688,9 +766,18 @@ pub mod benches {
                     let mut high_ptr = self.d_high.as_device_ptr().as_raw();
                     let mut low_ptr = self.d_low.as_device_ptr().as_raw();
                     let mut close_ptr = self.d_close.as_device_ptr().as_raw();
-                    let mut periods_ptr = self.d_periods.as_device_ptr().offset(row0 as isize).as_raw();
-                    let mut drifts_ptr = self.d_drifts.as_device_ptr().offset(row0 as isize).as_raw();
-                    let mut scalars_ptr = self.d_scalars.as_device_ptr().offset(row0 as isize).as_raw();
+                    let mut periods_ptr = self
+                        .d_periods
+                        .as_device_ptr()
+                        .offset(row0 as isize)
+                        .as_raw();
+                    let mut drifts_ptr =
+                        self.d_drifts.as_device_ptr().offset(row0 as isize).as_raw();
+                    let mut scalars_ptr = self
+                        .d_scalars
+                        .as_device_ptr()
+                        .offset(row0 as isize)
+                        .as_raw();
                     let mut log2_ptr = self.d_log2.as_device_ptr().as_raw();
                     let mut offs_ptr = self.d_offsets.as_device_ptr().as_raw();
                     let mut stmax_ptr = self.d_st_max.as_device_ptr().as_raw();
@@ -701,7 +788,11 @@ pub mod benches {
                     let mut levels_i = self.levels;
                     let mut n_i = n as i32;
                     let mut maxp_i = self.max_period;
-                    let mut out_ptr = self.d_out.as_device_ptr().offset((row0 * self.len) as isize).as_raw();
+                    let mut out_ptr = self
+                        .d_out
+                        .as_device_ptr()
+                        .offset((row0 * self.len) as isize)
+                        .as_raw();
                     let args: &mut [*mut c_void] = &mut [
                         &mut high_ptr as *mut _ as *mut c_void,
                         &mut low_ptr as *mut _ as *mut c_void,
@@ -752,9 +843,15 @@ pub mod benches {
             .max()
             .unwrap_or(0);
 
-        let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(14) as i32).collect();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(14) as i32)
+            .collect();
         let drifts_i32: Vec<i32> = combos.iter().map(|c| c.drift.unwrap_or(1) as i32).collect();
-        let scalars_f32: Vec<f32> = combos.iter().map(|c| c.scalar.unwrap_or(100.0) as f32).collect();
+        let scalars_f32: Vec<f32> = combos
+            .iter()
+            .map(|c| c.scalar.unwrap_or(100.0) as f32)
+            .collect();
 
         let tables = build_willr_gpu_tables(&high, &low);
         let levels = (tables.level_offsets.len() - 1) as i32;
@@ -781,7 +878,10 @@ pub mod benches {
         let d_st_min = DeviceBuffer::from_slice(&tables.st_min).expect("d_st_min");
         let d_nan_psum = DeviceBuffer::from_slice(&tables.nan_psum).expect("d_nan_psum");
 
-        let func = cuda.module.get_function("chop_batch_f32").expect("chop_batch_f32");
+        let func = cuda
+            .module
+            .get_function("chop_batch_f32")
+            .expect("chop_batch_f32");
         let mut func: Function<'static> = unsafe { std::mem::transmute(func) };
         if shared_bytes == 0 {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
@@ -789,10 +889,9 @@ pub mod benches {
             let _ = func.set_cache_config(CacheConfig::PreferShared);
         }
 
-        let d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(rows * ONE_SERIES_LEN, &cuda.stream)
-        }
-        .expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(rows * ONE_SERIES_LEN, &cuda.stream) }
+                .expect("d_out");
 
         cuda.stream.synchronize().expect("sync after prep");
         Box::new(ChopBatchDeviceState {
@@ -864,7 +963,10 @@ pub mod benches {
                     .launch(&self.func, grid, block, 0, args)
                     .expect("chop_many_series launch");
             }
-            self.cuda.stream.synchronize().expect("chop_many_series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("chop_many_series sync");
         }
     }
 
@@ -954,12 +1056,13 @@ pub mod benches {
         let period = 14i32;
         let scalar = 100.0f32;
 
-        let d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&high_tm, &cuda.stream) }
-            .expect("d_high_tm");
-        let d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&low_tm, &cuda.stream) }
-            .expect("d_low_tm");
-        let d_psum: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&atr_psum_tm, &cuda.stream) }
-            .expect("d_psum_tm");
+        let d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(&high_tm, &cuda.stream) }.expect("d_high_tm");
+        let d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(&low_tm, &cuda.stream) }.expect("d_low_tm");
+        let d_psum: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(&atr_psum_tm, &cuda.stream) }
+                .expect("d_psum_tm");
         let d_first: DeviceBuffer<i32> = DeviceBuffer::from_slice(&first_valids).expect("d_first");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(MANY_COLS * MANY_ROWS, &cuda.stream) }

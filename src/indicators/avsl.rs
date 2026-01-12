@@ -1,60 +1,12 @@
-//! # Anti-Volume Stop Loss (AVSL)
-//!
-//! A dynamic stop-loss indicator that uses volume-price confirmation/contradiction to calculate
-//! adaptive stop-loss levels. AVSL analyzes the relationship between volume-weighted moving averages
-//! (VWMA) and simple moving averages (SMA) to detect volume-price divergences, then calculates
-//! dynamic stop levels based on these divergences and market volatility.
-//!
-//! ## Parameters
-//! - **fast_period**: Period for fast average (default: 12)
-//! - **slow_period**: Period for slow average (default: 26)
-//! - **multiplier**: Volatility multiplier for stop distance (default: 2.0)
-//!
-//! ## Inputs
-//! - Requires close prices, low prices, and volume data
-//! - Supports both raw slices and Candles data structure
-//! - All three input arrays must have the same length
-//!
-//! ## Returns
-//! - **`Ok(AvslOutput)`** containing a `Vec<f64>` matching input length
-//! - Leading values are NaN during warmup (slow_period-1 values)
-//!
-//! ## Decision Log (2025-11-13)
-//! - SIMD enabled under `nightly-avx` with scalar as reference; small speedups on AVX2/AVX512.
-//! - CUDA wrappers present; Python VRAM handle implements CAI v3 + DLPack for interop.
-//! - Public API and numerics unchanged; tests reference values preserved.
-//!
-//! ## Developer Notes (Status)
-//! - Scalar: optimized to a single forward pass with rolling sums and tiny rings (≤200) for the
-//!   dynamic window; avoids large temporaries and extra series materialization.
-//! - SIMD: AVX2/AVX512 partially vectorize the contiguous low-sum (pref) and parts of the ring
-//!   segment. Modest speedups expected; scalar remains the reference path.
-//! - Batch: per-row compute currently dispatches the same kernels; no row-specific sharing yet.
-//! - Warmup/semantics: preserved exactly; allocation and NaN prefixes follow alma.rs patterns.
-//!
-//! ## Binding Tests Status (2025-10-27)
-//! - Python bindings: PASS. `tests/python/test_avsl.py` (13 tests) all pass and the accuracy checks
-//!   compare the last 5 values against the same PineScript reference used by the Rust unit tests
-//!   with the same 1% tolerance.
-//! - WASM bindings: PARTIAL. `tests/wasm/test_avsl.js` batch default-row check passes against the
-//!   Rust reference (within 1%), but the single-series `avsl_js` accuracy test fails: the last 5
-//!   values differ significantly (e.g., got ~64,606 vs expected ~56,472 on the first of the last
-//!   five). This suggests an issue specific to the `avsl_js` path rather than data or batch paths.
-//!   No changes were made to kernels pending investigation.
-
-
-
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -66,32 +18,22 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-
 use crate::indicators::moving_averages::vwma::{
     vwma_into_slice, vwma_with_kernel, VwmaInput, VwmaParams,
 };
 use crate::indicators::sma::{sma_into_slice, sma_with_kernel, SmaInput, SmaParams};
 
-
-
-
-
-
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum AvslData<'a> {
     Candles {
@@ -106,15 +48,16 @@ pub enum AvslData<'a> {
     },
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct AvslOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AvslParams {
     pub fast_period: Option<usize>,
     pub slow_period: Option<usize>,
@@ -131,7 +74,6 @@ impl Default for AvslParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct AvslInput<'a> {
     pub data: AvslData<'a>,
@@ -185,8 +127,6 @@ impl<'a> AvslInput<'a> {
     }
 }
 
-
-/// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct AvslBuilder {
     fast_period: Option<usize>,
@@ -274,7 +214,6 @@ impl AvslBuilder {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum AvslError {
     #[error("avsl: Input data slice is empty.")]
@@ -305,7 +244,11 @@ pub enum AvslError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("avsl: Invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("avsl: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -314,8 +257,6 @@ pub enum AvslError {
     ComputationError(String),
 }
 
-
-/// Find the maximum first valid index across three input arrays
 #[inline(always)]
 fn first_valid_max3(a: &[f64], b: &[f64], c: &[f64]) -> Option<usize> {
     let fa = a.iter().position(|x| !x.is_nan())?;
@@ -323,18 +264,16 @@ fn first_valid_max3(a: &[f64], b: &[f64], c: &[f64]) -> Option<usize> {
     let fc = c.iter().position(|x| !x.is_nan())?;
     Some(fa.max(fb).max(fc))
 }
-/// Main entry point with automatic kernel detection
+
 #[inline]
 pub fn avsl(input: &AvslInput) -> Result<AvslOutput, AvslError> {
     avsl_with_kernel(input, Kernel::Auto)
 }
 
-/// Entry point with explicit kernel selection
 pub fn avsl_with_kernel(input: &AvslInput, kernel: Kernel) -> Result<AvslOutput, AvslError> {
     let (close, low, volume, fast_period, slow_period, multiplier, first, chosen) =
         avsl_prepare(input, kernel)?;
 
-    
     let mut out = alloc_with_nan_prefix(close.len(), first + slow_period - 1);
 
     avsl_compute_into(
@@ -352,7 +291,6 @@ pub fn avsl_with_kernel(input: &AvslInput, kernel: Kernel) -> Result<AvslOutput,
     Ok(AvslOutput { values: out })
 }
 
-/// Zero-allocation version for WASM and performance-critical paths
 #[inline]
 pub fn avsl_into_slice(dst: &mut [f64], input: &AvslInput, kern: Kernel) -> Result<(), AvslError> {
     let (close, low, volume, fast_period, slow_period, multiplier, first, chosen) =
@@ -377,7 +315,6 @@ pub fn avsl_into_slice(dst: &mut [f64], input: &AvslInput, kern: Kernel) -> Resu
         dst,
     )?;
 
-    
     let warmup_end = first + slow_period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -386,7 +323,6 @@ pub fn avsl_into_slice(dst: &mut [f64], input: &AvslInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-/// Prepare and validate input data
 #[inline(always)]
 fn avsl_prepare<'a>(
     input: &'a AvslInput,
@@ -472,7 +408,6 @@ fn avsl_prepare<'a>(
     ))
 }
 
-/// Core computation dispatcher
 #[inline(always)]
 fn avsl_compute_into(
     close: &[f64],
@@ -486,7 +421,6 @@ fn avsl_compute_into(
     out: &mut [f64],
 ) -> Result<(), AvslError> {
     unsafe {
-        // WASM SIMD128 support
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -537,24 +471,21 @@ fn avsl_compute_into(
                 out,
             ),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
-            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                avsl_scalar(
-                    close,
-                    low,
-                    volume,
-                    fast_period,
-                    slow_period,
-                    multiplier,
-                    first,
-                    out,
-                )
-            }
+            Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => avsl_scalar(
+                close,
+                low,
+                volume,
+                fast_period,
+                slow_period,
+                multiplier,
+                first,
+                out,
+            ),
             _ => unreachable!(),
         }
     }
 }
 
-// ==================== SCALAR IMPLEMENTATION ====================
 #[inline]
 pub fn avsl_scalar(
     close: &[f64],
@@ -685,7 +616,6 @@ pub fn avsl_scalar(
                     ring_pos = 0;
                 }
 
-                // Total elements we can actually take from [0..=i]
                 let take = len_v.min(i + 1);
                 let hist_n = (i - base + 1).min(take);
                 let pref_n = take - hist_n;
@@ -770,7 +700,6 @@ pub fn avsl_scalar(
     Ok(())
 }
 
-// Reference scalar implementation (materializes intermediate series); used for correctness.
 #[inline]
 fn avsl_scalar_ref(
     close: &[f64],
@@ -784,7 +713,6 @@ fn avsl_scalar_ref(
 ) -> Result<(), AvslError> {
     let len = close.len();
 
-    // rows: 0 vwma_fast | 1 vwma_slow | 2 sma_fast | 3 sma_slow | 4 vol_sma_fast | 5 vol_sma_slow | 6 pre_avsl
     let rows = 7usize;
     let cols = len;
 
@@ -945,7 +873,6 @@ fn avsl_scalar_ref(
     Ok(())
 }
 
-// ==================== WASM SIMD128 IMPLEMENTATION ====================
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn avsl_simd128(
@@ -958,7 +885,6 @@ unsafe fn avsl_simd128(
     first_val: usize,
     out: &mut [f64],
 ) -> Result<(), AvslError> {
-    // For now, fallback to scalar implementation
     avsl_scalar(
         close,
         low,
@@ -971,7 +897,6 @@ unsafe fn avsl_simd128(
     )
 }
 
-// ==================== AVX2 IMPLEMENTATION ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn avsl_avx2(
@@ -1027,7 +952,6 @@ unsafe fn avsl_avx2(
     let l_ptr = low.as_ptr();
     let v_ptr = volume.as_ptr();
 
-    // masks for adjust()
     let v_neg1 = _mm256_set1_pd(-1.0);
     let v_zero = _mm256_set1_pd(0.0);
     let v_pos1 = _mm256_set1_pd(1.0);
@@ -1088,7 +1012,7 @@ unsafe fn avsl_avx2(
             };
 
             let vpc = vwma_s - sma_s;
-            // Use same FP pathway as scalar for vpr to minimize rounding drift
+
             let vpr = if sma_f != 0.0 { vwma_f / sma_f } else { 1.0 };
             let vol_f = sum_vol_f * inv_fast;
             let vol_s = sum_vol_s * inv_slow;
@@ -1123,7 +1047,6 @@ unsafe fn avsl_avx2(
             let mut acc = 0.0_f64;
 
             if hist_n > 0 {
-                // Scalar-ordered accumulation for exact parity
                 let mut rp = if ring_pos == 0 {
                     MAX_WIN - 1
                 } else {
@@ -1194,7 +1117,6 @@ unsafe fn avsl_avx2(
     Ok(())
 }
 
-// ==================== AVX512 IMPLEMENTATION ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn avsl_avx512(
@@ -1300,7 +1222,7 @@ unsafe fn avsl_avx512(
                 sma_s
             };
             let vpc = vwma_s - sma_s;
-            // Match scalar semantics: when volume sum is zero (vwma = sma), vpr should be 1.0
+
             let vpr = if sma_f != 0.0 && sum_vol_f != 0.0 {
                 (sum_cxv_f * (fast_period as f64)) / (sum_vol_f * sum_close_f)
             } else {
@@ -1336,7 +1258,7 @@ unsafe fn avsl_avx512(
             let hist_n = (i - base + 1).min(take);
             let pref_n = take - hist_n;
             let mut acc = 0.0_f64;
-            // Accumulate recent portion using exact scalar mapping to ensure parity
+
             if hist_n > 0 {
                 let mut rp = if ring_pos == 0 {
                     MAX_WIN - 1
@@ -1409,26 +1331,19 @@ unsafe fn avsl_avx512(
     Ok(())
 }
 
-// ==================== STREAMING API (O(1) per update) ====================
-// Decision: Streaming path uses rolling sums + small rings to achieve O(1) work per tick,
-// matching scalar semantics and warmup (warmup2). Public API unchanged (try_new, update).
 #[derive(Debug, Clone)]
 pub struct AvslStream {
-    // params
     fast_period: usize,
     slow_period: usize,
     multiplier: f64,
 
-    // precomputed
     inv_fast: f64,
     inv_slow: f64,
-    base: usize,    // first index where vpc/vpr are valid: slow - 1 (first==0 in stream)
-    warmup2: usize, // base + slow - 1
+    base: usize,
+    warmup2: usize,
 
-    // time / counters
-    t: usize, // number of updates processed so far (0-based index of current bar)
+    t: usize,
 
-    // --- rolling sums for SMA/VWMA (fast & slow) ---
     sum_close_f: f64,
     sum_vol_f: f64,
     sum_cxv_f: f64,
@@ -1436,30 +1351,24 @@ pub struct AvslStream {
     sum_vol_s: f64,
     sum_cxv_s: f64,
 
-    // ring to remove trailing samples for fast/slow windows
-    ring_len: usize,      // = max(fast_period, slow_period)
-    ring_pos: usize,      // next write position
-    close_ring: Vec<f64>, // len = ring_len
-    vol_ring: Vec<f64>,   // len = ring_len
-    cxv_ring: Vec<f64>,   // len = ring_len (close*volume)
+    ring_len: usize,
+    ring_pos: usize,
+    close_ring: Vec<f64>,
+    vol_ring: Vec<f64>,
+    cxv_ring: Vec<f64>,
 
-    // --- prefix-sum rings for variable-length last-K queries (K <= 200) ---
-    // We store cumulative sums at index (t+1) % R. Query sum of last K as S[t+1] - S[t+1-K].
-    // Take R = MAX_WIN + 1 so we never overwrite a needed entry (K <= MAX_WIN).
     csum_low: [f64; AvslStream::R],
-    csum_y: [f64; AvslStream::R], // y_i = low_i / (adj(vpc_i) * vpr_i), 0 before base
+    csum_y: [f64; AvslStream::R],
 
-    // --- SMA over 'pre' (slow_period) ---
-    pre_ring: Vec<f64>, // len = slow_period
+    pre_ring: Vec<f64>,
     pre_pos: usize,
     pre_sum: f64,
-    pre_cnt: usize, // counts only bars >= base for pre-averaging
+    pre_cnt: usize,
 }
 
 impl AvslStream {
-    // constants used by the streaming kernel
     const MAX_WIN: usize = 200;
-    const R: usize = Self::MAX_WIN + 1; // prefix-sum ring length
+    const R: usize = Self::MAX_WIN + 1;
 
     pub fn try_new(params: AvslParams) -> Result<Self, AvslError> {
         let fast_period = params.fast_period.unwrap_or(12);
@@ -1544,17 +1453,14 @@ impl AvslStream {
     pub fn update(&mut self, close: f64, low: f64, volume: f64) -> Option<f64> {
         let i = self.t;
 
-        // ---- 1) Update rolling sums for fast/slow windows (SMA & VWMA) ----
         let cv = close * volume;
 
-        // positions of samples to drop
         let rp = self.ring_pos;
         let rl = self.ring_len;
 
         let pos_old_fast = (rp + rl - (self.fast_period % rl)) % rl;
         let pos_old_slow = (rp + rl - (self.slow_period % rl)) % rl;
 
-        // old samples
         let (c_old_f, v_old_f, cv_old_f) = if i >= self.fast_period {
             (
                 self.close_ring[pos_old_fast],
@@ -1575,26 +1481,21 @@ impl AvslStream {
             (0.0, 0.0, 0.0)
         };
 
-        // add new, remove old (fast)
         self.sum_close_f += close - c_old_f;
         self.sum_vol_f += volume - v_old_f;
         self.sum_cxv_f += cv - cv_old_f;
 
-        // add new, remove old (slow)
         self.sum_close_s += close - c_old_s;
         self.sum_vol_s += volume - v_old_s;
         self.sum_cxv_s += cv - cv_old_s;
 
-        // write into rings and advance
         self.close_ring[rp] = close;
         self.vol_ring[rp] = volume;
         self.cxv_ring[rp] = cv;
         self.ring_pos = (rp + 1) % rl;
 
-        // ---- 2) Prefix sums for low and y (y is 0 before base to match scalar semantics) ----
         let t1_mod = (i + 1) % Self::R;
 
-        // Compute vpc/vpr/vm only when i >= base; otherwise y contributes 0
         let mut y_i = 0.0;
         if i >= self.base {
             let sma_f = self.sum_close_f * self.inv_fast;
@@ -1618,18 +1519,15 @@ impl AvslStream {
             let vol_s = self.sum_vol_s * self.inv_slow;
             let _vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
 
-            // adj mapping identical to scalar_ref
             let adj = Self::adjust_vpc(vpc);
             if adj != 0.0 && vpr != 0.0 {
                 y_i = low / (adj * vpr);
             }
         }
 
-        // write prefix sums (store cumulative at index t+1)
         self.csum_low[t1_mod] = self.csum_low[i % Self::R] + low;
         self.csum_y[t1_mod] = self.csum_y[i % Self::R] + y_i;
 
-        // ---- 3) If i >= base, compute vpci/len_v and the pre value; then feed slow SMA ----
         let mut out: Option<f64> = None;
 
         if i >= self.base {
@@ -1652,7 +1550,6 @@ impl AvslStream {
             let vm = if vol_s != 0.0 { vol_f / vol_s } else { 1.0 };
             let vpci = vpc * vpr * vm;
 
-            // len_v per spec, clamped to [1..MAX_WIN]
             let t_len = if vpc < 0.0 {
                 (vpci - 3.0).abs().round()
             } else {
@@ -1660,24 +1557,20 @@ impl AvslStream {
             };
             let len_v = t_len.max(1.0).min(Self::MAX_WIN as f64) as usize;
 
-            // take/hist/pref split identical to scalar path
             let take = len_v.min(i + 1);
             let hist_n = ((i - self.base + 1).min(take)) as usize;
             let pref_n = take - hist_n;
 
-            // prefix-sum queries (O(1))
             let sum_hist_y = Self::sum_last(&self.csum_y, t1_mod, i + 1, hist_n);
             let sum_take_l = Self::sum_last(&self.csum_low, t1_mod, i + 1, take);
             let sum_hist_l = Self::sum_last(&self.csum_low, t1_mod, i + 1, hist_n);
             let acc = sum_hist_y + (sum_take_l - sum_hist_l);
 
-            // price_v and pre_i
             let inv_len_v = 1.0 / (len_v as f64);
             let price_v = (acc * inv_len_v) * 0.01;
             let dev = self.multiplier.mul_add(vpci, 0.0) * vm;
             let pre_i = (low - price_v) + dev;
 
-            // slow SMA over 'pre'
             self.pre_sum += pre_i;
             if self.pre_cnt < self.slow_period {
                 self.pre_ring[self.pre_pos] = pre_i;
@@ -1700,13 +1593,11 @@ impl AvslStream {
             }
         }
 
-        // advance time
         self.t = i + 1;
         out
     }
 }
 
-// ==================== BATCH API ====================
 #[derive(Clone, Debug)]
 pub struct AvslBatchRange {
     pub fast_period: (usize, usize, usize),
@@ -1717,9 +1608,9 @@ pub struct AvslBatchRange {
 impl Default for AvslBatchRange {
     fn default() -> Self {
         Self {
-            fast_period: (12, 12, 0),    // Static at default value
-            slow_period: (26, 275, 1),    // 250 combos (includes default 26)
-            multiplier: (2.0, 2.0, 0.0), // Static at default value
+            fast_period: (12, 12, 0),
+            slow_period: (26, 275, 1),
+            multiplier: (2.0, 2.0, 0.0),
         }
     }
 }
@@ -1810,7 +1701,7 @@ impl AvslBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct AvslBatchOutput {
-    pub values: Vec<f64>, // row-major [rows * cols]
+    pub values: Vec<f64>,
     pub combos: Vec<AvslParams>,
     pub rows: usize,
     pub cols: usize,
@@ -1842,15 +1733,19 @@ fn axis_usize((s, e, st): (usize, usize, usize)) -> Vec<usize> {
     if s < e {
         return (s..=e).step_by(st.max(1)).collect();
     }
-    // reversed bounds
+
     let mut v = Vec::new();
     let step = st.max(1);
     let mut cur = s;
     while cur >= e {
         v.push(cur);
-        if cur < step { break; }
+        if cur < step {
+            break;
+        }
         cur -= step;
-        if cur == usize::MAX { break; }
+        if cur == usize::MAX {
+            break;
+        }
     }
     v
 }
@@ -1927,7 +1822,6 @@ pub fn avsl_batch_with_kernel(
         other => return Err(AvslError::InvalidKernelForBatch(other)),
     };
 
-    // We dispatch rows via Scalar compute, like alma.rs maps batch→SIMD choice.
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1947,10 +1841,8 @@ pub fn avsl_batch_with_kernel(
     let cols = close.len();
     let rows = combos.len();
 
-    // Allocate uninitialized rows×cols, set only warm prefixes to NaN.
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // warm prefix for each row = first_valid + slow_period - 1
     let first = first_valid_max3(close, low, volume).ok_or(AvslError::AllValuesNaN)?;
     let warm: Vec<usize> = combos
         .iter()
@@ -1958,7 +1850,6 @@ pub fn avsl_batch_with_kernel(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Transmute to &mut [f64] without extra init
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -1981,7 +1872,6 @@ pub fn avsl_batch_with_kernel(
     })
 }
 
-// Separate functions for explicit parallel/serial control
 #[inline(always)]
 pub fn avsl_batch_slice(
     close: &[f64],
@@ -2065,7 +1955,6 @@ fn avsl_batch_inner(
     if parallel {
         avsl_batch_inner_into(close, low, volume, &combos, simd, out)?;
     } else {
-        // Serial version
         let out_rows: &mut [MaybeUninit<f64>] = unsafe {
             core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
         };
@@ -2107,16 +1996,14 @@ fn avsl_batch_inner_into(
 ) -> Result<(), AvslError> {
     let cols = close.len();
     let first = first_valid_max3(close, low, volume).ok_or(AvslError::AllValuesNaN)?;
-    // Safety: out length is rows*cols laid out by caller.
+
     let rows = combos.len();
-    // length check and warmup prefix validation
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(AvslError::InvalidRange {
-            start: 0,
-            end: 0,
-            step: 0,
-        })?;
+
+    let expected = rows.checked_mul(cols).ok_or(AvslError::InvalidRange {
+        start: 0,
+        end: 0,
+        step: 0,
+    })?;
     if out.len() != expected {
         return Err(AvslError::OutputLengthMismatch {
             expected,
@@ -2133,13 +2020,11 @@ fn avsl_batch_inner_into(
         let slow = p.slow_period.unwrap_or(26);
         let mult = p.multiplier.unwrap_or(2.0);
 
-        // Write directly into the row slice
         let dst: &mut [f64] =
             unsafe { core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, cols) };
         avsl_compute_into(close, low, volume, fast, slow, mult, first, kern, dst)
     };
 
-    // Non-WASM: allow parallel fill. On WASM: serial.
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
@@ -2157,7 +2042,6 @@ fn avsl_batch_inner_into(
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
 #[cfg(feature = "python")]
 #[pyclass(name = "AvslStream")]
 pub struct AvslStreamPy {
@@ -2244,8 +2128,6 @@ pub fn avsl_batch_py<'py>(
         multiplier: mult_range,
     };
 
-    // Expand to know rows and allocate flattened output uninitialized.
-    // Treat empty expansion or overflow as an invalid range error.
     let combos = expand_grid_avsl(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err(
@@ -2259,18 +2141,16 @@ pub fn avsl_batch_py<'py>(
     }
     let rows = combos.len();
     let cols = close.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| {
-            PyValueError::new_err(
-                AvslError::InvalidRange {
-                    start: sweep.fast_period.0,
-                    end: sweep.fast_period.1,
-                    step: sweep.fast_period.2,
-                }
-                .to_string(),
-            )
-        })?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err(
+            AvslError::InvalidRange {
+                start: sweep.fast_period.0,
+                end: sweep.fast_period.1,
+                step: sweep.fast_period.2,
+            }
+            .to_string(),
+        )
+    })?;
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
@@ -2322,7 +2202,6 @@ pub fn avsl_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== Python CUDA Bindings ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::avsl_wrapper::CudaAvsl;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2334,7 +2213,6 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-// AVSL-specific Python device handle with CAI v3 + DLPack and context guard
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Avsl", unsendable)]
 pub struct DeviceArrayF32AvslPy {
@@ -2371,7 +2249,7 @@ impl DeviceArrayF32AvslPy {
             inner.buf.as_device_ptr().as_raw() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2389,7 +2267,6 @@ impl DeviceArrayF32AvslPy {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2408,12 +2285,11 @@ impl DeviceArrayF32AvslPy {
                 }
             }
         }
-        
+
         let _ = stream;
 
-        
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             crate::cuda::moving_averages::DeviceArrayF32 {
@@ -2435,8 +2311,16 @@ impl DeviceArrayF32AvslPy {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32AvslPy {
-    pub fn new(inner: crate::cuda::moving_averages::DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+    pub fn new(
+        inner: crate::cuda::moving_averages::DeviceArrayF32,
+        ctx_guard: Arc<Context>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
     }
 }
 
@@ -2543,8 +2427,7 @@ pub fn avsl_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32AvslPy::new(inner, ctx, dev_id))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn avsl_js(
     close: &[f64],
@@ -2554,7 +2437,6 @@ pub fn avsl_js(
     slow_period: usize,
     multiplier: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    
     let len = close.len();
     if len == 0 {
         return Err(JsValue::from_str("empty input"));
@@ -2577,9 +2459,6 @@ pub fn avsl_js(
         return Err(JsValue::from_str("Not enough valid data"));
     }
 
-    
-    
-    
     let sweep = AvslBatchRange {
         fast_period: (fast_period, fast_period, 0),
         slow_period: (slow_period, slow_period, 0),
@@ -2590,18 +2469,13 @@ pub fn avsl_js(
     Ok(out.values)
 }
 
-/// Zero-allocation native API that writes results into a caller-provided buffer.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-/// - Uses `Kernel::Auto` for dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn avsl_into(input: &AvslInput, out: &mut [f64]) -> Result<(), AvslError> {
     avsl_into_slice(out, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn avsl_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2610,7 +2484,7 @@ pub fn avsl_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn avsl_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2618,7 +2492,7 @@ pub fn avsl_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn avsl_into(
     close_ptr: *const f64,
@@ -2639,7 +2513,6 @@ pub fn avsl_into(
         let vol = core::slice::from_raw_parts(vol_ptr, len);
         let out = core::slice::from_raw_parts_mut(out_ptr, len);
 
-        
         let n = close.len();
         if n == 0 {
             return Err(JsValue::from_str("empty input"));
@@ -2667,15 +2540,21 @@ pub fn avsl_into(
             multiplier: Some(multiplier),
         };
 
-        
         if out_ptr as *const f64 == close_ptr as *const f64
             || out_ptr as *const f64 == low_ptr as *const f64
             || out_ptr as *const f64 == vol_ptr as *const f64
         {
             let mut temp = vec![0.0; len];
             let combos = vec![params];
-            avsl_batch_inner_into(close, low, vol, &combos, detect_best_batch_kernel(), &mut temp)
-                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+            avsl_batch_inner_into(
+                close,
+                low,
+                vol,
+                &combos,
+                detect_best_batch_kernel(),
+                &mut temp,
+            )
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
             out.copy_from_slice(&temp);
         } else {
             let combos = vec![params];
@@ -2686,7 +2565,7 @@ pub fn avsl_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AvslBatchConfig {
     pub fast_range: (usize, usize, usize),
@@ -2694,7 +2573,7 @@ pub struct AvslBatchConfig {
     pub mult_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AvslBatchJsOutput {
     pub values: Vec<f64>,
@@ -2703,7 +2582,7 @@ pub struct AvslBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = avsl_batch)]
 pub fn avsl_batch_unified_js(
     close: &[f64],
@@ -2733,7 +2612,7 @@ pub fn avsl_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub struct AvslContext {
     fast_period: usize,
@@ -2742,7 +2621,7 @@ pub struct AvslContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 impl AvslContext {
     #[wasm_bindgen(constructor)]
@@ -2802,7 +2681,6 @@ impl AvslContext {
 
             let first = first_valid_max3(close, low, volume).unwrap_or(0);
 
-            
             if out_ptr as *const f64 == close_ptr
                 || out_ptr as *const f64 == low_ptr
                 || out_ptr as *const f64 == vol_ptr
@@ -2843,7 +2721,7 @@ impl AvslContext {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn avsl_batch_into(
     close_ptr: *const f64,
@@ -2873,7 +2751,7 @@ pub fn avsl_batch_into(
             slow_period: (slow_start, slow_end, slow_step),
             multiplier: (mult_start, mult_end, mult_step),
         };
-        
+
         let combos = expand_grid_avsl(&sweep);
         if combos.is_empty() {
             return Err(JsValue::from_str(
@@ -2899,13 +2777,11 @@ pub fn avsl_batch_into(
         })?;
         let out = core::slice::from_raw_parts_mut(out_ptr, total);
 
-        
         avsl_batch_inner_into(close, low, vol, &combos, detect_best_batch_kernel(), out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2914,7 +2790,6 @@ mod tests {
     use paste::paste;
     use std::error::Error;
 
-    
     macro_rules! skip_if_unsupported {
         ($kernel:expr, $test_name:expr) => {
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -2939,7 +2814,6 @@ mod tests {
         let input = AvslInput::from_candles(&candles, "close", "low", AvslParams::default());
         let result = avsl_with_kernel(&input, kernel)?;
 
-        
         let expected_last_five = [
             56471.61721191,
             56267.11946706,
@@ -2951,7 +2825,7 @@ mod tests {
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
-            let tolerance = expected_last_five[i].abs() * 0.01; 
+            let tolerance = expected_last_five[i].abs() * 0.01;
             assert!(
                 diff < tolerance,
                 "[{}] AVSL {:?} mismatch at idx {}: got {}, expected {}, diff {}",
@@ -3001,7 +2875,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
 
         let close = [1.0, 2.0, 3.0];
-        let low = [0.9, 1.9]; 
+        let low = [0.9, 1.9];
         let volume = [100.0, 200.0, 300.0];
         let params = AvslParams::default();
         let input = AvslInput::from_slices(&close, &low, &volume, params);
@@ -3024,7 +2898,7 @@ mod tests {
         let params = AvslParams {
             fast_period: Some(12),
             slow_period: Some(26),
-            multiplier: Some(-1.0), 
+            multiplier: Some(-1.0),
         };
         let input = AvslInput::from_slices(&data, &data, &data, params);
         let res = avsl_with_kernel(&input, kernel);
@@ -3036,7 +2910,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_avsl_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3068,7 +2941,6 @@ mod tests {
         }
     }
 
-    
     generate_all_avsl_tests!(
         check_avsl_accuracy,
         check_avsl_empty_input,
@@ -3077,7 +2949,6 @@ mod tests {
         check_avsl_invalid_multiplier
     );
 
-    
     fn check_avsl_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -3131,7 +3002,7 @@ mod tests {
             .mult_range(1.5, 2.5, 0.5)
             .apply_candles(&candles, "close", "low")?;
 
-        let expected_combos = 2 * 2 * 3; 
+        let expected_combos = 2 * 2 * 3;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, candles.close.len());
@@ -3139,7 +3010,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -3173,15 +3043,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let params = AvslParams::default();
         let input = AvslInput::from_candles(&candles, "close", "low", params.clone());
         let batch_result = avsl(&input)?;
 
-        
         let mut stream = AvslStream::try_new(params)?;
 
-        
         let mut stream_results = Vec::new();
         for i in 0..candles.close.len() {
             if let Some(value) = stream.update(candles.close[i], candles.low[i], candles.volume[i])
@@ -3190,7 +3057,6 @@ mod tests {
             }
         }
 
-        
         if !stream_results.is_empty() && !batch_result.values.is_empty() {
             let last_stream = stream_results.last().unwrap();
             let last_batch = batch_result
@@ -3201,7 +3067,7 @@ mod tests {
                 .unwrap();
 
             let diff = (last_stream - last_batch).abs();
-            let tolerance = last_batch.abs() * 0.01; 
+            let tolerance = last_batch.abs() * 0.01;
             assert!(
                 diff < tolerance,
                 "Streaming vs batch mismatch: {} vs {}, diff {}",
@@ -3219,20 +3085,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let output = AvslBatchBuilder::with_default_candles(&candles).map_err(|e| {
             eprintln!("Error: {:?}", e);
             e
         })?;
         assert_eq!(output.cols, candles.close.len());
 
-        
         let params = AvslParams::default();
         let row_idx = output.row_for_params(&params);
         assert!(row_idx.is_some());
-        assert_eq!(row_idx.unwrap(), 0); 
+        assert_eq!(row_idx.unwrap(), 0);
 
-        
         let sweep = AvslBatchRange::default();
         let par_output = avsl_batch_par_slice(
             &candles.close,
@@ -3252,7 +3115,6 @@ mod tests {
         assert_eq!(par_output.rows, ser_output.rows);
         assert_eq!(par_output.cols, ser_output.cols);
 
-        
         let default_output = AvslBatchBuilder::with_default_slices(
             &candles.close,
             &candles.low,
@@ -3260,13 +3122,12 @@ mod tests {
             Kernel::Auto,
         )?;
         assert_eq!(default_output.cols, candles.close.len());
-        assert_eq!(default_output.rows, 250); 
+        assert_eq!(default_output.rows, 250);
 
         Ok(())
     }
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_avsl_into_matches_api() -> Result<(), Box<dyn Error>> {
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
@@ -3277,10 +3138,8 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let input = AvslInput::from_candles(&candles, "close", "low", AvslParams::default());
 
-        
         let baseline = avsl(&input)?;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
         avsl_into(&input, &mut out)?;
 

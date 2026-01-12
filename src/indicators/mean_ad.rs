@@ -1,31 +1,7 @@
-//! # Mean Absolute Deviation (MeanAd)
-//!
-//! Computes the mean absolute deviation as a rolling statistic. The indicator is implemented
-//! with a two-pass method: first, a rolling mean is computed, then a rolling mean of the
-//! absolute deviations from that mean. The `period` parameter controls the window size.
-//!
-//! ## Parameters
-//! - **period**: The window size (number of data points, default: 5).
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **values**: Vector of mean absolute deviation values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - Decision: Streaming uses O(1) sliding windows with two ring buffers (prices + residuals),
-//!   matching batch outputs exactly. First Some(...) appears at index `2*period - 2`.
-//! - SIMD: AVX2/AVX512 paths delegate to scalar; time-recursive recurrence limits gains.
-//! - Scalar: Incremental SMA update, cached reciprocal per call, modulo-free ring indices.
-//! - Batch: Uses uninitialized helpers; NaN warmup prefixes mirror batch semantics.
-//! - Decision log: SIMD present but delegates to scalar; CUDA wrapper reuses the shared DeviceArrayF32 handle; Python interop uses ALMA’s DeviceArrayF32Py for CAI v3 + DLPack v1.x; numerical outputs unchanged.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes,
-    make_uninit_matrix,
+    alloc_with_nan_prefix, detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -42,13 +18,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -193,7 +169,11 @@ pub enum MeanAdError {
     #[error("mean_ad: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("mean_ad: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("mean_ad: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
@@ -236,7 +216,6 @@ pub fn mean_ad_with_kernel(
     }
 
     let chosen = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -251,11 +230,7 @@ pub fn mean_ad_with_kernel(
     }
 }
 
-/// Write Mean AD values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like `mean_ad()` (quiet-NaN prefix semantics).
-/// - `out.len()` must equal the input length; otherwise an error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn mean_ad_into(input: &MeanAdInput, out: &mut [f64]) -> Result<(), MeanAdError> {
     mean_ad_into_slice(out, input, Kernel::Auto)
@@ -267,7 +242,6 @@ pub fn mean_ad_scalar(
     period: usize,
     first: usize,
 ) -> Result<MeanAdOutput, MeanAdError> {
-    
     if period == 0 {
         return Err(MeanAdError::InvalidPeriod {
             period: 0,
@@ -283,32 +257,26 @@ pub fn mean_ad_scalar(
 
     let n = data.len();
 
-    
     if first + period > n {
         let out = alloc_with_nan_prefix(n, n);
         return Ok(MeanAdOutput { values: out });
     }
 
-    
     let inv_p = 1.0f64 / (period as f64);
 
-    
     let warmup_end = first + (period << 1) - 2;
     let mut out = alloc_with_nan_prefix(n, warmup_end.min(n));
 
-    
     let mut sum = 0.0f64;
     for i in first..(first + period) {
         sum += data[i];
     }
     let mut sma = sum * inv_p;
 
-    
     let mut residual_buffer = vec![0.0f64; period];
     let mut buffer_index = 0usize;
     let mut residual_sum = 0.0f64;
 
-    
     let start_t = first + period - 1;
     let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
     for t in start_t..=fill_t_end {
@@ -325,17 +293,14 @@ pub fn mean_ad_scalar(
         }
     }
 
-    
     if warmup_end < n {
         out[warmup_end] = residual_sum * inv_p;
     }
 
-    
-    let mut t = start_t + period; 
+    let mut t = start_t + period;
     while t < n {
         let residual = (data[t] - sma).abs();
 
-        
         let old = residual_buffer[buffer_index];
         residual_sum += residual - old;
         residual_buffer[buffer_index] = residual;
@@ -344,10 +309,8 @@ pub fn mean_ad_scalar(
             buffer_index = 0;
         }
 
-        
         out[t] = residual_sum * inv_p;
 
-        
         if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
             sma = sum * inv_p;
@@ -405,7 +368,6 @@ pub fn mean_ad_batch_with_kernel(
     k: Kernel,
 ) -> Result<MeanAdBatchOutput, MeanAdError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MeanAdError::InvalidKernelForBatch(other)),
@@ -426,7 +388,9 @@ pub struct MeanAdBatchRange {
 
 impl Default for MeanAdBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -494,9 +458,7 @@ impl MeanAdBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &MeanAdBatchRange) -> Result<Vec<MeanAdParams>, MeanAdError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, MeanAdError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MeanAdError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -512,7 +474,7 @@ fn expand_grid(r: &MeanAdBatchRange) -> Result<Vec<MeanAdParams>, MeanAdError> {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -583,13 +545,14 @@ fn mean_ad_batch_inner_into(
             data_len: data.len(),
         });
     }
-    let expected = combos
-        .len()
-        .checked_mul(data.len())
-        .ok_or_else(|| MeanAdError::OutputLengthMismatch {
-            expected: usize::MAX,
-            got: out.len(),
-        })?;
+    let expected =
+        combos
+            .len()
+            .checked_mul(data.len())
+            .ok_or_else(|| MeanAdError::OutputLengthMismatch {
+                expected: usize::MAX,
+                got: out.len(),
+            })?;
     if out.len() != expected {
         return Err(MeanAdError::OutputLengthMismatch {
             expected,
@@ -616,7 +579,6 @@ fn mean_ad_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -694,23 +656,19 @@ fn mean_ad_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + 2 * c.period.unwrap() - 2)
         .collect();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
     let values_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(values_ptr, buf_guard.len()) };
 
-    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -718,7 +676,7 @@ fn mean_ad_batch_inner(
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
-        
+
         let warmup_end = first + 2 * period - 2;
         for i in 0..warmup_end.min(out_row.len()) {
             out_row[i] = f64::NAN;
@@ -753,7 +711,6 @@ fn mean_ad_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -779,19 +736,16 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     let n = data.len();
     let inv_p = 1.0f64 / (period as f64);
 
-    
     let mut sum = 0.0f64;
     for i in first..(first + period) {
         sum += data[i];
     }
     let mut sma = sum * inv_p;
 
-    
     let mut residual_buffer = vec![0.0f64; period];
     let mut buffer_index = 0usize;
     let mut residual_sum = 0.0f64;
 
-    
     let start_t = first + period - 1;
     let fill_t_end = (start_t + period - 1).min(n.saturating_sub(1));
     for t in start_t..=fill_t_end {
@@ -808,18 +762,15 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         }
     }
 
-    
     let first_output = first + (period << 1) - 2;
     if first_output < n {
         out[first_output] = residual_sum * inv_p;
     }
 
-    
-    let mut t = start_t + period; 
+    let mut t = start_t + period;
     while t < n {
         let residual = (data[t] - sma).abs();
 
-        
         let old = residual_buffer[buffer_index];
         residual_sum += residual - old;
         residual_buffer[buffer_index] = residual;
@@ -828,10 +779,8 @@ pub fn mean_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
             buffer_index = 0;
         }
 
-        
         out[t] = residual_sum * inv_p;
 
-        
         if t + 1 < n {
             sum += data[t + 1] - data[t + 1 - period];
             sma = sum * inv_p;
@@ -907,63 +856,52 @@ impl MeanAdStream {
         let p = self.period;
         let inv_p = 1.0f64 / (p as f64);
 
-        
         let price_idx = self.head;
         let old_x = self.buffer[price_idx];
 
         let resid_idx = self.mean_head;
         let old_r = self.mean_buffer[resid_idx];
 
-        
         self.buffer[price_idx] = value;
         let next_price_idx = price_idx + 1;
         let wrapped_prices = next_price_idx == p;
         self.head = if wrapped_prices { 0 } else { next_price_idx };
 
-        
         let just_filled_prices = !self.filled && wrapped_prices;
         if just_filled_prices {
             self.filled = true;
         }
-        
+
         if !self.filled {
             self.mean += value;
             return None;
         }
 
-        
         let sum_t = if just_filled_prices {
-            
             self.mean + value
         } else {
-            
             self.mean + value - old_x
         };
         let mean_t = sum_t * inv_p;
-        
+
         self.mean = sum_t;
 
-        
         let resid_t = (value - mean_t).abs();
 
-        
         self.mean_buffer[resid_idx] = resid_t;
         let next_resid_idx = resid_idx + 1;
         let wrapped_resids = next_resid_idx == p;
         self.mean_head = if wrapped_resids { 0 } else { next_resid_idx };
 
-        
         if !self.mean_filled {
             self.mad += resid_t;
             if wrapped_resids {
-                
                 self.mean_filled = true;
                 return Some(self.mad * inv_p);
             }
             return None;
         }
 
-        
         self.mad = self.mad + resid_t - old_r;
         Some(self.mad * inv_p)
     }
@@ -1133,7 +1071,6 @@ mod tests {
             period: Some(period),
         })?;
 
-        
         let mut stream_uninit: Vec<MaybeUninit<f64>> = Vec::with_capacity(candles.close.len());
         unsafe {
             stream_uninit.set_len(candles.close.len());
@@ -1147,7 +1084,6 @@ mod tests {
             stream_uninit[i] = MaybeUninit::new(val);
         }
 
-        
         let stream_values = unsafe {
             let ptr = stream_uninit.as_mut_ptr() as *mut f64;
             let len = stream_uninit.len();
@@ -1181,20 +1117,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            MeanAdParams::default(),            
-            MeanAdParams { period: Some(2) },   
-            MeanAdParams { period: Some(3) },   
-            MeanAdParams { period: Some(5) },   
-            MeanAdParams { period: Some(7) },   
-            MeanAdParams { period: Some(10) },  
-            MeanAdParams { period: Some(14) },  
-            MeanAdParams { period: Some(20) },  
-            MeanAdParams { period: Some(30) },  
-            MeanAdParams { period: Some(50) },  
-            MeanAdParams { period: Some(100) }, 
-            MeanAdParams { period: Some(200) }, 
+            MeanAdParams::default(),
+            MeanAdParams { period: Some(2) },
+            MeanAdParams { period: Some(3) },
+            MeanAdParams { period: Some(5) },
+            MeanAdParams { period: Some(7) },
+            MeanAdParams { period: Some(10) },
+            MeanAdParams { period: Some(14) },
+            MeanAdParams { period: Some(20) },
+            MeanAdParams { period: Some(30) },
+            MeanAdParams { period: Some(50) },
+            MeanAdParams { period: Some(100) },
+            MeanAdParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1203,12 +1138,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1255,7 +1189,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_mean_ad_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_mean_ad_tests {
@@ -1287,7 +1221,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=64)
             .prop_flat_map(|period| {
                 (
@@ -1296,13 +1229,11 @@ mod tests {
                         period..400,
                     ),
                     Just(period),
-                    
                     prop::bool::weighted(0.1),
                 )
             })
             .prop_map(|(mut data, period, make_constant)| {
                 if make_constant && data.len() > 0 {
-                    
                     let constant_val = data[0];
                     data.iter_mut().for_each(|v| *v = constant_val);
                 }
@@ -1318,7 +1249,6 @@ mod tests {
             let MeanAdOutput { values: out } = mean_ad_with_kernel(&input, kernel)?;
             let MeanAdOutput { values: ref_out } = mean_ad_with_kernel(&input, Kernel::Scalar)?;
 
-            
             prop_assert_eq!(
                 out.len(),
                 data.len(),
@@ -1326,11 +1256,9 @@ mod tests {
                 test_name
             );
 
-            
             let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_period = first_valid + 2 * period - 2;
 
-            
             for i in 0..warmup_period.min(out.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1341,11 +1269,10 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_period..out.len() {
                 if !out[i].is_nan() {
                     prop_assert!(
-                        out[i] >= -1e-10, 
+                        out[i] >= -1e-10,
                         "[{}] MAD should be non-negative at index {}: got {}",
                         test_name,
                         i,
@@ -1354,12 +1281,10 @@ mod tests {
                 }
             }
 
-            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                
                 if y.is_nan() || r.is_nan() {
                     prop_assert!(
                         y.is_nan() && r.is_nan(),
@@ -1372,7 +1297,6 @@ mod tests {
                     continue;
                 }
 
-                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = y_bits.abs_diff(r_bits);
@@ -1389,7 +1313,6 @@ mod tests {
                 );
             }
 
-            
             let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
             if is_constant && out.len() > warmup_period {
                 for i in warmup_period..out.len() {
@@ -1405,8 +1328,6 @@ mod tests {
                 }
             }
 
-            
-            
             let is_linear_monotonic = if data.len() >= 3 {
                 let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
                 let first_diff = diffs[0];
@@ -1416,12 +1337,10 @@ mod tests {
             };
 
             if is_linear_monotonic && out.len() > warmup_period + period {
-                
                 for i in (warmup_period + 1)..out.len() {
                     if !out[i].is_nan() && !out[i - 1].is_nan() && out[i - 1] > 1e-10 {
                         let change_ratio = (out[i] - out[i - 1]).abs() / out[i - 1];
 
-                        
                         prop_assert!(
 								change_ratio <= 0.1,
 								"[{}] MAD changes too much for linear data at index {}: {} -> {} ({:.2}% change)",
@@ -1435,23 +1354,18 @@ mod tests {
                 }
             }
 
-            
             for i in warmup_period..out.len() {
                 if out[i].is_nan() || i < period {
                     continue;
                 }
 
-                
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
 
-                
                 let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
                 let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let window_range = window_max - window_min;
 
-                
-                
                 prop_assert!(
                     out[i] <= window_range / 2.0 + 1e-9,
                     "[{}] MAD exceeds half window range at index {}: MAD={}, window_range/2={}",
@@ -1462,9 +1376,7 @@ mod tests {
                 );
             }
 
-            
             if period == data.len() && out.len() > warmup_period {
-                
                 let non_nan_count = out.iter().filter(|&&v| !v.is_nan()).count();
                 prop_assert!(
                     non_nan_count <= 1,
@@ -1475,7 +1387,6 @@ mod tests {
                 );
             }
 
-            
             if period == 2 && out.len() > warmup_period {
                 for i in warmup_period..out.len() {
                     if !out[i].is_nan() && i >= 1 {
@@ -1552,17 +1463,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),     
-            (5, 25, 5),     
-            (30, 60, 15),   
-            (2, 5, 1),      
-            (10, 50, 10),   
-            (3, 15, 3),     
-            (20, 30, 2),    
-            (7, 21, 7),     
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 50, 10),
+            (3, 15, 3),
+            (20, 30, 2),
+            (7, 21, 7),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1581,7 +1491,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1634,12 +1543,11 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[test]
     fn test_mean_ad_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         data.push(f64::NAN);
@@ -1655,13 +1563,12 @@ mod tests {
         let baseline = mean_ad(&input)?.values;
 
         let mut into_out = vec![0.0; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             mean_ad_into(&input, &mut into_out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             mean_ad_into_slice(&mut into_out, &input, Kernel::Auto)?;
         }
 
@@ -1746,8 +1653,7 @@ pub fn mean_ad_batch_py<'py>(
         period: period_range,
     };
 
-    let combos_for_shape =
-        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos_for_shape = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_for_shape.len();
     let cols = slice_in.len();
 
@@ -1786,7 +1692,6 @@ pub fn mean_ad_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mean_ad_cuda_batch_dev")]
@@ -1862,9 +1767,6 @@ impl MeanAdStreamPy {
     }
 }
 
-
-
-/// Zero-copy helper for writing directly to output slice - no allocations
 pub fn mean_ad_into_slice(
     dst: &mut [f64],
     input: &MeanAdInput,
@@ -1910,7 +1812,6 @@ pub fn mean_ad_into_slice(
     }
 
     let chosen = match kern {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -1921,7 +1822,6 @@ pub fn mean_ad_into_slice(
         dst[..warmup_end].fill(f64::NAN);
     }
 
-    
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => mean_ad_row_scalar(data, first, period, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1934,7 +1834,7 @@ pub fn mean_ad_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mean_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = MeanAdParams {
@@ -1942,14 +1842,14 @@ pub fn mean_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = MeanAdInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; 
+    let mut output = vec![0.0; data.len()];
     mean_ad_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mean_ad_into(
     in_ptr: *const f64,
@@ -1969,7 +1869,6 @@ pub fn mean_ad_into(
         let input = MeanAdInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             mean_ad_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1984,7 +1883,7 @@ pub fn mean_ad_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mean_ad_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1993,7 +1892,7 @@ pub fn mean_ad_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mean_ad_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2003,13 +1902,13 @@ pub fn mean_ad_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MeanAdBatchConfig {
-    pub period_range: (usize, usize, usize), 
+    pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MeanAdBatchJsOutput {
     pub values: Vec<f64>,
@@ -2018,7 +1917,7 @@ pub struct MeanAdBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = mean_ad_batch)]
 pub fn mean_ad_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MeanAdBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2042,7 +1941,7 @@ pub fn mean_ad_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mean_ad_batch_into(
     in_ptr: *const f64,
@@ -2065,8 +1964,7 @@ pub fn mean_ad_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -2079,7 +1977,6 @@ pub fn mean_ad_batch_into(
             .ok_or_else(|| JsValue::from_str("mean_ad_batch_into: size overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        
         let kernel = detect_best_batch_kernel();
         let simd = match kernel {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -2088,7 +1985,6 @@ pub fn mean_ad_batch_into(
             _ => unreachable!(),
         };
 
-        
         mean_ad_batch_inner_into(data, &sweep, simd, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

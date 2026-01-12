@@ -1,29 +1,3 @@
-/// # Moving Average Streaming Dispatcher
-///
-/// A single entry-point for streaming moving average calculations that provides O(1)
-/// updates per tick/price point. This dispatcher creates and manages streaming
-/// implementations of various moving average algorithms based on a string identifier.
-///
-/// ## Parameters for initialization
-/// - **ma_type**: A lowercase string identifier specifying which moving average
-///   stream to create (e.g., `"sma"`, `"ema"`, `"alma"`, `"kama"`, etc.).
-/// - **period**: The window length for the chosen moving average. Its interpretation
-///   depends on the specific MA type (e.g., a look-back period).
-///
-/// ## Usage
-/// ```rust
-/// let mut stream = ma_stream("sma", 14)?;
-/// let value = stream.update(price); // Returns Option<f64>
-/// ```
-///
-/// ## Errors
-/// - **`Box<dyn Error>`**: Returns errors from specific moving average initialization
-///   (invalid periods, invalid parameters, etc.). If `ma_type` does not match a known
-///   identifier, an error will also be returned.
-///
-/// ## Returns
-/// - **`Ok(MaStream)`** on success, containing the initialized streaming object
-/// - **`Err(Box<dyn Error>)`** on initialization failure
 use crate::indicators::alma::{AlmaParams, AlmaStream};
 use crate::indicators::cwma::{CwmaParams, CwmaStream};
 use crate::indicators::dema::{DemaParams, DemaStream};
@@ -76,7 +50,6 @@ use crate::indicators::zlema::{ZlemaParams, ZlemaStream};
 
 use std::error::Error;
 
-/// Unified streaming moving average enum that holds any stream type
 #[derive(Debug, Clone)]
 pub enum MaStream {
     Sma(SmaStream),
@@ -131,8 +104,6 @@ pub enum MaStream {
 }
 
 impl MaStream {
-    /// Update the stream with a new value
-    /// Returns Some(f64) with the calculated moving average, or None if not enough data yet
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         match self {
@@ -173,10 +144,10 @@ impl MaStream {
             MaStream::Wilders(s) => s.update(value),
             MaStream::Wma(s) => s.update(value),
             MaStream::VpWma(s) => s.update(value),
-            MaStream::Vwap(s) => None, 
-            MaStream::Vwma(s) => None, 
+            MaStream::Vwap(s) => None,
+            MaStream::Vwma(s) => None,
             MaStream::EhlersITrend(s) => s.update(value),
-            MaStream::Frama(s) => None, 
+            MaStream::Frama(s) => None,
             MaStream::Epma(s) => s.update(value),
             MaStream::Dma(s) => s.update(value),
             MaStream::EhlersEcema(s) => Some(s.next(value)),
@@ -188,29 +159,17 @@ impl MaStream {
         }
     }
 
-    /// Update volume-based indicators with price and volume
-    /// Returns Some(f64) with the calculated moving average, or None if not enough data yet
-    /// For non-volume indicators, volume is ignored and regular update is called
     #[inline]
     pub fn update_with_volume(&mut self, value: f64, volume: f64) -> Option<f64> {
         match self {
             MaStream::VpWma(s) => s.update(value * volume),
-            MaStream::Vwap(_s) => None, 
+            MaStream::Vwap(_s) => None,
             MaStream::Vwma(s) => s.update(value, volume),
             _ => self.update(value),
         }
     }
 }
 
-/// Create a new streaming moving average dispatcher
-///
-/// # Arguments
-/// * `ma_type` - String identifier for the moving average type
-/// * `period` - The period/window for the moving average
-///
-/// # Returns
-/// * `Ok(MaStream)` - The initialized streaming moving average
-/// * `Err(Box<dyn Error>)` - If initialization fails
 #[inline]
 pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error>> {
     match ma_type.to_lowercase().as_str() {
@@ -259,8 +218,8 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "alma" => {
             let stream = AlmaStream::try_new(AlmaParams {
                 period: Some(period),
-                offset: None, 
-                sigma: None,  
+                offset: None,
+                sigma: None,
             })?;
             Ok(MaStream::Alma(stream))
         }
@@ -289,7 +248,7 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "gaussian" => {
             let stream = GaussianStream::try_new(GaussianParams {
                 period: Some(period),
-                poles: None, 
+                poles: None,
             })?;
             Ok(MaStream::Gaussian(stream))
         }
@@ -304,7 +263,7 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "highpass2" => {
             let stream = HighPass2Stream::try_new(HighPass2Params {
                 period: Some(period),
-                k: Some(0.707), 
+                k: Some(0.707),
             })?;
             Ok(MaStream::HighPass2(stream))
         }
@@ -318,7 +277,7 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
 
         "hwma" => {
             let stream = HwmaStream::try_new(HwmaParams {
-                na: None, 
+                na: None,
                 nb: None,
                 nc: None,
             })?;
@@ -328,8 +287,8 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "jma" => {
             let stream = JmaStream::try_new(JmaParams {
                 period: Some(period),
-                phase: None, 
-                power: None, 
+                phase: None,
+                power: None,
             })?;
             Ok(MaStream::Jma(stream))
         }
@@ -358,8 +317,8 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "maaq" => {
             let stream = MaaqStream::try_new(MaaqParams {
                 period: Some(period),
-                fast_period: Some(period / 2), 
-                slow_period: Some(period * 2), 
+                fast_period: Some(period / 2),
+                slow_period: Some(period * 2),
             })?;
             Ok(MaStream::Maaq(stream))
         }
@@ -367,16 +326,14 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "mama" => {
             let _fast_limit = (10.0 / period as f64).clamp(0.0, 1.0);
             let stream = MamaStream::try_new(MamaParams {
-                fast_limit: Some(_fast_limit), 
+                fast_limit: Some(_fast_limit),
                 slow_limit: None,
             })?;
             Ok(MaStream::Mama(stream))
         }
 
         "mwdx" => {
-            let stream = MwdxStream::try_new(MwdxParams {
-                factor: None, 
-            })?;
+            let stream = MwdxStream::try_new(MwdxParams { factor: None })?;
             Ok(MaStream::Mwdx(stream))
         }
 
@@ -446,7 +403,7 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "tilson" => {
             let stream = TilsonStream::try_new(TilsonParams {
                 period: Some(period),
-                volume_factor: None, 
+                volume_factor: None,
             })?;
             Ok(MaStream::Tilson(stream))
         }
@@ -482,15 +439,13 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "vpwma" => {
             let stream = VpwmaStream::try_new(VpwmaParams {
                 period: Some(period),
-                power: None, 
+                power: None,
             })?;
             Ok(MaStream::VpWma(stream))
         }
 
         "vwap" => {
-            let stream = VwapStream::try_new(VwapParams {
-                anchor: None, 
-            })?;
+            let stream = VwapStream::try_new(VwapParams { anchor: None })?;
             Ok(MaStream::Vwap(stream))
         }
 
@@ -503,8 +458,8 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
 
         "ehlers_itrend" => {
             let stream = EhlersITrendStream::try_new(EhlersITrendParams {
-                warmup_bars: Some(20),       
-                max_dc_period: Some(period), 
+                warmup_bars: Some(20),
+                max_dc_period: Some(period),
             })?;
             Ok(MaStream::EhlersITrend(stream))
         }
@@ -521,7 +476,7 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         "epma" => {
             let stream = EpmaStream::try_new(EpmaParams {
                 period: Some(period),
-                offset: None, 
+                offset: None,
             })?;
             Ok(MaStream::Epma(stream))
         }
@@ -581,7 +536,6 @@ pub fn ma_stream(ma_type: &str, period: usize) -> Result<MaStream, Box<dyn Error
         }
 
         _ => {
-            
             eprintln!("Unknown indicator '{ma_type}'. Defaulting to 'sma'.");
             let stream = SmaStream::try_new(SmaParams {
                 period: Some(period),
@@ -661,10 +615,8 @@ mod tests {
             }
         }
 
-        
         assert!(!results.is_empty(), "SMA stream should produce values");
 
-        
         let expected = 9.0;
         let actual = results.last().unwrap();
         assert!(
@@ -689,9 +641,6 @@ mod tests {
             vpwma.update_with_volume(price, volume);
             vwap.update_with_volume(price, volume);
         }
-
-        
-        
     }
 
     #[test]
@@ -700,7 +649,7 @@ mod tests {
         assert!(stream.is_ok(), "Should default to SMA for unknown type");
 
         let mut s = stream.unwrap();
-        
+
         let test_values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let mut last_result = None;
 
@@ -708,7 +657,6 @@ mod tests {
             last_result = s.update(value);
         }
 
-        
         assert_eq!(last_result, Some(3.0));
     }
 }

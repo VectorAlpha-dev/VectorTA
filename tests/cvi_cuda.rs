@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::cvi::{
     cvi_batch_with_kernel, cvi_with_kernel, CviBatchRange, CviData, CviInput, CviParams,
 };
@@ -118,7 +116,6 @@ fn cvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 10usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -140,7 +137,6 @@ fn cvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaCvi::new(0).expect("CudaCvi::new");

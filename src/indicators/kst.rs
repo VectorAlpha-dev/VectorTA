@@ -1,38 +1,3 @@
-//! # Know Sure Thing (KST)
-//!
-//! KST is a momentum oscillator based on the smoothed rate-of-change (ROC) values of four different time frames.
-//! It combines multiple ROC calculations with different periods and applies weighted smoothing to generate
-//! momentum signals.
-//!
-//! ## Parameters
-//! - **sma_period1**: Smoothing period for the first ROC (default: 10)
-//! - **sma_period2**: Smoothing period for the second ROC (default: 10)
-//! - **sma_period3**: Smoothing period for the third ROC (default: 10)
-//! - **sma_period4**: Smoothing period for the fourth ROC (default: 15)
-//! - **roc_period1**: Period for the first ROC calculation (default: 10)
-//! - **roc_period2**: Period for the second ROC calculation (default: 15)
-//! - **roc_period3**: Period for the third ROC calculation (default: 20)
-//! - **roc_period4**: Period for the fourth ROC calculation (default: 30)
-//! - **signal_period**: Smoothing period for the signal line (default: 9)
-//!
-//! ## Returns
-//! - **`Ok(KstOutput)`** containing:
-//!   - `line`: The KST oscillator values
-//!   - `signal`: The smoothed signal line
-//!
-//! ## Developer Notes
-//! ### Implementation Status / Decision Log
-//! - SIMD (per-row): Disabled by design — loop-carried ring-buffer deps make time-lane SIMD ineffective; runtime selection short-circuits to scalar (scalar is reference).
-//! - AVX2/AVX512 stubs: Present for API parity only and delegate to the scalar path; `#[cfg(feature = "nightly-avx")]` + `#[cfg(target_arch = "x86_64")]` gated.
-//! - CUDA: Wrapper present under `#[cfg(feature = "cuda")]`, returns VRAM-backed handles used by Python; PTX is loaded with JIT opts matching ALMA.
-//! - Python interop: Uses the shared `DeviceArrayF32Py` handle from ALMA, with CUDA Array Interface v3 + DLPack v1.x implemented there; KST reuses these for GPU outputs.
-//! - Memory: Uses `alloc_with_nan_prefix` and batch helpers; no O(N) temporaries beyond outputs and small rings; checked arithmetic guards rows*cols/byte sizes.
-//! - Batch: Parallel-by-row scalar batch; row-specific SIMD/caching is not yet enabled but expand-grid / range handling is hardened for reversed and degenerate sweeps.
-//!
-//! ### TODO - Performance Improvements
-//! - [ ] Row-specific batch optimization: cache ROC streams shared across rows (by identical r1..r4), then update only SMA rings per row.
-//! - [ ] If revisiting SIMD, focus on batch lane-packing across rows; per-row SIMD over 4 ROCs is unlikely to beat scalar consistently.
-
 use crate::indicators::moving_averages::sma::{
     sma, SmaData, SmaError, SmaInput, SmaOutput, SmaParams,
 };
@@ -52,13 +17,12 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use js_sys;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaKst;
@@ -87,7 +51,10 @@ pub struct KstOutput {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct KstParams {
     pub sma_period1: Option<usize>,
     pub sma_period2: Option<usize>,
@@ -344,7 +311,11 @@ pub enum KstError {
     #[error("kst: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("kst: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("kst: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("kst: size arithmetic overflow")]
@@ -363,14 +334,13 @@ fn kst_prepare<'a>(
 ) -> Result<
     (
         &'a [f64],
-        // periods
-        (usize, usize, usize, usize), // s1..s4
-        (usize, usize, usize, usize), // r1..r4
-        usize,                        // sig
-        usize,                        // first
-        usize,                        // warm_line = max(ri+si-1)
-        usize,                        // warm_sig  = warm_line + sig - 1
-        Kernel,                       // chosen
+        (usize, usize, usize, usize),
+        (usize, usize, usize, usize),
+        usize,
+        usize,
+        usize,
+        usize,
+        Kernel,
     ),
     KstError,
 > {
@@ -394,7 +364,6 @@ fn kst_prepare<'a>(
     let r4 = input.get_roc_period4();
     let sig = input.get_signal_period();
 
-    // explicit period checks
     for &p in [s1, s2, s3, s4, r1, r2, r3, r4, sig].iter() {
         if p == 0 || p > len {
             return Err(KstError::InvalidPeriod {
@@ -439,8 +408,6 @@ fn kst_prepare<'a>(
     }
 
     let chosen = match kernel {
-        // SIMD kernels are currently stubs (they call the scalar body), so avoid paying runtime
-        // detection overhead for `Kernel::Auto` in the single-series path.
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -472,13 +439,12 @@ fn kst_compute_into(
     let (s1, s2, s3, s4) = s;
     let (r1, r2, r3, r4) = r;
 
-    // ---- Small stack buffers to avoid wasm memory.grow detaching JS views
     const STACK: usize = 256;
     let mut sb1 = [0.0f64; STACK];
     let mut sb2 = [0.0f64; STACK];
     let mut sb3 = [0.0f64; STACK];
     let mut sb4 = [0.0f64; STACK];
-    let mut sbs = [0.0f64; STACK]; // signal ring
+    let mut sbs = [0.0f64; STACK];
 
     let mut v1_heap;
     let mut v2_heap;
@@ -486,7 +452,6 @@ fn kst_compute_into(
     let mut v4_heap;
     let mut vs_heap;
 
-    // Select ring buffers (stack or heap) for SMA(ROC) and signal
     let (b1, b2, b3, b4, sbuf): (&mut [f64], &mut [f64], &mut [f64], &mut [f64], &mut [f64]) = {
         v1_heap = if s1 > STACK {
             vec![0.0; s1]
@@ -542,7 +507,6 @@ fn kst_compute_into(
         (b1, b2, b3, b4, sbuf)
     };
 
-    // State for four SMA(ROC) rings
     let mut i1 = 0usize;
     let mut i2 = 0usize;
     let mut i3 = 0usize;
@@ -552,34 +516,28 @@ fn kst_compute_into(
     let mut sum3 = 0.0f64;
     let mut sum4 = 0.0f64;
 
-    // Precompute reciprocals and weights (use mul_add later)
     let inv1 = 1.0 / (s1 as f64);
     let inv2 = 1.0 / (s2 as f64);
     let inv3 = 1.0 / (s3 as f64);
     let inv4 = 1.0 / (s4 as f64);
-    let w2 = inv2 + inv2; // 2*inv2
-    let w3 = inv3 + inv3 + inv3; // 3*inv3
-    let w4 = (4.0f64) * inv4; // 4*inv4
+    let w2 = inv2 + inv2;
+    let w3 = inv3 + inv3 + inv3;
+    let w4 = (4.0f64) * inv4;
 
-    // Absolute indices where each ROC becomes available
     let start1 = first + r1;
     let start2 = first + r2;
     let start3 = first + r3;
     let start4 = first + r4;
 
-    // Absolute warmups for line/signal
-    let start_line = first + warm_line; // first index allowed to write KST line
-    let warm_sig_abs = first + warm_sig; // first index allowed to write signal
+    let start_line = first + warm_line;
+    let warm_sig_abs = first + warm_sig;
 
-    // Signal ring state (built up as soon as line starts)
     let mut sidx = 0usize;
     let mut ssum = 0.0f64;
-    let mut sbuilt = 0usize; // how many valid entries currently in signal ring [0..=sig]
+    let mut sbuilt = 0usize;
 
-    // Fast helpers
     #[inline(always)]
     fn safe_roc(curr: f64, prev: f64) -> f64 {
-        // Matches prior semantics: zeros when not computable; ignores non-finite inputs.
         if prev != 0.0 && curr.is_finite() && prev.is_finite() {
             ((curr / prev) - 1.0) * 100.0
         } else {
@@ -587,7 +545,6 @@ fn kst_compute_into(
         }
     }
 
-    // Hot loop
     unsafe {
         let out_line_ptr = out_line.as_mut_ptr();
         let out_sig_ptr = out_sig.as_mut_ptr();
@@ -599,7 +556,6 @@ fn kst_compute_into(
         let b4_ptr = b4.as_mut_ptr();
         let sb_ptr = sbuf.as_mut_ptr();
 
-        // Small inlined "ring update": sum += v - old; buf[idx] = v; idx=(idx+1) with branchless wrap
         #[inline(always)]
         unsafe fn ring_update(buf: *mut f64, idx: &mut usize, cap: usize, sum: &mut f64, v: f64) {
             let old = *buf.add(*idx);
@@ -612,10 +568,8 @@ fn kst_compute_into(
         }
 
         for i in first..len {
-            // Current price (may be NaN; safe_roc handles it)
             let x = *data_ptr.add(i);
 
-            // Four ROC updates become active at their own starts.
             if i >= start1 {
                 let p = *data_ptr.add(i - r1);
                 let v = safe_roc(x, p);
@@ -637,20 +591,15 @@ fn kst_compute_into(
                 ring_update(b4_ptr, &mut i4, s4, &mut sum4, v);
             }
 
-            // Gate writes until all components are available
             if i < start_line {
                 continue;
             }
 
-            // KST line using FMAs: sum1*inv1 + 2*sum2*inv2 + 3*sum3*inv3 + 4*sum4*inv4
-            // Evaluate as nested mul_add to reduce rounding and latency.
             let kst = sum1.mul_add(inv1, sum2.mul_add(w2, sum3.mul_add(w3, sum4 * w4)));
             *out_line_ptr.add(i) = kst;
 
-            // Build signal in the same pass (simple SMA over last `sig` KST values)
-            // Note: sbuf was zero-initialized; we update ssum += kst - old_value
             if sbuilt < sig {
-                let old = *sb_ptr.add(sidx); // initially 0.0
+                let old = *sb_ptr.add(sidx);
                 ssum += kst - old;
                 *sb_ptr.add(sidx) = kst;
                 sidx += 1;
@@ -680,13 +629,8 @@ pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, Ks
     let (data, s, r, sig, first, warm_line, warm_sig, chosen) = kst_prepare(input, kernel)?;
     let len = data.len();
 
-    // Adjust warmup to account for NaN prefix
-    let actual_warm_line = first
-        .checked_add(warm_line)
-        .ok_or(KstError::SizeOverflow)?;
-    let actual_warm_sig = first
-        .checked_add(warm_sig)
-        .ok_or(KstError::SizeOverflow)?;
+    let actual_warm_line = first.checked_add(warm_line).ok_or(KstError::SizeOverflow)?;
+    let actual_warm_sig = first.checked_add(warm_sig).ok_or(KstError::SizeOverflow)?;
     let mut line = alloc_with_nan_prefix(len, actual_warm_line);
     let mut signal = alloc_with_nan_prefix(len, actual_warm_sig);
 
@@ -707,7 +651,6 @@ pub fn kst_with_kernel(input: &KstInput, kernel: Kernel) -> Result<KstOutput, Ks
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // keep stubs, call scalar body
                 kst_compute_into(
                     data,
                     s,
@@ -757,22 +700,15 @@ pub fn kst_into_slice(
     Ok(())
 }
 
-/// Write KST outputs into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmup prefixes exactly like `kst()`/`kst_with_kernel()`.
-/// - `out_line.len()` and `out_signal.len()` must equal the input length.
-/// - Uses `Kernel::Auto` for internal dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
-pub fn kst_into(input: &KstInput, out_line: &mut [f64], out_signal: &mut [f64]) -> Result<(), KstError> {
+pub fn kst_into(
+    input: &KstInput,
+    out_line: &mut [f64],
+    out_signal: &mut [f64],
+) -> Result<(), KstError> {
     kst_into_slice(out_line, out_signal, input, Kernel::Auto)
 }
-
-// The old kst_scalar function has been removed as it's no longer needed
-
-
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -781,7 +717,6 @@ pub(crate) unsafe fn kst_avx2(
     _first: usize,
     _len: usize,
 ) -> Result<KstOutput, KstError> {
-    
     unreachable!("AVX2 stub should not be called directly")
 }
 
@@ -792,7 +727,6 @@ pub(crate) unsafe fn kst_avx512(
     _first: usize,
     len: usize,
 ) -> Result<KstOutput, KstError> {
-    
     if len <= 32 {
         kst_avx512_short(_input, _first, len)
     } else {
@@ -807,7 +741,6 @@ pub(crate) unsafe fn kst_avx512_short(
     _first: usize,
     _len: usize,
 ) -> Result<KstOutput, KstError> {
-    
     unreachable!("AVX512 short stub should not be called directly")
 }
 
@@ -818,7 +751,6 @@ pub(crate) unsafe fn kst_avx512_long(
     _first: usize,
     _len: usize,
 ) -> Result<KstOutput, KstError> {
-    
     unreachable!("AVX512 long stub should not be called directly")
 }
 
@@ -829,7 +761,6 @@ pub fn kst_batch_with_kernel(
     k: Kernel,
 ) -> Result<KstBatchOutput, KstError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(KstError::InvalidKernelForBatch(other)),
@@ -844,7 +775,10 @@ pub fn kst_batch_with_kernel(
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct KstBatchRange {
     pub sma_period1: (usize, usize, usize),
     pub sma_period2: (usize, usize, usize),
@@ -1019,7 +953,6 @@ fn expand_grid(r: &KstBatchRange) -> Result<Vec<KstParams>, KstError> {
     let r4 = axis_usize(r.roc_period4);
     let sig = axis_usize(r.signal_period);
 
-    
     if s1.is_empty() {
         return Err(KstError::InvalidRange {
             start: r.sma_period1.0,
@@ -1164,7 +1097,6 @@ fn kst_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(KstError::AllValuesNaN)?;
 
-    
     let mut warm_line = Vec::with_capacity(combos.len());
     let mut warm_sig = Vec::with_capacity(combos.len());
     for c in &combos {
@@ -1185,7 +1117,6 @@ fn kst_batch_inner(
         warm_sig.push(wl + sig - 1);
     }
 
-    
     let rows = combos.len();
     let mut line_mu = make_uninit_matrix(rows, cols);
     let mut signal_mu = make_uninit_matrix(rows, cols);
@@ -1194,7 +1125,6 @@ fn kst_batch_inner(
     init_matrix_prefixes(&mut line_mu, cols, &warm_line_abs);
     init_matrix_prefixes(&mut signal_mu, cols, &warm_sig_abs);
 
-    
     let mut line_guard = core::mem::ManuallyDrop::new(line_mu);
     let mut signal_guard = core::mem::ManuallyDrop::new(signal_mu);
     let line_out: &mut [f64] = unsafe {
@@ -1204,24 +1134,21 @@ fn kst_batch_inner(
         core::slice::from_raw_parts_mut(signal_guard.as_mut_ptr() as *mut f64, signal_guard.len())
     };
 
-    
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
     let simd = match actual {
         Kernel::ScalarBatch => Kernel::Scalar,
-        Kernel::Avx2Batch => Kernel::Scalar, 
-        Kernel::Avx512Batch => Kernel::Scalar, 
+        Kernel::Avx2Batch => Kernel::Scalar,
+        Kernel::Avx512Batch => Kernel::Scalar,
         _ => Kernel::Scalar,
     };
 
-    
     use std::collections::HashMap;
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     struct R4(usize, usize, usize, usize);
 
-    
     let mut groups: HashMap<R4, Vec<usize>> = HashMap::new();
     for (idx, prm) in combos.iter().enumerate() {
         groups
@@ -1235,7 +1162,6 @@ fn kst_batch_inner(
             .push(idx);
     }
 
-    
     fn compute_roc_streams(
         data: &[f64],
         first: usize,
@@ -1290,7 +1216,6 @@ fn kst_batch_inner(
         streams_map.insert(*key, Streams { v1, v2, v3, v4 });
     }
 
-    
     let do_row = |row: usize, ldst: &mut [f64], sdst: &mut [f64]| {
         let prm = &combos[row];
         let s = (
@@ -1312,11 +1237,9 @@ fn kst_batch_inner(
             .max(r.3 + s.3 - 1);
         let ws = wl + sig - 1;
 
-        
         let key = R4(r.0, r.1, r.2, r.3);
         let st = streams_map.get(&key).unwrap();
 
-        
         let len = ldst.len();
         let (s1, s2, s3, s4) = s;
         let inv1 = 1.0 / (s1 as f64);
@@ -1327,7 +1250,6 @@ fn kst_batch_inner(
         let w3 = inv3 + inv3 + inv3;
         let w4 = 4.0f64 * inv4;
 
-        
         let mut b1 = vec![0.0f64; s1];
         let mut b2 = vec![0.0f64; s2];
         let mut b3 = vec![0.0f64; s3];
@@ -1344,7 +1266,6 @@ fn kst_batch_inner(
         let start_line = first + wl;
         let warm_sig_abs = first + ws;
 
-        
         let mut sbuf = vec![0.0f64; sig];
         let mut sidx = 0usize;
         let mut ssum = 0.0f64;
@@ -1449,7 +1370,6 @@ fn kst_batch_inner(
         }
     }
 
-    
     let lines = unsafe {
         Vec::from_raw_parts(
             line_guard.as_mut_ptr() as *mut f64,
@@ -1486,9 +1406,7 @@ fn kst_batch_inner_into(
     let combos = expand_grid(sweep)?;
     let cols = data.len();
     let rows = combos.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(KstError::SizeOverflow)?;
+    let total = rows.checked_mul(cols).ok_or(KstError::SizeOverflow)?;
     if lines_out.len() != total || signals_out.len() != total {
         return Err(KstError::OutputLengthMismatch {
             expected: total,
@@ -1501,7 +1419,6 @@ fn kst_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(KstError::AllValuesNaN)?;
 
-    
     let mut warm_line = vec![0usize; rows];
     let mut warm_sig = vec![0usize; rows];
     for (row, c) in combos.iter().enumerate() {
@@ -1511,7 +1428,7 @@ fn kst_batch_inner_into(
             .max(c.roc_period4.unwrap() + c.sma_period4.unwrap() - 1);
         warm_line[row] = wl;
         warm_sig[row] = wl + c.signal_period.unwrap() - 1;
-        
+
         let abs_wl = first + warm_line[row];
         let abs_ws = first + warm_sig[row];
         for v in &mut lines_out[row * cols..row * cols + abs_wl.min(cols)] {
@@ -1528,17 +1445,15 @@ fn kst_batch_inner_into(
     };
     let simd = match actual {
         Kernel::ScalarBatch => Kernel::Scalar,
-        Kernel::Avx2Batch => Kernel::Scalar, 
-        Kernel::Avx512Batch => Kernel::Scalar, 
+        Kernel::Avx2Batch => Kernel::Scalar,
+        Kernel::Avx512Batch => Kernel::Scalar,
         _ => Kernel::Scalar,
     };
 
-    
     use std::collections::HashMap;
     #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
     struct R4(usize, usize, usize, usize);
 
-    
     let mut groups: HashMap<R4, Vec<usize>> = HashMap::new();
     for (idx, prm) in combos.iter().enumerate() {
         groups
@@ -1763,18 +1678,12 @@ fn kst_batch_inner_into(
     Ok(combos)
 }
 
-
-
-/// Streaming KST – O(1) per tick.
-/// Decision: uses cached reciprocals and branchy wrap; reduces divisions/modulo and uses an FMA chain.
 #[derive(Debug, Clone)]
 pub struct KstStream {
-    
     s: (usize, usize, usize, usize),
     r: (usize, usize, usize, usize),
     sig: usize,
 
-    
     b1: Vec<f64>,
     b2: Vec<f64>,
     b3: Vec<f64>,
@@ -1788,28 +1697,23 @@ pub struct KstStream {
     sum3: f64,
     sum4: f64,
 
-    
-    inv1: f64, 
-    w2: f64,   
-    w3: f64,   
-    w4: f64,   
+    inv1: f64,
+    w2: f64,
+    w3: f64,
+    w4: f64,
 
-    
     sig_buf: Vec<f64>,
     sig_idx: usize,
     sig_sum: f64,
 
-    
     price_ring: Vec<f64>,
     recip_ring: Vec<f64>,
-    head: usize, 
+    head: usize,
 
-    
-    t: usize,         
-    warm_line: usize, 
-    warm_sig: usize,  
+    t: usize,
+    warm_line: usize,
+    warm_sig: usize,
 
-    
     last_line: f64,
 }
 impl KstStream {
@@ -1843,7 +1747,7 @@ impl KstStream {
         let warm_sig = warm_line + sig - 1;
 
         let max_roc = r1.max(r2).max(r3).max(r4);
-        let price_cap = max_roc + 1; 
+        let price_cap = max_roc + 1;
 
         Ok(Self {
             s: (s1, s2, s3, s4),
@@ -1884,10 +1788,8 @@ impl KstStream {
         })
     }
 
-    /// O(1) tick update. Returns (line, signal) or None until fully warmed.
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<(f64, f64)> {
-        
         self.price_ring[self.head] = price;
         self.recip_ring[self.head] = if price.is_finite() && price != 0.0 {
             1.0 / price
@@ -1895,14 +1797,12 @@ impl KstStream {
             f64::NAN
         };
 
-        
         Self::wrap_inc(&mut self.head, self.price_ring.len());
 
         let cap = self.price_ring.len();
         let (s1, s2, s3, s4) = self.s;
         let (r1, r2, r3, r4) = self.r;
 
-        
         let mut v1 = 0.0;
         if self.t >= r1 {
             let idx = Self::back_from_next(self.head, cap, r1 + 1);
@@ -1936,7 +1836,6 @@ impl KstStream {
             }
         }
 
-        
         if self.t >= r1 {
             self.sum1 -= self.b1[self.i1];
             self.b1[self.i1] = v1;
@@ -1962,15 +1861,12 @@ impl KstStream {
             Self::wrap_inc(&mut self.i4, s4);
         }
 
-        
         self.t += 1;
 
-        
         if self.t <= self.warm_line {
             return None;
         }
 
-        
         let line = self.sum1.mul_add(
             self.inv1,
             self.sum2
@@ -1979,7 +1875,6 @@ impl KstStream {
 
         self.last_line = line;
 
-        
         let old = self.sig_buf[self.sig_idx];
         self.sig_sum += line - old;
         self.sig_buf[self.sig_idx] = line;
@@ -1994,8 +1889,6 @@ impl KstStream {
         Some((line, signal))
     }
 
-    
-
     #[inline(always)]
     fn wrap_inc(idx: &mut usize, cap: usize) {
         *idx += 1;
@@ -2004,7 +1897,6 @@ impl KstStream {
         }
     }
 
-    /// Compute (next - k) mod cap with a single branch, where k ∈ [0, cap]
     #[inline(always)]
     fn back_from_next(next: usize, cap: usize, k: usize) -> usize {
         debug_assert!(k <= cap);
@@ -2112,10 +2004,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
             KstParams::default(),
-            
             KstParams {
                 sma_period1: Some(2),
                 sma_period2: Some(2),
@@ -2127,7 +2017,6 @@ mod tests {
                 roc_period4: Some(2),
                 signal_period: Some(2),
             },
-            
             KstParams {
                 sma_period1: Some(5),
                 sma_period2: Some(5),
@@ -2139,7 +2028,6 @@ mod tests {
                 roc_period4: Some(15),
                 signal_period: Some(5),
             },
-            
             KstParams {
                 sma_period1: Some(7),
                 sma_period2: Some(10),
@@ -2151,7 +2039,6 @@ mod tests {
                 roc_period4: Some(20),
                 signal_period: Some(7),
             },
-            
             KstParams {
                 sma_period1: Some(10),
                 sma_period2: Some(10),
@@ -2163,7 +2050,6 @@ mod tests {
                 roc_period4: Some(30),
                 signal_period: Some(9),
             },
-            
             KstParams {
                 sma_period1: Some(20),
                 sma_period2: Some(25),
@@ -2175,7 +2061,6 @@ mod tests {
                 roc_period4: Some(60),
                 signal_period: Some(15),
             },
-            
             KstParams {
                 sma_period1: Some(30),
                 sma_period2: Some(40),
@@ -2187,7 +2072,6 @@ mod tests {
                 roc_period4: Some(100),
                 signal_period: Some(21),
             },
-            
             KstParams {
                 sma_period1: Some(5),
                 sma_period2: Some(10),
@@ -2199,7 +2083,6 @@ mod tests {
                 roc_period4: Some(56),
                 signal_period: Some(12),
             },
-            
             KstParams {
                 sma_period1: Some(10),
                 sma_period2: Some(10),
@@ -2211,7 +2094,6 @@ mod tests {
                 roc_period4: Some(30),
                 signal_period: Some(2),
             },
-            
             KstParams {
                 sma_period1: Some(1),
                 sma_period2: Some(1),
@@ -2223,7 +2105,6 @@ mod tests {
                 roc_period4: Some(1),
                 signal_period: Some(1),
             },
-            
             KstParams {
                 sma_period1: Some(100),
                 sma_period2: Some(120),
@@ -2235,7 +2116,6 @@ mod tests {
                 roc_period4: Some(250),
                 signal_period: Some(50),
             },
-            
             KstParams {
                 sma_period1: Some(10),
                 sma_period2: Some(15),
@@ -2247,7 +2127,6 @@ mod tests {
                 roc_period4: Some(30),
                 signal_period: Some(10),
             },
-            
             KstParams {
                 sma_period1: Some(3),
                 sma_period2: Some(6),
@@ -2265,15 +2144,13 @@ mod tests {
             let input = KstInput::from_candles(&candles, "close", params.clone());
             let output = kst_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.line.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2341,7 +2218,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2422,7 +2298,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_kst_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2434,80 +2310,58 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (
-            
-            (3usize..=20), 
-            (3usize..=20), 
-            (3usize..=20), 
-            (5usize..=25), 
-            
-            (5usize..=15),  
-            (10usize..=20), 
-            (15usize..=25), 
-            (20usize..=35), 
-            
-            (3usize..=15), 
-            
-            (0usize..=3), 
+            (3usize..=20),
+            (3usize..=20),
+            (3usize..=20),
+            (5usize..=25),
+            (5usize..=15),
+            (10usize..=20),
+            (15usize..=25),
+            (20usize..=35),
+            (3usize..=15),
+            (0usize..=3),
         )
             .prop_flat_map(|(s1, s2, s3, s4, r1, r2, r3, r4, sig, scenario)| {
-                
                 let warmup1 = r1 + s1 - 1;
                 let warmup2 = r2 + s2 - 1;
                 let warmup3 = r3 + s3 - 1;
                 let warmup4 = r4 + s4 - 1;
                 let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
-                let min_data_len = warmup + sig + 20; 
+                let min_data_len = warmup + sig + 20;
 
-                
                 let data_strategy = match scenario {
-                    0 => {
-                        
-                        prop::collection::vec(
-                            (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                            min_data_len..400,
-                        )
-                        .boxed()
-                    }
-                    1 => {
-                        
-                        prop::collection::vec(
-                            (0.01f64..5.0f64).prop_filter("finite", |x| x.is_finite()),
-                            min_data_len..400,
-                        )
-                        .boxed()
-                    }
-                    2 => {
-                        
-                        prop::collection::vec((10.0f64..1000.0f64), min_data_len..400)
-                            .prop_map(|mut v| {
-                                
-                                for i in 0..v.len() / 4 {
-                                    let plateau_start = i * 4;
-                                    let plateau_end = (plateau_start + 3).min(v.len() - 1);
-                                    let plateau_value = v[plateau_start];
-                                    for j in plateau_start..=plateau_end {
-                                        v[j] = plateau_value;
-                                    }
+                    0 => prop::collection::vec(
+                        (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+                        min_data_len..400,
+                    )
+                    .boxed(),
+                    1 => prop::collection::vec(
+                        (0.01f64..5.0f64).prop_filter("finite", |x| x.is_finite()),
+                        min_data_len..400,
+                    )
+                    .boxed(),
+                    2 => prop::collection::vec((10.0f64..1000.0f64), min_data_len..400)
+                        .prop_map(|mut v| {
+                            for i in 0..v.len() / 4 {
+                                let plateau_start = i * 4;
+                                let plateau_end = (plateau_start + 3).min(v.len() - 1);
+                                let plateau_value = v[plateau_start];
+                                for j in plateau_start..=plateau_end {
+                                    v[j] = plateau_value;
                                 }
-                                v
-                            })
-                            .boxed()
-                    }
-                    _ => {
-                        
-                        prop::collection::vec((10.0f64..1000.0f64), min_data_len..400)
-                            .prop_map(|mut v| {
-                                
-                                for i in (5..v.len()).step_by(20) {
-                                    v[i] = v[i - 1] * (1.5 + (i % 3) as f64 * 0.5);
-                                    
-                                }
-                                v
-                            })
-                            .boxed()
-                    }
+                            }
+                            v
+                        })
+                        .boxed(),
+                    _ => prop::collection::vec((10.0f64..1000.0f64), min_data_len..400)
+                        .prop_map(|mut v| {
+                            for i in (5..v.len()).step_by(20) {
+                                v[i] = v[i - 1] * (1.5 + (i % 3) as f64 * 0.5);
+                            }
+                            v
+                        })
+                        .boxed(),
                 };
 
                 (
@@ -2525,226 +2379,219 @@ mod tests {
             });
 
         proptest::test_runner::TestRunner::default()
-			.run(&strat, |(data, s1, s2, s3, s4, r1, r2, r3, r4, sig)| {
-				let params = KstParams {
-					sma_period1: Some(s1),
-					sma_period2: Some(s2),
-					sma_period3: Some(s3),
-					sma_period4: Some(s4),
-					roc_period1: Some(r1),
-					roc_period2: Some(r2),
-					roc_period3: Some(r3),
-					roc_period4: Some(r4),
-					signal_period: Some(sig),
-				};
-				let input = KstInput::from_slice(&data, params);
+            .run(&strat, |(data, s1, s2, s3, s4, r1, r2, r3, r4, sig)| {
+                let params = KstParams {
+                    sma_period1: Some(s1),
+                    sma_period2: Some(s2),
+                    sma_period3: Some(s3),
+                    sma_period4: Some(s4),
+                    roc_period1: Some(r1),
+                    roc_period2: Some(r2),
+                    roc_period3: Some(r3),
+                    roc_period4: Some(r4),
+                    signal_period: Some(sig),
+                };
+                let input = KstInput::from_slice(&data, params);
 
-				
-				let warmup1 = r1 + s1 - 1;
-				let warmup2 = r2 + s2 - 1;
-				let warmup3 = r3 + s3 - 1;
-				let warmup4 = r4 + s4 - 1;
-				let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
-				let signal_warmup = warmup + sig - 1;
+                let warmup1 = r1 + s1 - 1;
+                let warmup2 = r2 + s2 - 1;
+                let warmup3 = r3 + s3 - 1;
+                let warmup4 = r4 + s4 - 1;
+                let warmup = warmup1.max(warmup2).max(warmup3).max(warmup4);
+                let signal_warmup = warmup + sig - 1;
 
-				
-				let KstOutput { line, signal } = kst_with_kernel(&input, kernel).unwrap();
-				let KstOutput { line: ref_line, signal: ref_signal } = kst_with_kernel(&input, Kernel::Scalar).unwrap();
+                let KstOutput { line, signal } = kst_with_kernel(&input, kernel).unwrap();
+                let KstOutput {
+                    line: ref_line,
+                    signal: ref_signal,
+                } = kst_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				
-				for i in 0..warmup.min(data.len()) {
-					prop_assert!(
-						line[i].is_nan(),
-						"KST line should be NaN during warmup at index {i}"
-					);
-				}
-				for i in 0..signal_warmup.min(data.len()) {
-					prop_assert!(
-						signal[i].is_nan(),
-						"Signal should be NaN during warmup at index {i}"
-					);
-				}
+                for i in 0..warmup.min(data.len()) {
+                    prop_assert!(
+                        line[i].is_nan(),
+                        "KST line should be NaN during warmup at index {i}"
+                    );
+                }
+                for i in 0..signal_warmup.min(data.len()) {
+                    prop_assert!(
+                        signal[i].is_nan(),
+                        "Signal should be NaN during warmup at index {i}"
+                    );
+                }
 
-				
-				for i in warmup..data.len() {
-					let y = line[i];
-					let r = ref_line[i];
+                for i in warmup..data.len() {
+                    let y = line[i];
+                    let r = ref_line[i];
 
-					if !y.is_finite() || !r.is_finite() {
-						prop_assert!(y.to_bits() == r.to_bits(), "NaN/Inf mismatch at idx {i}: {y} vs {r}");
-						continue;
-					}
+                    if !y.is_finite() || !r.is_finite() {
+                        prop_assert!(
+                            y.to_bits() == r.to_bits(),
+                            "NaN/Inf mismatch at idx {i}: {y} vs {r}"
+                        );
+                        continue;
+                    }
 
-					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
-					prop_assert!(
-						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
-						"KST line kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
-					);
-				}
+                    let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+                    prop_assert!(
+                        (y - r).abs() <= 1e-9 || ulp_diff <= 4,
+                        "KST line kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
+                    );
+                }
 
-				for i in signal_warmup..data.len() {
-					let y = signal[i];
-					let r = ref_signal[i];
+                for i in signal_warmup..data.len() {
+                    let y = signal[i];
+                    let r = ref_signal[i];
 
-					if !y.is_finite() || !r.is_finite() {
-						prop_assert!(y.to_bits() == r.to_bits(), "Signal NaN/Inf mismatch at idx {i}: {y} vs {r}");
-						continue;
-					}
+                    if !y.is_finite() || !r.is_finite() {
+                        prop_assert!(
+                            y.to_bits() == r.to_bits(),
+                            "Signal NaN/Inf mismatch at idx {i}: {y} vs {r}"
+                        );
+                        continue;
+                    }
 
-					let ulp_diff = y.to_bits().abs_diff(r.to_bits());
-					prop_assert!(
-						(y - r).abs() <= 1e-9 || ulp_diff <= 4,
-						"Signal kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
-					);
-				}
+                    let ulp_diff = y.to_bits().abs_diff(r.to_bits());
+                    prop_assert!(
+                        (y - r).abs() <= 1e-9 || ulp_diff <= 4,
+                        "Signal kernel mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
+                    );
+                }
 
-				
-				if data.windows(2).all(|w| (w[0] - w[1]).abs() <= f64::EPSILON) {
-					for i in warmup..data.len() {
-						prop_assert!(
-							line[i].abs() <= 1e-9,
-							"KST should be ~0 for constant data at idx {i}: {}",
-							line[i]
-						);
-					}
-				}
+                if data.windows(2).all(|w| (w[0] - w[1]).abs() <= f64::EPSILON) {
+                    for i in warmup..data.len() {
+                        prop_assert!(
+                            line[i].abs() <= 1e-9,
+                            "KST should be ~0 for constant data at idx {i}: {}",
+                            line[i]
+                        );
+                    }
+                }
 
-				
-				if data.windows(2).all(|w| w[1] > w[0] + f64::EPSILON) {
-					let check_start = warmup + 10; 
-					for i in check_start..data.len() {
-						if line[i].is_finite() {
-							prop_assert!(
-								line[i] > -1e-6,
-								"KST should be positive for increasing data at idx {i}: {}",
-								line[i]
-							);
-						}
-					}
-				}
+                if data.windows(2).all(|w| w[1] > w[0] + f64::EPSILON) {
+                    let check_start = warmup + 10;
+                    for i in check_start..data.len() {
+                        if line[i].is_finite() {
+                            prop_assert!(
+                                line[i] > -1e-6,
+                                "KST should be positive for increasing data at idx {i}: {}",
+                                line[i]
+                            );
+                        }
+                    }
+                }
 
-				
-				if data.windows(2).all(|w| w[0] > w[1] + f64::EPSILON) {
-					let check_start = warmup + 10; 
-					for i in check_start..data.len() {
-						if line[i].is_finite() {
-							prop_assert!(
-								line[i] < 1e-6,
-								"KST should be negative for decreasing data at idx {i}: {}",
-								line[i]
-							);
-						}
-					}
-				}
+                if data.windows(2).all(|w| w[0] > w[1] + f64::EPSILON) {
+                    let check_start = warmup + 10;
+                    for i in check_start..data.len() {
+                        if line[i].is_finite() {
+                            prop_assert!(
+                                line[i] < 1e-6,
+                                "KST should be negative for decreasing data at idx {i}: {}",
+                                line[i]
+                            );
+                        }
+                    }
+                }
 
-					
-					
-					
-					if signal_warmup < data.len() {
-						for i in signal_warmup..data.len() {
-							let y = signal[i];
-							if !y.is_finite() {
-								continue;
-							}
+                if signal_warmup < data.len() {
+                    for i in signal_warmup..data.len() {
+                        let y = signal[i];
+                        if !y.is_finite() {
+                            continue;
+                        }
 
-							let start = i + 1 - sig;
-							let window = &line[start..=i];
-							let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
-							let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        let start = i + 1 - sig;
+                        let window = &line[start..=i];
+                        let lo = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                        let hi = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-							prop_assert!(
-								y >= lo - 1e-9 && y <= hi + 1e-9,
-								"Signal out of window bounds at idx {i}: {y} ∉ [{lo}, {hi}]"
-							);
-						}
-					}
+                        prop_assert!(
+                            y >= lo - 1e-9 && y <= hi + 1e-9,
+                            "Signal out of window bounds at idx {i}: {y} ∉ [{lo}, {hi}]"
+                        );
+                    }
+                }
 
-				
-				
-				
-				
-				let min_price = data.iter().cloned().fold(f64::INFINITY, f64::min);
-				let max_price = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-				let max_roc = if min_price > 0.0 {
-					((max_price / min_price) - 1.0) * 100.0
-				} else {
-					10000.0 
-				};
-				
-				let kst_bound = max_roc * 10.0;
+                let min_price = data.iter().cloned().fold(f64::INFINITY, f64::min);
+                let max_price = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let max_roc = if min_price > 0.0 {
+                    ((max_price / min_price) - 1.0) * 100.0
+                } else {
+                    10000.0
+                };
 
-				for i in warmup..data.len() {
-					if line[i].is_finite() {
-						prop_assert!(
-							line[i] >= -kst_bound && line[i] <= kst_bound,
-							"KST line out of reasonable bounds at idx {i}: {} (bound: ±{})",
-							line[i], kst_bound
-						);
-					}
-				}
-				for i in signal_warmup..data.len() {
-					if signal[i].is_finite() {
-						prop_assert!(
-							signal[i] >= -kst_bound && signal[i] <= kst_bound,
-							"Signal out of reasonable bounds at idx {i}: {} (bound: ±{})",
-							signal[i], kst_bound
-						);
-					}
-				}
+                let kst_bound = max_roc * 10.0;
 
-				
-				for i in warmup..data.len() {
-					prop_assert!(
-						line[i].is_nan() || line[i].is_finite(),
-						"KST line has infinite value at idx {i}: {}",
-						line[i]
-					);
-				}
-				for i in signal_warmup..data.len() {
-					prop_assert!(
-						signal[i].is_nan() || signal[i].is_finite(),
-						"Signal has infinite value at idx {i}: {}",
-						signal[i]
-					);
-				}
+                for i in warmup..data.len() {
+                    if line[i].is_finite() {
+                        prop_assert!(
+                            line[i] >= -kst_bound && line[i] <= kst_bound,
+                            "KST line out of reasonable bounds at idx {i}: {} (bound: ±{})",
+                            line[i],
+                            kst_bound
+                        );
+                    }
+                }
+                for i in signal_warmup..data.len() {
+                    if signal[i].is_finite() {
+                        prop_assert!(
+                            signal[i] >= -kst_bound && signal[i] <= kst_bound,
+                            "Signal out of reasonable bounds at idx {i}: {} (bound: ±{})",
+                            signal[i],
+                            kst_bound
+                        );
+                    }
+                }
 
-				
-				
-				if signal_warmup + sig + 5 < data.len() {
-					
-					for i in (signal_warmup + sig)..data.len() {
-						
-						let line_window = &line[i.saturating_sub(sig-1)..=i.min(data.len()-1)];
-						let valid_values: Vec<f64> = line_window.iter()
-							.filter(|x| x.is_finite())
-							.cloned()
-							.collect();
+                for i in warmup..data.len() {
+                    prop_assert!(
+                        line[i].is_nan() || line[i].is_finite(),
+                        "KST line has infinite value at idx {i}: {}",
+                        line[i]
+                    );
+                }
+                for i in signal_warmup..data.len() {
+                    prop_assert!(
+                        signal[i].is_nan() || signal[i].is_finite(),
+                        "Signal has infinite value at idx {i}: {}",
+                        signal[i]
+                    );
+                }
 
-						if !valid_values.is_empty() && signal[i].is_finite() {
-							let line_avg = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
+                if signal_warmup + sig + 5 < data.len() {
+                    for i in (signal_warmup + sig)..data.len() {
+                        let line_window = &line[i.saturating_sub(sig - 1)..=i.min(data.len() - 1)];
+                        let valid_values: Vec<f64> = line_window
+                            .iter()
+                            .filter(|x| x.is_finite())
+                            .cloned()
+                            .collect();
 
-							
-							let tolerance = if line_avg.abs() > 100.0 {
-								0.005  
-							} else if line_avg.abs() > 10.0 {
-								0.007  
-							} else {
-								0.01   
-							};
+                        if !valid_values.is_empty() && signal[i].is_finite() {
+                            let line_avg =
+                                valid_values.iter().sum::<f64>() / valid_values.len() as f64;
 
-							prop_assert!(
+                            let tolerance = if line_avg.abs() > 100.0 {
+                                0.005
+                            } else if line_avg.abs() > 10.0 {
+                                0.007
+                            } else {
+                                0.01
+                            };
+
+                            prop_assert!(
 								(signal[i] - line_avg).abs() <= 1e-6 ||
 								(signal[i] - line_avg).abs() / line_avg.abs().max(1.0) <= tolerance,
 								"Signal deviates from KST trend at idx {i}: signal={}, line_avg={}, tolerance={}%",
 								signal[i], line_avg, tolerance * 100.0
 							);
-						}
-					}
-				}
+                        }
+                    }
+                }
 
-				Ok(())
-			})
-			.unwrap();
+                Ok(())
+            })
+            .unwrap();
 
         Ok(())
     }
@@ -2761,7 +2608,6 @@ mod tests {
 
     #[test]
     fn test_kst_into_matches_api() {
-        
         let n = 512usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
@@ -2771,22 +2617,19 @@ mod tests {
 
         let input = KstInput::from_slice(&data, KstParams::default());
 
-        
         let base = kst(&input).expect("kst baseline");
 
-        
         let mut out_line = vec![0.0; n];
         let mut out_signal = vec![0.0; n];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             kst_into(&input, &mut out_line, &mut out_signal).expect("kst_into");
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
-            kst_into_slice(&mut out_line, &mut out_signal, &input, Kernel::Auto).expect("kst_into_slice");
+            kst_into_slice(&mut out_line, &mut out_signal, &input, Kernel::Auto)
+                .expect("kst_into_slice");
         }
 
         assert_eq!(base.line.len(), n);
@@ -2846,23 +2689,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
             (
                 3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 3, 3, 0, 4, 4, 0, 5, 5, 0, 6, 6, 0, 3, 3, 0,
             ),
-            
             (
                 5, 10, 5, 5, 10, 5, 5, 10, 5, 8, 13, 5, 5, 10, 5, 8, 13, 5, 10, 15, 5, 15, 20, 5,
                 5, 7, 2,
             ),
-            
             (
                 10, 10, 0, 10, 10, 0, 10, 10, 0, 15, 15, 0, 10, 10, 0, 15, 15, 0, 20, 20, 0, 30,
                 30, 0, 9, 9, 0,
             ),
-            
             (
                 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 3, 4, 1, 4, 5, 1, 5, 6, 1, 2, 3, 1,
             ),
@@ -2914,7 +2752,6 @@ mod tests {
                 .signal_period_range(sig_start, sig_end, sig_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.lines.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2925,7 +2762,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2999,7 +2835,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.signals.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3097,32 +2932,26 @@ mod tests {
 
     #[test]
     fn check_empty_input_error() {
-        
         let empty_data: Vec<f64> = vec![];
         let params = KstParams::default();
         let input = KstInput::from_slice(&empty_data, params);
 
         match kst(&input) {
-            Err(KstError::EmptyInputData) => {} 
+            Err(KstError::EmptyInputData) => {}
             Err(e) => panic!("Expected EmptyInputData, got: {:?}", e),
             Ok(_) => panic!("Empty input should have failed"),
         }
 
-        
         let nan_data = vec![f64::NAN; 10];
         let input2 = KstInput::from_slice(&nan_data, params);
 
         match kst(&input2) {
-            Err(KstError::AllValuesNaN) => {} 
+            Err(KstError::AllValuesNaN) => {}
             Err(e) => panic!("Expected AllValuesNaN, got: {:?}", e),
             Ok(_) => panic!("All NaN should have failed"),
         }
     }
 }
-
-
-
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -3250,10 +3079,9 @@ pub fn kst_batch_py<'py>(
     let rows;
     let cols = slice.len();
     let (line_arr, sig_arr) = {
-        let tmp_combos = expand_grid(&sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let tmp_combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
         rows = tmp_combos.len();
-        combos = tmp_combos; // keep for metadata
+        combos = tmp_combos;
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| PyValueError::new_err("kst: size overflow in batch output"))?;
@@ -3268,8 +3096,8 @@ pub fn kst_batch_py<'py>(
             };
             let simd = match k {
                 Kernel::ScalarBatch => Kernel::Scalar,
-                Kernel::Avx2Batch => Kernel::Scalar, // Use scalar if AVX2 not available
-                Kernel::Avx512Batch => Kernel::Scalar, // Use scalar if AVX512 not available
+                Kernel::Avx2Batch => Kernel::Scalar,
+                Kernel::Avx512Batch => Kernel::Scalar,
                 _ => Kernel::Scalar,
             };
             kst_batch_inner_into(slice, &sweep, simd, true, lo, so)
@@ -3281,7 +3109,7 @@ pub fn kst_batch_py<'py>(
     let d = pyo3::types::PyDict::new(py);
     d.set_item("line", line_arr.reshape((rows, cols))?)?;
     d.set_item("signal", sig_arr.reshape((rows, cols))?)?;
-    // metadata vectors per combo
+
     d.set_item(
         "sma1",
         combos
@@ -3368,7 +3196,6 @@ pub fn register_kst_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     }
     Ok(())
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kst_cuda_batch_dev")]
@@ -3495,19 +3322,15 @@ pub fn kst_cuda_many_series_one_param_dev_py(
     ))
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KstJsResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "kst")]
 pub fn kst_js(
     data: &[f64],
@@ -3550,8 +3373,7 @@ pub fn kst_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kst_into(
     in_ptr: *const f64,
@@ -3572,7 +3394,6 @@ pub fn kst_into(
         return Err(JsValue::from_str("null pointer"));
     }
     unsafe {
-        
         let in_beg = in_ptr as usize;
         let in_end = in_beg + len * 8;
         let lo_beg = out_line_ptr as usize;
@@ -3582,10 +3403,9 @@ pub fn kst_into(
         let overlap = |a0: usize, a1: usize, b0: usize, b1: usize| a0 < b1 && b0 < a1;
 
         let data_slice = std::slice::from_raw_parts(in_ptr, len);
-        let shadow; 
+        let shadow;
         let data =
             if overlap(in_beg, in_end, lo_beg, lo_end) || overlap(in_beg, in_end, so_beg, so_end) {
-                
                 shadow = data_slice.to_vec();
                 &shadow[..]
             } else {
@@ -3608,14 +3428,12 @@ pub fn kst_into(
         let ldst = std::slice::from_raw_parts_mut(out_line_ptr, len);
         let sdst = std::slice::from_raw_parts_mut(out_signal_ptr, len);
 
-        
         kst_into_slice(ldst, sdst, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
-/// Allocate memory for output arrays
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kst_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3624,8 +3442,7 @@ pub fn kst_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-/// Free allocated memory
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kst_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -3633,8 +3450,7 @@ pub fn kst_free(ptr: *mut f64, len: usize) {
     }
 }
 
-/// Configuration for batch KST calculation
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KstBatchConfig {
     pub sma_period1_range: (usize, usize, usize),
@@ -3648,16 +3464,16 @@ pub struct KstBatchConfig {
     pub signal_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KstBatchJsOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<KstParams>,
-    pub rows: usize, 
+    pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "kst_batch")]
 pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let sweep: KstBatchRange = serde_wasm_bindgen::from_value(config)
@@ -3666,7 +3482,6 @@ pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     let rows = combos.len();
     let cols = data.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("kst: size overflow in kst_batch_unified_js"))?;
@@ -3682,12 +3497,9 @@ pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let mut values = lines;
     values.extend_from_slice(&sigs);
 
-    
-    
     let out = KstBatchJsOutput {
         values,
         combos,
@@ -3698,8 +3510,7 @@ pub fn kst_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-/// Fast batch calculation into pre-allocated memory
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kst_batch_into(
     in_ptr: *const f64,
@@ -3753,7 +3564,6 @@ pub fn kst_batch_into(
             signal_period: (signal_period_start, signal_period_end, signal_period_step),
         };
 
-        
         let count_range = |r: &(usize, usize, usize)| {
             if r.2 == 0 {
                 0
@@ -3762,7 +3572,8 @@ pub fn kst_batch_into(
             }
         };
 
-        let rows = count_range(&sweep.sma_period1).max(1)
+        let rows = count_range(&sweep.sma_period1)
+            .max(1)
             .checked_mul(count_range(&sweep.sma_period2).max(1))
             .and_then(|x| x.checked_mul(count_range(&sweep.sma_period3).max(1)))
             .and_then(|x| x.checked_mul(count_range(&sweep.sma_period4).max(1)))

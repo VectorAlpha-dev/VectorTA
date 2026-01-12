@@ -1,36 +1,3 @@
-//! # Average Sentiment Oscillator (ASO)
-//!
-//! The Average Sentiment Oscillator measures market sentiment by analyzing both intrabar
-//! and group price movements to calculate bullish and bearish sentiment values.
-//!
-//! ## Parameters
-//! - **period**: The lookback period for calculations (default: 10)
-//! - **mode**: Calculation mode - 0: average of both, 1: intrabar only, 2: group only (default: 0)
-//!
-//! ## Returns
-//! - **`Ok(AsoOutput)`** on success, containing bulls and bears Vec<f64> of length matching the input.
-//! - **`Err(AsoError)`** otherwise.
-//!
-//! Decision log: SIMD stubs delegate to scalar; CUDA wrappers and Python interop enabled with CAI v3 + DLPack; scalar path is the reference and matches tests.
-//!
-//! ## Developer Notes
-//! - SIMD: Implemented as stubs that delegate to scalar; disabled by default due to
-//!   control-flow/deque costs. Scalar is the reference path and matches tests.
-//! - CUDA: Wrapper provided with typed errors; Python device handle exposes CAI v3 and
-//!   DLPack for interop (when `python` + `cuda` features are enabled).
-//! - Scalar: hybrid path. Uses naive O(period) scan for short windows and
-//!   monotonic deques (O(1) amortized) for long windows; warmup ramp and
-//!   zero-copy allocation preserved.
-//! - SIMD (AVX2/AVX512): stubs delegating to scalar. Wide-SIMD across time is
-//!   not beneficial here due to data dependencies and deque control-flow.
-//!   Selection routes to scalar for Avx2/Avx512 variants.
-//! - Batch: per-row compute reuses the scalar kernel. Row-specific cross-row
-//!   sharing (e.g., precomputed intrabar, per-period extrema) deferred.
-//! - Streaming: O(1) amortized per tick via monotonic deques for rolling
-//!   min/max and a ring+running-sum SMA ramp. Matches scalar outputs.
-
-
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -40,12 +7,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -57,22 +22,17 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-
-/// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum AsoData<'a> {
     Candles {
@@ -87,16 +47,17 @@ pub enum AsoData<'a> {
     },
 }
 
-/// Output structure containing calculated bulls and bears values
 #[derive(Debug, Clone)]
 pub struct AsoOutput {
     pub bulls: Vec<f64>,
     pub bears: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AsoParams {
     pub period: Option<usize>,
     pub mode: Option<usize>,
@@ -111,7 +72,6 @@ impl Default for AsoParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct AsoInput<'a> {
     pub data: AsoData<'a>,
@@ -174,8 +134,6 @@ impl<'a> AsoInput<'a> {
     }
 }
 
-
-/// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct AsoBuilder {
     period: Option<usize>,
@@ -258,7 +216,6 @@ impl AsoBuilder {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum AsoError {
     #[error("aso: Input data slice is empty.")]
@@ -283,25 +240,26 @@ pub enum AsoError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("aso: Invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("aso: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
 
-
-/// Main entry point with automatic kernel detection
 #[inline]
 pub fn aso(input: &AsoInput) -> Result<AsoOutput, AsoError> {
     aso_with_kernel(input, Kernel::Auto)
 }
 
-/// Entry point with explicit kernel selection
 pub fn aso_with_kernel(input: &AsoInput, kernel: Kernel) -> Result<AsoOutput, AsoError> {
     let (open, high, low, close, period, mode, first, chosen) = aso_prepare(input, kernel)?;
 
     let len = close.len();
-    
+
     let mut bulls = alloc_with_nan_prefix(len, first + period - 1);
     let mut bears = alloc_with_nan_prefix(len, first + period - 1);
 
@@ -312,44 +270,39 @@ pub fn aso_with_kernel(input: &AsoInput, kernel: Kernel) -> Result<AsoOutput, As
     Ok(AsoOutput { bulls, bears })
 }
 
-/// Writes ASO bulls and bears into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - Output slice lengths must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
-pub fn aso_into(input: &AsoInput, bulls_out: &mut [f64], bears_out: &mut [f64]) -> Result<(), AsoError> {
+pub fn aso_into(
+    input: &AsoInput,
+    bulls_out: &mut [f64],
+    bears_out: &mut [f64],
+) -> Result<(), AsoError> {
     let (open, high, low, close, period, mode, first, chosen) = aso_prepare(input, Kernel::Auto)?;
 
     if bulls_out.len() != close.len() || bears_out.len() != close.len() {
-        return Err(AsoError::OutputLengthMismatch { expected: close.len(), got: bulls_out.len().min(bears_out.len()) });
+        return Err(AsoError::OutputLengthMismatch {
+            expected: close.len(),
+            got: bulls_out.len().min(bears_out.len()),
+        });
     }
 
-    
     let warm = first + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm = warm.min(close.len());
-    for v in &mut bulls_out[..warm] { *v = qnan; }
-    for v in &mut bears_out[..warm] { *v = qnan; }
+    for v in &mut bulls_out[..warm] {
+        *v = qnan;
+    }
+    for v in &mut bears_out[..warm] {
+        *v = qnan;
+    }
 
-    
     aso_compute_into(
-        open,
-        high,
-        low,
-        close,
-        period,
-        mode,
-        first,
-        chosen,
-        bulls_out,
-        bears_out,
+        open, high, low, close, period, mode, first, chosen, bulls_out, bears_out,
     );
 
     Ok(())
 }
 
-/// Zero-allocation version for performance-critical paths
 #[inline]
 pub fn aso_into_slices(
     bulls_dst: &mut [f64],
@@ -360,14 +313,16 @@ pub fn aso_into_slices(
     let (open, high, low, close, period, mode, first, chosen) = aso_prepare(input, kern)?;
 
     if bulls_dst.len() != close.len() || bears_dst.len() != close.len() {
-        return Err(AsoError::OutputLengthMismatch { expected: close.len(), got: bulls_dst.len().min(bears_dst.len()) });
+        return Err(AsoError::OutputLengthMismatch {
+            expected: close.len(),
+            got: bulls_dst.len().min(bears_dst.len()),
+        });
     }
 
     aso_compute_into(
         open, high, low, close, period, mode, first, chosen, bulls_dst, bears_dst,
     );
 
-    
     let warm = first + period - 1;
     for v in &mut bulls_dst[..warm] {
         *v = f64::NAN;
@@ -379,7 +334,6 @@ pub fn aso_into_slices(
     Ok(())
 }
 
-/// Prepare and validate input data, normalizing to slices
 #[inline(always)]
 fn aso_prepare<'a>(
     input: &'a AsoInput,
@@ -446,8 +400,7 @@ fn aso_prepare<'a>(
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    
-    
+
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
         chosen = Kernel::Avx2;
@@ -456,7 +409,6 @@ fn aso_prepare<'a>(
     Ok((open, high, low, close, period, mode, first, chosen))
 }
 
-/// Core computation dispatcher
 #[inline(always)]
 fn aso_compute_into(
     open: &[f64],
@@ -471,7 +423,6 @@ fn aso_compute_into(
     out_bears: &mut [f64],
 ) {
     unsafe {
-        
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -503,7 +454,6 @@ fn aso_compute_into(
     }
 }
 
-
 #[inline]
 pub fn aso_scalar(
     open: &[f64],
@@ -521,13 +471,10 @@ pub fn aso_scalar(
         return;
     }
 
-    
     let warm = first_val + period - 1;
 
-    
     const DEQUE_THRESHOLD: usize = 64;
     if period <= DEQUE_THRESHOLD {
-        
         let mut ring_b = vec![0.0; period];
         let mut ring_e = vec![0.0; period];
         let mut sum_b = 0.0;
@@ -536,7 +483,6 @@ pub fn aso_scalar(
         let mut filled = 0usize;
 
         for i in first_val..len {
-            
             let intrarange = high[i] - low[i];
             let k1 = if intrarange == 0.0 { 1.0 } else { intrarange };
             let intrabarbulls = (((close[i] - low[i]) + (high[i] - open[i])) * 50.0) / k1;
@@ -588,7 +534,7 @@ pub fn aso_scalar(
                     filled += 1;
                 }
 
-                let n = filled; 
+                let n = filled;
                 unsafe {
                     *out_bulls.get_unchecked_mut(i) = sum_b / n as f64;
                     *out_bears.get_unchecked_mut(i) = sum_e / n as f64;
@@ -598,7 +544,6 @@ pub fn aso_scalar(
         return;
     }
 
-    
     let mut ring_b = vec![0.0f64; period];
     let mut ring_e = vec![0.0f64; period];
     let mut sum_b = 0.0f64;
@@ -776,7 +721,6 @@ pub fn aso_scalar(
     }
 }
 
-
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn aso_simd128(
@@ -792,12 +736,10 @@ unsafe fn aso_simd128(
 ) {
     use core::arch::wasm32::*;
 
-    
     aso_scalar(
         open, high, low, close, period, mode, first_val, out_bulls, out_bears,
     );
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
@@ -812,12 +754,10 @@ unsafe fn aso_avx2(
     out_bulls: &mut [f64],
     out_bears: &mut [f64],
 ) {
-    
     aso_scalar(
         open, high, low, close, period, mode, first_val, out_bulls, out_bears,
     );
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
@@ -832,14 +772,11 @@ unsafe fn aso_avx512(
     out_bulls: &mut [f64],
     out_bears: &mut [f64],
 ) {
-    
     aso_scalar(
         open, high, low, close, period, mode, first_val, out_bulls, out_bears,
     );
 }
 
-
-/// Batch parameter ranges
 #[derive(Clone, Debug)]
 pub struct AsoBatchRange {
     pub period: (usize, usize, usize),
@@ -855,7 +792,6 @@ impl Default for AsoBatchRange {
     }
 }
 
-/// Batch builder for parameter sweeps
 #[derive(Clone, Debug, Default)]
 pub struct AsoBatchBuilder {
     range: AsoBatchRange,
@@ -933,11 +869,10 @@ impl AsoBatchBuilder {
     }
 }
 
-/// Batch output structure
 #[derive(Clone, Debug)]
 pub struct AsoBatchOutput {
-    pub bulls: Vec<f64>, 
-    pub bears: Vec<f64>, 
+    pub bulls: Vec<f64>,
+    pub bears: Vec<f64>,
     pub combos: Vec<AsoParams>,
     pub rows: usize,
     pub cols: usize,
@@ -970,18 +905,21 @@ impl AsoBatchOutput {
     }
 }
 
-/// Expand parameter grid for batch processing
 #[inline(always)]
 fn expand_grid_aso(r: &AsoBatchRange) -> Result<Vec<AsoParams>, AsoError> {
     fn axis_usize((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, AsoError> {
-        if st == 0 || s == e { return Ok(vec![s]); }
+        if st == 0 || s == e {
+            return Ok(vec![s]);
+        }
         let mut v = Vec::new();
         if s < e {
             let mut cur = s;
             while cur <= e {
                 v.push(cur);
                 let next = cur.saturating_add(st);
-                if next == cur { break; }
+                if next == cur {
+                    break;
+                }
                 cur = next;
             }
         } else {
@@ -989,12 +927,22 @@ fn expand_grid_aso(r: &AsoBatchRange) -> Result<Vec<AsoParams>, AsoError> {
             while cur >= e {
                 v.push(cur);
                 let next = cur.saturating_sub(st);
-                if next == cur { break; }
+                if next == cur {
+                    break;
+                }
                 cur = next;
-                if cur == 0 && e > 0 { break; }
+                if cur == 0 && e > 0 {
+                    break;
+                }
             }
         }
-        if v.is_empty() { return Err(AsoError::InvalidRange { start: s, end: e, step: st }); }
+        if v.is_empty() {
+            return Err(AsoError::InvalidRange {
+                start: s,
+                end: e,
+                step: st,
+            });
+        }
         Ok(v)
     }
 
@@ -1003,17 +951,23 @@ fn expand_grid_aso(r: &AsoBatchRange) -> Result<Vec<AsoParams>, AsoError> {
     let total = ps
         .len()
         .checked_mul(ms.len())
-        .ok_or(AsoError::InvalidRange { start: ps.len(), end: ms.len(), step: 0 })?;
+        .ok_or(AsoError::InvalidRange {
+            start: ps.len(),
+            end: ms.len(),
+            step: 0,
+        })?;
     let mut out = Vec::with_capacity(total);
     for &p in &ps {
         for &m in &ms {
-            out.push(AsoParams { period: Some(p), mode: Some(m) });
+            out.push(AsoParams {
+                period: Some(p),
+                mode: Some(m),
+            });
         }
     }
     Ok(out)
 }
 
-/// Batch processing with kernel selection
 pub fn aso_batch_with_kernel(
     open: &[f64],
     high: &[f64],
@@ -1046,11 +1000,9 @@ pub fn aso_batch_with_kernel(
         });
     }
 
-    
     let mut bulls_mu = make_uninit_matrix(rows, cols);
     let mut bears_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1058,7 +1010,6 @@ pub fn aso_batch_with_kernel(
     init_matrix_prefixes(&mut bulls_mu, cols, &warm);
     init_matrix_prefixes(&mut bears_mu, cols, &warm);
 
-    
     let mut guard_b = core::mem::ManuallyDrop::new(bulls_mu);
     let mut guard_e = core::mem::ManuallyDrop::new(bears_mu);
     let bulls_out: &mut [f64] =
@@ -1071,14 +1022,12 @@ pub fn aso_batch_with_kernel(
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => k,
         other => return Err(AsoError::InvalidKernelForBatch(other)),
     };
-    
-    
+
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(k, Kernel::Auto) && matches!(actual, Kernel::Avx2Batch | Kernel::Avx512Batch) {
         actual = Kernel::ScalarBatch;
     }
 
-    
     let do_row = |row: usize, bulls_row: &mut [f64], bears_row: &mut [f64]| {
         let p = combos[row].period.unwrap();
         let m = combos[row].mode.unwrap();
@@ -1104,7 +1053,6 @@ pub fn aso_batch_with_kernel(
         }
     };
 
-    
     #[cfg(not(target_arch = "wasm32"))]
     {
         bulls_out
@@ -1125,7 +1073,6 @@ pub fn aso_batch_with_kernel(
         }
     }
 
-    
     let bulls = unsafe {
         Vec::from_raw_parts(
             guard_b.as_mut_ptr() as *mut f64,
@@ -1150,7 +1097,6 @@ pub fn aso_batch_with_kernel(
     })
 }
 
-/// Batch processing for slices
 pub fn aso_batch_slice(
     open: &[f64],
     high: &[f64],
@@ -1168,7 +1114,6 @@ pub fn aso_batch_slice(
     aso_batch_with_kernel(open, high, low, close, sweep, k)
 }
 
-/// Parallel batch processing for slices
 #[cfg(not(target_arch = "wasm32"))]
 pub fn aso_batch_par_slice(
     open: &[f64],
@@ -1178,8 +1123,6 @@ pub fn aso_batch_par_slice(
     sweep: &AsoBatchRange,
     kern: Kernel,
 ) -> Result<AsoBatchOutput, AsoError> {
-    
-    
     let k = match kern {
         Kernel::Scalar => Kernel::ScalarBatch,
         Kernel::Avx2 => Kernel::Avx2Batch,
@@ -1198,11 +1141,9 @@ pub fn aso_batch_par_slice(
     sweep: &AsoBatchRange,
     kern: Kernel,
 ) -> Result<AsoBatchOutput, AsoError> {
-    
     aso_batch_with_kernel(open, high, low, close, sweep, kern)
 }
 
-/// In-place batch core (no allocations, no copies)
 #[inline(always)]
 fn aso_batch_inner_into(
     open: &[f64],
@@ -1212,12 +1153,16 @@ fn aso_batch_inner_into(
     sweep: &AsoBatchRange,
     kern: Kernel,
     parallel: bool,
-    out_bulls: &mut [f64], 
-    out_bears: &mut [f64], 
+    out_bulls: &mut [f64],
+    out_bears: &mut [f64],
 ) -> Result<Vec<AsoParams>, AsoError> {
     let combos = expand_grid_aso(sweep)?;
     if combos.is_empty() {
-        return Err(AsoError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(AsoError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
 
     let cols = close.len();
@@ -1228,11 +1173,16 @@ fn aso_batch_inner_into(
         return Err(AsoError::MissingData);
     }
     let rows = combos.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(AsoError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    let total = rows.checked_mul(cols).ok_or(AsoError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
     if out_bulls.len() != total || out_bears.len() != total {
-        return Err(AsoError::OutputLengthMismatch { expected: total, got: out_bulls.len().min(out_bears.len()) });
+        return Err(AsoError::OutputLengthMismatch {
+            expected: total,
+            got: out_bulls.len().min(out_bears.len()),
+        });
     }
 
     let first = close
@@ -1247,7 +1197,6 @@ fn aso_batch_inner_into(
         });
     }
 
-    
     let mut b_mu = unsafe {
         core::slice::from_raw_parts_mut(
             out_bulls.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1281,15 +1230,11 @@ fn aso_batch_inner_into(
         let e = core::slice::from_raw_parts_mut(er.as_mut_ptr() as *mut f64, er.len());
 
         match actual {
-            Kernel::ScalarBatch => {
-                aso_scalar(open, high, low, close, p, m, first, b, e)
-            }
+            Kernel::ScalarBatch => aso_scalar(open, high, low, close, p, m, first, b, e),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2Batch => aso_avx2(open, high, low, close, p, m, first, b, e),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512Batch => {
-                aso_avx512(open, high, low, close, p, m, first, b, e)
-            }
+            Kernel::Avx512Batch => aso_avx512(open, high, low, close, p, m, first, b, e),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2Batch | Kernel::Avx512Batch => {
                 aso_scalar(open, high, low, close, p, m, first, b, e)
@@ -1323,18 +1268,13 @@ fn aso_batch_inner_into(
     Ok(combos)
 }
 
-
-/// Streaming calculator using monotonic deques for min/max and a ring+sum SMA ramp.
-/// Decision: SIMD stubs remain; streaming optimized to O(1) amortized with parity to scalar.
 #[derive(Debug, Clone)]
 pub struct AsoStream {
-    
     o: Vec<f64>,
     h: Vec<f64>,
     l: Vec<f64>,
     c: Vec<f64>,
 
-    
     rb: Vec<f64>,
     re: Vec<f64>,
     sum_b: f64,
@@ -1342,8 +1282,6 @@ pub struct AsoStream {
     head_be: usize,
     filled_be: usize,
 
-    
-    
     dq_min_idx: Vec<usize>,
     dq_min_val: Vec<f64>,
     min_head: usize,
@@ -1358,8 +1296,8 @@ pub struct AsoStream {
 
     period: usize,
     mode: usize,
-    i: usize,    
-    ready: bool, 
+    i: usize,
+    ready: bool,
 }
 
 impl AsoStream {
@@ -1410,7 +1348,6 @@ impl AsoStream {
         })
     }
 
-    /// Multiply by the reciprocal; guard zero to avoid NaNs
     #[inline(always)]
     fn inv_or_one(x: f64) -> f64 {
         if x != 0.0 {
@@ -1426,13 +1363,11 @@ impl AsoStream {
         let i = self.i;
         let idx = i % p;
 
-        
         self.o[idx] = open;
         self.h[idx] = high;
         self.l[idx] = low;
         self.c[idx] = close;
 
-        
         while self.min_len > 0 {
             let back = if self.min_tail == 0 {
                 p - 1
@@ -1440,7 +1375,6 @@ impl AsoStream {
                 self.min_tail - 1
             };
             if low <= self.dq_min_val[back] {
-                
                 self.min_tail = back;
                 self.min_len -= 1;
             } else {
@@ -1448,7 +1382,6 @@ impl AsoStream {
             }
         }
         if self.min_len == p {
-            
             self.min_head += 1;
             if self.min_head == p {
                 self.min_head = 0;
@@ -1463,7 +1396,6 @@ impl AsoStream {
         }
         self.min_len += 1;
 
-        
         while self.max_len > 0 {
             let back = if self.max_tail == 0 {
                 p - 1
@@ -1471,7 +1403,6 @@ impl AsoStream {
                 self.max_tail - 1
             };
             if high >= self.dq_max_val[back] {
-                
                 self.max_tail = back;
                 self.max_len -= 1;
             } else {
@@ -1493,7 +1424,6 @@ impl AsoStream {
         }
         self.max_len += 1;
 
-        
         self.i = i + 1;
         if self.i >= p {
             self.ready = true;
@@ -1502,10 +1432,8 @@ impl AsoStream {
             return None;
         }
 
-        
         let start_abs = self.i - p;
 
-        
         while self.min_len > 0 && self.dq_min_idx[self.min_head] < start_abs {
             self.min_head += 1;
             if self.min_head == p {
@@ -1521,28 +1449,23 @@ impl AsoStream {
             self.max_len -= 1;
         }
 
-        
         debug_assert!(self.min_len > 0 && self.max_len > 0);
         let gl = self.dq_min_val[self.min_head];
         let gh = self.dq_max_val[self.max_head];
 
-        
         let oldest_ring = if idx + 1 == p { 0 } else { idx + 1 };
         let gopen = self.o[oldest_ring];
 
-        
         let intrarange = high - low;
         let scale1 = 50.0 * Self::inv_or_one(intrarange);
         let intrabarbulls = ((close - low) + (high - open)) * scale1;
         let intrabarbears = ((high - close) + (open - low)) * scale1;
 
-        
         let gr = gh - gl;
         let scale2 = 50.0 * Self::inv_or_one(gr);
         let groupbulls = ((close - gl) + (gh - gopen)) * scale2;
         let groupbears = ((gh - close) + (gopen - gl)) * scale2;
 
-        
         let b = match self.mode {
             0 => 0.5 * (intrabarbulls + groupbulls),
             1 => intrabarbulls,
@@ -1554,7 +1477,6 @@ impl AsoStream {
             _ => groupbears,
         };
 
-        
         let old_b = if self.filled_be == p {
             self.rb[self.head_be]
         } else {
@@ -1585,7 +1507,6 @@ impl AsoStream {
     }
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "aso")]
 #[pyo3(signature = (open, high, low, close, period=None, mode=None, kernel=None))]
@@ -1614,7 +1535,6 @@ pub fn aso_py<'py>(
     let params = AsoParams { period, mode };
     let input = AsoInput::from_slices(o, h, l, c, params);
 
-    
     let (bulls, bears) = py
         .allow_threads(|| aso_with_kernel(&input, kern).map(|o| (o.bulls, o.bears)))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1690,7 +1610,6 @@ pub fn aso_batch_py<'py>(
     Ok(d)
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1709,7 +1628,7 @@ use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct AsoDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<CudaContext>,
@@ -1741,12 +1660,14 @@ impl AsoDeviceArrayF32Py {
                 .as_raw() as usize
         };
         d.set_item("data", (ptr, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1757,7 +1678,6 @@ impl AsoDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1827,8 +1747,20 @@ pub fn aso_cuda_batch_dev_py(
         Ok::<_, PyErr>((out.0, out.1, cuda.context_arc(), cuda.device_id()))
     })?;
     Ok((
-        AsoDeviceArrayF32Py { buf: Some(bulls.buf), rows: bulls.rows, cols: bulls.cols, _ctx: ctx_guard.clone(), device_id: dev_id },
-        AsoDeviceArrayF32Py { buf: Some(bears.buf), rows: bears.rows, cols: bears.cols, _ctx: ctx_guard, device_id: dev_id },
+        AsoDeviceArrayF32Py {
+            buf: Some(bulls.buf),
+            rows: bulls.rows,
+            cols: bulls.cols,
+            _ctx: ctx_guard.clone(),
+            device_id: dev_id,
+        },
+        AsoDeviceArrayF32Py {
+            buf: Some(bears.buf),
+            rows: bears.rows,
+            cols: bears.cols,
+            _ctx: ctx_guard,
+            device_id: dev_id,
+        },
     ))
 }
 
@@ -1871,8 +1803,20 @@ pub fn aso_cuda_many_series_one_param_dev_py(
         Ok::<_, PyErr>((out.0, out.1, cuda.context_arc(), cuda.device_id()))
     })?;
     Ok((
-        AsoDeviceArrayF32Py { buf: Some(bulls.buf), rows: bulls.rows, cols: bulls.cols, _ctx: ctx_guard.clone(), device_id: dev_id },
-        AsoDeviceArrayF32Py { buf: Some(bears.buf), rows: bears.rows, cols: bears.cols, _ctx: ctx_guard, device_id: dev_id },
+        AsoDeviceArrayF32Py {
+            buf: Some(bulls.buf),
+            rows: bulls.rows,
+            cols: bulls.cols,
+            _ctx: ctx_guard.clone(),
+            device_id: dev_id,
+        },
+        AsoDeviceArrayF32Py {
+            buf: Some(bears.buf),
+            rows: bears.rows,
+            cols: bears.cols,
+            _ctx: ctx_guard,
+            device_id: dev_id,
+        },
     ))
 }
 
@@ -1898,16 +1842,15 @@ impl AsoStreamPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AsoResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "aso")]
 pub fn aso_js(
     open: &[f64],
@@ -1940,18 +1883,15 @@ pub fn aso_js(
         return Err(JsValue::from_str("Not enough valid data"));
     }
 
-    
     let mut mu = make_uninit_matrix(2, len);
     let warm = first + p - 1;
     init_matrix_prefixes(&mut mu, len, &[warm, warm]);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(mu);
     let dst: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
     let (bulls_dst, bears_dst) = dst.split_at_mut(len);
 
-    
     let chosen = detect_best_kernel();
     unsafe {
         aso_compute_into(
@@ -1959,7 +1899,6 @@ pub fn aso_js(
         );
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1975,7 +1914,7 @@ pub fn aso_js(
     serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aso_into(
     open_ptr: *const f64,
@@ -2020,7 +1959,7 @@ pub fn aso_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aso_batch_into(
     open_ptr: *const f64,
@@ -2054,8 +1993,7 @@ pub fn aso_batch_into(
             mode: (mode_start, mode_end, mode_step),
         };
 
-        let combos = expand_grid_aso(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_aso(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -2071,23 +2009,23 @@ pub fn aso_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AsoBatchConfig {
     pub period_range: (usize, usize, usize),
     pub mode_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AsoBatchJsOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<AsoParams>,
-    pub rows: usize, 
-    pub cols: usize, 
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "aso_batch")]
 pub fn aso_batch_unified_js(
     open: &[f64],
@@ -2103,8 +2041,7 @@ pub fn aso_batch_unified_js(
         period: cfg.period_range,
         mode: cfg.mode_range,
     };
-    let combos = expand_grid_aso(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid_aso(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = close.len();
     if cols == 0 {
@@ -2114,7 +2051,6 @@ pub fn aso_batch_unified_js(
         return Err(JsValue::from_str("OHLC length mismatch"));
     }
 
-    
     let mut mu = make_uninit_matrix(rows * 2, cols);
     let first = close
         .iter()
@@ -2129,7 +2065,6 @@ pub fn aso_batch_unified_js(
         .collect();
     init_matrix_prefixes(&mut mu, cols, &warms);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(mu);
     let dst: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -2138,14 +2073,12 @@ pub fn aso_batch_unified_js(
         .ok_or_else(|| JsValue::from_str("size overflow"))?;
     let (bulls_dst, bears_dst) = dst.split_at_mut(total);
 
-    
     let kern = detect_best_batch_kernel();
     aso_batch_inner_into(
         open, high, low, close, &sweep, kern, false, bulls_dst, bears_dst,
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -2156,15 +2089,15 @@ pub fn aso_batch_unified_js(
 
     let out = AsoBatchJsOutput {
         values,
-        combos: combos.clone(), 
-        rows: rows * 2,         
+        combos: combos.clone(),
+        rows: rows * 2,
         cols,
     };
     serde_wasm_bindgen::to_value(&out)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aso_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2173,14 +2106,13 @@ pub fn aso_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aso_free(ptr: *mut f64, len: usize) {
     unsafe {
         let _ = Vec::from_raw_parts(ptr, len, len);
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2200,7 +2132,6 @@ mod tests {
         let input = AsoInput::from_candles(&candles, "close", AsoParams::default());
         let result = aso_with_kernel(&input, kernel)?;
 
-        
         let expected_bulls = [
             48.48594883,
             46.37206396,
@@ -2255,7 +2186,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = AsoInput::from_slices(
             &candles.open,
             &candles.high,
@@ -2283,13 +2213,11 @@ mod tests {
         let input = AsoInput::from_candles(&candles, "close", AsoParams::default());
         aso_into_slices(&mut bulls, &mut bears, &input, kernel)?;
 
-        
         for i in 0..9 {
             assert!(bulls[i].is_nan());
             assert!(bears[i].is_nan());
         }
 
-        
         assert!(!bulls[20].is_nan());
         assert!(!bears[20].is_nan());
 
@@ -2311,7 +2239,7 @@ mod tests {
 
         let result = aso_batch_with_kernel(&open, &high, &low, &close, &sweep, kernel)?;
 
-        assert_eq!(result.rows, 9); 
+        assert_eq!(result.rows, 9);
         assert_eq!(result.cols, 10);
         assert_eq!(result.bulls.len(), 90);
         assert_eq!(result.bears.len(), 90);
@@ -2407,7 +2335,7 @@ mod tests {
 
         let params = AsoParams {
             period: Some(10),
-            mode: Some(3), 
+            mode: Some(3),
         };
         let input = AsoInput::from_candles(&candles, "close", params);
         let res = aso_with_kernel(&input, kernel);
@@ -2484,7 +2412,6 @@ mod tests {
         let first_input = AsoInput::from_candles(&candles, "close", first_params);
         let first_result = aso_with_kernel(&first_input, kernel)?;
 
-        
         let second_params = AsoParams {
             period: Some(10),
             mode: Some(0),
@@ -2501,7 +2428,6 @@ mod tests {
         assert_eq!(second_result.bulls.len(), first_result.bulls.len());
         assert_eq!(second_result.bears.len(), first_result.bears.len());
 
-        
         if second_result.bulls.len() > 30 {
             assert!(!second_result.bulls[30].is_nan());
             assert!(!second_result.bears[30].is_nan());
@@ -2527,7 +2453,6 @@ mod tests {
         assert_eq!(res.bulls.len(), candles.close.len());
         assert_eq!(res.bears.len(), candles.close.len());
 
-        
         if res.bulls.len() > 240 {
             for (i, (&bull_val, &bear_val)) in res.bulls[240..]
                 .iter()
@@ -2599,7 +2524,6 @@ mod tests {
         assert_eq!(batch_output.bulls.len(), stream_bulls.len());
         assert_eq!(batch_output.bears.len(), stream_bears.len());
 
-        
         for (i, ((&batch_bull, &stream_bull), (&batch_bear, &stream_bear))) in batch_output
             .bulls
             .iter()
@@ -2614,19 +2538,8 @@ mod tests {
                 continue;
             }
 
-            
-            
-            
-            
-            
-            
-            
-
-            
             if i >= period {
-                
                 if !batch_bull.is_nan() && !stream_bull.is_nan() {
-                    
                     assert!(
                         stream_bull >= -1e-9 && stream_bull <= 100.0 + 1e-9,
                         "[{}] ASO streaming bulls out of range at idx {}: {}",
@@ -2645,7 +2558,6 @@ mod tests {
                     );
                 }
 
-                
                 if mode != 0 && !stream_bull.is_nan() && !stream_bear.is_nan() {
                     let sum = stream_bull + stream_bear;
                     assert!(
@@ -2737,7 +2649,6 @@ mod tests {
                 let bull_bits = bull_val.to_bits();
                 let bear_bits = bear_val.to_bits();
 
-                
                 for (val, bits, name) in [
                     (bull_val, bull_bits, "bulls"),
                     (bear_val, bear_bits, "bears"),
@@ -2811,7 +2722,7 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                0usize..=2, 
+                0usize..=2,
             )
         });
 
@@ -2822,7 +2733,6 @@ mod tests {
                     mode: Some(mode),
                 };
 
-                
                 let mut open = Vec::with_capacity(data.len());
                 let mut high = Vec::with_capacity(data.len());
                 let mut low = Vec::with_capacity(data.len());
@@ -2853,7 +2763,6 @@ mod tests {
                     let ref_bull = ref_bulls[i];
                     let ref_bear = ref_bears[i];
 
-                    
                     if !bull.is_nan() && !bear.is_nan() {
                         let sum = bull + bear;
                         prop_assert!(
@@ -2866,7 +2775,6 @@ mod tests {
                         );
                     }
 
-                    
                     if !bull.is_nan() {
                         prop_assert!(
                             bull >= -1e-9 && bull <= 100.0 + 1e-9,
@@ -2884,7 +2792,6 @@ mod tests {
                         );
                     }
 
-                    
                     let bull_bits = bull.to_bits();
                     let bear_bits = bear.to_bits();
                     let ref_bull_bits = ref_bull.to_bits();
@@ -2937,7 +2844,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -2948,7 +2854,6 @@ mod tests {
             .kernel(kernel)
             .apply_candles(&candles)?;
 
-        
         let default_params = AsoParams::default();
         let default_row_idx = output
             .combos
@@ -2962,7 +2867,6 @@ mod tests {
         assert_eq!(bulls_row.len(), candles.close.len());
         assert_eq!(bears_row.len(), candles.close.len());
 
-        
         let expected_bulls = [
             48.48594883,
             46.37206396,
@@ -3012,16 +2916,15 @@ mod tests {
 
         let output = AsoBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 20, 2) 
-            .mode_range(0, 2, 1) 
+            .period_range(10, 20, 2)
+            .mode_range(0, 2, 1)
             .apply_candles(&candles)?;
 
-        let expected_combos = 6 * 3; 
+        let expected_combos = 6 * 3;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, candles.close.len());
 
-        
         let mut found_combos = 0;
         for period in (10..=20).step_by(2) {
             for mode in 0..=2 {
@@ -3052,13 +2955,13 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_configs = vec![
-            (2, 10, 2, 0, 2, 1),   
-            (5, 25, 5, 0, 0, 1),   
-            (10, 10, 1, 0, 2, 1),  
-            (2, 5, 1, 1, 1, 1),    
-            (30, 60, 15, 2, 2, 1), 
-            (9, 15, 3, 0, 2, 2),   
-            (8, 12, 1, 0, 1, 1),   
+            (2, 10, 2, 0, 2, 1),
+            (5, 25, 5, 0, 0, 1),
+            (10, 10, 1, 0, 2, 1),
+            (2, 5, 1, 1, 1, 1),
+            (30, 60, 15, 2, 2, 1),
+            (9, 15, 3, 0, 2, 2),
+            (8, 12, 1, 0, 1, 1),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step)) in
@@ -3070,7 +2973,6 @@ mod tests {
                 .mode_range(m_start, m_end, m_step)
                 .apply_candles(&candles)?;
 
-            
             for (row_idx, combo) in output.combos.iter().enumerate() {
                 let bulls_row = output.bulls_row(row_idx);
                 let bears_row = output.bears_row(row_idx);
@@ -3128,7 +3030,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_aso_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3207,8 +3108,7 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_aso_into_matches_api() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -3216,10 +3116,8 @@ mod tests {
 
         let input = AsoInput::from_candles(&candles, "close", AsoParams::default());
 
-        
         let base = aso(&input)?;
 
-        
         let mut bulls = vec![0.0; candles.close.len()];
         let mut bears = vec![0.0; candles.close.len()];
         aso_into(&input, &mut bulls, &mut bears)?;
@@ -3251,22 +3149,18 @@ mod tests {
         Ok(())
     }
 
-    
     #[test]
     fn test_new_api_features() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = AsoInput::from_candles(&candles, "close", AsoParams::default());
         let _data_ref: &[f64] = input.as_ref();
 
-        
         let builder = AsoBatchBuilder::new().period_static(10).mode_static(0);
         let output = builder.apply_candles(&candles)?;
         assert_eq!(output.combos.len(), 1);
 
-        
         let output2 = AsoBatchBuilder::with_default_candles(&candles)?;
         assert!(output2.combos.len() > 0);
 
@@ -3279,7 +3173,6 @@ mod tests {
         )?;
         assert!(output3.combos.len() > 0);
 
-        
         let params = AsoParams::default();
         if let Some(row) = output2.row_for_params(&params) {
             let bulls_row = output2.bulls_row(row);
@@ -3293,7 +3186,6 @@ mod tests {
             assert_eq!(bears.len(), candles.close.len());
         }
 
-        
         let sweep = AsoBatchRange::default();
         let output4 = aso_batch_slice(
             &candles.open,
@@ -3315,7 +3207,6 @@ mod tests {
         )?;
         assert_eq!(output4.combos.len(), output5.combos.len());
 
-        
         let input_high = AsoInput::from_candles(&candles, "high", AsoParams::default());
         let _output_high = aso(&input_high)?;
 

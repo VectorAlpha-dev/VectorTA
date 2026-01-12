@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::kama::{
     kama_batch_with_kernel, kama_with_kernel, KamaBatchRange, KamaInput, KamaParams,
 };

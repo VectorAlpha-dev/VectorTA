@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::jma::{
     jma_batch_with_kernel, JmaBatchRange, JmaBuilder, JmaParams,
 };

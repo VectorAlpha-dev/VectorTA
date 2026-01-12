@@ -1,31 +1,3 @@
-//! # Jurik Moving Average (JMA)
-//!
-//! Decision: Streaming kernel precomputes (1-α), (1-β), α², (1-α)² and clamps phase at init; parity with scalar/batch retained.
-//! CUDA: Enabled (RAII primary-context via cust::Context, per-handle Arc). Interop: CAI v3 (byte-strides, no stream) + DLPack v1.x negotiation (versioned/legacy capsules).
-//!
-//! A minimal-lag smoothing methodology developed by Mark Jurik. JMA adapts quickly
-//! to market moves while reducing noise. Parameters (`period`, `phase`, `power`)
-//! control window size, phase shift, and smoothing aggressiveness.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points) - default: 7
-//! - **phase**: Shift in [-100.0, 100.0], curve displacement - default: 50.0
-//! - **power**: Exponent for smoothing ratio - default: 2
-//!
-//! ## Returns
-//! - **`Ok(JmaOutput)`** on success, containing a `Vec<f64>` of smoothed values.
-//! - **`Err(JmaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Fully implemented – FMA-enabled with loop unrolling for ILP
-//! - **AVX512 kernel**: ✅ Fully implemented – 8-way unrolled scalar-FMA steps to better saturate wide backends
-//! - **Streaming update**: ✅ O(1) complexity - efficient incremental computation with state variables (e0, e1, e2)
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **Note**: Sequential nature of JMA calculations limits SIMD benefits, but implementations leverage
-//!   instruction-level parallelism through loop unrolling
-//! - **Row-specific batch**: Not attempted; potential reuse of e0/e1 across phase-only sweeps exists, but typical
-//!   grids vary period/power as well. Retaining per-row computation avoids complexity with limited upside.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -229,7 +201,11 @@ pub enum JmaError {
     #[error("jma: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("jma: Invalid range (usize): start={start}, end={end}, step={step}")]
-    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    InvalidRangeUsize {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("jma: Invalid range (f64): start={start}, end={end}, step={step}")]
     InvalidRangeF64 { start: f64, end: f64, step: f64 },
     #[error("jma: Invalid kernel for batch: {0:?}")]
@@ -281,7 +257,6 @@ pub fn jma_with_kernel(input: &JmaInput, kernel: Kernel) -> Result<JmaOutput, Jm
         other => other,
     };
 
-    
     let mut out = alloc_with_nan_prefix(len, first);
     unsafe {
         match chosen {
@@ -313,7 +288,6 @@ pub fn jma_with_kernel_into(
     };
     let len = data.len();
 
-    
     if out.len() != len {
         return Err(JmaError::OutputLengthMismatch {
             expected: len,
@@ -353,8 +327,6 @@ pub fn jma_with_kernel_into(
         other => other,
     };
 
-    
-    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     out[..first].fill(qnan);
 
@@ -375,15 +347,8 @@ pub fn jma_with_kernel_into(
     Ok(())
 }
 
-/// Write JMA values into a caller-provided buffer without allocations.
-///
-/// - Preserves the NaN warmup prefix exactly as the Vec-returning API does.
-/// - `out.len()` must equal the input data length.
-///
-/// Returns `Ok(())` on success or a `JmaError` on invalid parameters or length mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn jma_into(input: &JmaInput, out: &mut [f64]) -> Result<(), JmaError> {
-    
     jma_with_kernel_into(input, Kernel::Auto, out)
 }
 
@@ -427,13 +392,11 @@ pub fn jma_scalar(
 
     let n = data.len();
     unsafe {
-        
         let mut p = data.as_ptr().add(first_valid + 1);
         let mut q = output.as_mut_ptr().add(first_valid + 1);
         let end_ptr = data.as_ptr().add(n);
 
         while p.add(3) < end_ptr {
-            
             let x0 = *p;
             e0 = one_minus_alpha.mul_add(x0, alpha * e0);
             e1 = (x0 - e0).mul_add(one_minus_beta, beta * e1);
@@ -444,7 +407,6 @@ pub fn jma_scalar(
             p = p.add(1);
             q = q.add(1);
 
-            
             let x1 = *p;
             e0 = one_minus_alpha.mul_add(x1, alpha * e0);
             e1 = (x1 - e0).mul_add(one_minus_beta, beta * e1);
@@ -455,7 +417,6 @@ pub fn jma_scalar(
             p = p.add(1);
             q = q.add(1);
 
-            
             let x2 = *p;
             e0 = one_minus_alpha.mul_add(x2, alpha * e0);
             e1 = (x2 - e0).mul_add(one_minus_beta, beta * e1);
@@ -466,7 +427,6 @@ pub fn jma_scalar(
             p = p.add(1);
             q = q.add(1);
 
-            
             let x3 = *p;
             e0 = one_minus_alpha.mul_add(x3, alpha * e0);
             e1 = (x3 - e0).mul_add(one_minus_beta, beta * e1);
@@ -478,7 +438,6 @@ pub fn jma_scalar(
             q = q.add(1);
         }
 
-        
         while p < end_ptr {
             let x = *p;
             e0 = one_minus_alpha.mul_add(x, alpha * e0);
@@ -536,7 +495,6 @@ pub unsafe fn jma_avx2(
 
     let n = data.len();
     unsafe {
-        
         let mut p = data.as_ptr().add(first_valid + 1);
         let mut q = output.as_mut_ptr().add(first_valid + 1);
         let end_ptr = data.as_ptr().add(n);
@@ -658,7 +616,6 @@ pub unsafe fn jma_avx512(
     let mut i = first_valid + 1;
     let n = data.len();
 
-    
     while i + 7 < n {
         macro_rules! step {
             ($idx:expr) => {{
@@ -684,7 +641,6 @@ pub unsafe fn jma_avx512(
         i += 8;
     }
 
-    
     while i < n {
         let price = *data.get_unchecked(i);
         e0 = one_minus_alpha.mul_add(price, alpha * e0);
@@ -698,25 +654,20 @@ pub unsafe fn jma_avx512(
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct JmaStream {
-    
     period: usize,
     phase: f64,
     power: u32,
 
-    
     alpha: f64,
     beta: f64,
-    phase_ratio: f64, 
+    phase_ratio: f64,
     one_minus_alpha: f64,
     one_minus_beta: f64,
     alpha_sq: f64,
-    oma_sq: f64, 
+    oma_sq: f64,
 
-    
     initialized: bool,
     e0: f64,
     e1: f64,
@@ -740,11 +691,9 @@ impl JmaStream {
         }
         let power = params.power.unwrap_or(2);
 
-        
         let clamped = phase.max(-100.0).min(100.0);
         let phase_ratio = clamped / 100.0 + 1.5;
 
-        
         let numerator = 0.45 * (period as f64 - 1.0);
         let denominator = numerator + 2.0;
         let beta = if denominator.abs() < f64::EPSILON {
@@ -753,10 +702,8 @@ impl JmaStream {
             numerator / denominator
         };
 
-        
         let alpha = pow_u32(beta, power);
 
-        
         let one_minus_alpha = 1.0 - alpha;
         let one_minus_beta = 1.0 - beta;
         let alpha_sq = alpha * alpha;
@@ -794,7 +741,7 @@ impl JmaStream {
             self.jma_prev = value;
             return Some(value);
         }
-        
+
         self.e0 = self.one_minus_alpha * value + self.alpha * self.e0;
         self.e1 = (value - self.e0) * self.one_minus_beta + self.beta * self.e1;
         let diff = self.e0 + self.phase_ratio * self.e1 - self.jma_prev;
@@ -803,8 +750,6 @@ impl JmaStream {
         Some(self.jma_prev)
     }
 
-    /// Optional FMA version – uses fused multiply‑add where available.
-    /// Expect tiny numerical differences (usually < 1 ulp); may be faster on FMA CPUs.
     #[inline(always)]
     pub fn update_fma(&mut self, value: f64) -> Option<f64> {
         if !self.initialized {
@@ -1022,15 +967,21 @@ fn expand_grid(r: &JmaBatchRange) -> Vec<JmaParams> {
             while x <= end {
                 v.push(x);
                 x = x.saturating_add(step);
-                if x == *v.last().unwrap() { break; }
+                if x == *v.last().unwrap() {
+                    break;
+                }
             }
         } else {
             let mut x = start;
             while x >= end {
                 v.push(x);
-                if x < end + step { break; }
+                if x < end + step {
+                    break;
+                }
                 x = x.saturating_sub(step);
-                if x == *v.last().unwrap() { break; }
+                if x == *v.last().unwrap() {
+                    break;
+                }
             }
         }
         v
@@ -1099,24 +1050,20 @@ fn jma_batch_inner(
     }
     let rows = combos.len();
 
-    
     let warm: Vec<usize> = vec![first; rows];
 
-    
     let _cap = rows
         .checked_mul(cols)
         .ok_or_else(|| JmaError::InvalidInput("rows * cols overflow".into()))?;
     let mut raw = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut raw, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let prm = &combos[row];
         let period = prm.period.unwrap();
         let phase = prm.phase.unwrap();
         let power = prm.power.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1130,7 +1077,6 @@ fn jma_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1151,7 +1097,6 @@ fn jma_batch_inner(
         }
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1198,7 +1143,6 @@ fn jma_batch_inner_into(
     }
     let rows = combos.len();
 
-    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| JmaError::InvalidInput("rows * cols overflow".into()))?;
@@ -1209,14 +1153,12 @@ fn jma_batch_inner_into(
         });
     }
 
-    
     let warm: Vec<usize> = vec![first; rows];
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let prm = &combos[row];
         let period = prm.period.unwrap();
@@ -1233,7 +1175,6 @@ fn jma_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1522,7 +1463,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_jma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1530,11 +1470,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             JmaParams::default(),
-            
             JmaParams {
                 period: Some(3),
                 phase: Some(0.0),
@@ -1550,7 +1487,6 @@ mod tests {
                 phase: Some(100.0),
                 power: Some(3),
             },
-            
             JmaParams {
                 period: Some(7),
                 phase: Some(25.0),
@@ -1576,7 +1512,6 @@ mod tests {
                 phase: Some(100.0),
                 power: Some(2),
             },
-            
             JmaParams {
                 period: Some(20),
                 phase: Some(50.0),
@@ -1592,7 +1527,6 @@ mod tests {
                 phase: Some(50.0),
                 power: Some(3),
             },
-            
             JmaParams {
                 period: Some(1),
                 phase: Some(0.0),
@@ -1603,7 +1537,6 @@ mod tests {
                 phase: Some(100.0),
                 power: Some(5),
             },
-            
             JmaParams {
                 period: Some(10),
                 phase: Some(-100.0),
@@ -1620,16 +1553,13 @@ mod tests {
             let input = JmaInput::from_candles(&candles, "close", params.clone());
             let output = jma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1644,7 +1574,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1659,7 +1588,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1679,7 +1607,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_jma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1701,8 +1628,8 @@ mod tests {
                     period..400,
                 ),
                 Just(period),
-                -100f64..=100f64, 
-                1u32..=10,        
+                -100f64..=100f64,
+                1u32..=10,
             )
         });
 
@@ -1718,15 +1645,15 @@ mod tests {
 				let JmaOutput { values: out } = jma_with_kernel(&input, kernel).unwrap();
 				let JmaOutput { values: ref_out } = jma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				
+
 				prop_assert_eq!(out.len(), data.len());
 
-				
+
 				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(data.len());
 
-				
-				
-				
+
+
+
 				for i in 0..first_valid.min(out.len()) {
 					prop_assert!(
 						out[i].is_nan(),
@@ -1734,7 +1661,7 @@ mod tests {
 					);
 				}
 
-				
+
 				if first_valid < out.len() {
 					prop_assert!(
 						out[first_valid].is_finite(),
@@ -1742,7 +1669,7 @@ mod tests {
 					);
 				}
 
-				
+
 				for i in (first_valid + 1)..data.len() {
 					if data[i].is_finite() && !data[first_valid..=i].iter().any(|x| x.is_nan()) {
 						prop_assert!(
@@ -1752,7 +1679,7 @@ mod tests {
 					}
 				}
 
-				
+
 				let warmup_estimate = first_valid + period;
 				if warmup_estimate + 20 < data.len() {
 					let window_start = warmup_estimate;
@@ -1772,10 +1699,10 @@ mod tests {
 							.map(|x| (x - output_mean).powi(2))
 							.sum::<f64>() / output_slice.len() as f64;
 
-						
+
 						if input_var > 1e-10 {
 							prop_assert!(
-								output_var <= input_var * 1.1,  
+								output_var <= input_var * 1.1,
 								"JMA should smooth data: input_var={}, output_var={}, period={}, phase={}, power={}",
 								input_var, output_var, period, phase, power
 							);
@@ -1783,9 +1710,9 @@ mod tests {
 					}
 				}
 
-				
+
 				if period == 1 {
-					
+
 					for i in first_valid..data.len().min(first_valid + 20) {
 						if data[i].is_finite() && out[i].is_finite() {
 							prop_assert!(
@@ -1797,7 +1724,7 @@ mod tests {
 					}
 				}
 
-				
+
 				let warmup_estimate = first_valid + period;
 				if data[first_valid..].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && warmup_estimate + 5 < data.len() {
 					let constant_val = data[first_valid];
@@ -1812,7 +1739,7 @@ mod tests {
 					}
 				}
 
-				
+
 				if kernel != Kernel::Scalar {
 					for i in first_valid..data.len() {
 						if out[i].is_finite() && ref_out[i].is_finite() {
@@ -1824,8 +1751,8 @@ mod tests {
 								r_bits - y_bits
 							};
 
-							
-							
+
+
 							let abs_diff = (out[i] - ref_out[i]).abs();
 							let rel_diff = if ref_out[i].abs() > 1e-10 {
 								abs_diff / ref_out[i].abs()
@@ -1842,8 +1769,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				let warmup_estimate = first_valid + period;
 				if phase.abs() > 10.0 && warmup_estimate + 30 < data.len() {
 					let params_neutral = JmaParams {
@@ -1853,11 +1780,11 @@ mod tests {
 					};
 					let input_neutral = JmaInput::from_slice(&data, params_neutral);
 					if let Ok(JmaOutput { values: out_neutral }) = jma_with_kernel(&input_neutral, kernel) {
-						
+
 						let check_start = warmup_estimate + 10;
 						let check_end = (warmup_estimate + 30).min(data.len() - 1);
 
-						
+
 						let mut lead_count = 0;
 						let mut lag_count = 0;
 
@@ -1868,14 +1795,14 @@ mod tests {
 								if data_change.abs() > 1e-10 {
 									let phase_diff = out[i] - out_neutral[i];
 									if data_change > 0.0 {
-										
+
 										if phase > 0.0 && phase_diff > 0.0 {
 											lead_count += 1;
 										} else if phase < 0.0 && phase_diff < 0.0 {
 											lag_count += 1;
 										}
 									} else {
-										
+
 										if phase > 0.0 && phase_diff < 0.0 {
 											lead_count += 1;
 										} else if phase < 0.0 && phase_diff > 0.0 {
@@ -1886,7 +1813,7 @@ mod tests {
 							}
 						}
 
-						
+
 						if phase > 10.0 {
 							prop_assert!(
 								lead_count > 0,
@@ -1903,7 +1830,7 @@ mod tests {
 					}
 				}
 
-				
+
 				let warmup_estimate2 = first_valid + period;
 				if power > 1 && warmup_estimate2 + 20 < data.len() {
 					let params_low_power = JmaParams {
@@ -1913,7 +1840,7 @@ mod tests {
 					};
 					let input_low_power = JmaInput::from_slice(&data, params_low_power);
 					if let Ok(JmaOutput { values: out_low_power }) = jma_with_kernel(&input_low_power, kernel) {
-						
+
 						let check_start = warmup_estimate2;
 						let check_end = (warmup_estimate2 + 30).min(data.len());
 
@@ -1933,9 +1860,9 @@ mod tests {
 							high_power_responsiveness /= count as f64;
 							low_power_responsiveness /= count as f64;
 
-							
-							
-							
+
+
+
 							if low_power_responsiveness > high_power_responsiveness * 1.5 {
 								prop_assert!(
 									high_power_responsiveness <= low_power_responsiveness,
@@ -1954,7 +1881,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(feature = "proptest"))]
     fn check_jma_property(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2030,7 +1956,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2038,25 +1963,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            
             (5, 20, 5, 0.0, 100.0, 50.0, 1, 3, 1),
-            
             (1, 10, 3, -100.0, 200.0, 100.0, 1, 5, 2),
-            
             (50, 100, 25, -50.0, 50.0, 25.0, 2, 4, 1),
-            
             (14, 14, 1, -100.0, 200.0, 50.0, 1, 5, 1),
-            
             (1, 1, 1, 0.0, 0.0, 1.0, 1, 1, 1),
-            
             (10, 30, 10, 50.0, 50.0, 1.0, 1, 5, 2),
-            
             (5, 50, 5, -50.0, 150.0, 25.0, 1, 3, 1),
-            
             (7, 21, 7, -100.0, 100.0, 40.0, 2, 2, 1),
-            
             (80, 100, 20, 100.0, 200.0, 50.0, 4, 5, 1),
         ];
 
@@ -2068,9 +1983,7 @@ mod tests {
                 .power_range(config.6, config.7, config.8)
                 .apply_candles(&c, "close")?;
 
-            
             for (val_idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2080,7 +1993,6 @@ mod tests {
                 let col = val_idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) \
@@ -2092,7 +2004,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) \
@@ -2120,7 +2031,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) \
@@ -2153,7 +2063,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2184,25 +2093,24 @@ mod tests {
 
     #[test]
     fn test_jma_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let len = 256usize;
         let mut data = Vec::with_capacity(len);
-        for _ in 0..5 { data.push(f64::from_bits(0x7ff8_0000_0000_0000)); }
+        for _ in 0..5 {
+            data.push(f64::from_bits(0x7ff8_0000_0000_0000));
+        }
         for i in 0..(len - 5) {
             let x = i as f64;
-            
+
             data.push((x * 0.1).sin() * 10.0 + x * 0.01);
         }
 
         let input = JmaInput::from_slice(&data, JmaParams::default());
 
-        
         let baseline = jma(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
-        
-        #[cfg(not(feature = "wasm"))]
+
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             jma_into(&input, &mut out)?;
 
@@ -2219,7 +2127,6 @@ mod tests {
         Ok(())
     }
 }
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2255,12 +2162,10 @@ pub fn jma_py<'py>(
     };
     let jma_in = JmaInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| jma_with_kernel(&jma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2284,7 +2189,6 @@ pub fn jma_batch_py<'py>(
         power: power_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err("Invalid parameter ranges"));
@@ -2293,20 +2197,16 @@ pub fn jma_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let (combos_result, _, _) = py
         .allow_threads(|| {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2318,11 +2218,9 @@ pub fn jma_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    
     dict.set_item(
         "periods",
         combos_result
@@ -2419,11 +2317,9 @@ pub fn jma_cuda_many_series_one_param_dev_py(
     Ok(JmaDeviceArrayF32Py { inner: Some(inner) })
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct JmaDeviceArrayF32Py {
-    
     pub(crate) inner: Option<DeviceArrayF32Jma>,
 }
 
@@ -2447,18 +2343,13 @@ impl JmaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Producing stream is synchronized before return; omit "stream" per CAI v3 spec.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
-        let dev = self
-            .inner
-            .as_ref()
-            .map(|h| h.device_id as i32)
-            .unwrap_or(0);
+        let dev = self.inner.as_ref().map(|h| h.device_id as i32).unwrap_or(0);
         (2, dev)
     }
 
@@ -2539,10 +2430,6 @@ impl JmaStreamPy {
     }
 }
 
-// ================== Zero-Copy Helper for WASM ==================
-/// Write JMA values directly to output slice - no allocations
-/// This helper is the core optimization that enables zero-allocation writes.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn jma_into_slice(dst: &mut [f64], input: &JmaInput, kern: Kernel) -> Result<(), JmaError> {
     let data: &[f64] = match &input.data {
@@ -2550,7 +2437,6 @@ pub fn jma_into_slice(dst: &mut [f64], input: &JmaInput, kern: Kernel) -> Result
         JmaData::Slice(sl) => sl,
     };
 
-    // Verify output buffer size matches input
     if dst.len() != data.len() {
         return Err(JmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -2558,11 +2444,9 @@ pub fn jma_into_slice(dst: &mut [f64], input: &JmaInput, kern: Kernel) -> Result
         });
     }
 
-    // Use existing jma_with_kernel_into which already writes directly to dst
     jma_with_kernel_into(input, kern, dst)
 }
 
-// WASM bindings
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
@@ -2578,32 +2462,26 @@ pub fn jma_js(data: &[f64], period: usize, phase: f64, power: u32) -> Result<Vec
     };
     let input = JmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
     jma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// ================== Zero-Copy WASM Functions ==================
-
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn jma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec);
     ptr
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn jma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2621,21 +2499,17 @@ pub fn jma_into(
     phase: f64,
     power: u32,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to jma_into"));
     }
 
     unsafe {
-        // Create slice from pointer
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        // Calculate JMA
         let params = JmaParams {
             period: Some(period),
             phase: Some(phase),
@@ -2643,18 +2517,14 @@ pub fn jma_into(
         };
         let input = JmaInput::from_slice(data, params);
 
-        // Handle aliasing (in_ptr == out_ptr)
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
             let mut temp = vec![0.0; len];
             jma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             jma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2663,8 +2533,6 @@ pub fn jma_into(
         Ok(())
     }
 }
-
-// ================== Batch Processing Structures ==================
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
@@ -2695,7 +2563,6 @@ pub fn jma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         power: config.power_range,
     };
 
-    // parity with alma.rs: detect then map to single kernel
     let simd = match detect_best_batch_kernel() {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -2738,7 +2605,6 @@ pub fn jma_batch_js(
         power: (power_start, power_end, power_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     jma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
@@ -2788,8 +2654,6 @@ pub fn jma_batch_metadata_js(
     metadata
 }
 
-// ================== Optimized Batch Processing ==================
-
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn jma_batch_into(
@@ -2825,7 +2689,6 @@ pub fn jma_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Use optimized batch processing
         jma_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

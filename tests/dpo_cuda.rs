@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::dpo::{
     dpo_batch_with_kernel, dpo_with_kernel, DpoBatchRange, DpoBuilder, DpoInput, DpoParams,
 };
@@ -67,7 +65,7 @@ fn dpo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-4; 
+    let tol = 7e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -97,8 +95,8 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 12usize; 
-    let rows = 8192usize; 
+    let cols = 12usize;
+    let rows = 8192usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s % 7)..rows {
@@ -109,7 +107,6 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -153,9 +150,6 @@ fn dpo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    
-    
-    
     let tol = 1.1e-3;
     for idx in 0..host.len() {
         let c = cpu_tm[idx];

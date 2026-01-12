@@ -1,13 +1,3 @@
-//! CUDA wrapper for Coppock Curve (sum of two ROCs smoothed by WMA)
-//!
-//! Pattern: sequential time sweep with O(1) WMA sliding update.
-//! - Batch (one series × many params): 1D grid over (short,long,ma) combos; each thread owns one row and scans time.
-//! - Many-series × one-param (time-major): 1D grid over series; each thread scans time.
-//!
-//! Semantics are identical to the scalar path in `indicators::coppock`:
-//! - Warmup = first_valid + max(short,long) + (ma_period - 1)
-//! - Leading values are NaN; we don’t mask mid-stream NaNs (match CPU path).
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::coppock::CoppockBatchRange;
@@ -28,7 +18,11 @@ pub enum CudaCoppockError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -36,7 +30,14 @@ pub enum CudaCoppockError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -75,12 +76,11 @@ pub struct CudaCoppock {
     context: Arc<Context>,
     device_id: u32,
     policy: CudaCoppockPolicy,
-    
+
     debug_batch_logged: bool,
     debug_many_logged: bool,
 }
 
-/// VRAM-backed array for Coppock with context guard and device id.
 pub struct DeviceArrayF32Coppock {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -169,23 +169,12 @@ impl CudaCoppock {
         let max_threads = device
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
             .max(1) as u32;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)?
-            .max(1) as u32;
-        let max_grid_y = device
-            .get_attribute(DeviceAttribute::MaxGridDimY)?
-            .max(1) as u32;
-        let max_grid_z = device
-            .get_attribute(DeviceAttribute::MaxGridDimZ)?
-            .max(1) as u32;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)?.max(1) as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)?.max(1) as u32;
+        let max_grid_z = device.get_attribute(DeviceAttribute::MaxGridDimZ)?.max(1) as u32;
 
-        let threads_per_block = bx
-            .saturating_mul(by)
-            .saturating_mul(bz);
-        if threads_per_block > max_threads
-            || gx > max_grid_x
-            || gy > max_grid_y
-            || gz > max_grid_z
+        let threads_per_block = bx.saturating_mul(by).saturating_mul(bz);
+        if threads_per_block > max_threads || gx > max_grid_x || gy > max_grid_y || gz > max_grid_z
         {
             return Err(CudaCoppockError::LaunchConfigTooLarge {
                 gx,
@@ -208,7 +197,6 @@ impl CudaCoppock {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    
     pub fn coppock_batch_dev(
         &self,
         price: &[f32],
@@ -223,14 +211,12 @@ impl CudaCoppock {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCoppockError::InvalidInput("all values are NaN".into()))?;
 
-        
         let (shorts, longs, ma_periods) = expand_grid(sweep)?;
         let rows = ma_periods.len();
         if rows == 0 {
             return Err(CudaCoppockError::InvalidInput("no parameter combos".into()));
         }
 
-        
         for ((&s, &l), &m) in shorts.iter().zip(longs.iter()).zip(ma_periods.iter()) {
             let (s_u, l_u, m_u) = (s as usize, l as usize, m as usize);
             if s_u == 0 || l_u == 0 || m_u == 0 || s_u > len || l_u > len || m_u > len {
@@ -247,7 +233,6 @@ impl CudaCoppock {
             }
         }
 
-        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let prices_bytes = len
@@ -274,7 +259,6 @@ impl CudaCoppock {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        
         let d_price = DeviceBuffer::from_slice(price)?;
         let mut inv = vec![0f32; len];
         for i in 0..len {
@@ -282,25 +266,23 @@ impl CudaCoppock {
         }
         let d_inv = DeviceBuffer::from_slice(&inv)?;
 
-        
         let bytes_params = rows
             .checked_mul(3usize)
             .and_then(|v| v.checked_mul(elem_i32))
             .unwrap_or(0);
-        let bytes_out_total = out_elems
-            .checked_mul(elem_f32)
-            .unwrap_or(0);
+        let bytes_out_total = out_elems.checked_mul(elem_f32).unwrap_or(0);
         let headroom = 64usize * 1024 * 1024;
         let fits_single = match mem_get_info() {
-            Ok((free, _)) => bytes_params
-                .saturating_add(bytes_out_total)
-                .saturating_add(headroom)
-                <= free,
+            Ok((free, _)) => {
+                bytes_params
+                    .saturating_add(bytes_out_total)
+                    .saturating_add(headroom)
+                    <= free
+            }
             Err(_) => true,
         };
 
         if fits_single {
-            
             let d_s = DeviceBuffer::from_slice(&shorts)?;
             let d_l = DeviceBuffer::from_slice(&longs)?;
             let d_m = DeviceBuffer::from_slice(&ma_periods)?;
@@ -327,7 +309,6 @@ impl CudaCoppock {
             });
         }
 
-        
         let try_out: Result<DeviceBuffer<f32>, _> =
             unsafe { DeviceBuffer::uninitialized(rows * len) };
         if let Ok(mut d_out_full) = try_out {
@@ -366,7 +347,6 @@ impl CudaCoppock {
             });
         }
 
-        
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }?;
         let mut start = 0usize;
         let max_chunk = 65_535usize;
@@ -388,7 +368,7 @@ impl CudaCoppock {
                 &mut d_out,
                 start * len,
             )?;
-            
+
             start += chunk;
         }
         Ok(DeviceArrayF32Coppock {
@@ -423,7 +403,7 @@ impl CudaCoppock {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => 256,
         };
-        
+
         if block_x == 0 {
             return Err(CudaCoppockError::InvalidPolicy("block_x must be > 0"));
         }
@@ -441,7 +421,7 @@ impl CudaCoppock {
             let mut l_ptr = d_long.as_device_ptr().as_raw();
             let mut m_ptr = d_ma.as_device_ptr().as_raw();
             let mut n_i = n_combos as i32;
-            
+
             let base = d_out.as_device_ptr();
             let off = base.add(out_offset_elems);
             let mut out_ptr = off.as_raw();
@@ -461,7 +441,6 @@ impl CudaCoppock {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    
     pub fn coppock_many_series_one_param_time_major_dev(
         &self,
         price_tm: &[f32],
@@ -478,13 +457,14 @@ impl CudaCoppock {
             .checked_mul(rows)
             .ok_or_else(|| CudaCoppockError::InvalidInput("rows*cols overflow".into()))?;
         if price_tm.len() != expected {
-            return Err(CudaCoppockError::InvalidInput("time-major input mismatch".into()));
+            return Err(CudaCoppockError::InvalidInput(
+                "time-major input mismatch".into(),
+            ));
         }
         if short == 0 || long == 0 || ma_period == 0 {
             return Err(CudaCoppockError::InvalidInput("invalid periods".into()));
         }
 
-        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -529,7 +509,7 @@ impl CudaCoppock {
         self.will_fit(required, headroom)?;
 
         let d_price = DeviceBuffer::from_slice(price_tm)?;
-        
+
         let mut inv_tm = vec![0f32; cols * rows];
         for idx in 0..inv_tm.len() {
             inv_tm[idx] = 1.0f32 / price_tm[idx];
@@ -565,7 +545,9 @@ impl CudaCoppock {
         let func = self
             .module
             .get_function("coppock_many_series_one_param_f32")
-            .map_err(|_| CudaCoppockError::MissingKernelSymbol { name: "coppock_many_series_one_param_f32" })?;
+            .map_err(|_| CudaCoppockError::MissingKernelSymbol {
+                name: "coppock_many_series_one_param_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
@@ -653,9 +635,9 @@ fn expand_grid(r: &CoppockBatchRange) -> Result<(Vec<i32>, Vec<i32>, Vec<i32>), 
                 if cur == e {
                     break;
                 }
-                cur = cur
-                    .checked_add(st)
-                    .ok_or_else(|| CudaCoppockError::InvalidInput("short/long/ma range overflow".into()))?;
+                cur = cur.checked_add(st).ok_or_else(|| {
+                    CudaCoppockError::InvalidInput("short/long/ma range overflow".into())
+                })?;
                 if cur > e {
                     break;
                 }
@@ -667,9 +649,9 @@ fn expand_grid(r: &CoppockBatchRange) -> Result<(Vec<i32>, Vec<i32>, Vec<i32>), 
                 if cur == e {
                     break;
                 }
-                cur = cur
-                    .checked_sub(st)
-                    .ok_or_else(|| CudaCoppockError::InvalidInput("short/long/ma range overflow".into()))?;
+                cur = cur.checked_sub(st).ok_or_else(|| {
+                    CudaCoppockError::InvalidInput("short/long/ma range overflow".into())
+                })?;
                 if cur < e {
                     break;
                 }
@@ -710,14 +692,13 @@ fn expand_grid(r: &CoppockBatchRange) -> Result<(Vec<i32>, Vec<i32>, Vec<i32>), 
     Ok((shorts, longs, mas))
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; 
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -759,7 +740,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaCoppock::new(0).expect("cuda coppock");
         let price = gen_series(ONE_SERIES_LEN);
-        
+
         let sweep = CoppockBatchRange {
             short: (8, 18, 2),
             long: (20, 30, 2),

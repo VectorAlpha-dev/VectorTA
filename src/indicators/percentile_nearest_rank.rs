@@ -1,31 +1,3 @@
-//! # Percentile Nearest Rank (PNR)
-//!
-//! A statistical indicator that calculates the value at a specified percentile
-//! within a rolling window of data points.
-//!
-//! ## Parameters
-//! - **length**: Window size for the rolling calculation (default: 15)
-//! - **percentage**: Percentile to calculate (0-100, default: 50)
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **values**: Vector of percentile values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - SIMD status: Not implemented. Generic PNR relies on order-statistic selection with irregular
-//!   control flow; prior attempts (Introselect/partial selection) underperformed the simple
-//!   sort-based scalar path at realistic window sizes. Runtime selection short-circuits to scalar.
-//! - Streaming: Amortized O(log L) per update via dual-heaps with lazy deletion (exact nearest-rank
-//!   percentile; NaNs ignored inside the window; all-NaN window yields NaN). Preserves warmup semantics.
-//! - Batch: Adds a light row-specific optimization that shares the sorted window across rows that
-//!   have the same `length` but different `percentage` values (enabled when `parallel == false`).
-//!   This preserves warmup semantics and reduces redundant work when multiple percentiles are
-//!   requested per length. Default benches (single percentage per length) see no change.
-//! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-//! - Decision log: SIMD disabled (scalar-only); CUDA wrapper enabled for FP32 with VRAM-backed handles and CAI v3/DLPack v1.x; numerical outputs match the scalar path (tests unchanged).
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -33,9 +5,9 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -79,7 +51,10 @@ pub struct PercentileNearestRankOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct PercentileNearestRankParams {
     pub length: Option<usize>,
     pub percentage: Option<f64>,
@@ -159,7 +134,11 @@ pub enum PercentileNearestRankError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("percentile_nearest_rank: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("percentile_nearest_rank: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -213,10 +192,9 @@ fn pnr_compute_into(
     length: usize,
     percentage: f64,
     first: usize,
-    _kernel: Kernel, // reserved for parity; no SIMD needed
+    _kernel: Kernel,
     out: &mut [f64],
 ) {
-    // warmup prefix already set by caller when needed
     let n = data.len();
     if n == 0 {
         return;
@@ -226,7 +204,6 @@ fn pnr_compute_into(
         return;
     }
 
-    // maintain a sorted window of non-NaN values for the current i
     let mut sorted: Vec<f64> = Vec::with_capacity(length);
     let window_start0 = start_i + 1 - length;
     for idx in window_start0..=start_i {
@@ -269,7 +246,6 @@ fn pnr_compute_into(
             break;
         }
 
-        // Slide window: remove outgoing data[i - length + 1], insert incoming data[i+1]
         let out_idx = i + 1 - length;
         let v_out = data[out_idx];
         if !v_out.is_nan() {
@@ -306,12 +282,7 @@ pub fn percentile_nearest_rank_with_kernel(
     Ok(PercentileNearestRankOutput { values: out })
 }
 
-/// Writes results into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input data length; returns the module's
-///   existing error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn percentile_nearest_rank_into(
     input: &PercentileNearestRankInput,
@@ -320,7 +291,6 @@ pub fn percentile_nearest_rank_into(
     percentile_nearest_rank_into_slice(out, input, Kernel::Auto)
 }
 
-/// Parity with `alma_into_slice`
 #[inline]
 pub fn percentile_nearest_rank_into_slice(
     dst: &mut [f64],
@@ -335,18 +305,14 @@ pub fn percentile_nearest_rank_into_slice(
         });
     }
 
-    
     pnr_compute_into(data, length, percentage, first, chosen, dst);
 
-    
     let warmup_end = first + length - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
     }
     Ok(())
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct PercentileNearestRankBuilder {
@@ -463,14 +429,9 @@ impl PercentileNearestRankBuilder {
     }
 }
 
-
-
 use std::cmp::Reverse;
 use std::collections::HashMap;
 
-/// Decision: Streaming upgraded to dual-heaps (lazy deletion) for O(log L) updates; exact parity with batch.
-
-/// Wrapper that gives a total order for f64 as long as NaN isn't inserted (we filter NaNs earlier).
 #[derive(Copy, Clone, Debug)]
 struct FOrd(f64);
 impl PartialEq for FOrd {
@@ -493,7 +454,6 @@ impl Ord for FOrd {
     }
 }
 
-/// Hash key for lazy-deletion maps that treats -0.0 == +0.0.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 struct FKey(u64);
 impl From<f64> for FKey {
@@ -513,21 +473,18 @@ pub struct PercentileNearestRankStream {
     head: usize,
     filled: bool,
 
-    // Dual-heap state for non-NaN values
-    left: std::collections::BinaryHeap<FOrd>, // max-heap: t smallest values
-    right: std::collections::BinaryHeap<Reverse<FOrd>>, // min-heap: rest
+    left: std::collections::BinaryHeap<FOrd>,
+    right: std::collections::BinaryHeap<Reverse<FOrd>>,
     delayed_left: HashMap<FKey, usize>,
     delayed_right: HashMap<FKey, usize>,
     size_left: usize,
     size_right: usize,
 
-    // Precomputed target for full windows: t_full = k_full + 1
     t_full: usize,
 }
 
 #[inline(always)]
 fn nearest_rank_index_fast(pf: f64, wl: usize) -> usize {
-    // For non-negative inputs, floor(x + 0.5) == round(x)
     let mut k = (pf.mul_add(wl as f64, 0.5)) as usize;
     if k == 0 {
         0
@@ -705,8 +662,6 @@ impl PercentileNearestRankStream {
         self.prune_left();
     }
 
-    /// Amortized O(log L) update. Returns None until the first full window is seen,
-    /// then Some(value) each tick (NaN if all values in the window are NaN).
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let outgoing = self.buffer[self.head];
         self.buffer[self.head] = value;
@@ -716,14 +671,12 @@ impl PercentileNearestRankStream {
             self.filled = true;
         }
 
-        // Insert incoming even during warmup so heaps are ready.
         self.push_value(value);
 
         if !self.filled {
             return None;
         }
 
-        // Erase outgoing once full window is established.
         self.erase_value(outgoing);
 
         let valid = self.size_left + self.size_right;
@@ -736,8 +689,6 @@ impl PercentileNearestRankStream {
         self.current_left_top().or(Some(f64::NAN))
     }
 }
-
-// ==================== PYTHON BINDINGS ====================
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "percentile_nearest_rank")]
@@ -809,20 +760,16 @@ pub fn percentile_nearest_rank_batch_py<'py>(
         percentage: percentage_range,
     };
 
-    // expand once to know rows/cols and reuse later for metadata
-    let combos = expand_grid_pnr(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_pnr(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // flat output buffer, no extra copy
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize warmup values with NaN
     for (row_idx, combo) in combos.iter().enumerate() {
         let length = combo.length.unwrap_or(15);
         let warmup = length - 1;
@@ -838,7 +785,7 @@ pub fn percentile_nearest_rank_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        // compute directly into NumPy memory
+
         pnr_batch_inner_into(slice_in, &combos, k, true, slice_out)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -864,12 +811,10 @@ pub fn percentile_nearest_rank_batch_py<'py>(
     Ok(dict.into())
 }
 
-// ==================== BATCH PROCESSING ====================
-
 #[derive(Clone, Debug)]
 pub struct PercentileNearestRankBatchRange {
-    pub length: (usize, usize, usize), // (start, end, step)
-    pub percentage: (f64, f64, f64),   // (start, end, step)
+    pub length: (usize, usize, usize),
+    pub percentage: (f64, f64, f64),
 }
 
 impl Default for PercentileNearestRankBatchRange {
@@ -978,7 +923,7 @@ fn expand_grid_pnr(
         if start < end {
             return Ok((start..=end).step_by(step.max(1)).collect());
         }
-        // reversed bounds
+
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -1122,7 +1067,6 @@ fn pnr_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // first valid and availability check mirrors alma.rs
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1135,7 +1079,6 @@ fn pnr_batch_inner(
         });
     }
 
-    // Guard rows * cols overflow before allocating
     let _ = rows
         .checked_mul(cols)
         .ok_or_else(|| PercentileNearestRankError::InvalidRange {
@@ -1144,7 +1087,6 @@ fn pnr_batch_inner(
             step: "rows*cols".into(),
         })?;
 
-    // allocate uninit matrix and set NaN prefixes per row
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
@@ -1152,7 +1094,6 @@ fn pnr_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // write into the uninit matrix in place
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -1188,7 +1129,6 @@ fn pnr_batch_inner_into(
         return Err(PercentileNearestRankError::EmptyInputData);
     }
 
-    // single pass like alma.rs
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1198,7 +1138,6 @@ fn pnr_batch_inner_into(
         k => k,
     };
 
-    // Group rows by identical length so we can share sorted windows across different percentages
     use std::collections::HashMap;
     let mut by_len: HashMap<usize, Vec<(usize, f64)>> = HashMap::new();
     for (row, p) in combos.iter().enumerate() {
@@ -1210,11 +1149,10 @@ fn pnr_batch_inner_into(
     let has_benefit = by_len.values().any(|v| v.len() > 1);
 
     if parallel || !has_benefit {
-        // Fallback: per-row evaluation (parallelizable and simple). Keeps current behavior.
         let do_row = |row: usize, dst_row: &mut [f64]| {
             let length = combos[row].length.unwrap_or(15);
             let percentage = combos[row].percentage.unwrap_or(50.0);
-            // warmup NaNs were already written by init_matrix_prefixes
+
             pnr_compute_into(data, length, percentage, first, chosen, dst_row);
         };
 
@@ -1236,15 +1174,12 @@ fn pnr_batch_inner_into(
             }
         }
     } else {
-        // Row-specific optimization: for each length, maintain a single sorted window across time
-        // and index it for each percentage in the group. This avoids rebuilding/sorting each step.
         for (length, rows) in by_len.into_iter() {
             let start_i = first + length - 1;
             if start_i >= cols {
                 continue;
             }
 
-            // Precompute per-row fractions and constant index for full-length windows
             let mut rows_info: Vec<(usize, f64, usize)> = Vec::with_capacity(rows.len());
             for &(row, perc) in &rows {
                 let p_frac = perc * 0.01;
@@ -1256,7 +1191,6 @@ fn pnr_batch_inner_into(
                 rows_info.push((row, p_frac, k));
             }
 
-            // Build initial window at start_i
             let mut sorted: Vec<f64> = Vec::with_capacity(length);
             let window_start0 = start_i + 1 - length;
             for idx in window_start0..=start_i {
@@ -1270,7 +1204,6 @@ fn pnr_batch_inner_into(
             let mut i = start_i;
             loop {
                 if sorted.is_empty() {
-                    // propagate NaN to all rows in this group
                     for &(row, _, _) in &rows_info {
                         out[row * cols + i] = f64::NAN;
                     }
@@ -1296,7 +1229,6 @@ fn pnr_batch_inner_into(
                     break;
                 }
 
-                // Slide: remove outgoing, insert incoming
                 let out_idx = i + 1 - length;
                 let v_out = data[out_idx];
                 if !v_out.is_nan() {
@@ -1318,9 +1250,7 @@ fn pnr_batch_inner_into(
     Ok(())
 }
 
-// ==================== WASM BINDINGS ====================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn percentile_nearest_rank_js(
     data: &[f64],
@@ -1337,7 +1267,7 @@ pub fn percentile_nearest_rank_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn percentile_nearest_rank_alloc(n: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(n);
@@ -1346,7 +1276,7 @@ pub fn percentile_nearest_rank_alloc(n: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn percentile_nearest_rank_free(ptr: *mut f64, n: usize) {
     unsafe {
@@ -1354,7 +1284,7 @@ pub fn percentile_nearest_rank_free(ptr: *mut f64, n: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn percentile_nearest_rank_into(
     data_ptr: *const f64,
@@ -1375,7 +1305,6 @@ pub fn percentile_nearest_rank_into(
         let input = PercentileNearestRankInput::from_slice(data, params);
 
         if data_ptr == out_ptr {
-            // avoid overwriting in-place
             let mut temp = vec![0.0; len];
             percentile_nearest_rank_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1390,14 +1319,14 @@ pub fn percentile_nearest_rank_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PercentileNearestRankBatchConfig {
     pub length_range: (usize, usize, usize),
     pub percentage_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PercentileNearestRankBatchJsOutput {
     pub values: Vec<f64>,
@@ -1406,7 +1335,7 @@ pub struct PercentileNearestRankBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = percentile_nearest_rank_batch)]
 pub fn percentile_nearest_rank_batch_unified_js(
     data: &[f64],
@@ -1429,8 +1358,6 @@ pub fn percentile_nearest_rank_batch_unified_js(
     serde_wasm_bindgen::to_value(&js)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
-
-// ==================== TESTS ====================
 
 #[cfg(test)]
 mod tests {
@@ -1464,10 +1391,8 @@ mod tests {
         let input = PercentileNearestRankInput::from_candles(&candles, "close", params);
         let result = percentile_nearest_rank_with_kernel(&input, kernel)?;
 
-        // Verify result structure
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Check that warmup period is NaN
         for i in 0..14 {
             assert!(
                 result.values[i].is_nan(),
@@ -1477,14 +1402,12 @@ mod tests {
             );
         }
 
-        // Check that we have valid values after warmup
         assert!(
             !result.values[14].is_nan(),
             "[{}] Expected valid value at index 14",
             test_name
         );
 
-        // Verify last 5 values match expected reference values
         let expected_last_5 = vec![59419.0, 59419.0, 59300.0, 59285.0, 59273.0];
         let len = result.values.len();
         let actual_last_5 = &result.values[len - 5..];
@@ -1512,7 +1435,6 @@ mod tests {
 
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
 
-        // Test with partial params (only length)
         let params = PercentileNearestRankParams {
             length: Some(5),
             percentage: None,
@@ -1521,7 +1443,7 @@ mod tests {
         let result = percentile_nearest_rank_with_kernel(&input, kernel)?;
 
         assert_eq!(result.values.len(), data.len());
-        assert_eq!(result.values[4], 3.0); // Default 50th percentile
+        assert_eq!(result.values[4], 3.0);
 
         Ok(())
     }
@@ -1614,7 +1536,6 @@ mod tests {
 
         let data = vec![1.0; 20];
 
-        // Test percentage > 100
         let params = PercentileNearestRankParams {
             length: Some(5),
             percentage: Some(150.0),
@@ -1626,7 +1547,6 @@ mod tests {
             Err(PercentileNearestRankError::InvalidPercentage { .. })
         ));
 
-        // Test negative percentage
         let params = PercentileNearestRankParams {
             length: Some(5),
             percentage: Some(-10.0),
@@ -1695,7 +1615,7 @@ mod tests {
         let result = percentile_nearest_rank_with_kernel(&input, kernel)?;
 
         assert_eq!(result.values.len(), data.len());
-        // Should handle NaN values in window
+
         assert!(!result.values[6].is_nan());
         Ok(())
     }
@@ -1804,7 +1724,6 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate tests for all kernel variants
     macro_rules! generate_all_pnr_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1836,7 +1755,6 @@ mod tests {
         }
     }
 
-    // Generate all kernel-specific tests
     generate_all_pnr_tests!(
         check_pnr_accuracy,
         check_pnr_partial_params,
@@ -1854,7 +1772,6 @@ mod tests {
 
     #[test]
     fn test_percentile_nearest_rank_into_matches_api() {
-        // Small but non-trivial input with some NaNs in the prefix
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253 {
@@ -1867,10 +1784,8 @@ mod tests {
         };
         let input = PercentileNearestRankInput::from_slice(&data, params);
 
-        // Baseline via Vec-returning API
         let base = percentile_nearest_rank(&input).expect("baseline ok").values;
 
-        // Into API writes into caller-provided slice
         let mut out = vec![0.0; data.len()];
         let _ = percentile_nearest_rank_into(&input, &mut out).expect("into ok");
 
@@ -1881,7 +1796,6 @@ mod tests {
         }
     }
 
-    // Batch testing functions
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -1897,7 +1811,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Check warmup period
         for i in 0..14 {
             assert!(row[i].is_nan());
         }
@@ -1918,7 +1831,7 @@ mod tests {
             .percentage_range(25.0, 75.0, 25.0)
             .apply_candles(&c, "close")?;
 
-        assert_eq!(output.rows, 9); // 3 periods * 3 percentages
+        assert_eq!(output.rows, 9);
         assert_eq!(output.cols, c.close.len());
         assert_eq!(output.combos.len(), 9);
 
@@ -1962,7 +1875,6 @@ mod tests {
         Ok(())
     }
 
-    // Macro for batch tests
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -1988,7 +1900,6 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
 
-    // Keep old simple tests for compatibility
     #[test]
     fn test_percentile_nearest_rank_basic() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
@@ -2000,11 +1911,11 @@ mod tests {
         let result = percentile_nearest_rank(&input).unwrap();
 
         assert_eq!(result.values.len(), data.len());
-        // First 4 values should be NaN (warmup period)
+
         for i in 0..4 {
             assert!(result.values[i].is_nan());
         }
-        // 50th percentile of [1,2,3,4,5] = 3.0
+
         assert_eq!(result.values[4], 3.0);
     }
 
@@ -2039,7 +1950,7 @@ mod tests {
         let data = vec![1.0; 20];
         let params = PercentileNearestRankParams {
             length: Some(5),
-            percentage: Some(150.0), // Invalid
+            percentage: Some(150.0),
         };
         let input = PercentileNearestRankInput::from_slice(&data, params);
         let result = percentile_nearest_rank(&input);
@@ -2054,7 +1965,7 @@ mod tests {
     fn test_percentile_nearest_rank_period_too_large() {
         let data = vec![1.0; 10];
         let params = PercentileNearestRankParams {
-            length: Some(20), // Larger than data
+            length: Some(20),
             percentage: Some(50.0),
         };
         let input = PercentileNearestRankInput::from_slice(&data, params);
@@ -2077,7 +1988,6 @@ mod tests {
         let low_data = vec![0.5; 20];
         let volume_data = vec![100.0; 20];
 
-        // Calculate derived fields
         let mut hl2 = Vec::with_capacity(20);
         let mut hlc3 = Vec::with_capacity(20);
         let mut ohlc4 = Vec::with_capacity(20);
@@ -2111,11 +2021,11 @@ mod tests {
         let result = percentile_nearest_rank(&input).unwrap();
 
         assert_eq!(result.values.len(), 20);
-        // First 4 values should be NaN
+
         for i in 0..4 {
             assert!(result.values[i].is_nan());
         }
-        // 50th percentile of [1.5,2.5,3.5,4.5,5.5] = 3.5
+
         assert_eq!(result.values[4], 3.5);
     }
 }
@@ -2139,7 +2049,6 @@ pub fn register_percentile_nearest_rank_module(
     }
     Ok(())
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -2188,7 +2097,14 @@ pub fn percentile_nearest_rank_cuda_batch_dev_py<'py>(
         .collect();
     dict.set_item("lengths", lengths.into_pyarray(py))?;
     dict.set_item("percentages", percentages.into_pyarray(py))?;
-    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) }, dict))
+    Ok((
+        DeviceArrayF32Py {
+            inner,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2216,5 +2132,9 @@ pub fn percentile_nearest_rank_cuda_many_series_one_param_dev_py<'py>(
             .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }

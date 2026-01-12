@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::alligator::{
     alligator_batch_with_kernel, AlligatorBatchRange, AlligatorBuilder, AlligatorParams,
 };
@@ -112,7 +110,6 @@ fn alligator_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let params = AlligatorParams::default();
 
-    
     let mut jaw_tm = vec![f64::NAN; cols * rows];
     let mut teeth_tm = vec![f64::NAN; cols * rows];
     let mut lips_tm = vec![f64::NAN; cols * rows];

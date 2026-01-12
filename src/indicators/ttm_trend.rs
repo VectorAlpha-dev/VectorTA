@@ -1,24 +1,6 @@
-//! # TTM Trend
-//!
-//! TTM Trend is a boolean trend indicator that compares each close value to a rolling average
-//! of a chosen source (e.g., "hl2", "close", etc.) over a fixed period. Returns `true` if
-//! close > average, otherwise `false`.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points, default 5).
-//!
-//! ## Returns
-//! - **`Ok(TtmTrendOutput)`** on success, containing a `Vec<bool>` of length matching the input.
-//! - **`Err(TtmTrendError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - Decision log: SIMD enabled for period == 1; CUDA wrapper present with VRAM-backed handles; Python interop uses CUDA Array Interface v3 and DLPack v1.x. Numerical outputs match scalar and batch reference paths.
-//! - SIMD: AVX2/AVX512 enabled for period == 1 (vectorized `close > source`). For period > 1 we short-circuit to the scalar path (rolling-sum dependency is serial).
-//! - Scalar: optimized to avoid whole-slice prefill; only warmup prefixes are written, and the initial-sum build is loop-jammed with warmup marking.
-//! - Batch: row executor now uses a single inclusive prefix sum of `source` shared across rows (per-row average via `psum[i] - psum[i - p]`), eliminating per-row running sums.
-//! - Memory: uses `alloc_with_nan_prefix`/`make_uninit_matrix` patterns as in alma.rs; zero-copy/uninitialized outputs preserved.
-
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -26,15 +8,12 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::error::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
 use thiserror::Error;
-
 
 #[inline(always)]
 fn ttm_numeric_compute_into(
@@ -42,7 +21,7 @@ fn ttm_numeric_compute_into(
     close: &[f64],
     period: usize,
     first: usize,
-    out: &mut [f64], 
+    out: &mut [f64],
 ) {
     let mut sum = 0.0;
     for &v in &source[first..first + period] {
@@ -95,7 +74,6 @@ fn ttm_prepare<'a>(
     Ok((source, close, period, first, chosen))
 }
 
-// Helper to compute into f64 slice with already-prepared parameters
 #[inline(always)]
 fn ttm_numeric_compute_with_params(
     dst: &mut [f64],
@@ -103,7 +81,7 @@ fn ttm_numeric_compute_with_params(
     close: &[f64],
     period: usize,
     first: usize,
-    _kernel: Kernel, // For future SIMD dispatch
+    _kernel: Kernel,
 ) -> Result<(), TtmTrendError> {
     let len = source.len().min(close.len());
     if dst.len() != len {
@@ -112,7 +90,7 @@ fn ttm_numeric_compute_with_params(
             got: dst.len(),
         });
     }
-    // Initialize warmup prefix to NaN
+
     let warmup = first + period - 1;
     for v in &mut dst[..warmup] {
         *v = f64::NAN;
@@ -121,7 +99,6 @@ fn ttm_numeric_compute_with_params(
     Ok(())
 }
 
-// Public wrapper that calls prepare internally (for backward compatibility)
 #[inline(always)]
 fn ttm_numeric_into_slice(
     dst: &mut [f64],
@@ -280,7 +257,11 @@ pub enum TtmTrendError {
     #[error("ttm_trend: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("ttm_trend: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("ttm_trend: Invalid kernel type for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -294,15 +275,11 @@ pub fn ttm_trend_with_kernel(
     input: &TtmTrendInput,
     kernel: Kernel,
 ) -> Result<TtmTrendOutput, TtmTrendError> {
-    // Prepare once and dispatch like alma.rs
     let (source, close, period, first, chosen) = ttm_prepare(input, kernel)?;
     let len = source.len().min(close.len());
 
-    // Direct boolean compute to avoid f64 tmp + map
     let mut values = vec![false; len];
 
-    // Warmup semantics are handled by implementations; ensure prefix is clean
-    // Dispatch by kernel (SIMD paths fall back to scalar when not available)
     #[allow(unused_variables)]
     {
         match chosen {
@@ -341,17 +318,14 @@ pub fn ttm_trend_scalar(
         return;
     }
 
-    // Warmup end index (last uncomputable index + 1)
     let warmup_end = first + period - 1;
     if warmup_end >= n {
-        // Mark what we can and exit
         for i in 0..n {
             out[i] = false;
         }
         return;
     }
 
-    // Ensure warmup prefix is false without touching the entire slice
     for i in 0..first {
         out[i] = false;
     }
@@ -365,7 +339,6 @@ pub fn ttm_trend_scalar(
         return;
     }
 
-    // Build initial rolling sum while marking [first, warmup_end) as false
     let mut sum = 0.0;
     let mut k = first;
     while k < warmup_end {
@@ -395,24 +368,23 @@ pub fn ttm_trend_avx512(
     first: usize,
     out: &mut [bool],
 ) {
-    // Fast path for period == 1; otherwise fallback to scalar (serial dependency)
     if period == 1 {
         unsafe {
             let n = source.len().min(close.len()).min(out.len());
             if first >= n {
                 return;
             }
-            // Warmup prefix [0, first) = false (avoid whole-slice fill)
+
             for i in 0..first {
                 *out.get_unchecked_mut(i) = false;
             }
             let mut i = first;
-            const W: usize = 8; // 512-bit holds 8 f64
+            const W: usize = 8;
             while i + W <= n {
                 let s = _mm512_loadu_pd(source.as_ptr().add(i));
                 let c = _mm512_loadu_pd(close.as_ptr().add(i));
                 let m: u8 = _mm512_cmp_pd_mask(c, s, _CMP_GT_OQ);
-                // Write 8 bools from mask bits
+
                 (*out.get_unchecked_mut(i + 0)) = (m & (1 << 0)) != 0;
                 (*out.get_unchecked_mut(i + 1)) = (m & (1 << 1)) != 0;
                 (*out.get_unchecked_mut(i + 2)) = (m & (1 << 2)) != 0;
@@ -430,7 +402,7 @@ pub fn ttm_trend_avx512(
         }
         return;
     }
-    // Default
+
     ttm_trend_scalar(source, close, period, first, out)
 }
 
@@ -442,7 +414,6 @@ pub fn ttm_trend_avx2(
     first: usize,
     out: &mut [bool],
 ) {
-    // Fast path for period == 1; otherwise fallback to scalar
     if period == 1 {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         unsafe {
@@ -450,12 +421,12 @@ pub fn ttm_trend_avx2(
             if first >= n {
                 return;
             }
-            // Warmup prefix [0, first) = false
+
             for i in 0..first {
                 *out.get_unchecked_mut(i) = false;
             }
             let mut i = first;
-            const W: usize = 4; // 256-bit holds 4 f64
+            const W: usize = 4;
             while i + W <= n {
                 let s = _mm256_loadu_pd(source.as_ptr().add(i));
                 let c = _mm256_loadu_pd(close.as_ptr().add(i));
@@ -505,17 +476,15 @@ pub unsafe fn ttm_trend_avx512_long(
     ttm_trend_scalar(source, close, period, first, out)
 }
 
-/// Decision: Streaming tightened (mask wrap + inv_period, period==1 fast path).
-/// Preserves semantics and warmup; scalar path remains safe (no unsafe).
 #[derive(Debug, Clone)]
 pub struct TtmTrendStream {
     period: usize,
-    inv_period: f64,  // precomputed 1/period
-    buffer: Vec<f64>, // ring buffer of last `period` source values
-    sum: f64,         // rolling sum of the window
-    head: usize,      // write index
-    len: usize,       // number of values seen so far (capped at `period`)
-    pow2_mask: usize, // period-1 if power-of-two, else 0
+    inv_period: f64,
+    buffer: Vec<f64>,
+    sum: f64,
+    head: usize,
+    len: usize,
+    pow2_mask: usize,
 }
 
 impl TtmTrendStream {
@@ -554,32 +523,28 @@ impl TtmTrendStream {
         }
     }
 
-    /// Push one (source, close). Returns None until the window fills.
     #[inline(always)]
     pub fn update(&mut self, src_val: f64, close_val: f64) -> Option<bool> {
-        // Fast path: period == 1
         if self.period == 1 {
-            let old = self.buffer[self.head]; // always index 0
+            let old = self.buffer[self.head];
             self.buffer[self.head] = src_val;
-            self.sum += src_val - old; // keeps `sum` as last src
-            self.len = 1; // becomes and stays full
-                          // head stays 0 (bump would also keep it 0 via mask path)
+            self.sum += src_val - old;
+            self.len = 1;
+
             return Some(close_val > src_val);
         }
 
-        // General path: maintain rolling sum over ring buffer
         let old = self.buffer[self.head];
         self.buffer[self.head] = src_val;
-        // One form for all stages: early on `old == 0.0`
+
         self.sum += src_val - old;
         self.bump();
 
         if self.len < self.period {
             self.len += 1;
             if self.len < self.period {
-                return None; // warmup not complete
+                return None;
             }
-            // just became full -> fall through and compute first value
         }
 
         let avg = self.sum * self.inv_period;
@@ -594,7 +559,9 @@ pub struct TtmTrendBatchRange {
 
 impl Default for TtmTrendBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -669,7 +636,7 @@ pub fn ttm_trend_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, // Fallback to scalar for safety
+        _ => Kernel::Scalar,
     };
     ttm_trend_batch_par_slice(source, close, sweep, simd)
 }
@@ -698,9 +665,7 @@ impl TtmTrendBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &TtmTrendBatchRange) -> Result<Vec<TtmTrendParams>, TtmTrendError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, TtmTrendError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TtmTrendError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -712,7 +677,7 @@ fn expand_grid(r: &TtmTrendBatchRange) -> Result<Vec<TtmTrendParams>, TtmTrendEr
             }
             return Ok(v);
         }
-        // reversed bounds
+
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -791,7 +756,6 @@ fn ttm_batch_inner_f64(
     let rows = combos.len();
     let cols = len;
 
-    // f64 uninit matrix + warmup prefix using your helpers
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
@@ -803,7 +767,6 @@ fn ttm_batch_inner_f64(
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Inclusive prefix sum of `source` starting at `first` (unused entries before `first` left as 0.0)
     let mut psum = vec![0.0f64; len];
     if first < len {
         psum[first] = source[first];
@@ -814,16 +777,16 @@ fn ttm_batch_inner_f64(
 
     let do_row = |row: usize, row_dst: &mut [f64]| {
         let p = combos[row].period.unwrap();
-        let warm_i = warm[row]; // first + p - 1
+        let warm_i = warm[row];
         if warm_i >= len {
-            return; // nothing computable for this row
+            return;
         }
-        // First computable index uses the window [first..=warm_i]
+
         let inv_p = 1.0 / (p as f64);
         let mut i = warm_i;
         row_dst[i] = if close[i] > psum[i] * inv_p { 1.0 } else { 0.0 };
         i += 1;
-        // Remaining: use psum[i] - psum[i - p]
+
         while i < len {
             let sum = psum[i] - psum[i - p];
             row_dst[i] = if close[i] > sum * inv_p { 1.0 } else { 0.0 };
@@ -867,7 +830,7 @@ fn ttm_trend_batch_inner(
     parallel: bool,
 ) -> Result<TtmTrendBatchOutput, TtmTrendError> {
     let (vals_f64, combos, rows, cols) = ttm_batch_inner_f64(source, close, sweep, kern, parallel)?;
-    // map to bool for the Rust struct
+
     let values: Vec<bool> = vals_f64.into_iter().map(|v| v == 1.0).collect();
     Ok(TtmTrendBatchOutput {
         values,
@@ -905,13 +868,11 @@ fn ttm_trend_batch_inner_into_f64(
     }
     let rows = combos.len();
     let cols = len;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(TtmTrendError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(TtmTrendError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(TtmTrendError::OutputLengthMismatch {
             expected,
@@ -919,7 +880,6 @@ fn ttm_trend_batch_inner_into_f64(
         });
     }
 
-    // Initialize warmup periods with NaN
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap() - 1;
         let row_start = row * cols;
@@ -969,13 +929,11 @@ fn ttm_trend_batch_inner_into(
     let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = len;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(TtmTrendError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(TtmTrendError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(TtmTrendError::OutputLengthMismatch {
             expected,
@@ -983,11 +941,9 @@ fn ttm_trend_batch_inner_into(
         });
     }
 
-    // Use f64 internally
     let mut tmp = vec![f64::NAN; expected];
     let result = ttm_trend_batch_inner_into_f64(source, close, sweep, kern, parallel, &mut tmp)?;
 
-    // Convert to bool
     for (i, &v) in tmp.iter().enumerate() {
         out[i] = v == 1.0;
     }
@@ -1003,7 +959,7 @@ unsafe fn ttm_trend_row_scalar(
     period: usize,
     out: &mut [bool],
 ) {
-    out.fill(false); // ensures no uninit "true" values
+    out.fill(false);
     let mut sum = 0.0;
     for &v in &source[first..first + period] {
         sum += v;
@@ -1071,7 +1027,6 @@ unsafe fn ttm_trend_row_avx512_long(
     ttm_trend_row_scalar(source, close, first, period, out)
 }
 
-// ================== PYTHON MODULE REGISTRATION ==================
 #[cfg(feature = "python")]
 pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
@@ -1088,7 +1043,6 @@ pub fn register_ttm_trend_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResu
     }
     Ok(())
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -1124,7 +1078,7 @@ impl TtmTrendDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream synchronizes before returning the handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1142,7 +1096,6 @@ impl TtmTrendDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Array API stream semantics: producer is already synchronized, so we only validate.
         if let Some(ref s_obj) = stream {
             if let Ok(s) = s_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -1153,7 +1106,6 @@ impl TtmTrendDeviceArrayF32Py {
             }
         }
 
-        // Validate dl_device hint (if provided) against the allocation device.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1183,9 +1135,8 @@ impl TtmTrendDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -1286,31 +1237,25 @@ mod tests {
 
     #[test]
     fn test_ttm_trend_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing CSV candles to mirror other tests
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
         let source = source_type(&candles, "hl2");
         let close = source_type(&candles, "close");
         let input = TtmTrendInput::from_slices(source, close, TtmTrendParams::default());
 
-        // Baseline via existing Vec-returning API
         let baseline = ttm_trend(&input)?.values;
 
-        // Preallocate output and use the new into() API
         let mut out = vec![0.0f64; close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         ttm_trend_into(&input, &mut out)?;
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // In wasm builds the native name is taken; fall back to the slice form
             ttm_trend_into_slice_f64(&mut out, &input, Kernel::Auto)?;
         }
 
-        // Compute warmup exactly as the API does
         let (_s, _c, p, first, _k) = ttm_prepare(&input, Kernel::Auto)?;
         let warmup_end = first + p - 1;
 
-        // Build expected f64 output from the boolean baseline, with NaN warmups
         let mut expected = vec![0.0f64; out.len()];
         for i in 0..out.len() {
             if i < warmup_end {
@@ -1320,7 +1265,6 @@ mod tests {
             }
         }
 
-        // Helper: treat NaN == NaN
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1452,24 +1396,17 @@ mod tests {
         let src = source_type(&candles, "hl2");
         let close = source_type(&candles, "close");
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            // Default period
             TtmTrendParams::default(),
-            // Minimum period
             TtmTrendParams { period: Some(1) },
-            // Small periods
             TtmTrendParams { period: Some(2) },
             TtmTrendParams { period: Some(3) },
             TtmTrendParams { period: Some(7) },
-            // Medium periods
             TtmTrendParams { period: Some(10) },
             TtmTrendParams { period: Some(14) },
             TtmTrendParams { period: Some(20) },
-            // Large periods
             TtmTrendParams { period: Some(50) },
             TtmTrendParams { period: Some(100) },
-            // Very large period
             TtmTrendParams { period: Some(200) },
         ];
 
@@ -1477,7 +1414,6 @@ mod tests {
             let input = TtmTrendInput::from_slices(src, close, params.clone());
             let output = ttm_trend_with_kernel(&input, kernel)?;
 
-            // Find first valid index to calculate expected warmup
             let first_valid = src
                 .iter()
                 .zip(close.iter())
@@ -1486,7 +1422,6 @@ mod tests {
             let period = params.period.unwrap_or(5);
             let warmup_end = first_valid + period - 1;
 
-            // Check warmup period values should be false
             for i in 0..warmup_end.min(output.values.len()) {
                 if output.values[i] {
                     panic!(
@@ -1502,15 +1437,11 @@ mod tests {
                 }
             }
 
-            // Additionally check for any unexpected patterns in the output
-            // In debug mode, uninitialized memory would be filled with true (poison)
-            // So we check that after warmup, values vary (not all true)
             if warmup_end < output.values.len() {
                 let after_warmup = &output.values[warmup_end..];
                 let all_true = after_warmup.iter().all(|&v| v);
                 let all_false = after_warmup.iter().all(|&v| !v);
 
-                // If all values after warmup are true, this might indicate poison
                 if all_true && after_warmup.len() > 10 {
                     panic!(
                         "[{}] All values after warmup are true, possible poison pattern \
@@ -1527,7 +1458,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ttm_trend_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! generate_all_ttm_tests {
@@ -1594,18 +1525,16 @@ mod tests {
         let src = source_type(&c, "hl2");
         let close = source_type(&c, "close");
 
-        // Test various parameter sweep configurations
         let test_configs = vec![
-            // (period_start, period_end, period_step)
-            (1, 10, 1),    // Dense small periods
-            (2, 10, 2),    // Small periods with step
-            (5, 25, 5),    // Medium periods
-            (10, 50, 10),  // Large periods
-            (1, 5, 1),     // Very small dense range
-            (20, 100, 20), // Very large periods
-            (7, 21, 7),    // Weekly periods
-            (3, 30, 3),    // Multiples of 3
-            (15, 15, 0),   // Single period test
+            (1, 10, 1),
+            (2, 10, 2),
+            (5, 25, 5),
+            (10, 50, 10),
+            (1, 5, 1),
+            (20, 100, 20),
+            (7, 21, 7),
+            (3, 30, 3),
+            (15, 15, 0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1614,7 +1543,6 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_slices(src, close)?;
 
-            // Find first valid index
             let first_valid = src
                 .iter()
                 .zip(close.iter())
@@ -1628,7 +1556,6 @@ mod tests {
                 let period = combo.period.unwrap_or(5);
                 let warmup_end = first_valid + period - 1;
 
-                // Check if this index is in the warmup period
                 if col < warmup_end {
                     if val {
                         panic!(
@@ -1647,14 +1574,12 @@ mod tests {
                 }
             }
 
-            // Additionally check each row for suspicious patterns
             for row in 0..output.rows {
                 let start_idx = row * output.cols;
                 let row_values = &output.values[start_idx..start_idx + output.cols];
                 let period = output.combos[row].period.unwrap_or(5);
                 let warmup_end = first_valid + period - 1;
 
-                // Check if all values after warmup are true (suspicious)
                 if warmup_end < row_values.len() {
                     let after_warmup = &row_values[warmup_end..];
                     if after_warmup.len() > 10 && after_warmup.iter().all(|&v| v) {
@@ -1709,7 +1634,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // First, let's do a simple manual test to verify our understanding
         {
             let source = vec![100.0, 200.0, 300.0, 400.0, 500.0];
             let close = vec![150.0, 250.0, 350.0, 450.0, 550.0];
@@ -1720,13 +1644,12 @@ mod tests {
             let input = TtmTrendInput::from_slices(&source, &close, params);
             let result = ttm_trend_with_kernel(&input, kernel)?;
 
-            
             assert!(
                 result.values[1],
                 "Manual test failed at index 1 for {}",
                 test_name
             );
-            
+
             assert!(
                 result.values[2],
                 "Manual test failed at index 2 for {}",
@@ -1734,19 +1657,12 @@ mod tests {
             );
         }
 
-        
         let strat = (2usize..=50).prop_flat_map(|period| {
             let data_len = period * 2 + 50;
             (
-                
                 (100f64..10000f64),
-                
-                prop::collection::vec(
-                    (-0.02f64..0.02f64), 
-                    data_len - 1,
-                ),
+                prop::collection::vec((-0.02f64..0.02f64), data_len - 1),
                 Just(period),
-                
                 (0.005f64..0.02f64),
             )
         });
@@ -1755,35 +1671,27 @@ mod tests {
             .run(
                 &strat,
                 |(start_price, price_changes, period, spread_factor)| {
-                    
                     let mut base_prices = Vec::with_capacity(price_changes.len() + 1);
                     base_prices.push(start_price);
 
-                    
                     let mut current_price = start_price;
                     for &change_pct in &price_changes {
                         current_price *= 1.0 + change_pct;
-                        current_price = current_price.max(10.0); 
+                        current_price = current_price.max(10.0);
                         base_prices.push(current_price);
                     }
 
-                    
                     let mut source = Vec::with_capacity(base_prices.len());
                     let mut close = Vec::with_capacity(base_prices.len());
 
-                    
                     for (i, &base) in base_prices.iter().enumerate() {
-                        
                         let spread = base * spread_factor;
                         let high = base + spread;
                         let low = base - spread;
 
-                        
                         source.push((high + low) / 2.0);
 
-                        
-                        
-                        let close_ratio = ((i as f64 * 0.3).sin() + 1.0) / 2.0; 
+                        let close_ratio = ((i as f64 * 0.3).sin() + 1.0) / 2.0;
                         close.push(low + (high - low) * close_ratio);
                     }
                     let params = TtmTrendParams {
@@ -1791,15 +1699,12 @@ mod tests {
                     };
                     let input = TtmTrendInput::from_slices(&source, &close, params);
 
-                    
                     let result = ttm_trend_with_kernel(&input, kernel)?;
                     let values = result.values;
 
-                    
                     let ref_result = ttm_trend_with_kernel(&input, Kernel::Scalar)?;
                     let ref_values = ref_result.values;
 
-                    
                     let first_valid = source
                         .iter()
                         .zip(close.iter())
@@ -1807,11 +1712,9 @@ mod tests {
                         .unwrap_or(0);
                     let warmup_end = first_valid + period - 1;
 
-                    
                     prop_assert_eq!(values.len(), source.len());
                     prop_assert_eq!(values.len(), close.len());
 
-                    
                     for i in 0..warmup_end.min(values.len()) {
                         prop_assert!(
                             !values[i],
@@ -1821,20 +1724,12 @@ mod tests {
                         );
                     }
 
-                    
-                    
-                    
-                    
-                    
                     if warmup_end + 1 < values.len() {
-                        
-                        
                         let mut sum = 0.0;
                         for j in (first_valid + 1)..(first_valid + period + 1) {
                             sum += source[j];
                         }
 
-                        
                         for i in (warmup_end + 1)..values.len() {
                             let avg = sum / (period as f64);
                             let expected = close[i] > avg;
@@ -1845,14 +1740,12 @@ mod tests {
 							i, close[i], avg, expected, values[i]
 						);
 
-                            
                             if i + 1 < source.len() {
                                 sum += source[i + 1] - source[i + 1 - period];
                             }
                         }
                     }
 
-                    
                     for i in 0..values.len() {
                         prop_assert_eq!(
                             values[i],
@@ -1865,7 +1758,6 @@ mod tests {
                         );
                     }
 
-                    
                     if period == 1 {
                         for i in first_valid..values.len() {
                             let expected = close[i] > source[i];
@@ -1877,7 +1769,6 @@ mod tests {
                         }
                     }
 
-                    
                     let all_source_same = source.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                     let all_close_same = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                     if all_source_same && all_close_same && !source.is_empty() && !close.is_empty()
@@ -1895,23 +1786,21 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     let mut transitions = 0;
                     for i in (warmup_end + 1)..values.len() {
                         if values[i] != values[i - 1] {
                             transitions += 1;
-                            
+
                             let mut sum = 0.0;
                             for j in (i + 1 - period)..=i {
                                 sum += source[j];
                             }
                             let avg = sum / (period as f64);
-                            
+
                             prop_assert!(
-                                (close[i] - avg).abs() < source[i] * 0.1 || 
-							(values[i] && close[i] > avg) || 
-							(!values[i] && close[i] <= avg), 
+                                (close[i] - avg).abs() < source[i] * 0.1
+                                    || (values[i] && close[i] > avg)
+                                    || (!values[i] && close[i] <= avg),
                                 "Invalid transition at index {}: close={:.4}, avg={:.4}, value={}",
                                 i,
                                 close[i],
@@ -1921,10 +1810,7 @@ mod tests {
                         }
                     }
 
-                    
                     if period == source.len() - 1 && source.len() > 2 {
-                        
-                        
                         for i in 0..(source.len() - 1) {
                             prop_assert!(
                                 !values[i],
@@ -1936,7 +1822,6 @@ mod tests {
                         }
                     }
 
-                    
                     let result2 = ttm_trend_with_kernel(&input, kernel)?;
                     for i in 0..values.len() {
                         prop_assert_eq!(
@@ -1959,10 +1844,6 @@ mod tests {
     generate_all_ttm_tests!(check_ttm_trend_property);
 }
 
-
-
-
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1974,9 +1855,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "python")]
@@ -1997,14 +1878,11 @@ pub fn ttm_trend_py<'py>(
     };
     let input = TtmTrendInput::from_slices(s, c, params);
 
-    // allocate NumPy array directly to avoid extra copy
     let len = s.len().min(c.len());
     let out = unsafe { PyArray1::<f64>::new(py, [len], false) };
     let dst = unsafe { out.as_slice_mut()? };
 
     py.allow_threads(|| {
-        // init warmup prefix with NaN to mirror alma_py behavior
-        // compute warmup here via prepare to avoid double work
         let (ss, cc, p, first, chosen) = ttm_prepare(&input, kern).map_err(|e| e.to_string())?;
         for v in &mut dst[..first + p - 1] {
             *v = f64::NAN;
@@ -2075,7 +1953,7 @@ pub fn ttm_trend_batch_py<'py>(
         .map_err(|e: String| PyValueError::new_err(e))?;
 
     let dict = PyDict::new(py);
-    
+
     let arr = unsafe { PyArray1::<f64>::from_vec(py, vals_f64) }.reshape((rows, cols))?;
     dict.set_item("values", arr)?;
     dict.set_item(
@@ -2089,12 +1967,6 @@ pub fn ttm_trend_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-
-
-/// Write TTM Trend values directly to output slice - no allocations
-/// Note: This writes boolean values, but for WASM we'll convert to u8 (0/1)
 #[inline]
 pub fn ttm_trend_into_slice_f64(
     dst: &mut [f64],
@@ -2104,12 +1976,7 @@ pub fn ttm_trend_into_slice_f64(
     ttm_numeric_into_slice(dst, input, kern)
 }
 
-/// Write TTM Trend values into a caller-provided `out` buffer (no allocations).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning APIs.
-/// - Uses `Kernel::Auto` dispatch to select the best available implementation.
-/// - `out.len()` must equal the effective input length (min(source.len(), close.len())).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ttm_trend_into(input: &TtmTrendInput, out: &mut [f64]) -> Result<(), TtmTrendError> {
     ttm_trend_into_slice_f64(out, input, Kernel::Auto)
@@ -2144,7 +2011,7 @@ pub fn ttm_trend_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ttm_trend_js(source: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let input = TtmTrendInput::from_slices(
@@ -2161,7 +2028,7 @@ pub fn ttm_trend_js(source: &[f64], close: &[f64], period: usize) -> Result<Vec<
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ttm_trend_into(
     source_ptr: *const f64,
@@ -2194,7 +2061,7 @@ pub fn ttm_trend_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ttm_trend_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2203,7 +2070,7 @@ pub fn ttm_trend_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ttm_trend_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2213,22 +2080,22 @@ pub fn ttm_trend_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TtmTrendBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TtmTrendBatchJsOutput {
-    pub values: Vec<f64>, // Flattened f64 array (0.0/1.0)
+    pub values: Vec<f64>,
     pub periods: Vec<usize>,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ttm_trend_batch)]
 pub fn ttm_trend_batch_js(
     source: &[f64],
@@ -2238,7 +2105,6 @@ pub fn ttm_trend_batch_js(
     let config: TtmTrendBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-    // Validate period range
     if config.period_range.0 == 0 {
         return Err(JsValue::from_str("Invalid period: period must be > 0"));
     }

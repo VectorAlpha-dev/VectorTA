@@ -1,42 +1,3 @@
-//! # Ultimate Moving Average (UMA)
-//!
-//! Decision log: SIMD kept scalar-first; CUDA enabled with typed errors and VRAM checks; Python exposes CAI v3 and DLPack (device handle keeps CUDA context alive). Performance matches scalar; no reference changes.
-//!
-//! An adaptive moving average that dynamically adjusts its length based on multiple indicators
-//! including RSI, MFI, and standard deviation to respond to market conditions.
-//!
-//! ## Parameters
-//! - **accelerator**: Acceleration factor for dynamic length adjustment (default: 8.0)
-//! - **min_length**: Minimum lookback period (default: 5)
-//! - **max_length**: Maximum lookback period (default: 50)
-//! - **smooth_length**: Smoothing period for final output (default: 4)
-//!
-//! ## Returns
-//! - **`Ok(UmaOutput)`** containing values vector of length matching input data
-//! - **`Err(UmaError)`** on calculation errors
-//!
-//! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Not implemented (no explicit SIMD kernel functions)
-//! - **Streaming update**: O(1) where possible; UMA core O(L)
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix)
-//! - **Optimization status**: Scalar core optimized (inlined RSI/MFI, ln LUT, FMA). SIMD accumulation present under `nightly-avx`, but Auto selection prefers scalar due to limited wins from scalar `exp` cost.
-//! - **Streaming**: optimized. Maintains O(1) updates for mean/σ, momentum, and WMA;
-//!   UMA core remains O(L) per tick due to non-decomposable power weights.
-//!
-//! Binding test status (2025-10-27):
-//! - WASM bindings: failures currently observed in tests/wasm/test_uma.js
-//!   - "UMA - streaming interface": no valid values produced after warmup.
-//!   - "UMA - streaming with volume": no valid values produced after warmup.
-//! - Python bindings: failure in tests/python/test_uma.py
-//!   - TestUma::test_uma_streaming_with_volume: stream outputs remain all-NaN.
-//!
-//! Notes: Batch UMA matches Rust references (1% tolerance) in both bindings. The
-//! streaming failures appear due to an overly strict warmup gate in UmaStream
-//! that never transitions to producing values once the internal ring reaches
-//! capacity. Investigate the warmup condition so that streaming begins emitting
-//! values after enough samples (>= max_length) and lets the WMA stage handle its
-//! own warmup. No reference values changed.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -47,8 +8,6 @@ use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
@@ -57,12 +16,14 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use js_sys;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::deviation::{deviation, DeviationInput, DeviationParams};
@@ -110,7 +71,10 @@ pub struct UmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct UmaParams {
     pub accelerator: Option<f64>,
     pub min_length: Option<usize>,
@@ -183,8 +147,6 @@ impl<'a> UmaInput<'a> {
         self.params.smooth_length.unwrap_or(4)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct UmaBuilder {
@@ -279,50 +241,37 @@ impl UmaBuilder {
     }
 }
 
-
-
-/// SIMD status: streaming keeps scalar-safe logic; UMA core is O(L) per tick.
-/// Rationale: power-weighted sliding average reweights all items as p and L vary; no exact O(1).
 #[derive(Debug, Clone)]
 pub struct UmaStream {
-    
     accelerator: f64,
     min_length: usize,
     max_length: usize,
     smooth_length: usize,
 
-    
     price: Vec<f64>,
     volume: Vec<f64>,
     cap: usize,
     head: usize,
     count: usize,
 
-    
     sum: f64,
     sumsq: f64,
 
-    
     has_prev: bool,
     prev_price: f64,
 
-    
     upvol_cum: Vec<f64>,
     dnvol_cum: Vec<f64>,
     diff_step: usize,
 
-    
     rsi_avg_up: f64,
     rsi_avg_dn: f64,
     rsi_inited: bool,
 
-    
     dynamic_length: f64,
 
-    
     ln_lut: Vec<f64>,
 
-    
     uma_raw: Vec<f64>,
     uma_raw_head: usize,
     uma_raw_count: usize,
@@ -330,7 +279,6 @@ pub struct UmaStream {
     s2: f64,
     wma_denom: f64,
 
-    
     params: UmaParams,
     kernel: Kernel,
 }
@@ -366,9 +314,8 @@ impl UmaStream {
             return Err(UmaError::InvalidAccelerator { accelerator });
         }
 
-        
         let mut ln_lut = Vec::with_capacity(max_length + 1);
-        ln_lut.push(0.0); 
+        ln_lut.push(0.0);
         for k in 1..=max_length {
             ln_lut.push((k as f64).ln());
         }
@@ -419,14 +366,10 @@ impl UmaStream {
         self.update_with_volume(value, None)
     }
 
-    /// `volume`: if provided, enables the volume-momentum path (slice-with-volume behavior).
-    /// Otherwise the momentum falls back to RSI (Wilder).
     pub fn update_with_volume(&mut self, value: f64, volume: Option<f64>) -> Option<f64> {
         let v = volume.unwrap_or(0.0);
 
-        
         if self.count == self.cap {
-            
             let old = self.price[self.head];
             self.sum -= old;
             self.sumsq -= old * old;
@@ -438,13 +381,11 @@ impl UmaStream {
         self.sum += value;
         self.sumsq += value * value;
 
-        
         if self.has_prev {
             let diff = value - self.prev_price;
             let up = if diff > 0.0 { diff } else { 0.0 };
             let dn = if diff < 0.0 { -diff } else { 0.0 };
 
-            
             let cur = (self.diff_step + 1) % (self.cap + 1);
             let prev = self.diff_step % (self.cap + 1);
             let up_contrib = if up > 0.0 { v } else { 0.0 };
@@ -453,41 +394,32 @@ impl UmaStream {
             self.dnvol_cum[cur] = self.dnvol_cum[prev] + dn_contrib;
             self.diff_step += 1;
 
-            
             if !self.rsi_inited {
                 self.rsi_avg_up = up;
                 self.rsi_avg_dn = dn;
                 self.rsi_inited = true;
             } else {
-                
             }
         }
         self.prev_price = value;
         self.has_prev = true;
 
-        
         self.head = (self.head + 1) % self.cap;
 
-        
-        
-        
         if self.count < self.cap {
             return None;
         }
 
-        
         let n = self.cap as f64;
         let mu = self.sum / n;
         let var = (self.sumsq / n) - mu * mu;
         let sd = if var > 0.0 { var.sqrt() } else { 0.0 };
 
-        
         let a = (-1.75f64).mul_add(sd, mu);
         let b = (-0.25f64).mul_add(sd, mu);
         let c = (0.25f64).mul_add(sd, mu);
         let d = (1.75f64).mul_add(sd, mu);
 
-        
         let src = value;
         if src >= b && src <= c {
             self.dynamic_length += 1.0;
@@ -500,9 +432,7 @@ impl UmaStream {
             .min(self.max_length as f64);
         let len_r = self.dynamic_length.round().max(1.0) as usize;
 
-        
         let mf = if v > 0.0 && self.diff_step > 0 {
-            
             let cur = self.diff_step % (self.cap + 1);
             let prev = (self.diff_step + self.cap + 1 - len_r) % (self.cap + 1);
             let up_sum = self.upvol_cum[cur] - self.upvol_cum[prev];
@@ -514,9 +444,7 @@ impl UmaStream {
                 50.0
             }
         } else {
-            
             if self.diff_step > 0 {
-                
                 let newest_idx = (self.head + self.cap - 1) % self.cap;
                 let prev_idx = (self.head + self.cap - 2) % self.cap;
                 let prevv = self.price[prev_idx];
@@ -540,16 +468,13 @@ impl UmaStream {
             }
         };
 
-        
         let mf_scaled = mf.mul_add(2.0, -100.0);
-        let p = self.accelerator + (mf_scaled.abs() * 0.04); 
+        let p = self.accelerator + (mf_scaled.abs() * 0.04);
 
-        
         let start = (self.head + self.cap - len_r) % self.cap;
         let mut xws = 0.0f64;
         let mut wsum = 0.0f64;
 
-        
         let mut j = 0usize;
         while j + 1 < len_r {
             let k1 = len_r - j;
@@ -580,10 +505,8 @@ impl UmaStream {
 
         let uma_raw = if wsum > 0.0 { xws / wsum } else { src };
 
-        
         let m = self.smooth_length;
         if self.uma_raw_count < m {
-            
             self.s1 += uma_raw;
             self.s2 += uma_raw * ((self.uma_raw_count as f64) + 1.0);
             self.uma_raw[self.uma_raw_head] = uma_raw;
@@ -593,17 +516,15 @@ impl UmaStream {
             if self.uma_raw_count < m {
                 return None;
             }
-            
+
             let out = self.s2 / self.wma_denom;
             Some(out)
         } else {
-            
             let oldest = self.uma_raw[self.uma_raw_head];
             let s1_prev = self.s1;
             self.s1 = self.s1 - oldest + uma_raw;
             self.s2 = self.s2 - s1_prev + (m as f64) * uma_raw;
 
-            
             self.uma_raw[self.uma_raw_head] = uma_raw;
             self.uma_raw_head = (self.uma_raw_head + 1) % m;
 
@@ -640,13 +561,10 @@ impl UmaStream {
     }
 }
 
-
 #[inline(always)]
 fn exp_kernel(x: f64) -> f64 {
     x.exp()
 }
-
-
 
 #[derive(Debug, Error)]
 pub enum UmaError {
@@ -672,7 +590,11 @@ pub enum UmaError {
     #[error("uma: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("uma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("uma: Invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("uma: arithmetic overflow while computing {context}")]
@@ -680,8 +602,6 @@ pub enum UmaError {
     #[error("uma: Error from dependency: {0}")]
     DependencyError(String),
 }
-
-// ==================== CORE FUNCTIONS ====================
 
 #[inline(always)]
 fn uma_prepare<'a>(input: &'a UmaInput) -> Result<(&'a [f64], usize, usize, usize, f64), UmaError> {
@@ -737,15 +657,13 @@ fn uma_core_into(
     min_length: usize,
     max_length: usize,
     accelerator: f64,
-    _kernel: Kernel, 
+    _kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), UmaError> {
-    
     let data: &[f64] = input.as_ref();
     let len = data.len();
     debug_assert!(len == out.len());
 
-    
     let mean = sma(&SmaInput::from_slice(
         data,
         SmaParams {
@@ -765,42 +683,36 @@ fn uma_core_into(
     .map_err(|e| UmaError::DependencyError(e.to_string()))?
     .values;
 
-    
-    
     let mut ln_lut: Vec<f64> = Vec::with_capacity(max_length + 1);
-    
+
     ln_lut.push(0.0);
     for k in 1..=max_length {
         ln_lut.push((k as f64).ln());
     }
 
-    
     let (candles_opt, vol_opt) = match &input.data {
         UmaData::Candles { candles, .. } => (Some(*candles), input.volume),
         UmaData::Slice(_) => (None, input.volume),
     };
 
-    
     let warmup_end = first
         .checked_add(max_length)
         .and_then(|x| x.checked_sub(1))
-        .ok_or(UmaError::ArithmeticOverflow { context: "first + max_length - 1 (warmup_end)" })?;
+        .ok_or(UmaError::ArithmeticOverflow {
+            context: "first + max_length - 1 (warmup_end)",
+        })?;
     if warmup_end >= len {
-        return Ok(()); 
+        return Ok(());
     }
 
-    
     let mut dyn_len = max_length as f64;
 
-    
     #[inline(always)]
     fn rsi_wilder_last(data: &[f64], start: usize, end: usize, period: usize) -> f64 {
-        
         if period == 0 || end <= start || end - start + 1 < period + 1 {
             return 50.0;
         }
 
-        
         let mut sum_up = 0.0f64;
         let mut sum_dn = 0.0f64;
         let mut has_nan = false;
@@ -816,17 +728,16 @@ fn uma_core_into(
             if diff > 0.0 {
                 sum_up += diff;
             } else {
-                sum_dn -= diff; 
+                sum_dn -= diff;
             }
             prev = cur;
         }
         if has_nan {
-            return 50.0; 
+            return 50.0;
         }
         let mut avg_up = sum_up / (period as f64);
         let mut avg_dn = sum_dn / (period as f64);
 
-        
         if init_last < end {
             let n_1 = (period - 1) as f64;
             let n = period as f64;
@@ -852,18 +763,17 @@ fn uma_core_into(
 
     #[inline(always)]
     fn mfi_window_last_candles(c: &Candles, start: usize, end: usize) -> f64 {
-        
         if end <= start {
             return 50.0;
         }
-        
+
         let mut tp_prev = (c.high[start] + c.low[start] + c.close[start]) / 3.0;
         let mut pos = 0.0f64;
         let mut neg = 0.0f64;
 
         for j in (start + 1)..=end {
             let tp = (c.high[j] + c.low[j] + c.close[j]) / 3.0;
-            
+
             let mf = tp * c.volume[j];
             if tp > tp_prev {
                 pos += mf;
@@ -881,7 +791,6 @@ fn uma_core_into(
         }
     }
 
-    
     for i in warmup_end..len {
         let mu = mean[i];
         let sd = std_dev[i];
@@ -890,13 +799,11 @@ fn uma_core_into(
         }
         let src = data[i];
 
-        
         let a = (-1.75f64).mul_add(sd, mu);
         let b = (-0.25f64).mul_add(sd, mu);
         let c = (0.25f64).mul_add(sd, mu);
         let d = (1.75f64).mul_add(sd, mu);
 
-        
         if src >= b && src <= c {
             dyn_len += 1.0;
         } else if src < a || src > d {
@@ -909,12 +816,10 @@ fn uma_core_into(
             continue;
         }
 
-        
         let mf: f64 = match (vol_opt, candles_opt) {
             (Some(vol), Some(candles)) => {
                 let v_i = vol[i];
                 if v_i == 0.0 || v_i.is_nan() {
-                    
                     let end = i;
                     let start = if end + 1 >= 2 * len_r {
                         end + 1 - 2 * len_r
@@ -928,7 +833,6 @@ fn uma_core_into(
                 }
             }
             (Some(vol), None) => {
-                
                 let start = i + 1 - len_r;
                 let mut up_vol = 0.0f64;
                 let mut dn_vol = 0.0f64;
@@ -952,7 +856,6 @@ fn uma_core_into(
                 }
             }
             _ => {
-                
                 let end = i;
                 let start = if end + 1 >= 2 * len_r {
                     end + 1 - 2 * len_r
@@ -963,15 +866,11 @@ fn uma_core_into(
             }
         };
 
-        
-        
         let mf_scaled = mf.mul_add(2.0, -100.0);
-        let p = accelerator + (mf_scaled.abs() * 0.04); 
+        let p = accelerator + (mf_scaled.abs() * 0.04);
 
-        
         let start = i + 1 - len_r;
 
-        
         let (mut xws, mut wsum) = (0.0f64, 0.0f64);
 
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1002,9 +901,6 @@ fn uma_core_into(
         }
 
         if wsum == 0.0 {
-            
-            
-            
             let mut j = 0usize;
             while j + 1 < len_r {
                 let k1 = len_r - j;
@@ -1037,21 +933,19 @@ fn uma_core_into(
             }
         }
 
-        
         out[i] = if wsum > 0.0 { xws / wsum } else { src };
     }
 
     Ok(())
 }
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn uma_weighted_accumulate_avx2(
-    data: *const f64,   
-    ln_lut: *const f64, 
-    len_r: usize,       
-    p: f64,             
+    data: *const f64,
+    ln_lut: *const f64,
+    len_r: usize,
+    p: f64,
 ) -> (f64, f64) {
     use core::arch::x86_64::*;
     let mut sum_v = _mm256_setzero_pd();
@@ -1072,7 +966,6 @@ unsafe fn uma_weighted_accumulate_avx2(
 
         let xv = _mm256_loadu_pd(data.add(j));
 
-        
         let nan_mask = _mm256_cmp_pd(xv, xv, _CMP_ORD_Q);
         let xv_nz = _mm256_and_pd(xv, nan_mask);
 
@@ -1104,9 +997,6 @@ unsafe fn uma_weighted_accumulate_avx2(
     }
     (xws, wsum)
 }
-
-
-
 
 #[cfg(all(
     feature = "nightly-avx",
@@ -1143,8 +1033,8 @@ unsafe fn uma_weighted_accumulate_avx512(
 ))]
 #[inline(always)]
 unsafe fn uma_weighted_accumulate_avx512(
-    data: *const f64,   
-    ln_lut: *const f64, 
+    data: *const f64,
+    ln_lut: *const f64,
     len_r: usize,
     p: f64,
 ) -> (f64, f64) {
@@ -1179,7 +1069,6 @@ unsafe fn uma_weighted_accumulate_avx512(
         j += 8;
     }
 
-    
     let xws = {
         let mut tmp: [f64; 8] = core::mem::zeroed();
         _mm512_storeu_pd(tmp.as_mut_ptr(), sum_v);
@@ -1206,9 +1095,6 @@ unsafe fn uma_weighted_accumulate_avx512(
     (xws_acc, wsum_acc)
 }
 
-
-
-
 #[cfg(all(
     feature = "nightly-avx",
     target_arch = "x86_64",
@@ -1234,19 +1120,18 @@ pub fn uma_with_kernel(input: &UmaInput, kernel: Kernel) -> Result<UmaOutput, Um
     let warm = first
         .checked_add(max_len)
         .and_then(|x| x.checked_sub(1))
-        .ok_or(UmaError::ArithmeticOverflow { context: "first + max_len - 1 (warm)" })?;
+        .ok_or(UmaError::ArithmeticOverflow {
+            context: "first + max_len - 1 (warm)",
+        })?;
 
-    
     let mut out = alloc_with_nan_prefix(data.len(), warm);
 
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
     uma_core_into(input, first, min_len, max_len, accel, chosen, &mut out)?;
 
-    
     let smooth = input.get_smooth_length();
     if smooth > 1 {
         let w = wma(&WmaInput::from_slice(
@@ -1273,11 +1158,12 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
         });
     }
 
-    
     let warm = first
         .checked_add(max_len)
         .and_then(|x| x.checked_sub(1))
-        .ok_or(UmaError::ArithmeticOverflow { context: "first + max_len - 1 (warm)" })?;
+        .ok_or(UmaError::ArithmeticOverflow {
+            context: "first + max_len - 1 (warm)",
+        })?;
     let warm_end = warm.min(dst.len());
     for v in &mut dst[..warm_end] {
         *v = f64::NAN;
@@ -1291,7 +1177,6 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
 
     let smooth = input.get_smooth_length();
     if smooth > 1 {
-        
         let tmp = wma(&WmaInput::from_slice(
             dst,
             WmaParams {
@@ -1305,25 +1190,18 @@ pub fn uma_into_slice(dst: &mut [f64], input: &UmaInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Writes UMA results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn uma_into(input: &UmaInput, out: &mut [f64]) -> Result<(), UmaError> {
-    
     uma_into_slice(out, input, Kernel::Auto)
 }
 
-
-
 #[derive(Clone, Debug)]
 pub struct UmaBatchRange {
-    pub accelerator: (f64, f64, f64),         
-    pub min_length: (usize, usize, usize),    
-    pub max_length: (usize, usize, usize),    
-    pub smooth_length: (usize, usize, usize), 
+    pub accelerator: (f64, f64, f64),
+    pub min_length: (usize, usize, usize),
+    pub max_length: (usize, usize, usize),
+    pub smooth_length: (usize, usize, usize),
 }
 
 impl Default for UmaBatchRange {
@@ -1483,7 +1361,7 @@ pub fn expand_grid_uma(r: &UmaBatchRange) -> Vec<UmaParams> {
                 Ok(v)
             };
         }
-        
+
         let mut v = Vec::new();
         let mut cur = start;
         loop {
@@ -1554,7 +1432,6 @@ pub fn expand_grid_uma(r: &UmaBatchRange) -> Vec<UmaParams> {
         Err(_) => vec![r.smooth_length.0],
     };
 
-    
     if !mins.is_empty() && !maxs.is_empty() {
         if let (Some(min_min), Some(max_max)) = (mins.iter().min(), maxs.iter().max()) {
             if *min_min > *max_max {
@@ -1563,7 +1440,8 @@ pub fn expand_grid_uma(r: &UmaBatchRange) -> Vec<UmaParams> {
         }
     }
 
-    let cap = accs.len()
+    let cap = accs
+        .len()
         .checked_mul(mins.len())
         .and_then(|x| x.checked_mul(maxs.len()))
         .and_then(|x| x.checked_mul(smooths.len()))
@@ -1643,7 +1521,6 @@ fn uma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<UmaParams>, UmaError> {
-    
     match kern {
         Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
             return Err(UmaError::InvalidKernelForBatch(kern));
@@ -1662,11 +1539,14 @@ fn uma_batch_inner_into(
 
     let cols = data.len();
     let rows = combos.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(UmaError::ArithmeticOverflow { context: "rows * cols (batch out)" })?;
+    let expected = rows.checked_mul(cols).ok_or(UmaError::ArithmeticOverflow {
+        context: "rows * cols (batch out)",
+    })?;
     if out.len() != expected {
-        return Err(UmaError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(UmaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
     let per_row_kernel = debatch(kern);
@@ -1678,15 +1558,17 @@ fn uma_batch_inner_into(
             let a = first
                 .checked_add(c.max_length.unwrap_or(50))
                 .and_then(|x| x.checked_sub(1))
-                .ok_or(UmaError::ArithmeticOverflow { context: "first + max_length - 1 (batch warm)" })?;
-            a
-                .checked_add(c.smooth_length.unwrap_or(4))
+                .ok_or(UmaError::ArithmeticOverflow {
+                    context: "first + max_length - 1 (batch warm)",
+                })?;
+            a.checked_add(c.smooth_length.unwrap_or(4))
                 .and_then(|x| x.checked_sub(1))
-                .ok_or(UmaError::ArithmeticOverflow { context: "+ smooth_length - 1 (batch warm)" })
+                .ok_or(UmaError::ArithmeticOverflow {
+                    context: "+ smooth_length - 1 (batch warm)",
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1727,7 +1609,6 @@ fn uma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<UmaBatchOutput, UmaError> {
-    
     match kern {
         Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
             return Err(UmaError::InvalidKernelForBatch(kern));
@@ -1748,10 +1629,9 @@ fn uma_batch_inner(
         });
     }
 
-    
-    let _cap = rows
-        .checked_mul(cols)
-        .ok_or(UmaError::ArithmeticOverflow { context: "rows * cols (matrix alloc)" })?;
+    let _cap = rows.checked_mul(cols).ok_or(UmaError::ArithmeticOverflow {
+        context: "rows * cols (matrix alloc)",
+    })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
@@ -1761,11 +1641,14 @@ fn uma_batch_inner(
             let a = first
                 .checked_add(c.max_length.unwrap_or(50))
                 .and_then(|x| x.checked_sub(1))
-                .ok_or(UmaError::ArithmeticOverflow { context: "first + max_length - 1 (batch warm alloc)" })?;
-            a
-                .checked_add(c.smooth_length.unwrap_or(4))
+                .ok_or(UmaError::ArithmeticOverflow {
+                    context: "first + max_length - 1 (batch warm alloc)",
+                })?;
+            a.checked_add(c.smooth_length.unwrap_or(4))
                 .and_then(|x| x.checked_sub(1))
-                .ok_or(UmaError::ArithmeticOverflow { context: "+ smooth_length - 1 (batch warm alloc)" })
+                .ok_or(UmaError::ArithmeticOverflow {
+                    context: "+ smooth_length - 1 (batch warm alloc)",
+                })
         })
         .collect::<Result<Vec<_>, _>>()?;
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
@@ -1790,8 +1673,6 @@ fn uma_batch_inner(
         cols,
     })
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "uma")]
@@ -1852,12 +1733,10 @@ impl UmaStreamPy {
         Ok(Self { stream })
     }
 
-    /// alma-style: single-arg update
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
 
-    /// keep extended form for volume
     #[pyo3(name = "update_with_volume")]
     pub fn update_with_volume_py(&mut self, value: f64, volume: Option<f64>) -> Option<f64> {
         self.stream.update_with_volume(value, volume)
@@ -1866,7 +1745,6 @@ impl UmaStreamPy {
     pub fn reset(&mut self) {
         self.stream.reset();
     }
-
 }
 
 #[cfg(feature = "python")]
@@ -1939,7 +1817,6 @@ pub fn uma_batch_py<'py>(
             .into_pyarray(py),
     )?;
 
-    
     let combo_list: Vec<Bound<'py, PyDict>> = combos
         .iter()
         .map(|c| {
@@ -1962,7 +1839,7 @@ pub fn uma_batch_py<'py>(
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct UmaDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -1991,13 +1868,13 @@ impl UmaDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        (2, self.device_id as i32) 
+        (2, self.device_id as i32)
     }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
@@ -2009,8 +1886,7 @@ impl UmaDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2031,7 +1907,6 @@ impl UmaDeviceArrayF32Py {
 
         let _ = stream;
 
-        
         let buf = self
             .buf
             .take()
@@ -2073,15 +1948,23 @@ pub fn uma_cuda_batch_dev_py(
     };
 
     let (inner, ctx, dev_id) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
-            let cuda = CudaUma::new(device_id)?;
-            let out = cuda.uma_batch_dev(slice_in, volume_slice, &sweep)?;
-            Ok((out, cuda.context_arc(), cuda.device_id()))
-        })
+        .allow_threads(
+            || -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
+                let cuda = CudaUma::new(device_id)?;
+                let out = cuda.uma_batch_dev(slice_in, volume_slice, &sweep)?;
+                Ok((out, cuda.context_arc(), cuda.device_id()))
+            },
+        )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
-    Ok(UmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
+    Ok(UmaDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2128,26 +2011,32 @@ pub fn uma_cuda_many_series_one_param_dev_py(
     };
 
     let (inner, ctx, dev_id) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
-            let cuda = CudaUma::new(device_id)?;
-            let out = cuda.uma_many_series_one_param_time_major_dev(
-                prices_flat,
-                volume_flat,
-                cols,
-                rows,
-                &params,
-            )?;
-            Ok((out, cuda.context_arc(), cuda.device_id()))
-        })
+        .allow_threads(
+            || -> Result<_, crate::cuda::moving_averages::uma_wrapper::CudaUmaError> {
+                let cuda = CudaUma::new(device_id)?;
+                let out = cuda.uma_many_series_one_param_time_major_dev(
+                    prices_flat,
+                    volume_flat,
+                    cols,
+                    rows,
+                    &params,
+                )?;
+                Ok((out, cuda.context_arc(), cuda.device_id()))
+            },
+        )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
-    Ok(UmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
+    Ok(UmaDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_js(
     data: &[f64],
@@ -2168,7 +2057,6 @@ pub fn uma_js(
 
     match uma_with_kernel(&input, Kernel::Auto) {
         Ok(output) => {
-            
             let obj = js_sys::Object::new();
             let values_array = js_sys::Array::new();
             for val in output.values {
@@ -2181,7 +2069,7 @@ pub fn uma_js(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct UmaBatchConfig {
     pub accelerator_range: (f64, f64, f64),
@@ -2190,7 +2078,7 @@ pub struct UmaBatchConfig {
     pub smooth_length_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct UmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2199,7 +2087,7 @@ pub struct UmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "uma_batch")]
 pub fn uma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: UmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2222,7 +2110,7 @@ pub fn uma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2231,7 +2119,7 @@ pub fn uma_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2239,7 +2127,7 @@ pub fn uma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_into(
     in_ptr: *const f64,
@@ -2264,7 +2152,6 @@ pub fn uma_into(
         let input = UmaInput::from_slice(data, None, params);
 
         if core::ptr::eq(in_ptr as *const u8, out_ptr as *const u8) {
-            
             let mut tmp = vec![0.0; len];
             uma_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2279,9 +2166,7 @@ pub fn uma_into(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_stream_new(
     accelerator: f64,
@@ -2302,7 +2187,7 @@ pub fn uma_stream_new(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_stream_update(stream: *mut UmaStream, value: f64) -> Option<f64> {
     if stream.is_null() {
@@ -2311,7 +2196,7 @@ pub fn uma_stream_update(stream: *mut UmaStream, value: f64) -> Option<f64> {
     unsafe { (*stream).update_with_volume(value, None) }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_stream_update_with_volume(
     stream: *mut UmaStream,
@@ -2324,7 +2209,7 @@ pub fn uma_stream_update_with_volume(
     unsafe { (*stream).update_with_volume(value, Some(volume)) }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_stream_reset(stream: *mut UmaStream) {
     if !stream.is_null() {
@@ -2334,7 +2219,7 @@ pub fn uma_stream_reset(stream: *mut UmaStream) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_stream_free(stream: *mut UmaStream) {
     if !stream.is_null() {
@@ -2344,15 +2229,13 @@ pub fn uma_stream_free(stream: *mut UmaStream) {
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_get_view(ptr: *mut f64, len: usize) -> js_sys::Float64Array {
     unsafe { js_sys::Float64Array::view(std::slice::from_raw_parts(ptr, len)) }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_update(
     ptr: *mut f64,
@@ -2376,7 +2259,6 @@ pub fn uma_update(
         };
         let input = UmaInput::from_slice(data, None, params);
 
-        
         let mut tmp = vec![0.0; len];
         uma_into_slice(&mut tmp, &input, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2387,16 +2269,14 @@ pub fn uma_update(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn uma_batch_js(
     data: &[f64],
-    accelerator_range: Vec<f64>,     
-    min_length_range: Vec<usize>,    
-    max_length_range: Vec<usize>,    
-    smooth_length_range: Vec<usize>, 
+    accelerator_range: Vec<f64>,
+    min_length_range: Vec<usize>,
+    max_length_range: Vec<usize>,
+    smooth_length_range: Vec<usize>,
     volume: Option<Vec<f64>>,
 ) -> Result<JsValue, JsValue> {
     if accelerator_range.len() != 3
@@ -2438,17 +2318,14 @@ pub fn uma_batch_js(
     let result = uma_batch_inner(data, vol_slice, &sweep, kernel, true)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let obj = js_sys::Object::new();
 
-    
     let values_array = js_sys::Array::new();
     for val in result.values {
         values_array.push(&JsValue::from_f64(val));
     }
     js_sys::Reflect::set(&obj, &JsValue::from_str("values"), &values_array)?;
 
-    
     let accelerators = js_sys::Array::new();
     let min_lengths = js_sys::Array::new();
     let max_lengths = js_sys::Array::new();
@@ -2478,8 +2355,6 @@ pub fn uma_batch_js(
 
     Ok(obj.into())
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2515,11 +2390,9 @@ mod tests {
         let input = UmaInput::from_candles(&candles, "close", UmaParams::default());
         let result = uma_with_kernel(&input, kernel)?;
 
-        
         let values = &result.values;
         let valid_values: Vec<f64> = values.iter().filter(|&&v| !v.is_nan()).copied().collect();
 
-        
         let expected_last_five = [
             59665.81830666,
             59477.69234542,
@@ -2528,12 +2401,11 @@ mod tests {
             59143.61473211,
         ];
 
-        
         if valid_values.len() >= 5 {
             let start = valid_values.len().saturating_sub(5);
             for (i, &val) in valid_values[start..].iter().enumerate() {
                 let diff = (val - expected_last_five[i]).abs();
-                let tolerance = expected_last_five[i] * 0.01; 
+                let tolerance = expected_last_five[i] * 0.01;
                 assert!(
                     diff < tolerance || diff < 100.0,
                     "[{}] UMA {:?} mismatch at idx {}: got {}, expected {}",
@@ -2570,7 +2442,7 @@ mod tests {
         let params = UmaParams {
             accelerator: Some(1.0),
             min_length: Some(5),
-            max_length: Some(0), 
+            max_length: Some(0),
             smooth_length: Some(4),
         };
         let input = UmaInput::from_slice(&input_data, None, params);
@@ -2636,9 +2508,8 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let data: Vec<f64> = (0..100).map(|i| 100.0 + i as f64).collect();
 
-        
         let params = UmaParams {
-            accelerator: Some(0.5), 
+            accelerator: Some(0.5),
             max_length: Some(10),
             ..Default::default()
         };
@@ -2668,7 +2539,6 @@ mod tests {
 
         assert_eq!(second_result.values.len(), first_result.values.len());
 
-        
         let valid_count = second_result
             .values
             .iter()
@@ -2693,7 +2563,6 @@ mod tests {
         let res = uma_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), data.len());
 
-        
         let valid_count = res.values[60..].iter().filter(|&&v| !v.is_nan()).count();
         assert!(
             valid_count > 0,
@@ -2732,11 +2601,6 @@ mod tests {
 
         assert_eq!(batch_output.len(), stream_values.len());
 
-        
-        
-        
-
-        
         let batch_valid: Vec<f64> = batch_output
             .iter()
             .filter(|&&v| !v.is_nan())
@@ -2756,7 +2620,7 @@ mod tests {
                 let diff = (b - s).abs();
                 let relative_diff = diff / b.abs().max(1.0);
                 assert!(
-                    relative_diff < 0.1, 
+                    relative_diff < 0.1,
                     "[{}] UMA streaming mismatch at idx {}: batch={}, stream={}, diff={}, rel_diff={}",
                     test_name,
                     i,
@@ -2874,11 +2738,9 @@ mod tests {
                 let UmaOutput { values: ref_out } =
                     uma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len());
                 prop_assert_eq!(ref_out.len(), data.len());
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -2975,7 +2837,6 @@ mod tests {
 
     #[test]
     fn test_uma_into_matches_api() {
-        
         let len = 256usize;
         let mut ts = Vec::with_capacity(len);
         let mut open = Vec::with_capacity(len);
@@ -2991,7 +2852,7 @@ mod tests {
             let h = if i < 3 { f64::NAN } else { c + 1.0 };
             let l = if i < 3 { f64::NAN } else { c - 1.0 };
             let o = if i < 3 { f64::NAN } else { c };
-            let v = 1000.0 + (i % 10) as f64; 
+            let v = 1000.0 + (i % 10) as f64;
 
             open.push(o);
             high.push(h);
@@ -3000,30 +2861,28 @@ mod tests {
             volume.push(v);
         }
 
-        let candles = crate::utilities::data_loader::Candles::new(
-            ts, open, high, low, close, volume,
-        );
+        let candles =
+            crate::utilities::data_loader::Candles::new(ts, open, high, low, close, volume);
         let params = UmaParams::default();
         let input = UmaInput::from_candles(&candles, "close", params);
 
         let baseline = uma(&input).unwrap().values;
         let mut via_into = vec![0.0; baseline.len()];
-        
-        #[cfg(not(feature = "wasm"))]
+
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         uma_into(&input, &mut via_into).unwrap();
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         uma_into_slice(&mut via_into, &input, Kernel::Auto).unwrap();
 
         assert_eq!(baseline.len(), via_into.len());
         for (a, b) in baseline.iter().zip(via_into.iter()) {
             let both_nan = a.is_nan() && b.is_nan();
-            let close_enough = if both_nan { true } else { (*a - *b).abs() <= 1e-12 };
-            assert!(
-                close_enough,
-                "Mismatch: a={} b={}",
-                a,
-                b
-            );
+            let close_enough = if both_nan {
+                true
+            } else {
+                (*a - *b).abs() <= 1e-12
+            };
+            assert!(close_enough, "Mismatch: a={} b={}", a, b);
         }
     }
 
@@ -3045,12 +2904,11 @@ mod tests {
             )
             .unwrap();
             let v = d.get_item("values").unwrap().expect("values missing");
-            
+
             assert!(v.downcast::<numpy::PyArray2<f64>>().is_ok());
         });
     }
 
-    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -3066,7 +2924,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        
         let valid_count = row.iter().filter(|&&v| !v.is_nan()).count();
         assert!(
             valid_count > 0,
@@ -3090,7 +2947,7 @@ mod tests {
             .smooth_length_range(3, 5, 2)
             .apply_slice(&data, None)?;
 
-        let expected_combos = 3 * 2 * 2 * 2; 
+        let expected_combos = 3 * 2 * 2 * 2;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, data.len());

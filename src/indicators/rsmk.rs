@@ -1,37 +1,3 @@
-//! # Relative Strength Mark (RSMK)
-//!
-//! A comparative momentum-based indicator that calculates the log-ratio of two sources, applies a momentum
-//! transform, smooths the result with a moving average, and provides both the main and signal lines.
-//!
-//! ## Parameters
-//! - **lookback**: Lookback period for momentum calculation (default: 90)
-//! - **period**: Moving average period for smoothing momentum (default: 3)
-//! - **signal_period**: Signal moving average period (default: 20)
-//! - **matype**: Moving average type for main line (default: "ema")
-//! - **signal_matype**: Moving average type for signal line (default: "ema")
-//!
-//! ## Inputs
-//! - Main data series and comparison data series (or candles with source)
-//! - Both series must have the same length
-//!
-//! ## Returns
-//! - **indicator**: Main RSMK line as `Vec<f64>` (length matches input)
-//! - **signal**: Signal line as `Vec<f64>` (length matches input)
-//!
-//! ## Developer Notes
-//! - SIMD status: AVX2/AVX512 entry points are present and feature-gated. They currently delegate to
-//!   the scalar fused path to guarantee identical results (previous momentum-only vectorization showed
-//!   minor divergence under property tests). Runtime selection continues to prefer the scalar path.
-//! - Streaming update: O(1) per tick via ring buffer for momentum and NaN-aware EMA/SMA windows
-//!   (matches fused scalar behavior, see Decision Logging below).
-//! - Decision: SIMD paths remain stubbed to scalar for correctness; streaming kernel enabled and
-//!   fastest by >O(n) vs prior version at identical outputs.
-//! - Memory optimization: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix,
-//!   init_matrix_prefixes) and removes branches in hot loops where IEEE-754 NaN propagation suffices.
-//! - Decision: Mixed MA combos (EMA→SMA, SMA→EMA) fused variants are implemented, but the main
-//!   selection falls back to the generic MA pipeline for those types due to prior underperformance.
-//! - Decision log: CUDA wrapper present with VRAM-backed handles; Python interop exposes CUDA
-//!   Array Interface v3 and DLPack v1.x (versioned capsules) with unchanged numerical outputs.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -41,11 +7,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde_wasm_bindgen;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -86,7 +52,10 @@ pub struct RsmkOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RsmkParams {
     pub lookback: Option<usize>,
     pub period: Option<usize>,
@@ -281,14 +250,18 @@ pub enum RsmkError {
     #[error("rsmk: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("rsmk: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("rsmk: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("rsmk: Error from MA function: {0}")]
     MaError(String),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<RsmkError> for JsValue {
     fn from(err: RsmkError) -> Self {
         JsValue::from_str(&err.to_string())
@@ -301,7 +274,6 @@ pub fn rsmk(input: &RsmkInput) -> Result<RsmkOutput, RsmkError> {
 }
 
 pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput, RsmkError> {
-    // Extract and check
     let (main, compare) = match &input.data {
         RsmkData::Candles {
             candles,
@@ -339,7 +311,6 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         });
     }
 
-    // log-ratio
     let mut lr = Vec::with_capacity(main.len());
     unsafe {
         lr.set_len(main.len());
@@ -347,7 +318,7 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
     for i in 0..main.len() {
         let m = main[i];
         let c = compare[i];
-        // c == 0 => NaN to preserve domain
+
         unsafe {
             *lr.get_unchecked_mut(i) = if m.is_nan() || c.is_nan() || c == 0.0 {
                 f64::NAN
@@ -361,8 +332,7 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         .iter()
         .position(|&x| !x.is_nan())
         .ok_or(RsmkError::AllValuesNaN)?;
-    // Require enough post-first-valid data to cover lookback and both MA windows.
-    // This mirrors classic-kernel behavior (momentum first_valid includes lookback).
+
     let needed = lookback + period.max(signal_period);
     if lr.len() - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -371,7 +341,6 @@ pub fn rsmk_with_kernel(input: &RsmkInput, kernel: Kernel) -> Result<RsmkOutput,
         });
     }
 
-    // Dispatch to selected kernel implementation (single-series)
     let mut mom = alloc_with_nan_prefix(lr.len(), first_valid + lookback);
     let ksel = match kernel {
         Kernel::Auto => detect_best_kernel(),
@@ -429,13 +398,9 @@ pub fn rsmk_scalar(
     first_valid: usize,
     mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
-    // === 1) Momentum (log-ratio diff) ===
-    // mom already has a NaN prefix sized by caller via alloc_with_nan_prefix
     let len = lr.len();
-    let mom_fv = first_valid + lookback; // first valid momentum index
+    let mom_fv = first_valid + lookback;
 
-    // Tight, bounds-check-free loop to compute momentum
-    // SAFETY: i in [mom_fv, len) and i - lookback in [first_valid, len)
     unsafe {
         for i in mom_fv..len {
             let a = *lr.get_unchecked(i);
@@ -448,7 +413,6 @@ pub fn rsmk_scalar(
         }
     }
 
-    // === 2) MA selection ===
     #[inline(always)]
     fn is_ema(s: &str) -> bool {
         s.eq_ignore_ascii_case("ema")
@@ -461,19 +425,14 @@ pub fn rsmk_scalar(
     let matype = input.get_ma_type();
     let sigtype = input.get_signal_ma_type();
 
-    // Common warmups based on momentum availability
     let ind_warmup = mom_fv.saturating_add(period.saturating_sub(1));
     let sig_warmup = ind_warmup.saturating_add(signal_period.saturating_sub(1));
 
-    // === 3) Jammed kernels for the 4 common combinations ===
-
-    // --- EMA over momentum, then EMA over indicator (one-pass, fused) ---
     if is_ema(matype) && is_ema(sigtype) {
         let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
         let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
         if ind_warmup < len {
-            // Initialize EMA(indicator) from SMA of first 'period' momentum points (ignoring NaNs)
             let mut sum = 0.0;
             let mut cnt = 0usize;
             let init_end = (mom_fv + period).min(len);
@@ -491,20 +450,15 @@ pub fn rsmk_scalar(
                 let alpha_ind = 2.0 / (period as f64 + 1.0);
                 let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
 
-                // Indicator EMA starts from SMA * 100
                 let mut ema_ind = (sum / cnt as f64) * 100.0;
                 unsafe {
                     *indicator.get_unchecked_mut(ind_warmup) = ema_ind;
                 }
 
-                // Build signal EMA in-place as we extend indicator:
-                //  - accumulate first `signal_period` indicator values to seed EMA(signal)
-                let mut ema_sig = 0.0f64; // will be set when seeded
+                let mut ema_sig = 0.0f64;
                 let mut acc_sig = ema_ind;
                 let mut cnt_sig = 1usize;
 
-                // If the signal warmup coincides with indicator warmup (signal_period == 1),
-                // seed and write the signal value immediately.
                 if sig_warmup == ind_warmup {
                     ema_sig = acc_sig / (cnt_sig as f64);
                     unsafe {
@@ -517,12 +471,11 @@ pub fn rsmk_scalar(
                         let mv = *mom.get_unchecked(i);
                         if !mv.is_nan() {
                             let src100 = mv * 100.0;
-                            // ema_ind = ema_ind + alpha*(src100 - ema_ind)  (single FMA)
+
                             ema_ind = (src100 - ema_ind).mul_add(alpha_ind, ema_ind);
                         }
                         *indicator.get_unchecked_mut(i) = ema_ind;
 
-                        // Seed EMA(signal) with SMA of first `signal_period` indicator values
                         if i < sig_warmup {
                             acc_sig += ema_ind;
                             cnt_sig += 1;
@@ -530,14 +483,12 @@ pub fn rsmk_scalar(
                             ema_sig = acc_sig / (cnt_sig as f64);
                             *signal.get_unchecked_mut(i) = ema_sig;
                         } else {
-                            // Continue EMA(signal)
                             ema_sig = (ema_ind - ema_sig).mul_add(alpha_sig, ema_sig);
                             *signal.get_unchecked_mut(i) = ema_sig;
                         }
                     }
                 }
             } else {
-                // No finite values to seed indicator EMA — leave post-warmup as NaN explicitly
                 for i in ind_warmup..len {
                     indicator[i] = f64::NAN;
                 }
@@ -550,7 +501,6 @@ pub fn rsmk_scalar(
         return Ok(RsmkOutput { indicator, signal });
     }
 
-    // --- SMA over momentum, then SMA over indicator (single pass, NaN-aware) ---
     if is_sma(matype) && is_sma(sigtype) {
         let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
         let mut signal = alloc_with_nan_prefix(len, sig_warmup);
@@ -563,7 +513,6 @@ pub fn rsmk_scalar(
 
         unsafe {
             for i in mom_fv..len {
-                // Update indicator SMA window with NaN-skipping
                 let v_new = *mom.get_unchecked(i);
                 if !v_new.is_nan() {
                     sum_ind += v_new;
@@ -586,7 +535,6 @@ pub fn rsmk_scalar(
                     };
                     *indicator.get_unchecked_mut(i) = ind_val;
 
-                    // Update signal SMA window over indicator (NaN-aware)
                     if !ind_val.is_nan() {
                         sum_sig += ind_val;
                         cnt_sig += 1;
@@ -613,13 +561,11 @@ pub fn rsmk_scalar(
         return Ok(RsmkOutput { indicator, signal });
     }
 
-    // --- EMA over momentum, then SMA over indicator (single pass after EMA seed) ---
     if is_ema(matype) && is_sma(sigtype) {
         let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
         let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
         if ind_warmup < len {
-            // Seed indicator EMA from SMA of first `period` momentum values (NaN-aware)
             let mut sum = 0.0;
             let mut cnt = 0usize;
             let init_end = (mom_fv + period).min(len);
@@ -637,18 +583,15 @@ pub fn rsmk_scalar(
                 let alpha_ind = 2.0 / (period as f64 + 1.0);
                 let mut ema_ind = (sum / cnt as f64) * 100.0;
 
-                // SMA(signal) rolling state
                 let mut sum_sig = 0.0;
                 let mut cnt_sig = 0usize;
 
                 unsafe {
                     *indicator.get_unchecked_mut(ind_warmup) = ema_ind;
-                    // Include first indicator into signal window build-up
+
                     sum_sig += ema_ind;
                     cnt_sig += 1;
 
-                    // If the signal warmup coincides with indicator warmup (signal_period == 1),
-                    // write the first SMA(signal) immediately.
                     if sig_warmup == ind_warmup {
                         *signal.get_unchecked_mut(sig_warmup) = sum_sig / cnt_sig as f64;
                     }
@@ -661,7 +604,6 @@ pub fn rsmk_scalar(
                         }
                         *indicator.get_unchecked_mut(i) = ema_ind;
 
-                        // Update SMA(signal) window
                         if !ema_ind.is_nan() {
                             sum_sig += ema_ind;
                             cnt_sig += 1;
@@ -696,7 +638,6 @@ pub fn rsmk_scalar(
         return Ok(RsmkOutput { indicator, signal });
     }
 
-    // --- SMA over momentum, then EMA over indicator (single pass after SMA build) ---
     if is_sma(matype) && is_ema(sigtype) {
         let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
         let mut signal = alloc_with_nan_prefix(len, sig_warmup);
@@ -704,15 +645,13 @@ pub fn rsmk_scalar(
         let mut sum_ind = 0.0;
         let mut cnt_ind = 0usize;
 
-        // To seed EMA(signal) we accumulate the first `signal_period` indicator values
         let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
         let mut acc_sig = 0.0;
         let mut cnt_sig = 0usize;
-        let mut ema_sig = 0.0f64; // set at seed
+        let mut ema_sig = 0.0f64;
 
         unsafe {
             for i in mom_fv..len {
-                // Update indicator SMA window with NaN-skipping
                 let v_new = *mom.get_unchecked(i);
                 if !v_new.is_nan() {
                     sum_ind += v_new;
@@ -751,7 +690,6 @@ pub fn rsmk_scalar(
                         if !ind_val.is_nan() && !ema_sig.is_nan() {
                             ema_sig = (ind_val - ema_sig).mul_add(alpha_sig, ema_sig);
                         } else if !ind_val.is_nan() && ema_sig.is_nan() {
-                            // Recover from NaN seed by snapping to the first finite indicator
                             ema_sig = ind_val;
                         }
                         *signal.get_unchecked_mut(i) = ema_sig;
@@ -763,26 +701,21 @@ pub fn rsmk_scalar(
         return Ok(RsmkOutput { indicator, signal });
     }
 
-    // === 4) Fallback to generic MA pipeline for uncommon types ===
-    // (kept for correctness & feature parity with the full MA dispatcher)
     let matype = input.get_ma_type();
     let sigmatype = input.get_signal_ma_type();
 
-    // indicator MA -> reuse Vec directly
     let mut indicator =
         ma(matype, MaData::Slice(mom), period).map_err(|e| RsmkError::MaError(e.to_string()))?;
     for v in &mut indicator {
         *v *= 100.0;
     }
 
-    // signal MA -> reuse Vec directly
     let signal = ma(sigmatype, MaData::Slice(&indicator), signal_period)
         .map_err(|e| RsmkError::MaError(e.to_string()))?;
 
     Ok(RsmkOutput { indicator, signal })
 }
 
-/// Write directly to output slices - no allocations
 #[inline]
 pub fn rsmk_into_slice(
     dst_indicator: &mut [f64],
@@ -834,7 +767,6 @@ pub fn rsmk_into_slice(
         });
     }
 
-    // log-ratio
     let mut lr = Vec::with_capacity(main.len());
     unsafe {
         lr.set_len(main.len());
@@ -855,7 +787,6 @@ pub fn rsmk_into_slice(
         .position(|x| !x.is_nan())
         .ok_or(RsmkError::AllValuesNaN)?;
 
-    // momentum
     let mut mom = alloc_with_nan_prefix(lr.len(), first + lookback);
     for i in (first + lookback)..lr.len() {
         let a = lr[i];
@@ -867,7 +798,6 @@ pub fn rsmk_into_slice(
         };
     }
 
-    // indicator
     let matype = p.matype.as_deref().unwrap_or("ema");
     let mut ind =
         ma(matype, MaData::Slice(&mom), period).map_err(|e| RsmkError::MaError(e.to_string()))?;
@@ -875,30 +805,23 @@ pub fn rsmk_into_slice(
         *v *= 100.0;
     }
 
-    // signal
     let sigtype = p.signal_matype.as_deref().unwrap_or("ema");
     let sig = ma(sigtype, MaData::Slice(&ind), signal_period)
         .map_err(|e| RsmkError::MaError(e.to_string()))?;
 
-    // copy into provided slices
     dst_indicator.copy_from_slice(&ind);
     dst_signal.copy_from_slice(&sig);
 
     Ok(())
 }
 
-/// Write RSMK results into caller-provided buffers without allocating outputs.
-///
-/// Preserves NaN warmups exactly as the Vec-returning API. Both `indicator_out`
-/// and `signal_out` must have length equal to the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn rsmk_into(
     input: &RsmkInput,
     indicator_out: &mut [f64],
     signal_out: &mut [f64],
 ) -> Result<(), RsmkError> {
-    // Extract and validate inputs exactly like rsmk_with_kernel
     let (main, compare) = match &input.data {
         RsmkData::Candles {
             candles,
@@ -949,9 +872,10 @@ pub fn rsmk_into(
         });
     }
 
-    // 1) log-ratio
     let mut lr = Vec::with_capacity(len);
-    unsafe { lr.set_len(len); }
+    unsafe {
+        lr.set_len(len);
+    }
     for i in 0..len {
         let m = main[i];
         let c = compare[i];
@@ -968,7 +892,6 @@ pub fn rsmk_into(
         .position(|x| !x.is_nan())
         .ok_or(RsmkError::AllValuesNaN)?;
 
-    // 2) momentum into temp vec with NaN prefix sized by (first_valid + lookback)
     let mut mom = alloc_with_nan_prefix(len, first_valid + lookback);
     let mom_fv = first_valid + lookback;
     unsafe {
@@ -983,11 +906,14 @@ pub fn rsmk_into(
         }
     }
 
-    // 3) MA selection and fused paths (mirror rsmk_scalar semantics)
     #[inline(always)]
-    fn is_ema(s: &str) -> bool { s.eq_ignore_ascii_case("ema") }
+    fn is_ema(s: &str) -> bool {
+        s.eq_ignore_ascii_case("ema")
+    }
     #[inline(always)]
-    fn is_sma(s: &str) -> bool { s.eq_ignore_ascii_case("sma") }
+    fn is_sma(s: &str) -> bool {
+        s.eq_ignore_ascii_case("sma")
+    }
 
     let matype = input.get_ma_type();
     let sigtype = input.get_signal_ma_type();
@@ -995,21 +921,25 @@ pub fn rsmk_into(
     let ind_warmup = mom_fv.saturating_add(period.saturating_sub(1));
     let sig_warmup = ind_warmup.saturating_add(signal_period.saturating_sub(1));
 
-    // Prefill NaN warmups in destination buffers
-    for i in 0..ind_warmup.min(len) { indicator_out[i] = f64::NAN; }
-    for i in 0..sig_warmup.min(len) { signal_out[i] = f64::NAN; }
+    for i in 0..ind_warmup.min(len) {
+        indicator_out[i] = f64::NAN;
+    }
+    for i in 0..sig_warmup.min(len) {
+        signal_out[i] = f64::NAN;
+    }
 
-    // --- EMA over momentum, then EMA over indicator (fused) ---
     if is_ema(matype) && is_ema(sigtype) {
         if ind_warmup < len {
-            // Seed EMA(indicator) from SMA of first `period` momentum points (NaN-aware)
             let mut sum = 0.0;
             let mut cnt = 0usize;
             let init_end = (mom_fv + period).min(len);
             unsafe {
                 for i in mom_fv..init_end {
                     let v = *mom.get_unchecked(i);
-                    if !v.is_nan() { sum += v; cnt += 1; }
+                    if !v.is_nan() {
+                        sum += v;
+                        cnt += 1;
+                    }
                 }
             }
             if cnt > 0 {
@@ -1019,10 +949,10 @@ pub fn rsmk_into(
                 let mut ema_ind = (sum / cnt as f64) * 100.0;
                 indicator_out[ind_warmup] = ema_ind;
 
-                let mut ema_sig = 0.0f64; // set when seeded
+                let mut ema_sig = 0.0f64;
                 let mut acc_sig = ema_ind;
                 let mut cnt_sig = 1usize;
-                if sig_warmup == ind_warmup { // signal_period == 1
+                if sig_warmup == ind_warmup {
                     ema_sig = acc_sig / (cnt_sig as f64);
                     signal_out[sig_warmup] = ema_sig;
                 }
@@ -1037,7 +967,8 @@ pub fn rsmk_into(
                         *indicator_out.get_unchecked_mut(i) = ema_ind;
 
                         if i < sig_warmup {
-                            acc_sig += ema_ind; cnt_sig += 1;
+                            acc_sig += ema_ind;
+                            cnt_sig += 1;
                         } else if i == sig_warmup {
                             ema_sig = acc_sig / (cnt_sig as f64);
                             *signal_out.get_unchecked_mut(i) = ema_sig;
@@ -1048,35 +979,59 @@ pub fn rsmk_into(
                     }
                 }
             } else {
-                // No finite values to seed
-                for i in ind_warmup..len { indicator_out[i] = f64::NAN; }
-                for i in sig_warmup..len { signal_out[i] = f64::NAN; }
+                for i in ind_warmup..len {
+                    indicator_out[i] = f64::NAN;
+                }
+                for i in sig_warmup..len {
+                    signal_out[i] = f64::NAN;
+                }
             }
         }
         return Ok(());
     }
 
-    // --- SMA over momentum, then SMA over indicator (fused) ---
     if is_sma(matype) && is_sma(sigtype) {
-        let mut sum_ind = 0.0; let mut cnt_ind = 0usize;
-        let mut sum_sig = 0.0; let mut cnt_sig = 0usize;
+        let mut sum_ind = 0.0;
+        let mut cnt_ind = 0usize;
+        let mut sum_sig = 0.0;
+        let mut cnt_sig = 0usize;
         unsafe {
             for i in mom_fv..len {
                 let v_new = *mom.get_unchecked(i);
-                if !v_new.is_nan() { sum_ind += v_new; cnt_ind += 1; }
+                if !v_new.is_nan() {
+                    sum_ind += v_new;
+                    cnt_ind += 1;
+                }
                 if i >= mom_fv + period {
                     let v_old = *mom.get_unchecked(i - period);
-                    if !v_old.is_nan() { sum_ind -= v_old; cnt_ind -= 1; }
+                    if !v_old.is_nan() {
+                        sum_ind -= v_old;
+                        cnt_ind -= 1;
+                    }
                 }
                 if i >= ind_warmup {
-                    let ind_val = if cnt_ind > 0 { (sum_ind / cnt_ind as f64) * 100.0 } else { f64::NAN };
+                    let ind_val = if cnt_ind > 0 {
+                        (sum_ind / cnt_ind as f64) * 100.0
+                    } else {
+                        f64::NAN
+                    };
                     *indicator_out.get_unchecked_mut(i) = ind_val;
-                    if !ind_val.is_nan() { sum_sig += ind_val; cnt_sig += 1; }
+                    if !ind_val.is_nan() {
+                        sum_sig += ind_val;
+                        cnt_sig += 1;
+                    }
                     if i >= sig_warmup {
                         let old_idx = i - signal_period;
                         let old_ind = *indicator_out.get_unchecked(old_idx);
-                        if !old_ind.is_nan() { sum_sig -= old_ind; cnt_sig -= 1; }
-                        *signal_out.get_unchecked_mut(i) = if cnt_sig > 0 { sum_sig / cnt_sig as f64 } else { f64::NAN };
+                        if !old_ind.is_nan() {
+                            sum_sig -= old_ind;
+                            cnt_sig -= 1;
+                        }
+                        *signal_out.get_unchecked_mut(i) = if cnt_sig > 0 {
+                            sum_sig / cnt_sig as f64
+                        } else {
+                            f64::NAN
+                        };
                     }
                 }
             }
@@ -1084,71 +1039,109 @@ pub fn rsmk_into(
         return Ok(());
     }
 
-    // --- EMA over momentum, then SMA over indicator (fused) ---
     if is_ema(matype) && is_sma(sigtype) {
         if ind_warmup < len {
-            // Seed indicator EMA
-            let mut sum = 0.0; let mut cnt = 0usize;
+            let mut sum = 0.0;
+            let mut cnt = 0usize;
             let init_end = (mom_fv + period).min(len);
             unsafe {
-                for i in mom_fv..init_end { let v = *mom.get_unchecked(i); if !v.is_nan() { sum += v; cnt += 1; } }
+                for i in mom_fv..init_end {
+                    let v = *mom.get_unchecked(i);
+                    if !v.is_nan() {
+                        sum += v;
+                        cnt += 1;
+                    }
+                }
             }
             if cnt > 0 {
                 let alpha_ind = 2.0 / (period as f64 + 1.0);
                 let mut ema_ind = (sum / cnt as f64) * 100.0;
-                let mut sum_sig = 0.0; let mut cnt_sig = 0usize;
+                let mut sum_sig = 0.0;
+                let mut cnt_sig = 0usize;
                 unsafe {
                     *indicator_out.get_unchecked_mut(ind_warmup) = ema_ind;
-                    sum_sig += ema_ind; cnt_sig += 1;
+                    sum_sig += ema_ind;
+                    cnt_sig += 1;
                     if sig_warmup == ind_warmup {
                         *signal_out.get_unchecked_mut(sig_warmup) = sum_sig / cnt_sig as f64;
                     }
                     for i in (ind_warmup + 1)..len {
                         let mv = *mom.get_unchecked(i);
-                        if !mv.is_nan() { let src100 = mv * 100.0; ema_ind = (src100 - ema_ind).mul_add(alpha_ind, ema_ind); }
+                        if !mv.is_nan() {
+                            let src100 = mv * 100.0;
+                            ema_ind = (src100 - ema_ind).mul_add(alpha_ind, ema_ind);
+                        }
                         *indicator_out.get_unchecked_mut(i) = ema_ind;
                         if i < sig_warmup {
-                            sum_sig += ema_ind; cnt_sig += 1;
+                            sum_sig += ema_ind;
+                            cnt_sig += 1;
                         } else if i == sig_warmup {
                             *signal_out.get_unchecked_mut(i) = sum_sig / cnt_sig as f64;
                         } else {
-                            // rolling SMA over indicator
                             let old_idx = i - signal_period;
                             let old_ind = *indicator_out.get_unchecked(old_idx);
-                            if !old_ind.is_nan() { sum_sig -= old_ind; cnt_sig -= 1; }
-                            sum_sig += ema_ind; cnt_sig += 1;
-                            *signal_out.get_unchecked_mut(i) = if cnt_sig > 0 { sum_sig / cnt_sig as f64 } else { f64::NAN };
+                            if !old_ind.is_nan() {
+                                sum_sig -= old_ind;
+                                cnt_sig -= 1;
+                            }
+                            sum_sig += ema_ind;
+                            cnt_sig += 1;
+                            *signal_out.get_unchecked_mut(i) = if cnt_sig > 0 {
+                                sum_sig / cnt_sig as f64
+                            } else {
+                                f64::NAN
+                            };
                         }
                     }
                 }
             } else {
-                for i in ind_warmup..len { indicator_out[i] = f64::NAN; }
-                for i in sig_warmup..len { signal_out[i] = f64::NAN; }
+                for i in ind_warmup..len {
+                    indicator_out[i] = f64::NAN;
+                }
+                for i in sig_warmup..len {
+                    signal_out[i] = f64::NAN;
+                }
             }
         }
         return Ok(());
     }
 
-    // --- SMA over momentum, then EMA over indicator (fused) ---
     if is_sma(matype) && is_ema(sigtype) {
-        let mut sum_ind = 0.0; let mut cnt_ind = 0usize;
+        let mut sum_ind = 0.0;
+        let mut cnt_ind = 0usize;
         let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
-        let mut ema_sig = 0.0f64; let mut seeded_sig = false; let mut acc_sig = 0.0f64; let mut cnt_sig = 0usize;
+        let mut ema_sig = 0.0f64;
+        let mut seeded_sig = false;
+        let mut acc_sig = 0.0f64;
+        let mut cnt_sig = 0usize;
         unsafe {
             for i in mom_fv..len {
                 let v_new = *mom.get_unchecked(i);
-                if !v_new.is_nan() { sum_ind += v_new; cnt_ind += 1; }
+                if !v_new.is_nan() {
+                    sum_ind += v_new;
+                    cnt_ind += 1;
+                }
                 if i >= mom_fv + period {
                     let v_old = *mom.get_unchecked(i - period);
-                    if !v_old.is_nan() { sum_ind -= v_old; cnt_ind -= 1; }
+                    if !v_old.is_nan() {
+                        sum_ind -= v_old;
+                        cnt_ind -= 1;
+                    }
                 }
                 if i >= ind_warmup {
-                    let ind_val = if cnt_ind > 0 { (sum_ind / cnt_ind as f64) * 100.0 } else { f64::NAN };
+                    let ind_val = if cnt_ind > 0 {
+                        (sum_ind / cnt_ind as f64) * 100.0
+                    } else {
+                        f64::NAN
+                    };
                     *indicator_out.get_unchecked_mut(i) = ind_val;
                     if !seeded_sig {
-                        acc_sig += ind_val; cnt_sig += 1;
+                        acc_sig += ind_val;
+                        cnt_sig += 1;
                         if i == sig_warmup {
-                            ema_sig = acc_sig / (cnt_sig as f64); seeded_sig = true; *signal_out.get_unchecked_mut(i) = ema_sig;
+                            ema_sig = acc_sig / (cnt_sig as f64);
+                            seeded_sig = true;
+                            *signal_out.get_unchecked_mut(i) = ema_sig;
                         }
                     } else {
                         if ind_val.is_finite() {
@@ -1162,10 +1155,11 @@ pub fn rsmk_into(
         return Ok(());
     }
 
-    // 4) Fallback to generic MA pipeline for uncommon MA types — match scalar behavior
-    let mut indicator = ma(matype, MaData::Slice(&mom), period)
-        .map_err(|e| RsmkError::MaError(e.to_string()))?;
-    for v in &mut indicator { *v *= 100.0; }
+    let mut indicator =
+        ma(matype, MaData::Slice(&mom), period).map_err(|e| RsmkError::MaError(e.to_string()))?;
+    for v in &mut indicator {
+        *v *= 100.0;
+    }
     let signal = ma(sigtype, MaData::Slice(&indicator), signal_period)
         .map_err(|e| RsmkError::MaError(e.to_string()))?;
     indicator_out.copy_from_slice(&indicator);
@@ -1185,7 +1179,6 @@ pub fn rsmk_avx2(
     first_valid: usize,
     mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
-    // Stub to scalar path for correctness; SIMD momentum under review.
     rsmk_scalar(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
@@ -1220,7 +1213,6 @@ pub unsafe fn rsmk_avx512_short(
     first_valid: usize,
     mom: &mut [f64],
 ) -> Result<RsmkOutput, RsmkError> {
-    // Stub to scalar path for correctness; SIMD momentum under review.
     rsmk_scalar(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
@@ -1239,45 +1231,38 @@ pub unsafe fn rsmk_avx512_long(
     rsmk_avx512_short(lr, lookback, period, signal_period, input, first_valid, mom)
 }
 
-// Decision Logging (streaming): O(1) kernel enabled; maintains ring buffer for log-ratio momentum
-// and NaN-aware EMA/SMA windows; matches fused scalar behavior including warm-ups and NaN rules.
 #[derive(Debug, Clone)]
 pub struct RsmkStream {
     lookback: usize,
     period: usize,
     signal_period: usize,
-    // Keep original strings for API parity, plus precomputed flags for hot path
+
     matype: String,
     signal_matype: String,
     main_is_ema: bool,
     signal_is_ema: bool,
 
-    // log-ratio ring for momentum in O(1)
     lr_buf: Vec<f64>,
     lr_head: usize,
     lr_len: usize,
 
-    // momentum first-valid detection boundary
     saw_first_finite_mom: bool,
-    // EMA(main) seed trackers (SMA over first `period` after mom_fv)
+
     ema_seed_pos: usize,
     ema_seed_sum: f64,
     ema_seed_cnt: usize,
     ema_ind: f64,
     ema_ind_seeded: bool,
-    ema_ind_dead: bool, // sticky NaN tail if seed had 0 finite samples
+    ema_ind_dead: bool,
 
-    // SMA(main) window (NaN-aware)
     ind_win_buf: Vec<f64>,
     ind_win_head: usize,
     ind_win_len: usize,
     ind_win_sum: f64,
     ind_win_cnt: usize,
 
-    // Latch when indicator becomes available (even if NaN by window) to start signal timing
     indicator_started: bool,
 
-    // EMA(signal)
     alpha_sig: f64,
     ema_sig: f64,
     ema_sig_seeded: bool,
@@ -1285,14 +1270,12 @@ pub struct RsmkStream {
     ema_sig_seed_sum: f64,
     ema_sig_seed_cnt: usize,
 
-    // SMA(signal)
     sig_win_buf: Vec<f64>,
     sig_win_head: usize,
     sig_win_len: usize,
     sig_win_sum: f64,
     sig_win_cnt: usize,
 
-    // Precomputed alpha for EMA(main)
     alpha_main: f64,
 }
 
@@ -1416,16 +1399,13 @@ impl RsmkStream {
         }
     }
 
-    /// Streaming update: O(1). Returns (indicator, signal) for the new point.
     pub fn update(&mut self, main: f64, compare: f64) -> Option<(f64, f64)> {
-        // 1) log-ratio with domain checks (NaN if compare==0 or any NaN)
         let lr = if main.is_nan() || compare.is_nan() || compare == 0.0 {
             f64::NAN
         } else {
             (main / compare).ln()
         };
 
-        // 2) momentum = lr_t - lr_{t-lookback} via ring buffer
         let evicted = Self::push_ring(&mut self.lr_buf, &mut self.lr_head, &mut self.lr_len, lr);
         let mom = match evicted {
             None => f64::NAN,
@@ -1442,14 +1422,12 @@ impl RsmkStream {
             self.saw_first_finite_mom = true;
         }
 
-        // 3) Indicator path (EMA or SMA)
         let indicator = if self.main_is_ema {
             self.update_indicator_ema(mom)
         } else {
             self.update_indicator_sma(mom)
         };
 
-        // 4) Signal path (EMA or SMA over indicator)
         let signal = if self.signal_is_ema {
             self.update_signal_ema(indicator)
         } else {
@@ -1680,7 +1658,6 @@ fn expand_grid(r: &RsmkBatchRange) -> Vec<RsmkParams> {
                 vals.push(v);
             }
         } else {
-            // Support reversed bounds with descending sequence
             let mut cur = start;
             let s = step.max(1);
             loop {
@@ -1803,13 +1780,11 @@ fn rsmk_batch_inner_into(
     let rows = combos.len();
     let cols = main.len();
 
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(RsmkError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 0,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(RsmkError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
     if indicator_out.len() != expected {
         return Err(RsmkError::OutputLengthMismatch {
             expected,
@@ -1823,7 +1798,6 @@ fn rsmk_batch_inner_into(
         });
     }
 
-    // Precompute log-ratio once
     let mut lr = Vec::with_capacity(cols);
     unsafe {
         lr.set_len(cols);
@@ -1840,7 +1814,6 @@ fn rsmk_batch_inner_into(
         }
     }
 
-    // Precompute momentum for each unique lookback and reuse per row
     use std::collections::HashMap;
     let mut mom_by_lookback: HashMap<usize, Vec<f64>> = HashMap::new();
     for &lookback in combos
@@ -1867,10 +1840,8 @@ fn rsmk_batch_inner_into(
         let mt = prm.matype.as_deref().unwrap_or("ema");
         let st = prm.signal_matype.as_deref().unwrap_or("ema");
 
-        // Use precomputed momentum for this lookback
         let mom = mom_by_lookback.get(&lookback).unwrap();
 
-        // indicator row
         match ma(mt, MaData::Slice(&mom), period) {
             Ok(mut v) => {
                 for x in &mut v {
@@ -1885,7 +1856,6 @@ fn rsmk_batch_inner_into(
             }
         }
 
-        // signal row
         match ma(st, MaData::Slice(ind_row), signal_period) {
             Ok(vs) => {
                 sig_row.copy_from_slice(&vs);
@@ -1972,18 +1942,15 @@ fn rsmk_batch_inner(
     let rows = combos.len();
     let cols = main.len();
 
-    let _expected = rows
-        .checked_mul(cols)
-        .ok_or(RsmkError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 0,
-        })?;
+    let _expected = rows.checked_mul(cols).ok_or(RsmkError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
 
     let mut indicators = make_uninit_matrix(rows, cols);
     let mut signals = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes for each row based on warmup periods
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1997,7 +1964,6 @@ fn rsmk_batch_inner(
     init_matrix_prefixes(&mut indicators, cols, &warmup_periods);
     init_matrix_prefixes(&mut signals, cols, &warmup_periods);
 
-    // Convert to mutable slices for computation
     let mut indicators = unsafe {
         use std::mem::ManuallyDrop;
         let mut v = ManuallyDrop::new(indicators);
@@ -2009,7 +1975,6 @@ fn rsmk_batch_inner(
         Vec::from_raw_parts(v.as_mut_ptr() as *mut f64, v.len(), v.capacity())
     };
 
-    // Precompute log-ratio once
     let mut lr = Vec::with_capacity(cols);
     unsafe {
         lr.set_len(cols);
@@ -2026,7 +1991,6 @@ fn rsmk_batch_inner(
         }
     }
 
-    // Precompute momentum for each unique lookback and reuse per row
     use std::collections::HashMap;
     let mut mom_by_lookback: HashMap<usize, Vec<f64>> = HashMap::new();
     for &lookback in combos
@@ -2053,10 +2017,8 @@ fn rsmk_batch_inner(
         let mt = prm.matype.as_deref().unwrap_or("ema");
         let st = prm.signal_matype.as_deref().unwrap_or("ema");
 
-        // Use precomputed momentum for this lookback
         let mom = mom_by_lookback.get(&lookback).unwrap();
 
-        // indicator row
         match ma(mt, MaData::Slice(&mom), period) {
             Ok(mut v) => {
                 for x in &mut v {
@@ -2071,7 +2033,6 @@ fn rsmk_batch_inner(
             }
         }
 
-        // signal row
         match ma(st, MaData::Slice(ind_row), signal_period) {
             Ok(vs) => {
                 sig_row.copy_from_slice(&vs);
@@ -2123,7 +2084,6 @@ fn rsmk_batch_inner(
     })
 }
 
-// Python bindings
 #[cfg(feature = "python")]
 #[pyfunction(name = "rsmk")]
 #[pyo3(signature = (main, compare, lookback, period, signal_period, matype=None, signal_matype=None, kernel=None))]
@@ -2189,36 +2149,34 @@ pub fn rsmk_batch_py<'py>(
         signal_period: signal_period_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = main_slice.len();
 
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| PyValueError::new_err(format!("rsmk: rows*cols overflow (rows={}, cols={})", rows, cols)))?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "rsmk: rows*cols overflow (rows={}, cols={})",
+            rows, cols
+        ))
+    })?;
 
-    
     let indicator_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let signal_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let indicator_slice = unsafe { indicator_arr.as_slice_mut()? };
     let signal_slice = unsafe { signal_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => kern, 
+                _ => kern,
             };
 
             rsmk_batch_inner_into(
@@ -2233,7 +2191,6 @@ pub fn rsmk_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("indicator", indicator_arr.reshape((rows, cols))?)?;
     dict.set_item("signal", signal_arr.reshape((rows, cols))?)?;
@@ -2316,16 +2273,15 @@ impl RsmkStreamPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsmkResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsmk_js(
     main: &[f64],
@@ -2361,7 +2317,7 @@ pub fn rsmk_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsmk_into(
     in_ptr: *const f64,
@@ -2392,13 +2348,11 @@ pub fn rsmk_into(
         };
         let input = RsmkInput::from_slices(main, compare, params);
 
-        
         let in_aliased = in_ptr == indicator_ptr || in_ptr == signal_ptr;
         let compare_aliased = compare_ptr == indicator_ptr || compare_ptr == signal_ptr;
         let outputs_aliased = indicator_ptr == signal_ptr;
 
         if in_aliased || compare_aliased || outputs_aliased {
-            
             let mut temp_indicator = vec![0.0; len];
             let mut temp_signal = vec![0.0; len];
 
@@ -2408,9 +2362,7 @@ pub fn rsmk_into(
             let indicator_out = std::slice::from_raw_parts_mut(indicator_ptr, len);
             let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
 
-            
             if outputs_aliased {
-                
                 indicator_out.copy_from_slice(&temp_indicator);
                 signal_out.copy_from_slice(&temp_signal);
             } else {
@@ -2418,7 +2370,6 @@ pub fn rsmk_into(
                 signal_out.copy_from_slice(&temp_signal);
             }
         } else {
-            
             let indicator_out = std::slice::from_raw_parts_mut(indicator_ptr, len);
             let signal_out = std::slice::from_raw_parts_mut(signal_ptr, len);
             rsmk_into_slice(indicator_out, signal_out, &input, Kernel::Auto)
@@ -2429,7 +2380,7 @@ pub fn rsmk_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsmk_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2438,7 +2389,7 @@ pub fn rsmk_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsmk_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2448,13 +2399,11 @@ pub fn rsmk_free(ptr: *mut f64, len: usize) {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaRsmk};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2486,8 +2435,7 @@ pub fn rsmk_cuda_batch_dev_py(
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .rsmk_batch_dev(main, comp, &sweep)
+        cuda.rsmk_batch_dev(main, comp, &sweep)
             .map(|(pair, _combos)| (pair, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2535,8 +2483,7 @@ pub fn rsmk_cuda_many_series_one_param_dev_py(
         let cuda = CudaRsmk::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .rsmk_many_series_one_param_time_major_dev(main_tm, comp_tm, cols, rows, &params)
+        cuda.rsmk_many_series_one_param_time_major_dev(main_tm, comp_tm, cols, rows, &params)
             .map(|pair| (pair, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2554,7 +2501,7 @@ pub fn rsmk_cuda_many_series_one_param_dev_py(
     ))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsmkBatchConfig {
     pub lookback_range: (usize, usize, usize),
@@ -2564,7 +2511,7 @@ pub struct RsmkBatchConfig {
     pub signal_matype: Option<String>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsmkBatchJsOutput {
     pub indicators: Vec<f64>,
@@ -2574,7 +2521,7 @@ pub struct RsmkBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = rsmk_batch)]
 pub fn rsmk_batch_js(main: &[f64], compare: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: RsmkBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2599,7 +2546,6 @@ pub fn rsmk_batch_js(main: &[f64], compare: &[f64], config: JsValue) -> Result<J
         .apply_slices(main, compare)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let indicators: Vec<f64> = output
         .indicator
         .chunks(output.cols)
@@ -2634,16 +2580,13 @@ mod tests {
 
     #[test]
     fn test_rsmk_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
         let input = RsmkInput::with_default_candles(&candles, &candles);
 
-        
         let baseline = rsmk(&input)?;
 
-        
         let n = candles.close.len();
         let mut out_ind = vec![0.0f64; n];
         let mut out_sig = vec![0.0f64; n];
@@ -2654,7 +2597,6 @@ mod tests {
         assert_eq!(out_ind.len(), n);
         assert_eq!(out_sig.len(), n);
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2809,66 +2751,63 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            RsmkParams::default(), 
+            RsmkParams::default(),
             RsmkParams {
                 lookback: Some(1),
                 period: Some(1),
                 signal_period: Some(1),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, 
+            },
             RsmkParams {
                 lookback: Some(10),
                 period: Some(2),
                 signal_period: Some(5),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, 
+            },
             RsmkParams {
                 lookback: Some(50),
                 period: Some(10),
                 signal_period: Some(15),
                 matype: Some("sma".to_string()),
                 signal_matype: Some("sma".to_string()),
-            }, 
+            },
             RsmkParams {
                 lookback: Some(100),
                 period: Some(20),
                 signal_period: Some(30),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("sma".to_string()),
-            }, 
+            },
             RsmkParams {
                 lookback: Some(200),
                 period: Some(50),
                 signal_period: Some(50),
                 matype: Some("sma".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, 
+            },
             RsmkParams {
                 lookback: Some(5),
                 period: Some(20),
                 signal_period: Some(10),
                 matype: Some("ema".to_string()),
                 signal_matype: Some("ema".to_string()),
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = RsmkInput::from_candles(&candles, &candles, "close", params.clone());
             let output = rsmk_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.indicator.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator at index {} \
@@ -2912,15 +2851,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal at index {} \
@@ -2970,7 +2907,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_rsmk_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2982,20 +2919,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=100, 1usize..=50, 1usize..=50).prop_flat_map(
             |(lookback, period, signal_period)| {
-                
-                
                 let min_len = lookback + period.max(signal_period) + 50;
                 (min_len..=500usize).prop_flat_map(move |len| {
                     (
-                        
                         prop::collection::vec(
                             (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
                         ),
-                        
                         prop::collection::vec(
                             (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
@@ -3021,12 +2953,9 @@ mod tests {
                     };
                     let input = RsmkInput::from_slices(&main, &compare, params.clone());
 
-                    
                     let output = match rsmk_with_kernel(&input, kernel) {
                         Ok(out) => out,
                         Err(_) => {
-                            
-                            
                             return Ok(());
                         }
                     };
@@ -3034,34 +2963,26 @@ mod tests {
                     let ref_output = match rsmk_with_kernel(&input, Kernel::Scalar) {
                         Ok(out) => out,
                         Err(_) => {
-                            
                             return Ok(());
                         }
                     };
 
-                    
                     prop_assert_eq!(output.indicator.len(), main.len());
                     prop_assert_eq!(output.signal.len(), main.len());
 
-                    
-                    
-                    
                     let all_equal = main
                         .iter()
                         .zip(compare.iter())
                         .all(|(a, b)| (a - b).abs() < f64::EPSILON);
 
-                    
                     for i in 0..lookback.min(main.len()) {
                         if all_equal {
-                            
                             prop_assert!(
 							output.indicator[i].is_nan() || output.indicator[i].abs() < 1e-9,
 							"Expected NaN or 0 during warmup at index {} (before lookback {}), got {}",
 							i, lookback, output.indicator[i]
 						);
                         } else {
-                            
                             prop_assert!(
 							output.indicator[i].is_nan(),
 							"Expected NaN during warmup at index {} (before lookback {}), got {}",
@@ -3070,7 +2991,6 @@ mod tests {
                         }
                     }
 
-                    
                     let full_warmup = lookback + period.max(signal_period);
                     if main.len() > full_warmup + 5 {
                         let has_valid =
@@ -3082,8 +3002,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     let identical_params = RsmkParams {
                         lookback: Some(lookback),
                         period: Some(period),
@@ -3093,7 +3011,6 @@ mod tests {
                     };
                     let identical_input = RsmkInput::from_slices(&main, &main, identical_params);
                     if let Ok(identical_output) = rsmk_with_kernel(&identical_input, kernel) {
-                        
                         let warmup = lookback.max(period).max(signal_period);
                         for i in warmup..main.len() {
                             if !identical_output.indicator[i].is_nan() {
@@ -3107,8 +3024,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     let const_ratio = 2.0;
                     let main_scaled: Vec<f64> = compare.iter().map(|&x| x * const_ratio).collect();
                     let const_params = RsmkParams {
@@ -3120,7 +3035,6 @@ mod tests {
                     };
                     let const_input = RsmkInput::from_slices(&main_scaled, &compare, const_params);
                     if let Ok(const_output) = rsmk_with_kernel(&const_input, kernel) {
-                        
                         let warmup = lookback.max(period).max(signal_period);
                         let check_start = (warmup + 10).min(main.len());
                         for i in check_start..main.len() {
@@ -3134,15 +3048,10 @@ mod tests {
                         }
                     }
 
-                    
                     if period == 1 {
-                        
-                        
                         prop_assert!(output.indicator.iter().any(|&x| !x.is_nan()));
                     }
 
-                    
-                    
                     let warmup = lookback.max(period).max(signal_period);
                     for i in warmup..main.len() {
                         let ind = output.indicator[i];
@@ -3150,7 +3059,6 @@ mod tests {
                         let sig = output.signal[i];
                         let ref_sig = ref_output.signal[i];
 
-                        
                         if !ind.is_nan() && !ref_ind.is_nan() {
                             let ind_bits = ind.to_bits();
                             let ref_ind_bits = ref_ind.to_bits();
@@ -3165,11 +3073,9 @@ mod tests {
                                 ulp_diff
                             );
                         } else {
-                            
                             prop_assert_eq!(ind.is_nan(), ref_ind.is_nan());
                         }
 
-                        
                         if !sig.is_nan() && !ref_sig.is_nan() {
                             let sig_bits = sig.to_bits();
                             let ref_sig_bits = ref_sig.to_bits();
@@ -3188,8 +3094,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     let indicator_diffs: Vec<f64> = output
                         .indicator
                         .windows(2)
@@ -3218,7 +3122,6 @@ mod tests {
                         && !signal_diffs.is_empty()
                         && indicator_diffs.len() > 10
                     {
-                        
                         let ind_mean =
                             indicator_diffs.iter().sum::<f64>() / indicator_diffs.len() as f64;
                         let ind_var = indicator_diffs
@@ -3234,7 +3137,6 @@ mod tests {
                             .sum::<f64>()
                             / signal_diffs.len() as f64;
 
-                        
                         if signal_period > 1 && ind_var > 1e-12 {
                             prop_assert!(
                                 sig_var <= ind_var * 1.2 || sig_var < 1e-10,
@@ -3245,8 +3147,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     let mut compare_with_zero = compare.clone();
                     if compare_with_zero.len() > lookback + 5 {
                         compare_with_zero[lookback + 2] = 0.0;
@@ -3260,9 +3160,6 @@ mod tests {
                         let zero_input =
                             RsmkInput::from_slices(&main, &compare_with_zero, zero_params);
                         if let Ok(zero_output) = rsmk_with_kernel(&zero_input, kernel) {
-                            
-                            
-                            
                             prop_assert!(
 							zero_output.indicator.len() == main.len(),
 							"Output length should match input length even with zeros in compare"
@@ -3270,9 +3167,7 @@ mod tests {
                         }
                     }
 
-                    
                     if main.len() > warmup + 10 {
-                        
                         let large_ratio = 10000.0;
                         let main_large: Vec<f64> =
                             compare.iter().map(|&x| x * large_ratio).collect();
@@ -3286,7 +3181,6 @@ mod tests {
                         let large_input =
                             RsmkInput::from_slices(&main_large, &compare, large_params);
                         if let Ok(large_output) = rsmk_with_kernel(&large_input, kernel) {
-                            
                             for i in warmup..main.len() {
                                 if !large_output.indicator[i].is_nan() {
                                     prop_assert!(
@@ -3294,7 +3188,7 @@ mod tests {
 									"Indicator should be finite for large ratios at index {}, got {}",
 									i, large_output.indicator[i]
 								);
-                                    
+
                                     if i > warmup + 10 {
                                         prop_assert!(
 										large_output.indicator[i].abs() < 1.0,
@@ -3366,7 +3260,7 @@ mod tests {
             .apply_slices(main, compare)?;
 
         let def = RsmkParams::default();
-        
+
         let default_row = batch
             .combos
             .iter()
@@ -3384,7 +3278,6 @@ mod tests {
         assert_eq!(ind_row.len(), candles.close.len());
         assert_eq!(sig_row.len(), candles.close.len());
 
-        
         let expected = [0.0, 0.0, 0.0, 0.0, 0.0];
         let len = ind_row.len();
         let start_idx = len - 5;
@@ -3401,7 +3294,7 @@ mod tests {
                 "[{test}] default-signal mismatch at idx {i}: {v} vs {expected:?}"
             );
         }
-        
+
         let max_period = def
             .lookback
             .unwrap()
@@ -3435,15 +3328,13 @@ mod tests {
         let main = &candles.close;
         let compare = &candles.close;
 
-        
         let test_configs = vec![
-            
-            ((10, 20, 5), (2, 5, 1), (5, 10, 5)), 
-            ((50, 100, 25), (5, 15, 5), (10, 30, 10)), 
-            ((100, 200, 50), (20, 40, 10), (30, 60, 15)), 
-            ((1, 5, 1), (1, 3, 1), (1, 5, 1)),    
-            ((90, 90, 0), (3, 3, 0), (20, 20, 0)), 
-            ((200, 250, 25), (50, 70, 10), (50, 100, 25)), 
+            ((10, 20, 5), (2, 5, 1), (5, 10, 5)),
+            ((50, 100, 25), (5, 15, 5), (10, 30, 10)),
+            ((100, 200, 50), (20, 40, 10), (30, 60, 15)),
+            ((1, 5, 1), (1, 3, 1), (1, 5, 1)),
+            ((90, 90, 0), (3, 3, 0), (20, 20, 0)),
+            ((200, 250, 25), (50, 70, 10), (50, 100, 25)),
         ];
 
         for (cfg_idx, &(lookback_range, period_range, signal_period_range)) in
@@ -3460,7 +3351,6 @@ mod tests {
                 )
                 .apply_slices(main, compare)?;
 
-            
             for (idx, &val) in output.indicator.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3471,7 +3361,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in indicator \
@@ -3515,7 +3404,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3526,7 +3414,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in signal \
@@ -3603,9 +3490,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
-/// Classic kernel with inline SMA calculations for both indicator and signal
 #[inline]
 fn rsmk_classic_sma(
     mom: &[f64],
@@ -3617,7 +3501,6 @@ fn rsmk_classic_sma(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3633,11 +3516,9 @@ fn rsmk_classic_sma(
     let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
     let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
-    
     let mut sum_ind = 0.0;
     let mut count_ind = 0;
 
-    
     for i in first_valid..(first_valid + period).min(len) {
         if !mom[i].is_nan() {
             sum_ind += mom[i];
@@ -3648,7 +3529,6 @@ fn rsmk_classic_sma(
     if count_ind > 0 && ind_warmup < len {
         indicator[ind_warmup] = (sum_ind / count_ind as f64) * 100.0;
 
-        
         for i in (ind_warmup + 1)..len {
             let old_val = mom[i - period];
             let new_val = mom[i];
@@ -3668,11 +3548,9 @@ fn rsmk_classic_sma(
         }
     }
 
-    
     let mut sum_sig = 0.0;
     let mut count_sig = 0;
 
-    
     for i in ind_warmup..(ind_warmup + signal_period).min(len) {
         if !indicator[i].is_nan() {
             sum_sig += indicator[i];
@@ -3683,7 +3561,6 @@ fn rsmk_classic_sma(
     if count_sig > 0 && sig_warmup < len {
         signal[sig_warmup] = sum_sig / count_sig as f64;
 
-        
         for i in (sig_warmup + 1)..len {
             let old_val = indicator[i - signal_period];
             let new_val = indicator[i];
@@ -3706,7 +3583,6 @@ fn rsmk_classic_sma(
     Ok(RsmkOutput { indicator, signal })
 }
 
-/// Classic kernel with inline EMA calculations for both indicator and signal
 #[inline]
 fn rsmk_classic_ema(
     mom: &[f64],
@@ -3718,7 +3594,6 @@ fn rsmk_classic_ema(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3734,11 +3609,9 @@ fn rsmk_classic_ema(
     let mut indicator = alloc_with_nan_prefix(len, ind_warmup);
     let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
-    
     let alpha_ind = 2.0 / (period as f64 + 1.0);
     let one_minus_alpha_ind = 1.0 - alpha_ind;
 
-    
     let mut sum_ind = 0.0;
     let mut count_ind = 0;
     for i in first_valid..(first_valid + period).min(len) {
@@ -3752,7 +3625,6 @@ fn rsmk_classic_ema(
         let mut ema_ind = (sum_ind / count_ind as f64) * 100.0;
         indicator[ind_warmup] = ema_ind;
 
-        
         for i in (ind_warmup + 1)..len {
             if !mom[i].is_nan() {
                 ema_ind = (alpha_ind * mom[i] * 100.0) + (one_minus_alpha_ind * ema_ind);
@@ -3761,11 +3633,9 @@ fn rsmk_classic_ema(
         }
     }
 
-    
     let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
     let one_minus_alpha_sig = 1.0 - alpha_sig;
 
-    
     let mut sum_sig = 0.0;
     let mut count_sig = 0;
     for i in ind_warmup..(ind_warmup + signal_period).min(len) {
@@ -3779,7 +3649,6 @@ fn rsmk_classic_ema(
         let mut ema_sig = sum_sig / count_sig as f64;
         signal[sig_warmup] = ema_sig;
 
-        
         for i in (sig_warmup + 1)..len {
             if !indicator[i].is_nan() {
                 ema_sig = (alpha_sig * indicator[i]) + (one_minus_alpha_sig * ema_sig);
@@ -3791,7 +3660,6 @@ fn rsmk_classic_ema(
     Ok(RsmkOutput { indicator, signal })
 }
 
-/// Classic kernel with EMA over momentum then SMA over indicator (fused single-pass after EMA seed)
 #[inline]
 fn rsmk_classic_ema_sma(
     mom: &[f64],
@@ -3803,7 +3671,6 @@ fn rsmk_classic_ema_sma(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3820,7 +3687,6 @@ fn rsmk_classic_ema_sma(
     let mut signal = alloc_with_nan_prefix(len, sig_warmup);
 
     if ind_warmup < len {
-        
         let mut sum = 0.0;
         let mut cnt = 0usize;
         let init_end = (first_valid + period).min(len);
@@ -3838,13 +3704,12 @@ fn rsmk_classic_ema_sma(
             let alpha_ind = 2.0 / (period as f64 + 1.0);
             let mut ema_ind = (sum / cnt as f64) * 100.0;
 
-            
             let mut sum_sig = 0.0;
             let mut cnt_sig = 0usize;
 
             unsafe {
                 *indicator.get_unchecked_mut(ind_warmup) = ema_ind;
-                
+
                 sum_sig += ema_ind;
                 cnt_sig += 1;
 
@@ -3856,7 +3721,6 @@ fn rsmk_classic_ema_sma(
                     }
                     *indicator.get_unchecked_mut(i) = ema_ind;
 
-                    
                     if !ema_ind.is_nan() {
                         sum_sig += ema_ind;
                         cnt_sig += 1;
@@ -3891,7 +3755,6 @@ fn rsmk_classic_ema_sma(
     Ok(RsmkOutput { indicator, signal })
 }
 
-/// Classic kernel with SMA over momentum then EMA over indicator (fused single-pass after SMA build)
 #[inline]
 fn rsmk_classic_sma_ema(
     mom: &[f64],
@@ -3903,7 +3766,6 @@ fn rsmk_classic_sma_ema(
     let ind_warmup = first_valid + period - 1;
     let sig_warmup = ind_warmup + signal_period - 1;
 
-    
     let needed = period.max(signal_period);
     if len < first_valid || len - first_valid < needed {
         return Err(RsmkError::NotEnoughValidData {
@@ -3925,11 +3787,10 @@ fn rsmk_classic_sma_ema(
     let alpha_sig = 2.0 / (signal_period as f64 + 1.0);
     let mut acc_sig = 0.0;
     let mut cnt_sig = 0usize;
-    let mut ema_sig = 0.0f64; 
+    let mut ema_sig = 0.0f64;
 
     unsafe {
         for i in first_valid..len {
-            
             let v_new = *mom.get_unchecked(i);
             if !v_new.is_nan() {
                 sum_ind += v_new;
@@ -3968,7 +3829,6 @@ fn rsmk_classic_sma_ema(
                     if !ind_val.is_nan() && !ema_sig.is_nan() {
                         ema_sig = (ind_val - ema_sig).mul_add(alpha_sig, ema_sig);
                     } else if !ind_val.is_nan() && ema_sig.is_nan() {
-                        
                         ema_sig = ind_val;
                     }
                     *signal.get_unchecked_mut(i) = ema_sig;

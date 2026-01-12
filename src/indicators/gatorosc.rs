@@ -1,34 +1,3 @@
-//! # Gator Oscillator (GATOR)
-//!
-//! The Gator Oscillator is based on Bill Williams' Alligator indicator. It calculates three exponentially smoothed averages (Jaws, Teeth, and Lips) of a given source, then produces two lines: `upper = abs(Jaws - Teeth)` and `lower = -abs(Teeth - Lips)`. Their 1-period momentum changes are also reported.
-//!
-//! ## Parameters
-//! - **jaws_length**: EMA length for Jaws (default: 13)
-//! - **jaws_shift**: Shift Jaws forward (default: 8)
-//! - **teeth_length**: EMA length for Teeth (default: 8)
-//! - **teeth_shift**: Shift Teeth forward (default: 5)
-//! - **lips_length**: EMA length for Lips (default: 5)
-//! - **lips_shift**: Shift Lips forward (default: 3)
-//!
-//! ## Inputs
-//! - Single data slice (typically close prices)
-//!
-//! ## Returns
-//! - `Ok(GatorOscOutput)` containing:
-//!   - `upper`: Upper oscillator values (Vec<f64>)
-//!   - `lower`: Lower oscillator values (Vec<f64>)
-//!   - `upper_change`: Upper momentum changes (Vec<f64>)
-//!   - `lower_change`: Lower momentum changes (Vec<f64>)
-//! - Output lengths match input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - **SIMD status**: AVX2/AVX512 update the three EMA states in packed lanes per step (broadcast price); modest wins (>5% at 100k) since the time-axis is sequential. Runtime detects and falls back to scalar when unsupported.
-//! - **Batch status**: Row-specific optimizations not added; batch executes per-row single-series kernels (benefits from SIMD when enabled). Little cross-row reuse available beyond identical lengths with different shifts.
-//! - **Streaming**: O(1) per update via small EMA rings; exact and matches batch warmups.
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all four outputs (lines 280-283)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
-//! - **Decision log**: SIMD enabled (AVX2/AVX512); CUDA kernels present for batch + many-series; GPU path used when available but scalar remains the reference for correctness.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -70,7 +39,10 @@ pub struct GatorOscOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct GatorOscParams {
     pub jaws_length: Option<usize>,
     pub jaws_shift: Option<usize>,
@@ -265,7 +237,11 @@ pub enum GatorOscError {
     #[error("gatorosc: output length mismatch: expected={expected} got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("gatorosc: invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("gatorosc: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("gatorosc: invalid input: {0}")]
@@ -282,7 +258,6 @@ fn gator_warmups(
     ll: usize,
     ls: usize,
 ) -> (usize, usize, usize, usize) {
-    // bars required for EMA pairs + their display shifts
     let upper_needed = jl.max(tl) + js.max(ts);
     let lower_needed = tl.max(ll) + ts.max(ls);
 
@@ -351,7 +326,6 @@ pub fn gatorosc_with_kernel(
         &mut lower_change,
     );
 
-    // Re-mask prefixes to ensure NaN consistency
     for v in &mut upper[..upper_warmup] {
         *v = f64::NAN;
     }
@@ -393,7 +367,6 @@ pub unsafe fn gatorosc_scalar(
         return;
     }
 
-    // Precompute EMA coefficients: y = (1-a)*y_prev + a*x
     let ja = 2.0 / (jaws_length as f64 + 1.0);
     let ta = 2.0 / (teeth_length as f64 + 1.0);
     let la = 2.0 / (lips_length as f64 + 1.0);
@@ -401,7 +374,6 @@ pub unsafe fn gatorosc_scalar(
     let tma = 1.0 - ta;
     let lma = 1.0 - la;
 
-    // Warmup gates for outputs/changes
     let (uw, lw, ucw, lcw) = gator_warmups(
         first_valid,
         jaws_length,
@@ -412,7 +384,6 @@ pub unsafe fn gatorosc_scalar(
         lips_shift,
     );
 
-    // Initialize EMA states
     let mut jema = if data[first_valid].is_nan() {
         0.0
     } else {
@@ -421,7 +392,6 @@ pub unsafe fn gatorosc_scalar(
     let mut tema = jema;
     let mut lema = jema;
 
-    // Small ring buffers for shifted reads; avoid modulo inside hot loop
     let max_shift = jaws_shift.max(teeth_shift).max(lips_shift);
     let buf_len = max_shift + 1;
 
@@ -434,7 +404,6 @@ pub unsafe fn gatorosc_scalar(
 
     let mut rpos: usize = 0;
 
-    // For change outputs on-the-fly
     let mut u_prev = 0.0;
     let mut l_prev = 0.0;
     let mut have_u = false;
@@ -451,17 +420,14 @@ pub unsafe fn gatorosc_scalar(
             }
         };
 
-        // EMA updates with fused multiply-add when available
         jema = jma.mul_add(jema, ja * x);
         tema = tma.mul_add(tema, ta * x);
         lema = lma.mul_add(lema, la * x);
 
-        // Push current EMAs into rings at rpos
         *jring.get_unchecked_mut(rpos) = jema;
         *tring.get_unchecked_mut(rpos) = tema;
         *lring.get_unchecked_mut(rpos) = lema;
 
-        // Wrapped indices without %
         let mut jj = rpos + buf_len - jaws_shift;
         if jj >= buf_len {
             jj -= buf_len;
@@ -478,7 +444,7 @@ pub unsafe fn gatorosc_scalar(
         if i >= uw {
             let u = (*jring.get_unchecked(jj) - *tring.get_unchecked(tt)).abs();
             *upper.get_unchecked_mut(i) = u;
-            // Prime previous at the first finite upper
+
             if i == uw {
                 u_prev = u;
                 have_u = true;
@@ -500,7 +466,6 @@ pub unsafe fn gatorosc_scalar(
             }
         }
 
-        // Advance ring position with branchless wrap
         rpos += 1;
         if rpos == buf_len {
             rpos = 0;
@@ -526,8 +491,6 @@ pub unsafe fn gatorosc_simd128(
     upper_change: &mut [f64],
     lower_change: &mut [f64],
 ) {
-    // SIMD128 implementation uses scalar since the complex EMA and ring buffer logic
-    // doesn't benefit significantly from SIMD128's limited 128-bit vectors
     gatorosc_scalar(
         data,
         jaws_length,
@@ -570,7 +533,7 @@ pub unsafe fn gatorosc_avx2(
     let ja = 2.0 / (jaws_length as f64 + 1.0);
     let ta = 2.0 / (teeth_length as f64 + 1.0);
     let la = 2.0 / (lips_length as f64 + 1.0);
-    // lanes: [j, t, l, 0]
+
     let a = _mm256_set_pd(0.0, la, ta, ja);
     let one = _mm256_set1_pd(1.0);
     let oma = _mm256_sub_pd(one, a);
@@ -593,7 +556,6 @@ pub unsafe fn gatorosc_avx2(
     let mut tema = jema;
     let mut lema = jema;
 
-    // e = [j, t, l, 0]
     let mut e = _mm256_set_pd(0.0, lema, tema, jema);
 
     let max_shift = jaws_shift.max(teeth_shift).max(lips_shift);
@@ -756,7 +718,7 @@ pub unsafe fn gatorosc_avx512_short(
     let ja = 2.0 / (jaws_length as f64 + 1.0);
     let ta = 2.0 / (teeth_length as f64 + 1.0);
     let la = 2.0 / (lips_length as f64 + 1.0);
-    // lanes: [j, t, l, 0, 0, 0, 0, 0]
+
     let a = _mm512_set_pd(0.0, 0.0, 0.0, 0.0, 0.0, la, ta, ja);
     let one = _mm512_set1_pd(1.0);
     let oma = _mm512_sub_pd(one, a);
@@ -813,7 +775,7 @@ pub unsafe fn gatorosc_avx512_short(
         e = _mm512_add_pd(oma_e, a_vx);
 
         _mm512_storeu_pd(lanes.as_mut_ptr(), e);
-        // Lane order after store: [jema, tema, lema, 0, 0, 0, 0, 0]
+
         jema = lanes[0];
         tema = lanes[1];
         lema = lanes[2];
@@ -883,7 +845,6 @@ pub unsafe fn gatorosc_avx512_long(
     upper_change: &mut [f64],
     lower_change: &mut [f64],
 ) {
-    // Reuse the same packed-EMA approach
     gatorosc_avx512_short(
         data,
         jaws_length,
@@ -900,7 +861,6 @@ pub unsafe fn gatorosc_avx512_long(
     );
 }
 
-// Helper function for validation and preparation
 #[inline]
 fn gatorosc_prepare<'a>(
     input: &'a GatorOscInput<'a>,
@@ -921,7 +881,6 @@ fn gatorosc_prepare<'a>(
 > {
     let data: &[f64] = input.as_ref();
 
-    // Check for empty data first
     if data.is_empty() {
         return Err(GatorOscError::EmptyInputData);
     }
@@ -939,13 +898,22 @@ fn gatorosc_prepare<'a>(
     let lips_shift = input.get_lips_shift();
 
     if jaws_length == 0 {
-        return Err(GatorOscError::InvalidPeriod { period: jaws_length, data_len: data.len() });
+        return Err(GatorOscError::InvalidPeriod {
+            period: jaws_length,
+            data_len: data.len(),
+        });
     }
     if teeth_length == 0 {
-        return Err(GatorOscError::InvalidPeriod { period: teeth_length, data_len: data.len() });
+        return Err(GatorOscError::InvalidPeriod {
+            period: teeth_length,
+            data_len: data.len(),
+        });
     }
     if lips_length == 0 {
-        return Err(GatorOscError::InvalidPeriod { period: lips_length, data_len: data.len() });
+        return Err(GatorOscError::InvalidPeriod {
+            period: lips_length,
+            data_len: data.len(),
+        });
     }
 
     let needed = jaws_length.max(teeth_length).max(lips_length)
@@ -975,7 +943,6 @@ fn gatorosc_prepare<'a>(
     ))
 }
 
-// Zero-allocation compute function
 #[inline]
 fn gatorosc_compute_into(
     data: &[f64],
@@ -1063,7 +1030,6 @@ fn gatorosc_compute_into(
     }
 }
 
-// Into slice wrapper for external use
 #[inline]
 pub fn gatorosc_into_slice(
     upper_dst: &mut [f64],
@@ -1087,16 +1053,28 @@ pub fn gatorosc_into_slice(
 
     let expected = data.len();
     if upper_dst.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_dst.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: upper_dst.len(),
+        });
     }
     if lower_dst.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_dst.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: lower_dst.len(),
+        });
     }
     if upper_change_dst.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_change_dst.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: upper_change_dst.len(),
+        });
     }
     if lower_change_dst.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_change_dst.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: lower_change_dst.len(),
+        });
     }
 
     gatorosc_compute_into(
@@ -1141,12 +1119,7 @@ pub fn gatorosc_into_slice(
     Ok(())
 }
 
-/// Writes Gator Oscillator results into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - All output slices must have the same length as the input series.
-/// - Equivalent to calling `gatorosc_with_kernel(input, Kernel::Auto)` and copying results.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn gatorosc_into(
     input: &GatorOscInput,
@@ -1155,14 +1128,18 @@ pub fn gatorosc_into(
     upper_change: &mut [f64],
     lower_change: &mut [f64],
 ) -> Result<(), GatorOscError> {
-    gatorosc_into_slice(upper, lower, upper_change, lower_change, input, Kernel::Auto)
+    gatorosc_into_slice(
+        upper,
+        lower,
+        upper_change,
+        lower_change,
+        input,
+        Kernel::Auto,
+    )
 }
-
-// --- Streaming kernel (O(1) per update) -------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct GatorOscStream {
-    // EMA coefficients (alpha) and state
     ja: f64,
     ta: f64,
     la: f64,
@@ -1171,47 +1148,38 @@ pub struct GatorOscStream {
     lema: f64,
     initialized: bool,
 
-    // Shifts (display offsets)
     jaws_shift: usize,
     teeth_shift: usize,
     lips_shift: usize,
 
-    // Small fixed-size rings of EMA values for shift lookbacks
     jring: AVec<f64>,
     tring: AVec<f64>,
     lring: AVec<f64>,
-    rpos: usize, // write position in rings
+    rpos: usize,
 
-    // Index of next update (acts like "i" in vectorized kernels)
     idx: usize,
 
-    // Warmup bookkeeping relative to first valid index
     first_valid: Option<usize>,
     upper_needed: usize,
     lower_needed: usize,
-    warmup_upper: usize, // absolute index where upper first valid
-    warmup_lower: usize, // absolute index where lower first valid
-    warmup_uc: usize,    // absolute index where upper_change first valid
-    warmup_lc: usize,    // absolute index where lower_change first valid
+    warmup_upper: usize,
+    warmup_lower: usize,
+    warmup_uc: usize,
+    warmup_lc: usize,
 
-    // For 1-bar momentum
     prev_u: f64,
     prev_l: f64,
     have_prev_u: bool,
     have_prev_l: bool,
 }
 
-// --- fast tiny helpers -------------------------------------------------------
-
 #[inline(always)]
 fn ema_update(prev: f64, x: f64, a: f64) -> f64 {
-    // y_t = y_{t-1} + a * (x_t - y_{t-1}); fused if FMA is available
     (x - prev).mul_add(a, prev)
 }
 
 #[inline(always)]
 fn fast_abs_f64(x: f64) -> f64 {
-    // bitwise abs; identical to x.abs() for all finite values & NaN-preserving
     f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
 }
 
@@ -1234,21 +1202,28 @@ impl GatorOscStream {
         let lips_shift = params.lips_shift.unwrap_or(3);
 
         if jaws_length == 0 {
-            return Err(GatorOscError::InvalidPeriod { period: jaws_length, data_len: 0 });
+            return Err(GatorOscError::InvalidPeriod {
+                period: jaws_length,
+                data_len: 0,
+            });
         }
         if teeth_length == 0 {
-            return Err(GatorOscError::InvalidPeriod { period: teeth_length, data_len: 0 });
+            return Err(GatorOscError::InvalidPeriod {
+                period: teeth_length,
+                data_len: 0,
+            });
         }
         if lips_length == 0 {
-            return Err(GatorOscError::InvalidPeriod { period: lips_length, data_len: 0 });
+            return Err(GatorOscError::InvalidPeriod {
+                period: lips_length,
+                data_len: 0,
+            });
         }
 
-        // EMA alphas
         let ja = 2.0 / (jaws_length as f64 + 1.0);
         let ta = 2.0 / (teeth_length as f64 + 1.0);
         let la = 2.0 / (lips_length as f64 + 1.0);
 
-        // Rings sized to max shift + 1 (match offline kernels)
         let buf_len = jaws_shift.max(teeth_shift).max(lips_shift) + 1;
         let mut jring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
         let mut tring: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, buf_len);
@@ -1257,7 +1232,6 @@ impl GatorOscStream {
         tring.resize(buf_len, 0.0);
         lring.resize(buf_len, 0.0);
 
-        // Bars required for each output (relative, not absolute)
         let upper_needed = jaws_length.max(teeth_length) + jaws_shift.max(teeth_shift);
         let lower_needed = teeth_length.max(lips_length) + teeth_shift.max(lips_shift);
 
@@ -1297,13 +1271,12 @@ impl GatorOscStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64, f64)> {
-        let i = self.idx; // current bar index
+        let i = self.idx;
         self.idx = i + 1;
 
-        // Delay initialization until first finite value (like offline first-valid)
         if !self.initialized {
             if !value.is_finite() {
-                return None; // still warming up on NaNs
+                return None;
             }
             self.jema = value;
             self.tema = value;
@@ -1311,7 +1284,6 @@ impl GatorOscStream {
             self.initialized = true;
             self.first_valid = Some(i);
 
-            // Convert relative warmups to absolute indices
             self.warmup_upper = i + self.upper_needed.saturating_sub(1);
             self.warmup_lower = i + self.lower_needed.saturating_sub(1);
             self.warmup_uc = self.warmup_upper + 1;
@@ -1323,26 +1295,22 @@ impl GatorOscStream {
             self.lema = ema_update(self.lema, x, self.la);
         }
 
-        // Push current EMA states into the rings
         let r = self.rpos;
         self.jring[r] = self.jema;
         self.tring[r] = self.tema;
         self.lring[r] = self.lema;
 
-        // Compute shifted indices
         let len = self.jring.len();
         let jj = wrap_back(r, len, self.jaws_shift);
         let tt = wrap_back(r, len, self.teeth_shift);
         let ll = wrap_back(r, len, self.lips_shift);
 
-        // Advance ring position
         let mut next = r + 1;
         if next == len {
             next = 0;
         }
         self.rpos = next;
 
-        // Prime prev values when each output first becomes defined
         if i == self.warmup_upper {
             let u0 = fast_abs_f64(self.jring[jj] - self.tring[tt]);
             self.prev_u = u0;
@@ -1354,16 +1322,13 @@ impl GatorOscStream {
             self.have_prev_l = true;
         }
 
-        // Respect original API: emit only after lower_change warmup is satisfied
         if i < self.warmup_lc {
             return None;
         }
 
-        // Compute outputs for this bar
         let u = fast_abs_f64(self.jring[jj] - self.tring[tt]);
         let l = -fast_abs_f64(self.tring[tt] - self.lring[ll]);
 
-        // 1-bar momentum
         let uc = if i >= self.warmup_uc && self.have_prev_u {
             let d = u - self.prev_u;
             self.prev_u = u;
@@ -1372,7 +1337,7 @@ impl GatorOscStream {
             f64::NAN
         };
         let lc = if i >= self.warmup_lc && self.have_prev_l {
-            let d = self.prev_l - l; // == -(l - prev_l)
+            let d = self.prev_l - l;
             self.prev_l = l;
             d
         } else {
@@ -1486,10 +1451,9 @@ fn expand_grid_gatorosc(r: &GatorOscBatchRange) -> Result<Vec<GatorOscParams>, G
             return vec![start];
         }
         if start < end {
-            // ascending, inclusive upper bound
             return (start..=end).step_by(step.max(1)).collect();
         }
-        // descending bounds supported
+
         let mut v = Vec::new();
         let mut cur = start;
         let s = step.max(1);
@@ -1593,7 +1557,6 @@ fn gatorosc_batch_inner(
     combos: &[GatorOscParams],
     kern: Kernel,
 ) -> Result<GatorOscBatchOutput, GatorOscError> {
-    // Check for empty data first
     if data.is_empty() {
         return Err(GatorOscError::EmptyInputData);
     }
@@ -1622,13 +1585,11 @@ fn gatorosc_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Use make_uninit_matrix for efficient allocation
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
     let mut upper_change_mu = make_uninit_matrix(rows, cols);
     let mut lower_change_mu = make_uninit_matrix(rows, cols);
 
-    // Initialize prefixes with NaN based on warmup periods using gator_warmups
     let warm_upper: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1698,7 +1659,6 @@ fn gatorosc_batch_inner(
     init_matrix_prefixes(&mut upper_change_mu, cols, &warm_uc);
     init_matrix_prefixes(&mut lower_change_mu, cols, &warm_lc);
 
-    // Zero-copy convert using ManuallyDrop
     let mut u_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut l_guard = core::mem::ManuallyDrop::new(lower_mu);
     let mut uc_guard = core::mem::ManuallyDrop::new(upper_change_mu);
@@ -1761,7 +1721,6 @@ fn gatorosc_batch_inner(
         }
     }
 
-    // Convert back to owned vectors without copying
     let upper = unsafe {
         Vec::from_raw_parts(
             u_guard.as_mut_ptr() as *mut f64,
@@ -1802,7 +1761,6 @@ fn gatorosc_batch_inner(
     })
 }
 
-// Zero-allocation batch function that writes directly to output slices
 #[inline]
 pub fn gatorosc_batch_inner_into(
     data: &[f64],
@@ -1816,7 +1774,6 @@ pub fn gatorosc_batch_inner_into(
 ) -> Result<Vec<GatorOscParams>, GatorOscError> {
     let combos = expand_grid_gatorosc(sweep)?;
 
-    // Check for empty data first
     if data.is_empty() {
         return Err(GatorOscError::EmptyInputData);
     }
@@ -1832,22 +1789,31 @@ pub fn gatorosc_batch_inner_into(
         .checked_mul(cols)
         .ok_or_else(|| GatorOscError::InvalidInput("rows*cols overflow".into()))?;
     if upper_out.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_out.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: upper_out.len(),
+        });
     }
     if lower_out.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_out.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: lower_out.len(),
+        });
     }
     if upper_change_out.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: upper_change_out.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: upper_change_out.len(),
+        });
     }
     if lower_change_out.len() != expected {
-        return Err(GatorOscError::OutputLengthMismatch { expected, got: lower_change_out.len() });
+        return Err(GatorOscError::OutputLengthMismatch {
+            expected,
+            got: lower_change_out.len(),
+        });
     }
 
-    // Initialize NaN prefixes for each row based on warmup periods
-    // This is critical for externally-provided buffers from Python/WASM
     for (row, combo) in combos.iter().enumerate() {
-        // Calculate warmup periods for each output using gator_warmups
         let (upper_warmup, lower_warmup, upper_change_warmup, lower_change_warmup) = gator_warmups(
             first,
             combo.jaws_length.unwrap(),
@@ -1860,22 +1826,18 @@ pub fn gatorosc_batch_inner_into(
 
         let row_start = row * cols;
 
-        // Initialize upper buffer with NaN
         for i in 0..upper_warmup.min(cols) {
             upper_out[row_start + i] = f64::NAN;
         }
 
-        // Initialize lower buffer with NaN
         for i in 0..lower_warmup.min(cols) {
             lower_out[row_start + i] = f64::NAN;
         }
 
-        // Initialize upper_change buffer with NaN
         for i in 0..upper_change_warmup.min(cols) {
             upper_change_out[row_start + i] = f64::NAN;
         }
 
-        // Initialize lower_change buffer with NaN
         for i in 0..lower_change_warmup.min(cols) {
             lower_change_out[row_start + i] = f64::NAN;
         }
@@ -1885,14 +1847,12 @@ pub fn gatorosc_batch_inner_into(
     if parallel {
         use rayon::prelude::*;
 
-        // Split the slices into chunks for parallel processing
         let chunk_size = cols;
         let upper_chunks = upper_out.chunks_mut(chunk_size);
         let lower_chunks = lower_out.chunks_mut(chunk_size);
         let upper_change_chunks = upper_change_out.chunks_mut(chunk_size);
         let lower_change_chunks = lower_change_out.chunks_mut(chunk_size);
 
-        // Zip all chunks together and process in parallel
         upper_chunks
             .zip(lower_chunks)
             .zip(upper_change_chunks)
@@ -2122,7 +2082,6 @@ pub fn gatorosc_batch_par_slice(
 ) -> Result<GatorOscBatchOutput, GatorOscError> {
     let combos = expand_grid_gatorosc(sweep)?;
 
-    // Check for empty data first
     if data.is_empty() {
         return Err(GatorOscError::EmptyInputData);
     }
@@ -2134,13 +2093,11 @@ pub fn gatorosc_batch_par_slice(
     let rows = combos.len();
     let cols = data.len();
 
-    // Use helper functions for zero-allocation
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
     let mut upper_change_mu = make_uninit_matrix(rows, cols);
     let mut lower_change_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods using gator_warmups helper
     let warm_upper: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -2205,13 +2162,11 @@ pub fn gatorosc_batch_par_slice(
         })
         .collect();
 
-    // Initialize with NaN prefixes
     init_matrix_prefixes(&mut upper_mu, cols, &warm_upper);
     init_matrix_prefixes(&mut lower_mu, cols, &warm_lower);
     init_matrix_prefixes(&mut upper_change_mu, cols, &warm_uc);
     init_matrix_prefixes(&mut lower_change_mu, cols, &warm_lc);
 
-    // Zero-copy convert using ManuallyDrop
     let mut u_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut l_guard = core::mem::ManuallyDrop::new(lower_mu);
     let mut uc_guard = core::mem::ManuallyDrop::new(upper_change_mu);
@@ -2283,7 +2238,6 @@ pub fn gatorosc_batch_par_slice(
         }
     }
 
-    // Convert back to owned vectors without copying
     let upper = unsafe {
         Vec::from_raw_parts(
             u_guard.as_mut_ptr() as *mut f64,
@@ -2324,22 +2278,20 @@ pub fn gatorosc_batch_par_slice(
     })
 }
 
-//======= WASM Bindings =======
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct GatorOscJsOutput {
-    pub values: Vec<f64>, // Flattened [upper..., lower..., upper_change..., lower_change...]
-    pub rows: usize,      // 4 for gatorosc
-    pub cols: usize,      // data length
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn gatorosc_js(
     data: &[f64],
@@ -2360,16 +2312,13 @@ pub fn gatorosc_js(
     };
     let input = GatorOscInput::from_slice(data, params);
 
-    // Single allocation for all outputs (flattened)
     let len = data.len();
     let mut values = vec![0.0; 4 * len];
 
-    // Split into mutable slices for each output
     let (upper_part, rest) = values.split_at_mut(len);
     let (lower_part, rest) = rest.split_at_mut(len);
     let (upper_change_part, lower_change_part) = rest.split_at_mut(len);
 
-    // Compute using zero-allocation helper
     gatorosc_into_slice(
         upper_part,
         lower_part,
@@ -2390,7 +2339,7 @@ pub fn gatorosc_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn gatorosc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2399,7 +2348,7 @@ pub fn gatorosc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn gatorosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2409,7 +2358,7 @@ pub fn gatorosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn gatorosc_into(
     in_ptr: *const f64,
@@ -2446,17 +2395,14 @@ pub fn gatorosc_into(
         };
         let input = GatorOscInput::from_slice(data, params);
 
-        // Check for aliasing - if any output pointer equals input pointer
         let needs_temp = in_ptr == upper_ptr as *const f64
             || in_ptr == lower_ptr as *const f64
             || in_ptr == upper_change_ptr as *const f64
             || in_ptr == lower_change_ptr as *const f64;
 
         if needs_temp {
-            // Use single temporary buffer for all outputs
             let mut temp = vec![0.0; 4 * len];
 
-            // Split into slices for computation
             let (temp_upper, rest) = temp.split_at_mut(len);
             let (temp_lower, rest) = rest.split_at_mut(len);
             let (temp_upper_change, temp_lower_change) = rest.split_at_mut(len);
@@ -2471,7 +2417,6 @@ pub fn gatorosc_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results to output pointers
             let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
             let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
             let upper_change_out = std::slice::from_raw_parts_mut(upper_change_ptr, len);
@@ -2482,7 +2427,6 @@ pub fn gatorosc_into(
             upper_change_out.copy_from_slice(temp_upper_change);
             lower_change_out.copy_from_slice(temp_lower_change);
         } else {
-            // Direct computation into output buffers
             let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
             let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
             let upper_change_out = std::slice::from_raw_parts_mut(upper_change_ptr, len);
@@ -2503,7 +2447,7 @@ pub fn gatorosc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct GatorOscBatchConfig {
     pub jaws_length_range: (usize, usize, usize),
@@ -2514,17 +2458,17 @@ pub struct GatorOscBatchConfig {
     pub lips_shift_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct GatorOscBatchJsOutput {
-    pub values: Vec<f64>, // Flattened [upper..., lower..., upper_change..., lower_change...]
+    pub values: Vec<f64>,
     pub combos: Vec<GatorOscParams>,
-    pub rows: usize,    // Number of parameter combinations
-    pub cols: usize,    // Data length
-    pub outputs: usize, // 4 for gatorosc
+    pub rows: usize,
+    pub cols: usize,
+    pub outputs: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = gatorosc_batch)]
 pub fn gatorosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: GatorOscBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2539,13 +2483,10 @@ pub fn gatorosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
         lips_shift: config.lips_shift_range,
     };
 
-    // Calculate total combinations (checked)
-    let combos = expand_grid_gatorosc(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid_gatorosc(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let n_combos = combos.len();
     let len = data.len();
 
-    // Single allocation for all outputs
     let total_size = n_combos
         .checked_mul(len)
         .ok_or_else(|| JsValue::from_str("gatorosc_batch_js: rows*cols overflow"))?;
@@ -2554,17 +2495,15 @@ pub fn gatorosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
         .ok_or_else(|| JsValue::from_str("gatorosc_batch_js: output size overflow"))?;
     let mut values = vec![0.0; slots];
 
-    // Split into mutable slices for each output
     let (upper_part, rest) = values.split_at_mut(total_size);
     let (lower_part, rest) = rest.split_at_mut(total_size);
     let (upper_change_part, lower_change_part) = rest.split_at_mut(total_size);
 
-    // Use zero-allocation batch function
     gatorosc_batch_inner_into(
         data,
         &sweep,
         Kernel::Auto,
-        false, // No parallel in WASM
+        false,
         upper_part,
         lower_part,
         upper_change_part,
@@ -2584,7 +2523,7 @@ pub fn gatorosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsVal
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn gatorosc_batch_into(
     in_ptr: *const f64,
@@ -2632,26 +2571,22 @@ pub fn gatorosc_batch_into(
             lips_shift: (lips_shift_start, lips_shift_end, lips_shift_step),
         };
 
-        // Calculate number of combinations (checked)
-        let combos = expand_grid_gatorosc(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_gatorosc(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let n_combos = combos.len();
         let total_size = n_combos
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("gatorosc_batch_into: rows*cols overflow"))?;
 
-        // Create output slices
         let upper_out = std::slice::from_raw_parts_mut(upper_ptr, total_size);
         let lower_out = std::slice::from_raw_parts_mut(lower_ptr, total_size);
         let upper_change_out = std::slice::from_raw_parts_mut(upper_change_ptr, total_size);
         let lower_change_out = std::slice::from_raw_parts_mut(lower_change_ptr, total_size);
 
-        // Use zero-allocation batch function
         gatorosc_batch_inner_into(
             data,
             &sweep,
             Kernel::Auto,
-            false, // No parallel in WASM
+            false,
             upper_out,
             lower_out,
             upper_change_out,
@@ -2686,15 +2621,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     fn test_gatorosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input (with a few NaNs at the front)
         let len = 256;
         let mut data = vec![0.0_f64; len];
         for i in 0..len {
             data[i] = (i as f64).sin() * 10.0 + ((i % 7) as f64) * 0.25;
         }
-        // Introduce some NaNs at the start to exercise warmup handling with first-valid > 0
+
         if len >= 3 {
             data[0] = f64::NAN;
             data[1] = f64::NAN;
@@ -2703,16 +2637,13 @@ mod tests {
 
         let input = GatorOscInput::from_slice(&data, GatorOscParams::default());
 
-        // Baseline via Vec-returning API
         let baseline = gatorosc(&input)?;
 
-        // Preallocate destination buffers
         let mut up = vec![0.0; len];
         let mut lo = vec![0.0; len];
         let mut upc = vec![0.0; len];
         let mut loc = vec![0.0; len];
 
-        // Zero-allocation into API
         gatorosc_into(&input, &mut up, &mut lo, &mut upc, &mut loc)?;
 
         assert_eq!(baseline.upper.len(), len);
@@ -2864,10 +2795,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            GatorOscParams::default(), // Default values
-            // Minimum values
+            GatorOscParams::default(),
             GatorOscParams {
                 jaws_length: Some(2),
                 jaws_shift: Some(0),
@@ -2876,7 +2805,6 @@ mod tests {
                 lips_length: Some(2),
                 lips_shift: Some(0),
             },
-            // Small values
             GatorOscParams {
                 jaws_length: Some(5),
                 jaws_shift: Some(2),
@@ -2885,7 +2813,6 @@ mod tests {
                 lips_length: Some(3),
                 lips_shift: Some(1),
             },
-            // Medium values
             GatorOscParams {
                 jaws_length: Some(20),
                 jaws_shift: Some(10),
@@ -2894,7 +2821,6 @@ mod tests {
                 lips_length: Some(10),
                 lips_shift: Some(5),
             },
-            // Large values
             GatorOscParams {
                 jaws_length: Some(50),
                 jaws_shift: Some(20),
@@ -2903,7 +2829,6 @@ mod tests {
                 lips_length: Some(20),
                 lips_shift: Some(10),
             },
-            // Edge case: jaws < teeth < lips (unusual)
             GatorOscParams {
                 jaws_length: Some(5),
                 jaws_shift: Some(3),
@@ -2912,7 +2837,6 @@ mod tests {
                 lips_length: Some(13),
                 lips_shift: Some(8),
             },
-            // Edge case: all same length
             GatorOscParams {
                 jaws_length: Some(10),
                 jaws_shift: Some(5),
@@ -2921,7 +2845,6 @@ mod tests {
                 lips_length: Some(10),
                 lips_shift: Some(5),
             },
-            // Edge case: no shifts
             GatorOscParams {
                 jaws_length: Some(13),
                 jaws_shift: Some(0),
@@ -2930,7 +2853,6 @@ mod tests {
                 lips_length: Some(5),
                 lips_shift: Some(0),
             },
-            // Edge case: large shifts
             GatorOscParams {
                 jaws_length: Some(10),
                 jaws_shift: Some(20),
@@ -2945,15 +2867,13 @@ mod tests {
             let input = GatorOscInput::from_candles(&candles, "close", params.clone());
             let output = gatorosc_with_kernel(&input, kernel)?;
 
-            // Check upper values
             for (i, &val) in output.upper.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2979,7 +2899,6 @@ mod tests {
                 }
             }
 
-            // Check lower values
             for (i, &val) in output.lower.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3012,7 +2931,6 @@ mod tests {
                 }
             }
 
-            // Check upper_change values
             for (i, &val) in output.upper_change.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3045,7 +2963,6 @@ mod tests {
                 }
             }
 
-            // Check lower_change values
             for (i, &val) in output.lower_change.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3087,7 +3004,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -3099,26 +3016,20 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic market data with various parameter combinations
         let strat = (
-            // Jaws parameters (longest EMA)
-            (5usize..=50), // jaws_length
-            (1usize..=10), // jaws_shift (must be at least 1)
-            // Teeth parameters (medium EMA)
-            (3usize..=30), // teeth_length
-            (1usize..=8),  // teeth_shift (must be at least 1)
-            // Lips parameters (shortest EMA)
-            (2usize..=20), // lips_length
-            (1usize..=5),  // lips_shift (must be at least 1)
+            (5usize..=50),
+            (1usize..=10),
+            (3usize..=30),
+            (1usize..=8),
+            (2usize..=20),
+            (1usize..=5),
         )
             .prop_flat_map(
                 |(jaws_len, jaws_shift, teeth_len, teeth_shift, lips_len, lips_shift)| {
-                    // Calculate minimum data needed
                     let min_data_len = jaws_len.max(teeth_len).max(lips_len)
                         + jaws_shift.max(teeth_shift).max(lips_shift)
                         + 10;
                     (
-                        // Data generation: realistic price data with enough points
                         prop::collection::vec(
                             (10.0f64..100000.0f64).prop_filter("finite", |x| x.is_finite()),
                             min_data_len..400,
@@ -3155,7 +3066,6 @@ mod tests {
                     };
                     let input = GatorOscInput::from_slice(&data, params);
 
-                    // Get outputs from test kernel and reference (scalar)
                     let test_output = gatorosc_with_kernel(&input, kernel).unwrap();
                     let ref_output = gatorosc_with_kernel(&input, Kernel::Scalar).unwrap();
 
@@ -3172,8 +3082,6 @@ mod tests {
                         lower_change: ref_lower_change,
                     } = ref_output;
 
-                    // Property 1: Warmup period validation
-                    // Check which values are actually NaN vs finite
                     let mut first_finite_upper = None;
                     let mut first_finite_lower = None;
 
@@ -3186,7 +3094,6 @@ mod tests {
                         }
                     }
 
-                    // At least some warmup period should exist
                     if let Some(idx) = first_finite_upper {
                         prop_assert!(
 						idx > 0,
@@ -3203,8 +3110,6 @@ mod tests {
 					);
                     }
 
-                    // Property 2: Output finiteness after initial warmup
-                    // After sufficient data points, outputs should be finite
                     let safe_start = (jaws_length.max(teeth_length).max(lips_length)
                         + jaws_shift.max(teeth_shift).max(lips_shift))
                     .min(data.len() - 1);
@@ -3227,9 +3132,7 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Kernel consistency (compare with scalar reference)
                     for i in 0..data.len() {
-                        // Check upper consistency
                         if upper[i].is_finite() && ref_upper[i].is_finite() {
                             let ulp_diff = upper[i].to_bits().abs_diff(ref_upper[i].to_bits());
                             prop_assert!(
@@ -3249,7 +3152,6 @@ mod tests {
                             );
                         }
 
-                        // Check lower consistency
                         if lower[i].is_finite() && ref_lower[i].is_finite() {
                             let ulp_diff = lower[i].to_bits().abs_diff(ref_lower[i].to_bits());
                             prop_assert!(
@@ -3269,7 +3171,6 @@ mod tests {
                             );
                         }
 
-                        // Check upper_change consistency
                         if upper_change[i].is_finite() && ref_upper_change[i].is_finite() {
                             let ulp_diff = upper_change[i]
                                 .to_bits()
@@ -3292,7 +3193,6 @@ mod tests {
                             );
                         }
 
-                        // Check lower_change consistency
                         if lower_change[i].is_finite() && ref_lower_change[i].is_finite() {
                             let ulp_diff = lower_change[i]
                                 .to_bits()
@@ -3316,10 +3216,9 @@ mod tests {
                         }
                     }
 
-                    // Property 4: Upper always positive/zero, lower always negative/zero
                     for i in safe_start..upper.len() {
                         prop_assert!(
-                            upper[i] >= -1e-10, // Allow tiny numerical errors
+                            upper[i] >= -1e-10,
                             "Upper should be non-negative at {}: got {}",
                             i,
                             upper[i]
@@ -3328,14 +3227,13 @@ mod tests {
 
                     for i in safe_start..lower.len() {
                         prop_assert!(
-                            lower[i] <= 1e-10, // Allow tiny numerical errors
+                            lower[i] <= 1e-10,
                             "Lower should be non-positive at {}: got {}",
                             i,
                             lower[i]
                         );
                     }
 
-                    // Property 5: Change values are correct 1-period differences
                     for i in 1..data.len() {
                         if !upper[i].is_nan() && !upper[i - 1].is_nan() {
                             let expected_change = upper[i] - upper[i - 1];
@@ -3351,7 +3249,6 @@ mod tests {
                         }
 
                         if !lower[i].is_nan() && !lower[i - 1].is_nan() {
-                            // Note: lower_change is negated in the implementation
                             let expected_change = -(lower[i] - lower[i - 1]);
                             if lower_change[i].is_finite() {
                                 prop_assert!(
@@ -3365,13 +3262,11 @@ mod tests {
                         }
                     }
 
-                    // Property 6: EMA bounds - outputs influenced by input range
                     let min_price = data.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max_price = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let price_range = max_price - min_price;
 
                     for i in safe_start..upper.len() {
-                        // Upper is abs(Jaws - Teeth), bounded by price range
                         prop_assert!(
                             upper[i] <= price_range + 1e-9,
                             "Upper exceeds price range at {}: {} > {}",
@@ -3382,7 +3277,6 @@ mod tests {
                     }
 
                     for i in safe_start..lower.len() {
-                        // Lower is -abs(Teeth - Lips), bounded by negative price range
                         prop_assert!(
                             lower[i] >= -(price_range + 1e-9),
                             "Lower exceeds negative price range at {}: {} < {}",
@@ -3392,10 +3286,7 @@ mod tests {
                         );
                     }
 
-                    // Property 7: Constant data produces minimal oscillation
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9) {
-                        // With constant data, all EMAs converge to same value
-                        // So upper and lower should approach zero
                         for i in (data.len() * 3 / 4)..data.len() {
                             if upper[i].is_finite() {
                                 prop_assert!(
@@ -3416,7 +3307,6 @@ mod tests {
                         }
                     }
 
-                    // Property 8: No poison values in output
                     for i in 0..data.len() {
                         if upper[i].is_finite() {
                             prop_assert_ne!(upper[i].to_bits(), 0x11111111_11111111u64);
@@ -3538,11 +3428,10 @@ mod tests {
             .lips_shift_range(2, 3, 1);
 
         let output = builder.apply_slice(&c.close)?;
-        // Shape checks
+
         assert!(output.rows > 1, "Should have multiple param sweeps");
         assert_eq!(output.cols, c.close.len());
 
-        // Check at least one output row is not all-NaN (assuming input is valid)
         let some_upper = output
             .upper
             .chunks(output.cols)
@@ -3575,23 +3464,19 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            // Single parameter sweeps
-            (5, 20, 5, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0), // Vary jaws_length
-            (13, 13, 0, 3, 10, 2, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0), // Vary jaws_shift
-            (13, 13, 0, 8, 8, 0, 3, 10, 2, 5, 5, 0, 5, 5, 0, 3, 3, 0), // Vary teeth_length
-            (13, 13, 0, 8, 8, 0, 8, 8, 0, 2, 8, 2, 5, 5, 0, 3, 3, 0), // Vary teeth_shift
-            (13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 2, 8, 2, 3, 3, 0), // Vary lips_length
-            (13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 1, 5, 1), // Vary lips_shift
-            // Multi-parameter sweeps
-            (8, 14, 3, 5, 8, 3, 5, 8, 3, 3, 5, 2, 3, 5, 2, 2, 3, 1), // Vary all parameters
-            // Static configurations
-            (10, 10, 0, 5, 5, 0, 8, 8, 0, 4, 4, 0, 5, 5, 0, 2, 2, 0), // All static
-            (13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0), // Default static
-            // Edge cases
-            (2, 5, 1, 0, 3, 1, 2, 5, 1, 0, 3, 1, 2, 5, 1, 0, 3, 1), // Small values
+            (5, 20, 5, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),
+            (13, 13, 0, 3, 10, 2, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),
+            (13, 13, 0, 8, 8, 0, 3, 10, 2, 5, 5, 0, 5, 5, 0, 3, 3, 0),
+            (13, 13, 0, 8, 8, 0, 8, 8, 0, 2, 8, 2, 5, 5, 0, 3, 3, 0),
+            (13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 2, 8, 2, 3, 3, 0),
+            (13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 1, 5, 1),
+            (8, 14, 3, 5, 8, 3, 5, 8, 3, 3, 5, 2, 3, 5, 2, 2, 3, 1),
+            (10, 10, 0, 5, 5, 0, 8, 8, 0, 4, 4, 0, 5, 5, 0, 2, 2, 0),
+            (13, 13, 0, 8, 8, 0, 8, 8, 0, 5, 5, 0, 5, 5, 0, 3, 3, 0),
+            (2, 5, 1, 0, 3, 1, 2, 5, 1, 0, 3, 1, 2, 5, 1, 0, 3, 1),
             (
                 30, 50, 10, 10, 20, 5, 20, 30, 5, 8, 15, 3, 10, 20, 5, 5, 10, 2,
-            ), // Large values
+            ),
         ];
 
         for (
@@ -3628,7 +3513,6 @@ mod tests {
                 .lips_shift_range(ls_s, ls_e, ls_st)
                 .apply_slice(&c.close)?;
 
-            // Helper function to check poison in a matrix
             let check_poison = |matrix: &[f64], matrix_name: &str| {
                 for (idx, &val) in matrix.iter().enumerate() {
                     if val.is_nan() {
@@ -3675,7 +3559,6 @@ mod tests {
                 }
             };
 
-            // Check all four output matrices
             check_poison(&output.upper, "upper");
             check_poison(&output.lower, "lower");
             check_poison(&output.upper_change, "upper_change");
@@ -3723,10 +3606,6 @@ mod tests {
     gen_batch_tests!(check_batch_not_enough_data);
     gen_batch_tests!(check_batch_no_poison);
 }
-
-// ============================================================================
-//                               PYTHON BINDINGS
-// ============================================================================
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -3854,12 +3733,10 @@ pub fn gatorosc_batch_py<'py>(
         lips_shift: lips_shift_range,
     };
 
-    let combos = expand_grid_gatorosc(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_gatorosc(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("gatorosc_batch_py: rows*cols overflow"))?;
@@ -3886,7 +3763,6 @@ pub fn gatorosc_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            
             gatorosc_batch_inner_into(
                 slice_in,
                 &sweep,
@@ -3957,7 +3833,6 @@ pub fn gatorosc_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3971,9 +3846,12 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "GatorDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "GatorDeviceArrayF32",
+    unsendable
+)]
 pub struct DeviceArrayF32GatorPy {
     pub(crate) inner: crate::cuda::moving_averages::DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -4005,7 +3883,9 @@ impl DeviceArrayF32GatorPy {
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -4016,7 +3896,6 @@ impl DeviceArrayF32GatorPy {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -4038,7 +3917,7 @@ impl DeviceArrayF32GatorPy {
             }
         }
         let _ = stream;
-        // copy=True is not yet supported (no cross-device copy path here).
+
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -4048,9 +3927,8 @@ impl DeviceArrayF32GatorPy {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = self.inner.rows;
         let cols = self.inner.cols;
         let inner = std::mem::replace(
@@ -4100,20 +3978,35 @@ pub fn gatorosc_cuda_batch_dev_py(
         lips_shift: lips_shift_range,
     };
     let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
-        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.ctx();
         let quad = cuda
             .gatorosc_batch_dev(data, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(
-            (
-                DeviceArrayF32GatorPy { inner: quad.upper, _ctx_guard: ctx.clone(), _device_id: dev_id },
-                DeviceArrayF32GatorPy { inner: quad.lower, _ctx_guard: ctx.clone(), _device_id: dev_id },
-                DeviceArrayF32GatorPy { inner: quad.upper_change, _ctx_guard: ctx.clone(), _device_id: dev_id },
-                DeviceArrayF32GatorPy { inner: quad.lower_change, _ctx_guard: ctx, _device_id: dev_id },
-            )
-        )
+        Ok::<_, PyErr>((
+            DeviceArrayF32GatorPy {
+                inner: quad.upper,
+                _ctx_guard: ctx.clone(),
+                _device_id: dev_id,
+            },
+            DeviceArrayF32GatorPy {
+                inner: quad.lower,
+                _ctx_guard: ctx.clone(),
+                _device_id: dev_id,
+            },
+            DeviceArrayF32GatorPy {
+                inner: quad.upper_change,
+                _ctx_guard: ctx.clone(),
+                _device_id: dev_id,
+            },
+            DeviceArrayF32GatorPy {
+                inner: quad.lower_change,
+                _ctx_guard: ctx,
+                _device_id: dev_id,
+            },
+        ))
     })?;
     Ok((upper, lower, upper_change, lower_change))
 }
@@ -4150,7 +4043,8 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let (upper, lower, upper_change, lower_change) = py.allow_threads(|| {
-        let cuda = CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaGatorOsc::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.ctx();
         let quad = cuda
@@ -4166,14 +4060,28 @@ pub fn gatorosc_cuda_many_series_one_param_dev_py(
                 lips_shift,
             )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>(
-            (
-                DeviceArrayF32GatorPy { inner: quad.upper, _ctx_guard: ctx.clone(), _device_id: dev_id },
-                DeviceArrayF32GatorPy { inner: quad.lower, _ctx_guard: ctx.clone(), _device_id: dev_id },
-                DeviceArrayF32GatorPy { inner: quad.upper_change, _ctx_guard: ctx.clone(), _device_id: dev_id },
-                DeviceArrayF32GatorPy { inner: quad.lower_change, _ctx_guard: ctx, _device_id: dev_id },
-            )
-        )
+        Ok::<_, PyErr>((
+            DeviceArrayF32GatorPy {
+                inner: quad.upper,
+                _ctx_guard: ctx.clone(),
+                _device_id: dev_id,
+            },
+            DeviceArrayF32GatorPy {
+                inner: quad.lower,
+                _ctx_guard: ctx.clone(),
+                _device_id: dev_id,
+            },
+            DeviceArrayF32GatorPy {
+                inner: quad.upper_change,
+                _ctx_guard: ctx.clone(),
+                _device_id: dev_id,
+            },
+            DeviceArrayF32GatorPy {
+                inner: quad.lower_change,
+                _ctx_guard: ctx,
+                _device_id: dev_id,
+            },
+        ))
     })?;
     Ok((upper, lower, upper_change, lower_change))
 }

@@ -1,27 +1,3 @@
-//! # Volume Price Trend (VPT)
-//!
-//! Implements the cumulative Volume Price Trend indicator, which accumulates
-//! volume-weighted price changes over time. This is the standard definition of VPT.
-//!
-//! Note: This implementation calculates cumulative VPT where each value is the
-//! running sum of all previous volume * (price_change / previous_price) values.
-//! Some implementations (like certain Python libraries) may use a non-cumulative
-//! version that only adds the current and previous period values.
-//!
-//! ## Parameters
-//! None (uses price/volume arrays).
-//!
-//! ## Returns
-//! - **Ok(VptOutput)** with output array.
-//! - **Err(VptError)** otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD status: enabled (AVX2/AVX512) via block prefix-scan with scalar carry. On 100k candles at `-C target-cpu=native`, AVX2/AVX512 improve >30% vs optimized scalar.
-//! - CUDA/Python status: CUDA wrapper present with typed errors and VRAM checks; Python CUDA handle exposes CAI v3 + DLPack v1.x (versioned capsules) with primary-context lifetime tracking.
-//! - Batch status: row-specific batch kernels not attempted; VPT has no parameter grid and no shared precompute across rows. Batch selection short-circuits to scalar row path.
-//! - Streaming Performance: O(1) with sticky-NaN semantics to match slice/batch; uses `mul_add` on the hot path. Very efficient and state-minimal.
-//! - Memory Optimization: Uses `alloc_with_nan_prefix` and batch helpers properly. Streaming is optimal with minimal state.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -43,9 +19,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -66,7 +42,10 @@ pub struct VptOutput {
 }
 
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VptParams;
 
 #[derive(Debug, Clone)]
@@ -154,7 +133,11 @@ pub enum VptError {
     #[error("vpt: Output length mismatch. expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vpt: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("vpt: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("vpt: size overflow computing rows*cols")]
@@ -163,9 +146,6 @@ pub enum VptError {
 
 #[inline]
 fn vpt_first_valid(price: &[f64], volume: &[f64]) -> Option<usize> {
-    
-    
-    
     for i in 1..price.len() {
         let p0 = price[i - 1];
         let p1 = price[i];
@@ -251,16 +231,16 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
             valid: valid_count,
         });
     }
-    let first = vpt_first_valid(price, volume)
-        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
+    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
     let mut res = alloc_with_nan_prefix(n, first + 1);
 
-    
     let p_ptr = price.as_ptr();
     let v_ptr = volume.as_ptr();
     let o_ptr = res.as_mut_ptr();
 
-    
     let mut prev = {
         let p0 = *p_ptr.add(first - 1);
         let p1 = *p_ptr.add(first);
@@ -268,17 +248,14 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         if (p0 != p0) || (p0 == 0.0) || (p1 != p1) || (v1 != v1) {
             f64::NAN
         } else {
-            
             v1 * ((p1 - p0) / p0)
         }
     };
 
-    
     let mut i = first + 1;
     let mut p_prev = *p_ptr.add(i - 1);
 
     while i + 3 < n {
-        
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
         let cur0 = if (p_prev != p_prev) || (p_prev == 0.0) || (p1 != p1) || (v1 != v1) {
@@ -291,7 +268,6 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         prev = val0;
         p_prev = p1;
 
-        
         let j1 = i + 1;
         let p2 = *p_ptr.add(j1);
         let v2 = *v_ptr.add(j1);
@@ -305,7 +281,6 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         prev = val1;
         p_prev = p2;
 
-        
         let j2 = i + 2;
         let p3 = *p_ptr.add(j2);
         let v3 = *v_ptr.add(j2);
@@ -319,7 +294,6 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         prev = val2;
         p_prev = p3;
 
-        
         let j3 = i + 3;
         let p4 = *p_ptr.add(j3);
         let v4 = *v_ptr.add(j3);
@@ -336,7 +310,6 @@ pub unsafe fn vpt_scalar(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         i += 4;
     }
 
-    
     while i < n {
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
@@ -378,15 +351,16 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
             valid: valid_count,
         });
     }
-    let first = vpt_first_valid(price, volume)
-        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
+    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
     let mut out = alloc_with_nan_prefix(n, first + 1);
 
     let p_ptr = price.as_ptr();
     let v_ptr = volume.as_ptr();
     let o_ptr = out.as_mut_ptr();
 
-    
     let mut prev = {
         let p0 = *p_ptr.add(first - 1);
         let p1 = *p_ptr.add(first);
@@ -408,11 +382,9 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
         let hi = _mm256_extractf128_pd(x, 1);
         let z = _mm_setzero_pd();
 
-        
         let tlo = _mm_add_pd(lo, _mm_shuffle_pd(z, lo, 0));
         let thi = _mm_add_pd(hi, _mm_shuffle_pd(z, hi, 0));
 
-        
         let last_lo = _mm_unpackhi_pd(tlo, tlo);
         let thi2 = _mm_add_pd(thi, last_lo);
 
@@ -420,12 +392,10 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
     }
 
     while i + 3 < n {
-        
         let p0 = _mm256_loadu_pd(p_ptr.add(i - 1));
         let p1 = _mm256_loadu_pd(p_ptr.add(i));
         let vv = _mm256_loadu_pd(v_ptr.add(i));
 
-        
         let m_nan_p0 = _mm256_cmp_pd(p0, p0, _CMP_UNORD_Q);
         let m_nan_p1 = _mm256_cmp_pd(p1, p1, _CMP_UNORD_Q);
         let m_nan_v = _mm256_cmp_pd(vv, vv, _CMP_UNORD_Q);
@@ -435,21 +405,17 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
             _mm256_or_pd(m_nan_v, m_eq0_p0),
         );
 
-        
         let diff = _mm256_sub_pd(p1, p0);
         let div = _mm256_div_pd(diff, p0);
         let mul = _mm256_mul_pd(vv, div);
         let cur = _mm256_blendv_pd(mul, vnan, invalid);
 
-        
         let ps = prefix4_pd(cur);
         let cary = _mm256_set1_pd(prev);
         let outv = _mm256_add_pd(ps, cary);
 
-        
         _mm256_storeu_pd(o_ptr.add(i), outv);
 
-        
         let hi128 = _mm256_extractf128_pd(outv, 1);
         let last_hi = _mm_unpackhi_pd(hi128, hi128);
         let tmp: [f64; 2] = core::mem::transmute(last_hi);
@@ -458,7 +424,6 @@ pub unsafe fn vpt_avx2(price: &[f64], volume: &[f64]) -> Result<VptOutput, VptEr
         i += 4;
     }
 
-    
     if i < n {
         let mut p_prev = *p_ptr.add(i - 1);
         while i < n {
@@ -503,15 +468,16 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
             valid: valid_count,
         });
     }
-    let first = vpt_first_valid(price, volume)
-        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
+    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
     let mut out = alloc_with_nan_prefix(n, first + 1);
 
     let p_ptr = price.as_ptr();
     let v_ptr = volume.as_ptr();
     let o_ptr = out.as_mut_ptr();
 
-    
     let mut prev = {
         let p0 = *p_ptr.add(first - 1);
         let p1 = *p_ptr.add(first);
@@ -539,39 +505,32 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
     }
 
     while i + 7 < n {
-        
-        let p0 = _mm512_loadu_pd(p_ptr.add(i - 1)); 
-        let p1 = _mm512_loadu_pd(p_ptr.add(i)); 
-        let vv = _mm512_loadu_pd(v_ptr.add(i)); 
+        let p0 = _mm512_loadu_pd(p_ptr.add(i - 1));
+        let p1 = _mm512_loadu_pd(p_ptr.add(i));
+        let vv = _mm512_loadu_pd(v_ptr.add(i));
 
-        
         let m_nan_p0 = _mm512_cmp_pd_mask(p0, p0, _CMP_UNORD_Q);
         let m_nan_p1 = _mm512_cmp_pd_mask(p1, p1, _CMP_UNORD_Q);
         let m_nan_v = _mm512_cmp_pd_mask(vv, vv, _CMP_UNORD_Q);
         let m_eq0_p0 = _mm512_cmp_pd_mask(p0, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
         let invalid = m_nan_p0 | m_nan_p1 | m_nan_v | m_eq0_p0;
 
-        
-        
-        
         let diff = _mm512_sub_pd(p1, p0);
         let r0 = _mm512_rcp14_pd(p0);
         let two = _mm512_set1_pd(2.0);
-        let e1 = _mm512_fnmadd_pd(p0, r0, two);      
-        let r1 = _mm512_mul_pd(r0, e1);              
-        let e2 = _mm512_fnmadd_pd(p0, r1, two);      
-        let r2 = _mm512_mul_pd(r1, e2);              
+        let e1 = _mm512_fnmadd_pd(p0, r0, two);
+        let r1 = _mm512_mul_pd(r0, e1);
+        let e2 = _mm512_fnmadd_pd(p0, r1, two);
+        let r2 = _mm512_mul_pd(r1, e2);
         let div = _mm512_mul_pd(diff, r2);
         let mul = _mm512_mul_pd(vv, div);
         let cur = _mm512_mask_mov_pd(mul, invalid, _mm512_set1_pd(f64::NAN));
 
-        
         let lo256 = _mm512_castpd512_pd256(cur);
         let hi256 = _mm512_extractf64x4_pd(cur, 1);
         let lo_ps = prefix4_pd(lo256);
         let mut hi_ps = prefix4_pd(hi256);
 
-        
         let lo_hi128 = _mm256_extractf128_pd(lo_ps, 1);
         let lo_total = {
             let last_lo = _mm_unpackhi_pd(lo_hi128, lo_hi128);
@@ -580,16 +539,13 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         };
         hi_ps = _mm256_add_pd(hi_ps, _mm256_set1_pd(lo_total));
 
-        
         let ps512 = _mm512_insertf64x4(_mm512_castpd256_pd512(lo_ps), hi_ps, 1);
 
-        
         let outv = _mm512_add_pd(ps512, _mm512_set1_pd(prev));
         _mm512_storeu_pd(o_ptr.add(i), outv);
 
-        
-        let hi2 = _mm512_extractf64x4_pd(outv, 1); 
-        let hi128 = _mm256_extractf128_pd(hi2, 1); 
+        let hi2 = _mm512_extractf64x4_pd(outv, 1);
+        let hi128 = _mm256_extractf128_pd(hi2, 1);
         let last_hi = _mm_unpackhi_pd(hi128, hi128);
         let tmp: [f64; 2] = core::mem::transmute(last_hi);
         prev = tmp[0];
@@ -597,7 +553,6 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         i += 8;
     }
 
-    
     while i + 3 < n {
         use core::arch::x86_64::*;
         let p0 = _mm256_loadu_pd(p_ptr.add(i - 1));
@@ -640,7 +595,6 @@ pub unsafe fn vpt_avx512(price: &[f64], volume: &[f64]) -> Result<VptOutput, Vpt
         i += 4;
     }
 
-    
     if i < n {
         let mut p_prev = *p_ptr.add(i - 1);
         while i < n {
@@ -768,12 +722,7 @@ pub fn vpt_expand_grid() -> Vec<VptParams> {
     vec![VptParams::default()]
 }
 
-/// Writes VPT into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec API (`vpt`/`vpt_with_kernel`).
-/// - `out` length must equal the input length; returns `OutputLengthMismatch` on mismatch.
-/// - Uses `Kernel::Auto` dispatch (same as the Vec-returning API) and writes results in-place.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn vpt_into(input: &VptInput, out: &mut [f64]) -> Result<(), VptError> {
     let (price, volume) = match &input.data {
         VptData::Candles { candles, source } => {
@@ -789,7 +738,6 @@ pub fn vpt_into(input: &VptInput, out: &mut [f64]) -> Result<(), VptError> {
     vpt_into_slice(out, price, volume, Kernel::Auto)
 }
 
-/// Write VPT directly to output slice - no allocations
 pub fn vpt_into_slice(
     dst: &mut [f64],
     price: &[f64],
@@ -823,8 +771,10 @@ pub fn vpt_into_slice(
         });
     }
 
-    let first = vpt_first_valid(price, volume)
-        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
+    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
     unsafe {
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
@@ -879,10 +829,11 @@ pub fn vpt_batch_inner_into(
             valid: valid_count,
         });
     }
-    let first = vpt_first_valid(price, volume)
-        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
+    let first = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
 
-    
     unsafe {
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch | Kernel::Auto => {
@@ -900,30 +851,22 @@ pub fn vpt_batch_inner_into(
     Ok(combos)
 }
 
-/// Streaming VPT: sticky-NaN to match slice/batch; FMA used on hot path.
 #[derive(Clone, Debug, Default)]
 pub struct VptStream {
-    
     last_price: f64,
-    
+
     carry_inc: f64,
-    
+
     cum: f64,
-    
+
     seeded: bool,
-    
+
     sticky_nan: bool,
 }
 
 impl VptStream {
-    /// O(1) streaming update of cumulative VPT.
-    /// Returns:
-    ///   - None: on very first call (needs a previous price)
-    ///   - Some(NaN): during warmup at the first valid pair, or forever after any invalid data (sticky)
-    ///   - Some(value): cumulative VPT thereafter
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        
         if !self.seeded {
             self.last_price = price;
             self.seeded = true;
@@ -933,14 +876,11 @@ impl VptStream {
             return None;
         }
 
-        
         if self.sticky_nan {
-            self.last_price = price; 
+            self.last_price = price;
             return Some(f64::NAN);
         }
 
-        
-        
         if !(self.last_price.is_finite()
             && self.last_price != 0.0
             && price.is_finite()
@@ -953,24 +893,18 @@ impl VptStream {
             return Some(f64::NAN);
         }
 
-        
-        
         let inv = 1.0 / self.last_price;
         let scale = volume * inv;
         let dv = price - self.last_price;
         self.last_price = price;
 
-        
         let cur_inc = dv.mul_add(scale, 0.0);
-        
+
         if self.carry_inc.is_nan() {
             self.carry_inc = cur_inc;
             return Some(f64::NAN);
         }
 
-        
-        
-        
         let base = if self.cum.is_finite() {
             self.cum
         } else {
@@ -983,13 +917,11 @@ impl VptStream {
         Some(new_cum)
     }
 
-    /// Reset back to the unseeded state.
     #[inline(always)]
     pub fn reset(&mut self) {
         *self = Self::default();
     }
 
-    /// Optional helper: restart streaming continuity at a known price (after data gaps).
     #[inline(always)]
     pub fn restart_from(&mut self, price: f64) {
         self.last_price = price;
@@ -1111,11 +1043,8 @@ fn vpt_batch_inner(
     let rows = 1usize;
     let cols = price.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
-    
     let valid_count = price
         .iter()
         .zip(volume.iter())
@@ -1130,12 +1059,13 @@ fn vpt_batch_inner(
             valid: valid_count,
         });
     }
-    let first_valid = vpt_first_valid(price, volume)
-        .ok_or(VptError::NotEnoughValidData { needed: 2, valid: valid_count })?;
+    let first_valid = vpt_first_valid(price, volume).ok_or(VptError::NotEnoughValidData {
+        needed: 2,
+        valid: valid_count,
+    })?;
     let warm = vec![first_valid + 1];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -1160,18 +1090,14 @@ fn vpt_batch_inner(
 
 #[inline(always)]
 pub unsafe fn vpt_row_scalar(price: &[f64], volume: &[f64], out: &mut [f64]) {
-    
-    
     let n = price.len();
     if let Some(first) = vpt_first_valid(price, volume) {
-        
         for i in 0..=first {
             out[i] = f64::NAN;
         }
-        
+
         vpt_row_scalar_from(price, volume, first + 1, out);
     } else {
-        
         for i in 0..n {
             out[i] = f64::NAN;
         }
@@ -1191,7 +1117,6 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
     let v_ptr = volume.as_ptr();
     let o_ptr = out.as_mut_ptr();
 
-    
     let mut prev = if start_i >= 2 {
         let k = start_i - 1;
         let p0 = *p_ptr.add(k - 1);
@@ -1206,12 +1131,10 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         0.0
     };
 
-    
     let mut i = start_i;
     let mut p_prev = *p_ptr.add(i - 1);
 
     while i + 3 < n {
-        
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
         let cur0 = if (p_prev != p_prev) || (p_prev == 0.0) || (p1 != p1) || (v1 != v1) {
@@ -1224,7 +1147,6 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         prev = val0;
         p_prev = p1;
 
-        
         let j1 = i + 1;
         let p2 = *p_ptr.add(j1);
         let v2 = *v_ptr.add(j1);
@@ -1238,7 +1160,6 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         prev = val1;
         p_prev = p2;
 
-        
         let j2 = i + 2;
         let p3 = *p_ptr.add(j2);
         let v3 = *v_ptr.add(j2);
@@ -1252,7 +1173,6 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         prev = val2;
         p_prev = p3;
 
-        
         let j3 = i + 3;
         let p4 = *p_ptr.add(j3);
         let v4 = *v_ptr.add(j3);
@@ -1269,7 +1189,6 @@ pub unsafe fn vpt_row_scalar_from(price: &[f64], volume: &[f64], start_i: usize,
         i += 4;
     }
 
-    
     while i < n {
         let p1 = *p_ptr.add(i);
         let v1 = *v_ptr.add(i);
@@ -1331,13 +1250,22 @@ pub fn vpt_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    // Accept non-contiguous inputs; copy only when necessary
     let price_slice: &[f64];
     let volume_slice: &[f64];
     let owned_price;
     let owned_volume;
-    price_slice = if let Ok(s) = price.as_slice() { s } else { owned_price = price.to_owned_array(); owned_price.as_slice().unwrap() };
-    volume_slice = if let Ok(s) = volume.as_slice() { s } else { owned_volume = volume.to_owned_array(); owned_volume.as_slice().unwrap() };
+    price_slice = if let Ok(s) = price.as_slice() {
+        s
+    } else {
+        owned_price = price.to_owned_array();
+        owned_price.as_slice().unwrap()
+    };
+    volume_slice = if let Ok(s) = volume.as_slice() {
+        s
+    } else {
+        owned_volume = volume.to_owned_array();
+        owned_volume.as_slice().unwrap()
+    };
     let kern = validate_kernel(kernel, false)?;
 
     let input = VptInput::from_slices(price_slice, volume_slice);
@@ -1379,20 +1307,29 @@ pub fn vpt_batch_py<'py>(
     volume: PyReadonlyArray1<'py, f64>,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
-    
     let price_slice: &[f64];
     let volume_slice: &[f64];
     let owned_price;
     let owned_volume;
-    price_slice = if let Ok(s) = price.as_slice() { s } else { owned_price = price.to_owned_array(); owned_price.as_slice().unwrap() };
-    volume_slice = if let Ok(s) = volume.as_slice() { s } else { owned_volume = volume.to_owned_array(); owned_volume.as_slice().unwrap() };
+    price_slice = if let Ok(s) = price.as_slice() {
+        s
+    } else {
+        owned_price = price.to_owned_array();
+        owned_price.as_slice().unwrap()
+    };
+    volume_slice = if let Ok(s) = volume.as_slice() {
+        s
+    } else {
+        owned_volume = volume.to_owned_array();
+        owned_volume.as_slice().unwrap()
+    };
     let kern = validate_kernel(kernel, true)?;
 
-    if price_slice.is_empty() || volume_slice.is_empty() || price_slice.len() != volume_slice.len() {
+    if price_slice.is_empty() || volume_slice.is_empty() || price_slice.len() != volume_slice.len()
+    {
         return Err(PyValueError::new_err(VptError::EmptyInputData.to_string()));
     }
 
-    
     let rows: usize = 1;
     let cols = price_slice.len();
 
@@ -1416,12 +1353,11 @@ pub fn vpt_batch_py<'py>(
                 true,
                 slice_out,
             )?;
-            let first_valid = vpt_first_valid(price_slice, volume_slice).ok_or(
-                VptError::NotEnoughValidData {
+            let first_valid =
+                vpt_first_valid(price_slice, volume_slice).ok_or(VptError::NotEnoughValidData {
                     needed: 2,
                     valid: 0,
-                },
-            )?;
+                })?;
             for v in &mut slice_out[..=first_valid] {
                 *v = f64::NAN;
             }
@@ -1432,12 +1368,10 @@ pub fn vpt_batch_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    
     dict.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -1521,7 +1455,7 @@ pub fn vpt_cuda_many_series_one_param_dev_py(
     })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpt_js(price: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
     let mut output = vec![0.0; price.len()];
@@ -1532,7 +1466,7 @@ pub fn vpt_js(price: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpt_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1541,7 +1475,7 @@ pub fn vpt_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpt_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1551,7 +1485,7 @@ pub fn vpt_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpt_into(
     price_ptr: *const f64,
@@ -1567,16 +1501,13 @@ pub fn vpt_into(
         let price = std::slice::from_raw_parts(price_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
 
-        
         if price_ptr == out_ptr || volume_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             vpt_into_slice(&mut temp, price, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             vpt_into_slice(out, price, volume, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1586,13 +1517,11 @@ pub fn vpt_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
-pub struct VptBatchConfig {
-    
-}
+pub struct VptBatchConfig {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VptBatchJsOutput {
     pub values: Vec<f64>,
@@ -1601,10 +1530,9 @@ pub struct VptBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = vpt_batch)]
 pub fn vpt_batch_js(price: &[f64], volume: &[f64], _config: JsValue) -> Result<JsValue, JsValue> {
-    
     let output = vpt_batch_with_kernel(price, volume, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1619,7 +1547,7 @@ pub fn vpt_batch_js(price: &[f64], volume: &[f64], _config: JsValue) -> Result<J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpt_batch_into(
     price_ptr: *const f64,
@@ -1634,7 +1562,7 @@ pub fn vpt_batch_into(
     unsafe {
         let price = std::slice::from_raw_parts(price_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
-        
+
         if price_ptr == out_ptr || volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             vpt_into_slice(&mut temp, price, volume, Kernel::Auto)
@@ -1647,16 +1575,13 @@ pub fn vpt_batch_into(
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
 
-        
         Ok(1)
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "vector_ta", name = "VptDeviceArrayF32", unsendable)]
 pub struct VptDeviceArrayF32Py {
-    
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
@@ -1686,7 +1611,7 @@ impl VptDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producer synchronizes before returning, so no stream key is required per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1695,8 +1620,6 @@ impl VptDeviceArrayF32Py {
         (2, self.device_id as i32)
     }
 
-    // DLPack producer with v1.x negotiation and legacy fallback.
-    // Array API stream semantics are accepted but ignored here since the stream is synchronized.
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -1706,8 +1629,7 @@ impl VptDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1727,7 +1649,6 @@ impl VptDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let buf = self
             .buf
             .take()
@@ -1752,18 +1673,14 @@ mod tests {
 
     #[test]
     fn test_vpt_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing CSV candles to match other tests in this module.
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = VptInput::from_candles(&candles, "close");
 
-        // Baseline via Vec-returning API with a fixed kernel to avoid tiny
-        // rounding diffs across different paths.
         let baseline = vpt_with_kernel(&input, Kernel::Scalar)?;
 
-        // Preallocate output and compute via the new into API.
         let mut out = vec![0.0f64; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         vpt_into(&input, &mut out)?;
 
         assert_eq!(baseline.values.len(), out.len());
@@ -1842,13 +1759,6 @@ mod tests {
         let input = VptInput::from_candles(&candles, "close");
         let output = vpt_with_kernel(&input, kernel)?;
 
-        // NOTE: The Rust implementation calculates cumulative VPT (standard definition)
-        // Python reference values were for a non-cumulative version:
-        // [-0.40358334248536065, -0.16292768139917702, -0.4792942916867958,
-        //  -0.1188231211518107, -3.3492674990910025]
-        //
-        // Our implementation accumulates all historical VPT values, while the Python
-        // version only adds the current and previous period values.
         let expected_last_five = [
             -18292.323972247592,
             -18292.510374716476,
@@ -1903,7 +1813,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Since VPT has no parameters, we'll test with different data sources
         let test_sources = vec!["close", "open", "high", "low"];
 
         for (source_idx, &source) in test_sources.iter().enumerate() {
@@ -1912,12 +1821,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1949,7 +1857,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_vpt_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1961,10 +1869,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
-        
-        
         let strat = (2usize..=400).prop_flat_map(|len| {
             (
                 prop::collection::vec(
@@ -1983,13 +1887,10 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(&strat, |(price, volume)| {
             let input = VptInput::from_slices(&price, &volume);
 
-            
             let VptOutput { values: out } = vpt_with_kernel(&input, kernel)?;
 
-            
             let VptOutput { values: ref_out } = vpt_with_kernel(&input, Kernel::Scalar)?;
 
-            
             prop_assert_eq!(out.len(), price.len(), "Output length mismatch");
             prop_assert_eq!(
                 ref_out.len(),
@@ -1997,7 +1898,6 @@ mod tests {
                 "Reference output length mismatch"
             );
 
-            
             prop_assert!(
                 out[0].is_nan(),
                 "First VPT value should be NaN, got {}",
@@ -2009,7 +1909,6 @@ mod tests {
                 ref_out[0]
             );
 
-            
             let mut expected_vpt = vec![f64::NAN; price.len()];
             let mut prev_vpt_val = f64::NAN;
 
@@ -2018,36 +1917,29 @@ mod tests {
                 let p1 = price[i];
                 let v1 = volume[i];
 
-                
                 let vpt_val = if p0.is_nan() || p0 == 0.0 || p1.is_nan() || v1.is_nan() {
                     f64::NAN
                 } else {
                     v1 * ((p1 - p0) / p0)
                 };
 
-                
                 expected_vpt[i] = if vpt_val.is_nan() || prev_vpt_val.is_nan() {
                     f64::NAN
                 } else {
                     vpt_val + prev_vpt_val
                 };
 
-                
                 prev_vpt_val = vpt_val;
             }
 
-            
             for i in 0..price.len() {
                 let y = out[i];
                 let r = ref_out[i];
                 let e = expected_vpt[i];
 
-                
                 if y.is_nan() && r.is_nan() {
-                    
                     continue;
                 } else if !y.is_nan() && !r.is_nan() {
-                    
                     let diff = (y - r).abs();
                     prop_assert!(
                         diff < 1e-9,
@@ -2058,7 +1950,6 @@ mod tests {
                         diff
                     );
 
-                    
                     if !e.is_nan() {
                         let diff_expected = (y - e).abs();
                         prop_assert!(
@@ -2107,7 +1998,6 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_sources = vec!["close", "open", "high", "low"];
 
         for (src_idx, &source) in test_sources.iter().enumerate() {
@@ -2124,7 +2014,6 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Source {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \

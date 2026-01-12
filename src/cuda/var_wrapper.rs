@@ -1,15 +1,3 @@
-//! CUDA support for the VAR indicator (rolling variance with nbdev scaling).
-//!
-//! Parity targets (mirrors ALMA/Deviation wrappers):
-//! - PTX load via DetermineTargetFromContext + OptLevel O2 with simple fallback
-//! - NON_BLOCKING stream
-//! - VRAM checks with optional headroom and grid.y chunking
-//! - Public entry points:
-//!     - one-series × many-params (batch)
-//!     - many-series × one-param (time‑major)
-//! - Numerics: warmup/NaN identical to scalar; compute windows via host-built
-//!   prefix sums in f64 to reduce drift; outputs in f32 scaled by nbdev^2.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -32,7 +20,11 @@ pub enum CudaVarError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -40,13 +32,19 @@ pub enum CudaVarError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -54,7 +52,6 @@ struct Float2 {
     hi: f32,
     lo: f32,
 }
-
 
 unsafe impl DeviceCopy for Float2 {}
 
@@ -70,7 +67,6 @@ fn split_f64_to_float2_vec(src: &[f64]) -> Vec<Float2> {
 }
 
 impl CudaVar {
-    /// Best-effort: request an L2 persisting cache window for read-mostly spans.
     fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
         unsafe {
             use cust::device::Device as CuDevice;
@@ -82,7 +78,6 @@ impl CudaVar {
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
-            
             let mut max_window_bytes_i32: i32 = 0;
             if let Ok(dev) = CuDevice::get_device(self.device_id) {
                 let _ = cuDeviceGetAttribute(
@@ -96,10 +91,8 @@ impl CudaVar {
                 return;
             }
 
-            
             let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
 
-            
             let mut val: CUstreamAttrValue = std::mem::zeroed();
             val.accessPolicyWindow = CUaccessPolicyWindow {
                 base_ptr: base_dev_ptr as *mut std::ffi::c_void,
@@ -189,9 +182,12 @@ impl CudaVar {
         Ok(s)
     }
 
-    pub fn context_arc(&self) -> Arc<Context> { self.ctx.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
-
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.ctx.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn headroom_bytes() -> usize {
@@ -274,7 +270,6 @@ impl CudaVar {
         rows: usize,
         first_valids: &[i32],
     ) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
-        
         let total = data_tm_f32.len();
         let mut ps = vec![0.0f64; total + 1];
         let mut ps2 = vec![0.0f64; total + 1];
@@ -305,7 +300,6 @@ impl CudaVar {
         (ps, ps2, pn)
     }
 
-    
     pub fn var_batch_dev(
         &self,
         data_f32: &[f32],
@@ -338,7 +332,6 @@ impl CudaVar {
             }
         }
 
-        
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let nb2: Vec<f32> = combos
             .iter()
@@ -351,7 +344,6 @@ impl CudaVar {
         let out_elems = Self::checked_mul(rows, len, "var: rows * len")?;
         let out_bytes = Self::checked_mul(out_elems, std::mem::size_of::<f32>(), "var: out_bytes")?;
 
-        
         let ps_ff: Vec<Float2> = split_f64_to_float2_vec(&ps);
         let ps2_ff: Vec<Float2> = split_f64_to_float2_vec(&ps2);
 
@@ -361,8 +353,7 @@ impl CudaVar {
         let prefix_pairs = Self::checked_add(ps_ff.len(), ps2_ff.len(), "var: prefix pair count")?;
         let prefix_bytes = Self::checked_mul(prefix_pairs, sz_f2, "var: prefix bytes")?;
         let pn_bytes = Self::checked_mul(pn.len(), sz_i32, "var: prefix_nan bytes")?;
-        let periods_bytes =
-            Self::checked_mul(periods.len(), sz_i32, "var: periods bytes")?;
+        let periods_bytes = Self::checked_mul(periods.len(), sz_i32, "var: periods bytes")?;
         let nb2_bytes = Self::checked_mul(nb2.len(), sz_f32, "var: nb2 bytes")?;
         let in_bytes = Self::checked_add(
             Self::checked_add(prefix_bytes, pn_bytes, "var: in_bytes a+b")?,
@@ -376,8 +367,7 @@ impl CudaVar {
         let mut y_chunks = 1usize;
         if let Ok((free, _)) = mem_get_info() {
             if total_est > free {
-                let bytes_per_row =
-                    Self::checked_mul(len, sz_f32, "var: bytes_per_row")?;
+                let bytes_per_row = Self::checked_mul(len, sz_f32, "var: bytes_per_row")?;
                 let available = free.saturating_sub(in_bytes + headroom);
                 let max_rows = (available / bytes_per_row).max(1);
                 y_chunks = (rows + max_rows - 1) / max_rows;
@@ -399,10 +389,8 @@ impl CudaVar {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        
         Self::will_fit(work_bytes, headroom)?;
 
-        
         let mut d_ps: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::uninitialized_async(ps_ff.len(), &self.stream) }?;
         let mut d_ps2: DeviceBuffer<Float2> =
@@ -428,14 +416,12 @@ impl CudaVar {
             d_nb2.async_copy_from(&h_nb2, &self.stream)?;
         }
 
-        
         self.try_enable_persisting_l2(
             d_ps.as_device_ptr().as_raw() as u64,
             ps_ff.len() * std::mem::size_of::<Float2>(),
         );
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
         for c in 0..y_chunks {
             let start_row = c * chunk_rows;
@@ -445,7 +431,6 @@ impl CudaVar {
             let end_row = ((c + 1) * chunk_rows).min(rows);
             let n_rows = end_row - start_row;
 
-            
             let periods_ptr = unsafe {
                 d_periods
                     .as_device_ptr()
@@ -499,10 +484,11 @@ impl CudaVar {
         n_combos: usize,
         out_ptr: cust::memory::DevicePointer<f32>,
     ) -> Result<(), CudaVarError> {
-        let func = self
-            .module
-            .get_function("var_batch_f32")
-            .map_err(|_| CudaVarError::MissingKernelSymbol { name: "var_batch_f32" })?;
+        let func = self.module.get_function("var_batch_f32").map_err(|_| {
+            CudaVarError::MissingKernelSymbol {
+                name: "var_batch_f32",
+            }
+        })?;
 
         if len > i32::MAX as usize || n_combos > i32::MAX as usize {
             return Err(CudaVarError::InvalidInput(
@@ -510,7 +496,6 @@ impl CudaVar {
             ));
         }
 
-        
         const TILE: u32 = 4;
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
@@ -547,7 +532,6 @@ impl CudaVar {
         Ok(())
     }
 
-    
     pub fn var_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -574,7 +558,6 @@ impl CudaVar {
         }
         let nb2 = (nbdev as f32) * (nbdev as f32);
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -663,7 +646,9 @@ impl CudaVar {
         let func = self
             .module
             .get_function("var_many_series_one_param_f32")
-            .map_err(|_| CudaVarError::MissingKernelSymbol { name: "var_many_series_one_param_f32" })?;
+            .map_err(|_| CudaVarError::MissingKernelSymbol {
+                name: "var_many_series_one_param_f32",
+            })?;
         if cols > i32::MAX as usize || rows > i32::MAX as usize || period > i32::MAX as usize {
             return Err(CudaVarError::InvalidInput(
                 "inputs exceed kernel limits".into(),
@@ -673,7 +658,7 @@ impl CudaVar {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x; 
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -703,7 +688,6 @@ impl CudaVar {
         Ok(())
     }
 }
-
 
 pub mod benches {
     use super::*;

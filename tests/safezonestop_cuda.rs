@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::safezonestop::{
     safezonestop_batch_with_kernel, safezonestop_with_kernel, SafeZoneStopBatchRange,
     SafeZoneStopBuilder, SafeZoneStopInput, SafeZoneStopParams,
@@ -88,7 +86,7 @@ fn safezonestop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
         return Ok(());
     }
 
-    let cols = 16usize; 
+    let cols = 16usize;
     let rows = 4000usize;
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
@@ -105,7 +103,6 @@ fn safezonestop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
     let mult = 2.5f64;
     let lb = 3usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut high = vec![f64::NAN; rows];

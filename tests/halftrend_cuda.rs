@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::halftrend::HalfTrendBatchRange;
 use vector_ta::utilities::enums::Kernel;
 
@@ -54,7 +52,6 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         atr_period: (14, 14, 0),
     };
 
-    
     let hq: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let lq: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let cq: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -87,7 +84,7 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     dev.buy.buf.copy_to(&mut g_bs)?;
     dev.sell.buf.copy_to(&mut g_ss)?;
 
-    let tol = 1e-3; 
+    let tol = 1e-3;
     for idx in 0..need {
         assert!(
             approx_eq(cpu.halftrend[idx], g_ht[idx] as f64, tol),
@@ -109,7 +106,7 @@ fn halftrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
             "atr_low mismatch at {}",
             idx
         );
-        
+
         let cb = cpu.buy_signal[idx];
         let gb = g_bs[idx] as f64;
         if !(cb.is_nan() && gb.is_nan()) {
@@ -132,7 +129,6 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    
     let len = 8192usize;
     let mut close = vec![f64::NAN; len];
     for i in 4..len {
@@ -156,7 +152,6 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
         atr_period: (14, 14, 0),
     };
 
-    
     let hq: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let lq: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let cq: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -177,22 +172,14 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut g_bs = vec![0f32; need];
     let mut g_ss = vec![0f32; need];
     let (rows, cols, _) = cuda.halftrend_batch_into_host_f32(
-        &high_f32,
-        &low_f32,
-        &close_f32,
-        &sweep,
-        &mut g_ht,
-        &mut g_tr,
-        &mut g_ah,
-        &mut g_al,
-        &mut g_bs,
-        &mut g_ss,
+        &high_f32, &low_f32, &close_f32, &sweep, &mut g_ht, &mut g_tr, &mut g_ah, &mut g_al,
+        &mut g_bs, &mut g_ss,
     )?;
 
     assert_eq!(rows, cpu.rows);
     assert_eq!(cols, cpu.cols);
 
-    let tol = 1e-3; 
+    let tol = 1e-3;
     for idx in 0..need {
         assert!(
             approx_eq(cpu.halftrend[idx], g_ht[idx] as f64, tol),
@@ -214,7 +201,7 @@ fn halftrend_cuda_batch_time_major_matches_cpu() -> Result<(), Box<dyn std::erro
             "atr_low mismatch at {}",
             idx
         );
-        
+
         let cb = cpu.buy_signal[idx];
         let gb = g_bs[idx] as f64;
         if !(cb.is_nan() && gb.is_nan()) {
@@ -263,7 +250,6 @@ fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     let atr_period = 14usize;
     let ch = 2.0f64;
 
-    
     let mut cpu_ht_tm = vec![f64::NAN; cols * rows];
     let mut cpu_tr_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -281,7 +267,7 @@ fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             channel_deviation: (ch, ch, 0.0),
             atr_period: (atr_period, atr_period, 0),
         };
-        
+
         let hq: Vec<f64> = h.iter().map(|&v| (v as f32) as f64).collect();
         let lq: Vec<f64> = l.iter().map(|&v| (v as f32) as f64).collect();
         let cq: Vec<f64> = c.iter().map(|&v| (v as f32) as f64).collect();
@@ -337,7 +323,6 @@ fn halftrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
     Ok(())
 }
 
-
 #[allow(dead_code)]
 fn halftrend_batch_with_kernel_slices_internal(
     high: &[f64],
@@ -346,7 +331,6 @@ fn halftrend_batch_with_kernel_slices_internal(
     sweep: &HalfTrendBatchRange,
     kern: Kernel,
 ) -> Result<HalfTrendBatchOutputLite, Box<dyn std::error::Error>> {
-    
     let out = halftrend_batch_with_kernel_slices_public(high, low, close, sweep, kern)?;
     Ok(HalfTrendBatchOutputLite {
         halftrend: out.halftrend,
@@ -379,7 +363,6 @@ fn halftrend_batch_with_kernel_slices_public(
     sweep: &HalfTrendBatchRange,
     kern: Kernel,
 ) -> Result<vector_ta::indicators::halftrend::HalfTrendBatchOutput, Box<dyn std::error::Error>> {
-    
     let combos_out = vector_ta::indicators::halftrend::HalfTrendBatchBuilder::new()
         .amplitude_range(sweep.amplitude.0, sweep.amplitude.1, sweep.amplitude.2)
         .channel_deviation_range(

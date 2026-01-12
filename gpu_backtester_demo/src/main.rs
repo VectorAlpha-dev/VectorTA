@@ -11,69 +11,69 @@ use my_project::cuda::moving_averages::CudaAlma;
 #[derive(Debug, Clone, Parser)]
 #[command(name = "gpu_backtester_demo", version, about = "GPU-only double-crossover optimizer demo (ALMA only)")]
 struct Cli {
-    /// CSV file with price data (expects a header). If omitted, synthetic data is generated.
+
     #[arg(long)]
     csv: Option<String>,
 
-    /// Column name to use from CSV (default: close)
+
     #[arg(long, default_value = "close")]
     column: String,
 
-    /// Synthetic length (used when --csv is not provided)
+
     #[arg(long, default_value_t = 100_000)]
     synth_len: usize,
 
-    /// Fast ALMA period range as start:end:step
+
     #[arg(long, default_value = "5:100:1")]
     fast_period: String,
 
-    /// Slow ALMA period range as start:end:step
+
     #[arg(long, default_value = "20:200:2")]
     slow_period: String,
 
-    /// ALMA offset (single value applied to both fast and slow)
+
     #[arg(long, default_value_t = 0.85)]
     offset: f64,
 
-    /// ALMA sigma (single value applied to both fast and slow)
+
     #[arg(long, default_value_t = 6.0)]
     sigma: f64,
 
-    /// Commission rate (fraction) applied on entries/exits (e.g., 0.0005)
+
     #[arg(long, default_value_t = 0.0, alias = "fee")]
     commission: f32,
 
-    /// Neutral band as a fraction of |slow| to avoid churn (0 disables it)
+
     #[arg(long, default_value_t = 0.0)]
     eps_rel: f32,
 
-    /// Enable long-only (restrict to {0,+1})
+
     #[arg(long, default_value_t = false)]
     long_only: bool,
 
-    /// Do not flip directly; exit then wait
+
     #[arg(long, default_value_t = false)]
     no_flip: bool,
 
-    /// Use t-1 signal and enter/exit on next bar
+
     #[arg(long, default_value_t = false)]
     trade_on_next: bool,
 
-    /// Enforce fast_period < slow_period (skip invalid combos)
+
     #[arg(long, default_value_t = true)]
     enforce_fast_lt_slow: bool,
 
-    /// Also compute signed exposure (net position avg) into metric[6]
+
     #[arg(long, default_value_t = false)]
     signed_exposure: bool,
 
-    /// Max tile sizes (Pf_tile and Ps_tile). If 0, auto-choose a conservative value.
+
     #[arg(long, default_value_t = 0)]
     fast_tile: usize,
     #[arg(long, default_value_t = 0)]
     slow_tile: usize,
 
-    /// Metrics count written by kernel (fixed to 5 for now)
+
     #[arg(long, default_value_t = 5)]
     metrics: usize,
 }
@@ -107,7 +107,7 @@ fn gen_synthetic_prices(n: usize) -> Vec<f64> {
     let mut v = Vec::with_capacity(n);
     let mut price = 100.0;
     for i in 0..n {
-        
+
         let drift = 0.00002;
         let seasonal = (i as f64 * 0.0005).sin() * 0.001;
         price *= 1.0 + drift + seasonal;
@@ -140,13 +140,13 @@ fn expand_periods((s, e, st): (usize, usize, usize)) -> Vec<usize> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    
+
     let mut prices: Vec<f64> = if let Some(p) = &cli.csv { load_prices_from_csv(p, &cli.column)? } else { gen_synthetic_prices(cli.synth_len) };
     if prices.is_empty() { return Err(anyhow!("no price data")); }
     let first_valid = prices.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let t_len = prices.len();
 
-    
+
     let fast_periods = expand_periods(parse_range(&cli.fast_period)?);
     let slow_periods = expand_periods(parse_range(&cli.slow_period)?);
     if fast_periods.is_empty() || slow_periods.is_empty() { return Err(anyhow!("empty parameter ranges")); }
@@ -155,21 +155,21 @@ fn main() -> Result<()> {
     let max_pf = *fast_periods.iter().max().unwrap();
     let max_ps = *slow_periods.iter().max().unwrap();
 
-    
-    let alma = CudaAlma::new(0).map_err(|e| anyhow!("{:?}", e))?;
-    
 
-    
+    let alma = CudaAlma::new(0).map_err(|e| anyhow!("{:?}", e))?;
+
+
+
     let prices_f32: Vec<f32> = prices.iter().map(|&x| x as f32).collect();
     let d_prices = DeviceBuffer::from_slice(&prices_f32)?;
     let d_fast_periods = DeviceBuffer::from_slice(&fast_periods.iter().map(|&p| p as i32).collect::<Vec<_>>())?;
     let d_slow_periods = DeviceBuffer::from_slice(&slow_periods.iter().map(|&p| p as i32).collect::<Vec<_>>())?;
 
-    
+
     let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/double_crossover.ptx"));
     let bt_module = Module::from_ptx(ptx, &[])?;
 
-    
+
     let mut d_lr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(t_len)? };
     {
         let kernel = bt_module.get_function("compute_log_returns_f32")?;
@@ -190,10 +190,10 @@ fn main() -> Result<()> {
         }
     }
 
-    
+
     let (pf_tile, ps_tile) = choose_tiles(cli.fast_tile, cli.slow_tile, t_len, max_pf, max_ps, cli.metrics)?;
 
-    
+
     let total_pairs = f_total * s_total;
     let metrics = cli.metrics;
     let metrics_bytes = total_pairs * metrics * std::mem::size_of::<f32>();
@@ -201,21 +201,21 @@ fn main() -> Result<()> {
     let d_metrics_global = if will_fit(metrics_bytes, headroom) { Some(unsafe { DeviceBuffer::<f32>::uninitialized(total_pairs * metrics)? }) } else { None };
     let mut host_metrics: Vec<f32> = if d_metrics_global.is_some() { Vec::new() } else { vec![0.0; total_pairs * metrics] };
 
-    
-    
-    
-    
-    
+
+
+
+
+
     let mut fast_w_flat: Vec<f32> = Vec::new();
     let mut slow_w_flat: Vec<f32> = Vec::new();
     let mut fast_inv: Vec<f32> = Vec::new();
     let mut slow_inv: Vec<f32> = Vec::new();
 
-    
-    let mut d_fast_ma: Option<DeviceBuffer<f32>> = None;      
-    let mut d_slow_ma: Option<DeviceBuffer<f32>> = None;      
-    let mut d_fast_ma_tm: Option<DeviceBuffer<f32>> = None;   
-    let mut d_slow_ma_tm: Option<DeviceBuffer<f32>> = None;   
+
+    let mut d_fast_ma: Option<DeviceBuffer<f32>> = None;
+    let mut d_slow_ma: Option<DeviceBuffer<f32>> = None;
+    let mut d_fast_ma_tm: Option<DeviceBuffer<f32>> = None;
+    let mut d_slow_ma_tm: Option<DeviceBuffer<f32>> = None;
     let mut d_fast_w: Option<DeviceBuffer<f32>> = None;
     let mut d_slow_w: Option<DeviceBuffer<f32>> = None;
     let mut d_fast_inv: Option<DeviceBuffer<f32>> = None;
@@ -223,14 +223,14 @@ fn main() -> Result<()> {
     let mut d_fast_p: Option<DeviceBuffer<i32>> = None;
     let mut d_slow_p: Option<DeviceBuffer<i32>> = None;
 
-    
+
     let bt_stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-    
+
     let mut f_start = 0;
     while f_start < f_total {
         let pf = pf_tile.min(f_total - f_start);
-        
+
         fast_w_flat.resize(pf * max_pf, 0.0);
         fast_inv.resize(pf, 0.0);
         for i in 0..pf {
@@ -240,7 +240,7 @@ fn main() -> Result<()> {
             let base = i * max_pf;
             fast_w_flat[base..base + per].copy_from_slice(&w);
         }
-        
+
         if d_fast_w.as_ref().map(|b| b.len()) != Some(pf * max_pf) {
             d_fast_w = Some(unsafe { DeviceBuffer::<f32>::uninitialized(pf * max_pf)? });
         }
@@ -257,7 +257,7 @@ fn main() -> Result<()> {
         d_fast_inv.as_mut().unwrap().copy_from(&fast_inv)?;
         let host_p: Vec<i32> = fast_periods[f_start..f_start + pf].iter().map(|&x| x as i32).collect();
         d_fast_p.as_mut().unwrap().copy_from(&host_p)?;
-        
+
         alma.alma_batch_device(
             &d_prices,
             d_fast_w.as_ref().unwrap(),
@@ -273,7 +273,7 @@ fn main() -> Result<()> {
         let mut s_start = 0;
         while s_start < s_total {
             let ps = ps_tile.min(s_total - s_start);
-            
+
             slow_w_flat.resize(ps * max_ps, 0.0);
             slow_inv.resize(ps, 0.0);
             for j in 0..ps {
@@ -299,7 +299,7 @@ fn main() -> Result<()> {
             d_slow_inv.as_mut().unwrap().copy_from(&slow_inv)?;
             let host_p: Vec<i32> = slow_periods[s_start..s_start + ps].iter().map(|&x| x as i32).collect();
             d_slow_p.as_mut().unwrap().copy_from(&host_p)?;
-            
+
             alma.alma_batch_device(
                 &d_prices,
                 d_slow_w.as_ref().unwrap(),
@@ -312,9 +312,9 @@ fn main() -> Result<()> {
                 d_slow_ma.as_mut().unwrap(),
             ).map_err(|e| anyhow!("{:?}", e))?;
 
-            
+
             let tr = bt_module.get_function("transpose_row_to_tm")?;
-            
+
             if d_fast_ma_tm.as_ref().map(|b| b.len()) != Some(t_len * pf) {
                 d_fast_ma_tm = Some(unsafe { DeviceBuffer::<f32>::uninitialized(t_len * pf)? });
             }
@@ -335,7 +335,7 @@ fn main() -> Result<()> {
                 stream.launch(&tr, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
                 stream.synchronize()?;
             }
-            
+
             if d_slow_ma_tm.as_ref().map(|b| b.len()) != Some(t_len * ps) {
                 d_slow_ma_tm = Some(unsafe { DeviceBuffer::<f32>::uninitialized(t_len * ps)? });
             }
@@ -357,7 +357,7 @@ fn main() -> Result<()> {
                 stream.synchronize()?;
             }
 
-            
+
             let kernel = bt_module.get_function("double_cross_backtest_tm_flex_f32")?;
             let pairs = pf * ps;
             let block_x: u32 = 256;
@@ -371,7 +371,7 @@ fn main() -> Result<()> {
 
             let mut tile_host_buf: Vec<f32> = Vec::new();
             if let Some(ref d_global) = d_metrics_global {
-                
+
                 unsafe {
                     let mut f_ma_tm = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
                     let mut s_ma_tm = d_slow_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
@@ -417,7 +417,7 @@ fn main() -> Result<()> {
                 bt_stream.synchronize()?;
             } else {
                 tile_host_buf.resize(pairs * metrics, 0.0);
-                
+
                 let mut d_tile: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(pairs * metrics)? };
                 unsafe {
                     let mut f_ma_tm = d_fast_ma_tm.as_ref().unwrap().as_device_ptr().as_raw();
@@ -426,8 +426,8 @@ fn main() -> Result<()> {
                     let mut T = t_len as i32;
                     let mut pf_tile_i = pf as i32;
                     let mut ps_tile_i = ps as i32;
-                    let mut pf_total_i = pf as i32; 
-                    let mut ps_total_i = ps as i32; 
+                    let mut pf_total_i = pf as i32;
+                    let mut ps_total_i = ps as i32;
                     let mut f_off = 0i32;
                     let mut s_off = 0i32;
                     let mut f_per = d_fast_p.as_ref().unwrap().as_device_ptr().as_raw();
@@ -463,7 +463,7 @@ fn main() -> Result<()> {
                 }
                 bt_stream.synchronize()?;
                 d_tile.copy_to(&mut tile_host_buf)?;
-                
+
                 for i in 0..pf {
                     for j in 0..ps {
                         let f_idx = f_start + i;
@@ -483,7 +483,7 @@ fn main() -> Result<()> {
         f_start += pf;
     }
 
-    
+
     let mut metrics_host: Vec<f32> = if let Some(d) = d_metrics_global {
         let mut out = vec![0.0f32; total_pairs * metrics];
         d.copy_to(&mut out)?;
@@ -492,7 +492,7 @@ fn main() -> Result<()> {
         host_metrics
     };
 
-    
+
     println!("Computed {} pairs ({} x {}), metrics per pair = {}", total_pairs, f_total, s_total, metrics);
     println!("Example first 5 pairs (total_return, trades, max_dd, mean, std):");
     for k in 0..total_pairs.min(5) {
@@ -519,12 +519,12 @@ fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
 
 fn choose_tiles(fast_tile: usize, slow_tile: usize, t_len: usize, max_pf: usize, max_ps: usize, metrics: usize) -> Result<(usize, usize)> {
     if fast_tile > 0 && slow_tile > 0 { return Ok((fast_tile, slow_tile)); }
-    
+
     let budget = 256usize * 1024 * 1024;
     let bytes_per_fast = t_len * std::mem::size_of::<f32>() + max_pf * std::mem::size_of::<f32>();
     let bytes_per_slow = t_len * std::mem::size_of::<f32>() + max_ps * std::mem::size_of::<f32>();
-    
-    let mut pf = (budget / (bytes_per_fast.max(1))) / 2; 
+
+    let mut pf = (budget / (bytes_per_fast.max(1))) / 2;
     let mut ps = (budget / (bytes_per_slow.max(1))) / 2;
     pf = pf.clamp(1, 4096);
     ps = ps.clamp(1, 4096);

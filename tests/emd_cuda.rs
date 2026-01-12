@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::emd::{
     emd_batch_with_kernel, emd_with_kernel, EmdBatchRange, EmdInput, EmdParams,
 };
@@ -68,7 +66,7 @@ fn emd_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     outputs.middle.buf.copy_to(&mut g_middle)?;
     outputs.lower.buf.copy_to(&mut g_lower)?;
 
-    let tol = 2e-3; 
+    let tol = 2e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         assert!(
             approx_eq(cpu.upperband[idx], g_upper[idx] as f64, tol),
@@ -99,16 +97,15 @@ fn emd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let cols = 8usize;
     let rows = 4096usize;
     let mut mid_tm = vec![f64::NAN; cols * rows];
-    
-    
+
     for s in 0..cols {
         for t in 2..rows {
             let x = (t as f64) + (s as f64) * 0.5;
-            
+
             mid_tm[t * cols + s] = (x * 0.002).sin() + 0.0002 * x;
         }
     }
-    
+
     let period = 18usize;
     let delta = 0.5f64;
     let fraction = 0.1f64;
@@ -139,7 +136,7 @@ fn emd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
 
     let mid_tm_f32: Vec<f32> = mid_tm.iter().map(|&v| v as f32).collect();
-    
+
     let mut first_valids = vec![0i32; cols];
     for s in 0..cols {
         let mut fv = 0i32;

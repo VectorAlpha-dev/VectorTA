@@ -1,28 +1,8 @@
-//! # Chaikin Accumulation/Distribution (AD)
-//!
-//! Volume-based cumulative money flow indicator using high, low, close, and volume.
-//!
-//! ## Parameters
-//! - No adjustable parameters beyond input data.
-//!
-//! ## Returns
-//! - **Ok(AdOutput)** on success, with AD values.
-//! - **Err(AdError)** otherwise.
-//!
-//! ## Developer Notes
-//! - **SIMD status**: AVX2/AVX512 single-series kernels implemented; row dispatch in batch wired to SIMD.
-//!   Preserves streaming accumulation order (no FMA) for tight numeric parity.
-//! - **CUDA status**: Single-series and many-series time-major kernels implemented; Python exposes
-//!   CUDA Array Interface v3 and DLPack v1.x handles with primary-context-safe VRAM lifetimes.
-//! - **Streaming update**: O(1) cumulative sum; no warmup NaNs and scalar path is the reference.
-//! - **Memory posture**: Uses zero-copy helpers (alloc_with_nan_prefix/make_uninit_matrix); CUDA wrappers
-//!   apply checked arithmetic and VRAM preflight (mem_get_info) without changing numerical outputs.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaAd;
+use crate::utilities::data_loader::Candles;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
@@ -169,7 +149,11 @@ pub enum AdError {
     #[error("ad: all values are NaN")]
     AllValuesNaN,
     #[error("ad: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: isize, end: isize, step: isize },
+    InvalidRange {
+        start: isize,
+        end: isize,
+        step: isize,
+    },
     #[error("ad: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("ad: invalid input: {0}")]
@@ -224,16 +208,12 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
-    
-    
-    
+
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
         chosen = Kernel::Avx2;
     }
 
-    
-    
     let mut out = alloc_with_nan_prefix(size, 0);
 
     unsafe {
@@ -249,18 +229,12 @@ pub fn ad_with_kernel(input: &AdInput, kernel: Kernel) -> Result<AdOutput, AdErr
     Ok(AdOutput { values: out })
 }
 
-/// Writes AD results into the provided output slice without allocating.
-///
-/// - Preserves warmup semantics (AD has no NaN warmup; prefix length = 0).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ad_into(input: &AdInput, out: &mut [f64]) -> Result<(), AdError> {
-    
     ad_into_slice(out, input, Kernel::Auto)
 }
 
-/// Write AD values directly to output slice - no allocations
 pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(), AdError> {
     let (high, low, close, volume) = match &input.data {
         AdData::Candles { candles, .. } => (
@@ -277,12 +251,10 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
         } => (*high, *low, *close, *volume),
     };
 
-    
     if high.is_empty() {
         return Err(AdError::EmptyInputData);
     }
 
-    
     if high.len() != low.len() || high.len() != close.len() || high.len() != volume.len() {
         return Err(AdError::DataLengthMismatch {
             high_len: high.len(),
@@ -293,10 +265,12 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
     }
 
     if dst.len() != high.len() {
-        return Err(AdError::OutputLengthMismatch { expected: high.len(), got: dst.len() });
+        return Err(AdError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
+        });
     }
 
-    
     match kern {
         Kernel::Auto => {
             let mut k = detect_best_kernel();
@@ -321,7 +295,6 @@ pub fn ad_into_slice(dst: &mut [f64], input: &AdInput, kern: Kernel) -> Result<(
         _ => ad_scalar(high, low, close, volume, dst),
     }
 
-    
     Ok(())
 }
 
@@ -332,8 +305,6 @@ pub fn ad_scalar(high: &[f64], low: &[f64], close: &[f64], volume: &[f64], out: 
     debug_assert_eq!(high.len(), volume.len());
     debug_assert_eq!(high.len(), out.len());
 
-    
-    
     let mut sum = 0.0f64;
     for ((((&h, &l), &c), &v), o) in high
         .iter()
@@ -373,24 +344,20 @@ unsafe fn ad_avx2_inner(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]
     let mut i = 0usize;
 
     while i + 4 <= n {
-        
         let hv = _mm256_loadu_pd(h.add(i));
         let lv = _mm256_loadu_pd(l.add(i));
         let cv = _mm256_loadu_pd(c.add(i));
         let vv = _mm256_loadu_pd(v.add(i));
 
-        
         let hl = _mm256_sub_pd(hv, lv);
         let num = _mm256_sub_pd(_mm256_sub_pd(cv, lv), _mm256_sub_pd(hv, cv));
         let mfm = _mm256_div_pd(num, hl);
         let mfv_unmasked = _mm256_mul_pd(mfm, vv);
 
-        
         let z = _mm256_set1_pd(0.0);
         let mask = _mm256_cmp_pd(hl, z, _CMP_NEQ_OQ);
         let mfv = _mm256_and_pd(mfv_unmasked, mask);
 
-        
         let mut tmp: [f64; 4] = core::mem::zeroed();
         _mm256_storeu_pd(tmp.as_mut_ptr(), mfv);
         *o.add(i + 0) = {
@@ -413,7 +380,6 @@ unsafe fn ad_avx2_inner(high: &[f64], low: &[f64], close: &[f64], volume: &[f64]
         i += 4;
     }
 
-    
     while i < n {
         let hi = *h.add(i);
         let lo = *l.add(i);
@@ -470,7 +436,6 @@ unsafe fn ad_avx512_inner(
         let mask = _mm512_cmpneq_pd_mask(hl, _mm512_set1_pd(0.0));
         let mfv = _mm512_maskz_mov_pd(mask, mfv_unmasked);
 
-        
         let mut tmp = core::mem::MaybeUninit::<[f64; 8]>::uninit();
         _mm512_storeu_pd(tmp.as_mut_ptr() as *mut f64, mfv);
         let vals = tmp.assume_init();
@@ -595,17 +560,13 @@ fn ad_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| AdError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Use make_uninit_matrix for better poison detection during debugging
-    // AD has no warmup period, so we don't need init_matrix_prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let values = unsafe {
         let ptr = buf_mu.as_mut_ptr() as *mut f64;
         let slice = std::slice::from_raw_parts_mut(ptr, len);
 
-        
         ad_batch_inner_into(data, kern, parallel, slice)?;
 
-        
         Vec::from_raw_parts(ptr, len, len)
     };
     std::mem::forget(buf_mu);
@@ -622,7 +583,6 @@ fn ad_batch_inner_into(
     let rows = data.highs.len();
     let cols = if rows > 0 { data.highs[0].len() } else { 0 };
 
-    
     if data.lows.len() != rows || data.closes.len() != rows || data.volumes.len() != rows {
         return Err(AdError::DataLengthMismatch {
             high_len: data.highs.len(),
@@ -632,7 +592,6 @@ fn ad_batch_inner_into(
         });
     }
 
-    
     for row in 0..rows {
         let h_len = data.highs[row].len();
         let l_len = data.lows[row].len();
@@ -653,10 +612,12 @@ fn ad_batch_inner_into(
         .checked_mul(cols)
         .ok_or_else(|| AdError::InvalidInput("rows*cols overflow".into()))?;
     if out.len() != expected {
-        return Err(AdError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(AdError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
     let mut actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -789,8 +750,6 @@ pub struct AdStream {
 }
 
 impl AdStream {
-    /// Decision note: streaming keeps exact scalar algebra/order (no FMA) and
-    /// short-circuits on zero volume for a fast common-case bailout.
     #[inline(always)]
     pub fn try_new() -> Result<Self, AdError> {
         Ok(Self { sum: 0.0 })
@@ -798,25 +757,19 @@ impl AdStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
-        
         if volume == 0.0 {
             return self.sum;
         }
 
-        
         let hl = high - low;
         if hl != 0.0 {
-            
-            
             let num = (close - low) - (high - close);
 
-            
             self.sum += (num / hl) * volume;
         }
         self.sum
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
@@ -827,7 +780,7 @@ use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct AdDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, 
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -855,13 +808,13 @@ impl AdDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producing stream is synchronized before return; omit the 'stream' key
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        (2, self.device_id as i32) // 2 == kDLCUDA
+        (2, self.device_id as i32)
     }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
@@ -873,7 +826,6 @@ impl AdDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Validate `dl_device` hint against allocation device.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -894,7 +846,6 @@ impl AdDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move ownership of the device buffer into the shared DLPack capsule.
         let buf = self
             .buf
             .take()
@@ -938,7 +889,13 @@ pub fn ad_cuda_dev_py(
         Ok::<_, pyo3::PyErr>((out.buf, out.rows, out.cols, ctx, cuda.device_id()))
     })?;
 
-    Ok(AdDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
+    Ok(AdDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -966,16 +923,23 @@ pub fn ad_cuda_many_series_one_param_dev_py(
     let (buf, r_out, c_out, ctx, dev_id) = py.allow_threads(|| {
         let cuda = CudaAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
-            .ad_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, volume_tm, cols, rows)
+            .ad_many_series_one_param_time_major_dev(
+                high_tm, low_tm, close_tm, volume_tm, cols, rows,
+            )
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         Ok::<_, pyo3::PyErr>((out.buf, out.rows, out.cols, ctx, cuda.device_id()))
     })?;
 
-    Ok(AdDeviceArrayF32Py { buf: Some(buf), rows: r_out, cols: c_out, _ctx: ctx, device_id: dev_id })
+    Ok(AdDeviceArrayF32Py {
+        buf: Some(buf),
+        rows: r_out,
+        cols: c_out,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
-// Batch Builder for parity with Alma
 #[derive(Clone, Debug, Default)]
 pub struct AdBatchBuilder {
     pub kernel: Kernel,
@@ -1013,41 +977,13 @@ impl AdBatchBuilder {
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ad")]
 #[pyo3(signature = (high, low, close, volume, kernel=None))]
-/// Compute the Chaikin Accumulation/Distribution (AD) indicator.
-///
-/// AD is a volume-based cumulative money flow indicator that uses the relationship
-/// between close, high, and low prices to determine the Money Flow Multiplier,
-/// which is then multiplied by volume to create Money Flow Volume.
-///
-/// Parameters:
-/// -----------
-/// high : np.ndarray
-///     High prices array (float64).
-/// low : np.ndarray
-///     Low prices array (float64).
-/// close : np.ndarray
-///     Close prices array (float64).
-/// volume : np.ndarray
-///     Volume array (float64).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of AD values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If input arrays have different lengths or are empty.
+
 pub fn ad_py<'py>(
     py: Python<'py>,
     high: numpy::PyReadonlyArray1<'py, f64>,
@@ -1058,13 +994,11 @@ pub fn ad_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
     let volume_slice = volume.as_slice()?;
 
-    
     if high_slice.is_empty()
         || low_slice.is_empty()
         || close_slice.is_empty()
@@ -1073,10 +1007,8 @@ pub fn ad_py<'py>(
         return Err(PyValueError::new_err("Not enough data"));
     }
 
-    
     let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
-    
     let input = AdInput::from_slices(
         high_slice,
         low_slice,
@@ -1085,12 +1017,10 @@ pub fn ad_py<'py>(
         AdParams::default(),
     );
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| ad_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1109,7 +1039,6 @@ impl AdStreamPy {
         Ok(AdStreamPy { stream })
     }
 
-    /// Updates the stream with new OHLCV data and returns the calculated AD value.
     fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
         self.stream.update(high, low, close, volume)
     }
@@ -1118,29 +1047,7 @@ impl AdStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "ad_batch")]
 #[pyo3(signature = (highs, lows, closes, volumes, kernel=None))]
-/// Compute AD for multiple securities in a single pass.
-///
-/// This function processes multiple securities (rows) efficiently in parallel.
-/// Each row represents a different security's time series data.
-///
-/// Parameters:
-/// -----------
-/// highs : List[np.ndarray]
-///     List of high price arrays, one per security.
-/// lows : List[np.ndarray]
-///     List of low price arrays, one per security.
-/// closes : List[np.ndarray]
-///     List of close price arrays, one per security.
-/// volumes : List[np.ndarray]
-///     List of volume arrays, one per security.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array where each row is a security), 'rows', and 'cols'.
+
 pub fn ad_batch_py<'py>(
     py: Python<'py>,
     highs: &Bound<'py, PyList>,
@@ -1159,7 +1066,6 @@ pub fn ad_batch_py<'py>(
         ));
     }
 
-    
     let mut high_arrays: Vec<PyReadonlyArray1<f64>> = Vec::with_capacity(rows);
     let mut low_arrays: Vec<PyReadonlyArray1<f64>> = Vec::with_capacity(rows);
     let mut close_arrays: Vec<PyReadonlyArray1<f64>> = Vec::with_capacity(rows);
@@ -1170,7 +1076,7 @@ pub fn ad_batch_py<'py>(
         let l = lows.get_item(i)?.extract::<PyReadonlyArray1<f64>>()?;
         let c = closes.get_item(i)?.extract::<PyReadonlyArray1<f64>>()?;
         let v = volumes.get_item(i)?.extract::<PyReadonlyArray1<f64>>()?;
-        
+
         let n = h.len()?;
         if l.len()? != n || c.len()? != n || v.len()? != n {
             return Err(PyValueError::new_err(
@@ -1183,7 +1089,6 @@ pub fn ad_batch_py<'py>(
         volume_arrays.push(v);
     }
 
-    
     let high_slices: Vec<&[f64]> = high_arrays.iter().map(|a| a.as_slice().unwrap()).collect();
     let low_slices: Vec<&[f64]> = low_arrays.iter().map(|a| a.as_slice().unwrap()).collect();
     let close_slices: Vec<&[f64]> = close_arrays.iter().map(|a| a.as_slice().unwrap()).collect();
@@ -1219,12 +1124,12 @@ pub fn ad_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    dict.set_item("rows", rows)?; 
-    dict.set_item("cols", cols)?; 
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_js(
     high: &[f64],
@@ -1238,14 +1143,14 @@ pub fn ad_js(
 
     let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
 
-    let mut output = vec![0.0; high.len()]; 
+    let mut output = vec![0.0; high.len()];
     ad_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_batch_js(
     highs_flat: &[f64],
@@ -1272,7 +1177,6 @@ pub fn ad_batch_js(
         ));
     }
 
-    
     let mut high_slices = Vec::with_capacity(rows);
     let mut low_slices = Vec::with_capacity(rows);
     let mut close_slices = Vec::with_capacity(rows);
@@ -1299,14 +1203,13 @@ pub fn ad_batch_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_batch_metadata_js(rows: usize, cols: usize) -> Vec<f64> {
-    
     vec![rows as f64, cols as f64]
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1315,7 +1218,7 @@ pub fn ad_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1325,7 +1228,7 @@ pub fn ad_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_into(
     high_ptr: *const f64,
@@ -1352,20 +1255,17 @@ pub fn ad_into(
 
         let input = AdInput::from_slices(high, low, close, volume, AdParams::default());
 
-        
         if high_ptr as *const f64 == out_ptr
             || low_ptr as *const f64 == out_ptr
             || close_ptr as *const f64 == out_ptr
             || volume_ptr as *const f64 == out_ptr
         {
-            
             let mut temp = vec![0.0; len];
             ad_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             ad_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1375,10 +1275,10 @@ pub fn ad_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AdBatchJsOutput {
     pub values: Vec<f64>,
@@ -1386,7 +1286,7 @@ pub struct AdBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "ad_batch")]
 pub fn ad_batch_unified_js(
     highs_flat: &[f64],
@@ -1411,7 +1311,6 @@ pub fn ad_batch_unified_js(
         ));
     }
 
-    
     let mut highs = Vec::with_capacity(rows);
     let mut lows = Vec::with_capacity(rows);
     let mut closes = Vec::with_capacity(rows);
@@ -1443,7 +1342,7 @@ pub fn ad_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ad_batch_into(
     highs_ptr: *const f64,
@@ -1491,7 +1390,6 @@ pub fn ad_batch_into(
             volumes: &volumes,
         };
 
-        
         ad_batch_inner_into(&batch, detect_best_batch_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
@@ -1640,7 +1538,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_ad_no_poison(
         test_name: &str,
@@ -1651,21 +1548,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        
         let input = AdInput::with_default_candles(&candles);
         let output = ad_with_kernel(&input, kernel)?;
 
-        
         for (i, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1673,7 +1565,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1681,7 +1572,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1690,7 +1580,6 @@ mod tests {
             }
         }
 
-        
         let slice_input = AdInput::from_slices(
             &candles.high,
             &candles.low,
@@ -1732,7 +1621,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_ad_no_poison(
         _test_name: &str,
@@ -1768,12 +1656,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (10usize..400).prop_flat_map(|len| {
-            
             prop::collection::vec(
-                
                 (
                     1.0f64..1000.0f64,
                     0.0f64..500.0f64,
@@ -1805,7 +1689,6 @@ mod tests {
             })
         });
 
-        
         trait Unzip4<A, B, C, D> {
             fn unzip4(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>);
         }
@@ -1831,16 +1714,12 @@ mod tests {
                 let input =
                     AdInput::from_slices(&highs, &lows, &closes, &volumes, AdParams::default());
 
-                
                 let AdOutput { values: out } = ad_with_kernel(&input, kernel).unwrap();
 
-                
                 let AdOutput { values: ref_out } = ad_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), highs.len(), "Output length mismatch");
 
-                
                 for (i, &val) in out.iter().enumerate() {
                     prop_assert!(
                         !val.is_nan(),
@@ -1849,7 +1728,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1857,7 +1735,6 @@ mod tests {
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y_bits,
@@ -1868,7 +1745,6 @@ mod tests {
                             r
                         );
                     } else {
-                        
                         let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                         prop_assert!(
                             (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1881,8 +1757,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in 1..volumes.len() {
                     if volumes[i] == 0.0 {
                         prop_assert!(
@@ -1893,8 +1767,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in 0..highs.len() {
                     if (highs[i] - lows[i]).abs() < 1e-10 {
                         if i == 0 {
@@ -1913,8 +1785,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let mut expected_ad = 0.0;
                 for i in 0..highs.len() {
                     let hl = highs[i] - lows[i];
@@ -1932,8 +1802,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 if !highs.is_empty() {
                     let hl = highs[0] - lows[0];
                     let expected_first = if hl != 0.0 {
@@ -1949,8 +1817,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 for i in 0..highs.len() {
                     prop_assert!(
                         lows[i] <= closes[i] + 1e-10 && closes[i] <= highs[i] + 1e-10,
@@ -1962,8 +1828,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let all_equal = highs
                     .iter()
                     .zip(lows.iter())
@@ -2008,20 +1872,18 @@ mod tests {
         skip_if_unsupported!(kernel, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let highs: Vec<&[f64]> = vec![&candles.high];
         let lows: Vec<&[f64]> = vec![&candles.low];
         let closes: Vec<&[f64]> = vec![&candles.close];
         let volumes: Vec<&[f64]> = vec![&candles.volume];
 
-        
         let single = ad_with_kernel(
             &AdInput::from_candles(&candles, AdParams::default()),
             kernel,
         )?
         .values;
 
-        
         let batch = AdBatchBuilder::new()
             .kernel(kernel)
             .apply_slices(&highs, &lows, &closes, &volumes)?;
@@ -2047,13 +1909,12 @@ mod tests {
         skip_if_unsupported!(kernel, test);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        
+
         let highs: Vec<&[f64]> = vec![&candles.high, &candles.high, &candles.high];
         let lows: Vec<&[f64]> = vec![&candles.low, &candles.low, &candles.low];
         let closes: Vec<&[f64]> = vec![&candles.close, &candles.close, &candles.close];
         let volumes: Vec<&[f64]> = vec![&candles.volume, &candles.volume, &candles.volume];
 
-        
         let single = ad_with_kernel(
             &AdInput::from_candles(&candles, AdParams::default()),
             kernel,
@@ -2106,7 +1967,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2114,20 +1974,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
-        
         let mut highs: Vec<&[f64]> = vec![];
         let mut lows: Vec<&[f64]> = vec![];
         let mut closes: Vec<&[f64]> = vec![];
         let mut volumes: Vec<&[f64]> = vec![];
 
-        
         highs.push(&c.high);
         lows.push(&c.low);
         closes.push(&c.close);
         volumes.push(&c.volume);
 
-        
         let high_rev: Vec<f64> = c.high.iter().rev().copied().collect();
         let low_rev: Vec<f64> = c.low.iter().rev().copied().collect();
         let close_rev: Vec<f64> = c.close.iter().rev().copied().collect();
@@ -2138,7 +1994,6 @@ mod tests {
         closes.push(&close_rev);
         volumes.push(&volume_rev);
 
-        
         if c.high.len() > 100 {
             highs.push(&c.high[50..]);
             lows.push(&c.low[50..]);
@@ -2150,9 +2005,7 @@ mod tests {
             .kernel(kernel)
             .apply_slices(&highs, &lows, &closes, &volumes)?;
 
-        
         for (idx, &val) in batch.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -2161,7 +2014,6 @@ mod tests {
             let row = idx / batch.cols;
             let col = idx % batch.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2169,7 +2021,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2177,7 +2028,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2189,7 +2039,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2202,10 +2051,9 @@ mod tests {
     gen_batch_tests!(check_batch_multi_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_ad_into_matches_api() {
-        
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -2217,10 +2065,10 @@ mod tests {
         for i in 0..n {
             let i_f = i as f64;
             ts.push(i as i64);
-            let o = 100.0 + (i % 13) as f64 * 0.75; 
+            let o = 100.0 + (i % 13) as f64 * 0.75;
             let l = o - 2.0;
-            let h = o + 2.0 + ((i % 3) as f64) * 0.1; 
-            let c = l + ((i % 5) as f64) * 0.5; 
+            let h = o + 2.0 + ((i % 3) as f64) * 0.1;
+            let c = l + ((i % 5) as f64) * 0.5;
             let v = 1000.0 + 10.0 * i_f;
             open.push(o);
             low.push(l);
@@ -2229,24 +2077,33 @@ mod tests {
             volume.push(v);
         }
 
-        let candles = Candles::new(ts, open, high.clone(), low.clone(), close.clone(), volume.clone());
+        let candles = Candles::new(
+            ts,
+            open,
+            high.clone(),
+            low.clone(),
+            close.clone(),
+            volume.clone(),
+        );
         let input = AdInput::with_default_candles(&candles);
 
-        
         let baseline = ad(&input).expect("ad() should succeed").values;
 
-        
         let mut out = vec![0.0; baseline.len()];
         ad_into(&input, &mut out).expect("ad_into() should succeed");
 
         assert_eq!(out.len(), baseline.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
 
-        for (i, (a, b)) in out.iter().copied().zip(baseline.iter().copied()).enumerate() {
+        for (i, (a, b)) in out
+            .iter()
+            .copied()
+            .zip(baseline.iter().copied())
+            .enumerate()
+        {
             assert!(
                 eq_or_both_nan(a, b),
                 "ad_into parity failed at index {}: {} vs {}",

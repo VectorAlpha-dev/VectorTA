@@ -1,28 +1,15 @@
-//! CUDA scaffolding for the TEMA (Triple Exponential Moving Average) kernels.
-//!
-//! ALMA-parity wrapper surface:
-//! - PTX loaded with DetermineTargetFromContext and OptLevel O2 (with fallbacks)
-//! - NON_BLOCKING stream, VRAM estimates via mem_get_info, ~64MB headroom
-//! - Policy enums and one-shot BENCH_DEBUG logging of selected kernels
-//! - Batch (one series × many params) and time-major many-series × one param
-//! - Chunk extremely large grids to avoid launch dimension limits
-//!
-//! Math category: recurrence/IIR (no shared host precomputation). The kernels
-//! execute the triple-EMA recurrence per row/series entirely on device while the
-//! price series remains resident in VRAM.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
 use crate::indicators::moving_averages::tema::{TemaBatchRange, TemaParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::error::CudaError;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
@@ -39,18 +26,14 @@ fn env_warps_per_block() -> u32 {
         .unwrap_or(4)
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
-    
     Auto,
     Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
-    
     Auto,
     OneD { block_x: u32 },
 }
@@ -70,7 +53,6 @@ impl Default for CudaTemaPolicy {
     }
 }
 
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -85,11 +67,27 @@ pub enum ManySeriesKernelSelected {
 pub enum CudaTemaError {
     Cuda(CudaError),
     InvalidInput(String),
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    MissingKernelSymbol { name: &'static str },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
     InvalidPolicy(&'static str),
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
-    DeviceMismatch { buf: u32, current: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 
@@ -98,14 +96,27 @@ impl fmt::Display for CudaTemaError {
         match self {
             CudaTemaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaTemaError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaTemaError::OutOfMemory { required, free, headroom } => write!(
+            CudaTemaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "Out of memory: required={} bytes (free={}, headroom={})",
                 required, free, headroom
             ),
-            CudaTemaError::MissingKernelSymbol { name } => write!(f, "Missing kernel symbol: {}", name),
+            CudaTemaError::MissingKernelSymbol { name } => {
+                write!(f, "Missing kernel symbol: {}", name)
+            }
             CudaTemaError::InvalidPolicy(s) => write!(f, "Invalid policy: {}", s),
-            CudaTemaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaTemaError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "Launch config too large: grid=({}, {}, {}), block=({}, {}, {})",
                 gx, gy, gz, bx, by, bz
@@ -124,7 +135,9 @@ impl std::error::Error for CudaTemaError {}
 
 impl From<CudaError> for CudaTemaError {
     #[inline]
-    fn from(e: CudaError) -> Self { CudaTemaError::Cuda(e) }
+    fn from(e: CudaError) -> Self {
+        CudaTemaError::Cuda(e)
+    }
 }
 
 pub struct CudaTema {
@@ -138,7 +151,6 @@ pub struct CudaTema {
     debug_batch_logged: bool,
     debug_many_logged: bool,
 
-    // Warp-parallel launch tuning and device limits
     warps_per_block: u32,
     max_grid_x: u32,
 }
@@ -154,7 +166,7 @@ impl CudaTema {
         let context = Arc::new(Context::new(device).map_err(CudaTemaError::Cuda)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tema_kernel.ptx"));
-        // JIT to current context target; let optimization default to O4.
+
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
@@ -186,7 +198,6 @@ impl CudaTema {
         })
     }
 
-    /// Create with explicit policy (useful for tests/benches)
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaTemaPolicy,
@@ -293,7 +304,6 @@ impl CudaTema {
 
     #[inline]
     fn chunk_items_by_grid_x(&self, items: usize) -> impl Iterator<Item = (usize, usize)> {
-        // Batch kernel maps 1 combo per warp, so each block covers `warps_per_block` combos.
         let per_block = self.warps_per_block as usize;
         let max_items_per_launch = (self.max_grid_x as usize).saturating_mul(per_block).max(1);
         (0..items).step_by(max_items_per_launch).map(move |start| {
@@ -477,11 +487,15 @@ impl CudaTema {
             .checked_add(periods_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety margin
+        let headroom = 64 * 1024 * 1024;
 
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
-            return Err(CudaTemaError::OutOfMemory { required, free, headroom });
+            return Err(CudaTemaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }
@@ -489,13 +503,10 @@ impl CudaTema {
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&inputs.periods, &self.stream) }
             .map_err(CudaTemaError::Cuda)?;
         let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total_elems) }
-                .map_err(CudaTemaError::Cuda)?;
+            unsafe { DeviceBuffer::uninitialized(total_elems) }.map_err(CudaTemaError::Cuda)?;
 
-        // Hint the driver to persist prices[] in L2 across blocks (best effort)
         self.try_enable_persisting_l2(d_prices.as_device_ptr().as_raw(), prices_bytes);
 
-        // Chunk by grid.x capacity when needed
         for (start, len) in self.chunk_items_by_grid_x(n_combos) {
             let periods_ptr_raw =
                 d_periods.as_device_ptr().as_raw() + (start * core::mem::size_of::<i32>()) as u64;
@@ -512,7 +523,6 @@ impl CudaTema {
             )?;
         }
 
-        // Ensure kernels complete before returning device buffer to callers that may use copy_to
         self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
 
         Ok(DeviceArrayF32 {
@@ -552,15 +562,20 @@ impl CudaTema {
             .checked_add(first_valid_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaTemaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 32 * 1024 * 1024; // 32MB safety margin
+        let headroom = 32 * 1024 * 1024;
 
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
-            return Err(CudaTemaError::OutOfMemory { required, free, headroom });
+            return Err(CudaTemaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32).map_err(CudaTemaError::Cuda)?;
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).map_err(CudaTemaError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids).map_err(CudaTemaError::Cuda)?;
         let mut d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(prices_tm_f32.len()) }
                 .map_err(CudaTemaError::Cuda)?;
@@ -576,7 +591,6 @@ impl CudaTema {
 
         self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
 
-        // Ensure kernels complete before returning device buffer
         self.stream.synchronize().map_err(CudaTemaError::Cuda)?;
 
         Ok(DeviceArrayF32 {
@@ -614,10 +628,11 @@ impl CudaTema {
         first_valid: usize,
         out_ptr_raw: u64,
     ) -> Result<(), CudaTemaError> {
-        let func = self
-            .module
-            .get_function("tema_batch_f32")
-            .map_err(|_| CudaTemaError::MissingKernelSymbol { name: "tema_batch_f32" })?;
+        let func = self.module.get_function("tema_batch_f32").map_err(|_| {
+            CudaTemaError::MissingKernelSymbol {
+                name: "tema_batch_f32",
+            }
+        })?;
 
         let (grid, block, block_x) = self.batch_launch_dims(n_combos);
         unsafe {
@@ -660,7 +675,9 @@ impl CudaTema {
         let func = self
             .module
             .get_function("tema_multi_series_one_param_f32")
-            .map_err(|_| CudaTemaError::MissingKernelSymbol { name: "tema_multi_series_one_param_f32" })?;
+            .map_err(|_| CudaTemaError::MissingKernelSymbol {
+                name: "tema_multi_series_one_param_f32",
+            })?;
 
         let (grid, block, block_x) = self.warp_launch_dims(num_series);
         unsafe {
@@ -803,8 +820,6 @@ impl CudaTema {
     }
 }
 
-// ---------- Bench profiles ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -885,7 +900,6 @@ pub mod benches {
     }
 }
 
-// --- L2 persistence hint (enabled by default) ---
 impl CudaTema {
     fn try_enable_persisting_l2(&self, base_dev_ptr: u64, bytes: usize) {
         unsafe {
@@ -898,7 +912,6 @@ impl CudaTema {
                 CUstreamAttrValue_v1 as CUstreamAttrValue,
             };
 
-            // Query device max window size and clamp to requested bytes
             let mut max_win_i32: i32 = 0;
             if let Ok(dev) = CuDevice::get_device(self.device_id) {
                 let _ = cuDeviceGetAttribute(
@@ -912,10 +925,8 @@ impl CudaTema {
                 return;
             }
 
-            // Best-effort set-aside for L2 persistence
             let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_bytes);
 
-            // Configure the stream access policy window
             let mut val: CUstreamAttrValue = std::mem::zeroed();
             val.accessPolicyWindow = CUaccessPolicyWindow {
                 base_ptr: base_dev_ptr as *mut std::ffi::c_void,
@@ -947,7 +958,9 @@ struct ManySeriesInputs {
 fn expand_grid_tema(range: &TemaBatchRange) -> Result<Vec<TemaParams>, CudaTemaError> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return Ok(vec![TemaParams { period: Some(start) }]);
+        return Ok(vec![TemaParams {
+            period: Some(start),
+        }]);
     }
     let out: Vec<usize> = if start <= end {
         (start..=end).step_by(step).collect()
@@ -956,13 +969,22 @@ fn expand_grid_tema(range: &TemaBatchRange) -> Result<Vec<TemaParams>, CudaTemaE
         let mut cur = start;
         while cur >= end {
             v.push(cur);
-            if let Some(next) = cur.checked_sub(step) { cur = next; } else { break; }
-            if cur < end { break; }
+            if let Some(next) = cur.checked_sub(step) {
+                cur = next;
+            } else {
+                break;
+            }
+            if cur < end {
+                break;
+            }
         }
         v
     };
     if out.is_empty() {
         return Err(CudaTemaError::InvalidInput("invalid period range".into()));
     }
-    Ok(out.into_iter().map(|p| TemaParams { period: Some(p) }).collect())
+    Ok(out
+        .into_iter()
+        .map(|p| TemaParams { period: Some(p) })
+        .collect())
 }

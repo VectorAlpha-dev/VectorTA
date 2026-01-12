@@ -1,29 +1,3 @@
-//! # Rate of Change Percentage (ROCP)
-//!
-//! Calculates relative price change as (current - past) / past without the 100x factor.
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//! - **period**: Lookback window (default: 10)
-//!
-//! ## Returns
-//! - `Vec<f64>` - ROCP values centered at 0, matching input length
-//!
-//! ## Developer Status
-//! - SIMD implemented (AVX2/AVX512) but disabled by default: vector f64 division
-//!   underperforms vs safe scalar on current targets at realistic sizes (10k–100k).
-//!   `Kernel::Auto` short-circuits to `Scalar`/`ScalarBatch`. Explicit AVX benches remain
-//!   for future exploration and correctness.
-//! - Row-specific batch optimization enabled: when rows >= 4, precompute reciprocals
-//!   once and reuse across rows (compute `c * inv(prev) - 1`). This removes a divide
-//!   per output for additional rows while preserving scalar numerics in the single-series path.
-//! - Streaming: O(1) – ring buffer with branchless wrap; output uses
-//!   a reciprocal ring and FMA (mul_add) on the critical path for
-//!   lower latency while preserving scalar correctness.
-//! - Memory/interop: uses `alloc_with_nan_prefix`/`make_uninit_matrix` for CPU and a CUDA
-//!   wrapper that returns VRAM handles. Python exposes CAI v3 + DLPack v1.x via the shared
-//!   `DeviceArrayF32Py` type; numerical outputs match scalar/CPU paths.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -46,11 +20,11 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for RocpInput<'a> {
@@ -78,7 +52,10 @@ pub struct RocpOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RocpParams {
     pub period: Option<usize>,
 }
@@ -194,7 +171,11 @@ pub enum RocpError {
     #[error("rocp: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("rocp: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("rocp: Invalid kernel type for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -204,12 +185,7 @@ pub fn rocp(input: &RocpInput) -> Result<RocpOutput, RocpError> {
     rocp_with_kernel(input, Kernel::Auto)
 }
 
-/// Write ROCP values directly into the provided output slice without allocations.
-///
-/// - Preserves NaN warmup prefix exactly as the Vec-returning API (first + period entries are NaN).
-/// - The output slice length must equal the input data length.
-/// - Uses `Kernel::Auto` for dispatch (short-circuits to scalar for ROCP).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn rocp_into(input: &RocpInput, out: &mut [f64]) -> Result<(), RocpError> {
     rocp_into_slice(out, input, Kernel::Auto)
@@ -247,8 +223,6 @@ pub fn rocp_with_kernel(input: &RocpInput, kernel: Kernel) -> Result<RocpOutput,
 
     let mut out = alloc_with_nan_prefix(len, first + period);
 
-    
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -300,10 +274,12 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
     }
 
     if dst.len() != len {
-        return Err(RocpError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(RocpError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
-    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -320,7 +296,6 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
         }
     }
 
-    
     for v in &mut dst[..(first + period)] {
         *v = f64::NAN;
     }
@@ -330,19 +305,16 @@ pub fn rocp_into_slice(dst: &mut [f64], input: &RocpInput, kern: Kernel) -> Resu
 
 #[inline]
 pub fn rocp_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    
     let start = first_val + period;
     let n = data.len();
     if start >= n {
         return;
     }
 
-    
     let curr = &data[start..];
     let prev = &data[(start - period)..(n - period)];
     let dst = &mut out[start..];
 
-    
     for ((&c, &p), o) in curr.iter().zip(prev.iter()).zip(dst.iter_mut()) {
         *o = (c - p) / p;
     }
@@ -433,10 +405,9 @@ pub struct RocpStream {
     period: usize,
     buffer: Vec<f64>,
     head: usize,
-    /// Warmup counter: None for first (period-1) updates; on the period-th
-    /// update we return Some(NaN) due to initial NaN in the ring.
+
     warmup: usize,
-    /// Reciprocal ring to move division off the output path.
+
     inv: Vec<f64>,
 }
 
@@ -463,30 +434,25 @@ impl RocpStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let idx = self.head;
 
-        
         let prev = self.buffer[idx];
         let inv_prev = self.inv[idx];
 
-        
         self.buffer[idx] = value;
-        
+
         self.inv[idx] = 1.0f64 / value;
 
-        
         let next = idx + 1;
         self.head = if next == self.period { 0 } else { next };
 
-        
         if self.warmup > 1 {
             self.warmup -= 1;
             return None;
         } else if self.warmup == 1 {
             self.warmup = 0;
-            
+
             return Some(value.mul_add(inv_prev, -1.0));
         }
 
-        
         Some(value.mul_add(inv_prev, -1.0))
     }
 }
@@ -555,7 +521,6 @@ pub fn rocp_batch_with_kernel(
     sweep: &RocpBatchRange,
     k: Kernel,
 ) -> Result<RocpBatchOutput, RocpError> {
-    
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -679,33 +644,26 @@ fn rocp_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    let _ = rows
-        .checked_mul(cols)
-        .ok_or(RocpError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let _ = rows.checked_mul(cols).ok_or(RocpError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
-    
     let use_inv = rows >= 4;
     let inv: Option<Vec<f64>> = if use_inv {
         let mut v = Vec::with_capacity(cols);
-        
+
         for &x in data.iter() {
             v.push(1.0f64 / x);
         }
@@ -717,7 +675,6 @@ fn rocp_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         if let (Some(inv), Kernel::Scalar) = (&inv, kern) {
-            
             rocp_row_scalar_with_inv(data, first, period, out_row, inv);
         } else {
             match kern {
@@ -751,7 +708,6 @@ fn rocp_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -798,7 +754,6 @@ fn rocp_row_scalar_with_inv(
         return;
     }
 
-    
     let curr = &data[start..];
     let inv_prev = &inv[(start - period)..(n - period)];
     let dst = &mut out[start..];
@@ -885,8 +840,6 @@ unsafe fn rocp_row_avx512_impl(data: &[f64], first: usize, period: usize, out: &
     }
 }
 
-
-
 #[inline(always)]
 pub fn rocp_batch_inner_into(
     data: &[f64],
@@ -921,13 +874,11 @@ pub fn rocp_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(RocpError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(RocpError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(RocpError::OutputLengthMismatch {
             expected,
@@ -935,17 +886,13 @@ pub fn rocp_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
-    
     let use_inv = combos.len() >= 4;
     let inv: Option<Vec<f64>> = if use_inv {
         let mut v = Vec::with_capacity(cols);
@@ -976,7 +923,6 @@ pub fn rocp_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1123,7 +1069,6 @@ pub fn register_rocp_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     Ok(())
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaRocp;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1148,8 +1093,7 @@ pub fn rocp_cuda_batch_dev_py<'py>(
     };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .rocp_batch_dev(d, &sweep)
+        cuda.rocp_batch_dev(d, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     let dict = PyDict::new(py);
@@ -1182,14 +1126,13 @@ pub fn rocp_cuda_many_series_one_param_dev_py(
     let tm = data_tm_f32.as_slice()?;
     let inner = py.allow_threads(|| {
         let cuda = CudaRocp::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .rocp_many_series_one_param_time_major_dev(tm, cols, rows, period)
+        cuda.rocp_many_series_one_param_time_major_dev(tm, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok(make_device_array_py(device_id, inner)?)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocp_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = RocpParams {
@@ -1204,7 +1147,7 @@ pub fn rocp_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocp_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1213,7 +1156,7 @@ pub fn rocp_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocp_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1223,7 +1166,7 @@ pub fn rocp_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocp_into(
     in_ptr: *const f64,
@@ -1248,7 +1191,6 @@ pub fn rocp_into(
         let input = RocpInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing case
             let mut temp = vec![0.0; len];
             rocp_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1263,13 +1205,13 @@ pub fn rocp_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RocpBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RocpBatchJsOutput {
     pub values: Vec<f64>,
@@ -1278,7 +1220,7 @@ pub struct RocpBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = rocp_batch)]
 pub fn rocp_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: RocpBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1302,7 +1244,7 @@ pub fn rocp_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocp_batch_into(
     in_ptr: *const f64,
@@ -1323,8 +1265,7 @@ pub fn rocp_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total_size = rows
             .checked_mul(len)
@@ -1527,25 +1468,21 @@ mod tests {
 
     #[test]
     fn test_rocp_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use existing CSV input data for parity.
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let params = RocpParams { period: Some(10) };
         let input = RocpInput::from_candles(&candles, "close", params);
 
-        // Baseline via Vec-returning API
         let baseline = rocp(&input)?.values;
 
-        // Preallocate output and call the new no-allocation API
         let mut out = vec![0.0; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             rocp_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // When wasm feature is on, native rocp_into is not built; use into_slice parity
             rocp_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1554,7 +1491,11 @@ mod tests {
             let a = baseline[i];
             let b = out[i];
             let equal = (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12;
-            assert!(equal, "ROCP parity mismatch at index {}: api={} into={}", i, a, b);
+            assert!(
+                equal,
+                "ROCP parity mismatch at index {}: api={} into={}",
+                i, a, b
+            );
         }
 
         Ok(())
@@ -1623,14 +1564,14 @@ mod tests {
 
         let test_params = vec![
             RocpParams::default(),
-            RocpParams { period: Some(2) },   // minimum
-            RocpParams { period: Some(5) },   // small
-            RocpParams { period: Some(7) },   // small
-            RocpParams { period: Some(9) },   // typical
-            RocpParams { period: Some(14) },  // medium
-            RocpParams { period: Some(20) },  // medium
-            RocpParams { period: Some(50) },  // large
-            RocpParams { period: Some(100) }, // very large
+            RocpParams { period: Some(2) },
+            RocpParams { period: Some(5) },
+            RocpParams { period: Some(7) },
+            RocpParams { period: Some(9) },
+            RocpParams { period: Some(14) },
+            RocpParams { period: Some(20) },
+            RocpParams { period: Some(50) },
+            RocpParams { period: Some(100) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1777,13 +1718,13 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),   // Small periods
-            (5, 25, 5),   // Medium periods
-            (30, 60, 15), // Large periods
-            (2, 5, 1),    // Dense small range
-            (10, 50, 10), // Wide range
-            (7, 21, 7),   // Weekly periods
-            (14, 28, 14), // Bi-weekly periods
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 50, 10),
+            (7, 21, 7),
+            (14, 28, 14),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1893,8 +1834,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate random period values and corresponding data vectors
-        // Use non-negative values to simulate real financial data (prices >= 0)
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1912,28 +1851,22 @@ mod tests {
                 };
                 let input = RocpInput::from_slice(&data, params);
 
-                // Calculate ROCP with the specified kernel
                 let RocpOutput { values: out } = rocp_with_kernel(&input, kernel).unwrap();
 
-                // Calculate reference with scalar kernel for consistency check
                 let RocpOutput { values: ref_out } =
                     rocp_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Find first valid index
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-                // Verify outputs starting from warmup period
                 for i in (first_valid + period)..data.len() {
                     let prev_value = data[i - period];
                     let curr_value = data[i];
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Mathematical correctness: ROCP = (current - previous) / previous
                     if prev_value != 0.0 && prev_value.is_finite() && curr_value.is_finite() {
                         let expected = (curr_value - prev_value) / prev_value;
 
-                        // Check mathematical correctness (with tolerance for floating-point)
                         prop_assert!(
                             y.is_nan() || (y - expected).abs() <= 1e-10,
                             "idx {}: ROCP mismatch. Got {}, expected {}, curr={}, prev={}",
@@ -1944,7 +1877,6 @@ mod tests {
                             prev_value
                         );
                     } else if prev_value == 0.0 {
-                        // Division by zero should produce infinity or NaN
                         prop_assert!(
                             !y.is_finite(),
                             "idx {}: Expected non-finite value when dividing by zero, got {}",
@@ -1953,7 +1885,6 @@ mod tests {
                         );
                     }
 
-                    // Special case: constant data (using relative difference for better scale handling)
                     let is_constant = data[first_valid..=i].windows(2).all(|w| {
                         let max_val = w[0].max(w[1]);
                         if max_val > 0.0 {
@@ -1964,7 +1895,6 @@ mod tests {
                     });
 
                     if is_constant && data[first_valid].is_finite() && data[first_valid] != 0.0 {
-                        // If all values are the same, ROCP should be 0
                         prop_assert!(
                             y.abs() <= 1e-10,
                             "Constant data should produce ROCP=0, got {} at idx {}",
@@ -1973,37 +1903,32 @@ mod tests {
                         );
                     }
 
-                    // Special case: monotonic sequences
-                    // For strictly increasing data, ROCP should be positive
                     let is_increasing = i >= first_valid + period
                         && (first_valid..=i).all(|j| j == first_valid || data[j] > data[j - 1]);
 
                     if is_increasing && y.is_finite() {
                         prop_assert!(
-							y > -1e-10,  // Allow small negative due to floating point
+							y > -1e-10,
 							"Strictly increasing data should produce positive ROCP, got {} at idx {}",
 							y, i
 						);
                     }
 
-                    // For strictly decreasing data, ROCP should be negative
                     let is_decreasing = i >= first_valid + period
                         && (first_valid..=i).all(|j| j == first_valid || data[j] < data[j - 1]);
 
                     if is_decreasing && y.is_finite() {
                         prop_assert!(
-							y < 1e-10,  // Allow small positive due to floating point
+							y < 1e-10,
 							"Strictly decreasing data should produce negative ROCP, got {} at idx {}",
 							y, i
 						);
                     }
 
-                    // Kernel consistency check
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
                     if !y.is_finite() || !r.is_finite() {
-                        // NaN/Inf should match exactly
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
                             "finite/NaN mismatch idx {}: {} vs {}",
@@ -2014,7 +1939,6 @@ mod tests {
                         continue;
                     }
 
-                    // ULP comparison for floating-point accuracy
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
                     prop_assert!(
@@ -2027,7 +1951,6 @@ mod tests {
                     );
                 }
 
-                // Verify warmup period contains NaN
                 for i in 0..(first_valid + period).min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),

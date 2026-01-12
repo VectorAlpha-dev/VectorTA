@@ -1,4 +1,4 @@
-//! Test program to measure Rust-only performance for comparison
+
 
 use my_project::indicators::moving_averages::alma::{alma_with_kernel, AlmaInput, AlmaParams};
 use my_project::indicators::moving_averages::sma::{sma_with_kernel, SmaInput, SmaParams};
@@ -14,7 +14,7 @@ fn main() {
     let data = &candles.close;
     println!("Loaded {} data points\n", data.len());
 
-    
+
     for _ in 0..10 {
         let _ = sma_with_kernel(
             &SmaInput::from_slice(data, SmaParams { period: Some(14) }),
@@ -33,7 +33,7 @@ fn main() {
         );
     }
 
-    
+
     println!("Benchmarking Rust-only performance...");
     println!("{:=<60}", "=");
 
@@ -53,7 +53,7 @@ fn main() {
         sma_avg.as_secs_f64() * 1000.0
     );
 
-    
+
     let mut alma_times = Vec::new();
     for _ in 0..50 {
         let start = Instant::now();
@@ -77,11 +77,11 @@ fn main() {
         alma_avg.as_secs_f64() * 1000.0
     );
 
-    
+
     println!("\nTesting ALMA with explicit kernels:");
     println!("{}", "-".repeat(40));
 
-    
+
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     {
         if std::arch::is_x86_feature_detected!("avx512f") {
@@ -127,7 +127,7 @@ fn main() {
         }
     }
 
-    
+
     let mut times = Vec::new();
     for _ in 0..50 {
         let start = Instant::now();

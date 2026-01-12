@@ -1,27 +1,3 @@
-//! # Ultimate Oscillator (ULTOSC)
-//!
-//! Combines short, medium, and long time periods into a single oscillator value,
-//! blending market momentum over multiple horizons with weighted averages (4:2:1 ratio).
-//!
-//! ## Parameters
-//! - **timeperiod1**: Short window for fast momentum (default: 7)
-//! - **timeperiod2**: Medium window for intermediate momentum (default: 14)
-//! - **timeperiod3**: Long window for slow momentum (default: 28)
-//!
-//! ## Inputs
-//! - High, low, and close price series (or candles)
-//! - All series must have the same length
-//!
-//! ## Returns
-//! - **values**: Ultimate Oscillator values as `Vec<f64>` (length matches input, range 0-100)
-//!
-//! ## Developer Notes
-//! - Decision: SIMD kept as stubs delegating to scalar. ULTOSC has tight per-step recurrences (prev_close, rolling sums),
-//!   so across-time SIMD shows negligible gains on realistic sizes. Scalar is the reference path.
-//! - Scalar path: single-pass, branch-light ring with zeroed evictions; >5% faster vs prior (bench: ~387µs → ~265µs on 100k).
-//! - Batch: row-specific optimization via shared prefix sums for CMTL/TR; minor micro-tuning uses reciprocal multiplies.
-//! - CUDA: prefix-sum kernels for batch and many-series paths are enabled; wrappers use typed errors, VRAM checks, and CAI v3/DLPack handles without changing scalar numerical outputs.
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -33,9 +9,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -63,7 +39,11 @@ mod ultosc_python_cuda_handle {
     use std::ffi::c_void;
     use std::sync::Arc;
 
-    #[pyclass(module = "ta_indicators.cuda", unsendable, name = "UltOscDeviceArrayF32Py")]
+    #[pyclass(
+        module = "ta_indicators.cuda",
+        unsendable,
+        name = "UltOscDeviceArrayF32Py"
+    )]
     pub struct DeviceArrayF32Py {
         pub(crate) buf: Option<DeviceBuffer<f32>>,
         pub(crate) rows: usize,
@@ -123,9 +103,7 @@ mod ultosc_python_cuda_handle {
                                 "device copy not implemented for __dlpack__",
                             ));
                         } else {
-                            return Err(PyValueError::new_err(
-                                "dl_device mismatch for __dlpack__",
-                            ));
+                            return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                         }
                     }
                 }
@@ -149,7 +127,6 @@ mod ultosc_python_cuda_handle {
 #[cfg(all(feature = "python", feature = "cuda"))]
 use self::ultosc_python_cuda_handle::UltOscDeviceArrayF32Py;
 
-// --- DATA STRUCTS ---
 #[derive(Debug, Clone)]
 pub enum UltOscData<'a> {
     Candles {
@@ -171,7 +148,10 @@ pub struct UltOscOutput {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct UltOscParams {
     pub timeperiod1: Option<usize>,
     pub timeperiod2: Option<usize>,
@@ -251,7 +231,6 @@ impl<'a> UltOscInput<'a> {
     }
 }
 
-// --- BUILDER ---
 #[derive(Copy, Clone, Debug)]
 pub struct UltOscBuilder {
     timeperiod1: Option<usize>,
@@ -323,7 +302,6 @@ impl UltOscBuilder {
     }
 }
 
-// --- ERROR ---
 #[derive(Debug, Error)]
 pub enum UltOscError {
     #[error("ultosc: Input data slice is empty.")]
@@ -339,12 +317,15 @@ pub enum UltOscError {
     #[error("ultosc: Inconsistent input lengths")]
     InconsistentLengths,
     #[error("ultosc: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("ultosc: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
 
-// --- HELPER FUNCTIONS ---
 #[inline]
 fn ultosc_prepare<'a>(
     input: &'a UltOscInput,
@@ -439,7 +420,6 @@ fn ultosc_prepare<'a>(
     ))
 }
 
-
 #[inline]
 pub fn ultosc(input: &UltOscInput) -> Result<UltOscOutput, UltOscError> {
     ultosc_with_kernel(input, Kernel::Auto)
@@ -459,13 +439,7 @@ pub fn ultosc_with_kernel(
     Ok(UltOscOutput { values: out })
 }
 
-/// Compute Ultimate Oscillator into a caller-provided buffer (no allocations).
-///
-/// - Preserves NaN warmup prefix exactly like the Vec-returning API
-///   (quiet NaNs via `0x7ff8_0000_0000_0000`).
-/// - `out.len()` must equal the input length, otherwise returns this module's
-///   existing error variant.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn ultosc_into(input: &UltOscInput, out: &mut [f64]) -> Result<(), UltOscError> {
     let ((high, low, close), p1, p2, p3, first_valid, start_idx, chosen) =
         ultosc_prepare(input, Kernel::Auto)?;
@@ -477,14 +451,12 @@ pub fn ultosc_into(input: &UltOscInput, out: &mut [f64]) -> Result<(), UltOscErr
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
     let warm = start_idx.min(out.len());
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warm] {
         *v = qnan;
     }
 
-    // Compute the remainder directly into the destination buffer.
     ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, out);
 
     Ok(())
@@ -520,7 +492,6 @@ fn ultosc_compute_into(
     }
 }
 
-// --- KERNEL IMPL ---
 #[inline(always)]
 pub unsafe fn ultosc_scalar(
     high: &[f64],
@@ -535,11 +506,9 @@ pub unsafe fn ultosc_scalar(
     let len = high.len();
     let max_period = p1.max(p2).max(p3);
 
-    // Allocate temporary buffers on stack for small periods, heap for large
     const STACK_THRESHOLD: usize = 256;
 
     if max_period <= STACK_THRESHOLD {
-        // Stack allocation for small periods
         let mut cmtl_stack = [0.0_f64; STACK_THRESHOLD];
         let mut tr_stack = [0.0_f64; STACK_THRESHOLD];
         let cmtl_buf = &mut cmtl_stack[..max_period];
@@ -558,7 +527,6 @@ pub unsafe fn ultosc_scalar(
             tr_buf,
         );
     } else {
-        // Heap allocation for large periods
         let mut cmtl_vec = vec![0.0; max_period];
         let mut tr_vec = vec![0.0; max_period];
 
@@ -598,16 +566,13 @@ unsafe fn ultosc_scalar_impl(
     let max_p = p1.max(p2).max(p3);
     debug_assert!(max_p > 0 && max_p <= len);
 
-    // Start computing outputs when the largest window is filled
     let start_idx = first_valid + max_p - 1;
 
-    // Weights: 100 * (4*BP1/TR1 + 2*BP2/TR2 + 1*BP3/TR3) / 7
     let inv7_100: f64 = 100.0f64 / 7.0f64;
     let w1: f64 = inv7_100 * 4.0f64;
     let w2: f64 = inv7_100 * 2.0f64;
     let w3: f64 = inv7_100 * 1.0f64;
 
-    // Rolling sums for the three windows
     let mut sum1_a = 0.0f64;
     let mut sum1_b = 0.0f64;
     let mut sum2_a = 0.0f64;
@@ -615,11 +580,9 @@ unsafe fn ultosc_scalar_impl(
     let mut sum3_a = 0.0f64;
     let mut sum3_b = 0.0f64;
 
-    // Ring buffer index and element count processed since first_valid
     let mut buf_idx: usize = 0;
     let mut count: usize = 0;
 
-    // Single-pass loop from first_valid to end
     let mut i = first_valid;
     while i < len {
         let hi = *high.get_unchecked(i);
@@ -627,22 +590,11 @@ unsafe fn ultosc_scalar_impl(
         let ci = *close.get_unchecked(i);
         let prev_c = *close.get_unchecked(i - 1);
 
-        // Valid if all inputs for this step are non-NaN
         let valid = !(hi.is_nan() | lo.is_nan() | ci.is_nan() | prev_c.is_nan());
 
-        // Compute today's CMTL (close - true low) and True Range.
-        
         let (c_new, t_new) = if valid {
-            
             let tl = if lo < prev_c { lo } else { prev_c };
 
-            
-            
-            
-            
-            
-            
-            
             let th = if hi > prev_c { hi } else { prev_c };
             let tr = th - tl;
             (ci - tl, tr)
@@ -650,7 +602,6 @@ unsafe fn ultosc_scalar_impl(
             (0.0, 0.0)
         };
 
-        
         if count >= p1 {
             let mut old_idx1 = buf_idx + max_p - p1;
             if old_idx1 >= max_p {
@@ -676,11 +627,9 @@ unsafe fn ultosc_scalar_impl(
             sum3_b -= *tr_buf.get_unchecked(old_idx3);
         }
 
-        
         *cmtl_buf.get_unchecked_mut(buf_idx) = c_new;
         *tr_buf.get_unchecked_mut(buf_idx) = t_new;
 
-        
         if valid {
             sum1_a += c_new;
             sum1_b += t_new;
@@ -690,10 +639,8 @@ unsafe fn ultosc_scalar_impl(
             sum3_b += t_new;
         }
 
-        
         count += 1;
         if i >= start_idx {
-            
             let t1 = if sum1_b != 0.0 {
                 sum1_a * sum1_b.recip()
             } else {
@@ -710,12 +657,10 @@ unsafe fn ultosc_scalar_impl(
                 0.0
             };
 
-            
             let acc = f64::mul_add(w2, t2, w3 * t3);
             *out.get_unchecked_mut(i) = f64::mul_add(w1, t1, acc);
         }
 
-        
         buf_idx += 1;
         if buf_idx == max_p {
             buf_idx = 0;
@@ -724,7 +669,6 @@ unsafe fn ultosc_scalar_impl(
         i += 1;
     }
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -787,7 +731,6 @@ pub unsafe fn ultosc_avx512_long(
 ) {
     ultosc_scalar(high, low, close, p1, p2, p3, first_valid, out)
 }
-
 
 #[inline(always)]
 pub fn ultosc_row_scalar(
@@ -859,7 +802,6 @@ pub fn ultosc_row_avx512_long(
     unsafe { ultosc_avx512_long(high, low, close, p1, p2, p3, first_valid, out) }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct UltOscBatchRange {
     pub timeperiod1: (usize, usize, usize),
@@ -877,7 +819,7 @@ impl Default for UltOscBatchRange {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct UltOscBatchConfig {
     pub timeperiod1_range: (usize, usize, usize),
@@ -885,7 +827,7 @@ pub struct UltOscBatchConfig {
     pub timeperiod3_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct UltOscBatchJsOutput {
     pub values: Vec<f64>,
@@ -1046,9 +988,7 @@ pub fn ultosc_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(UltOscError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(UltOscError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1142,7 +1082,6 @@ pub fn ultosc_batch_inner_into(
         return Err(UltOscError::InconsistentLengths);
     }
 
-    
     let first_valid_idx = (1..len)
         .find(|&i| {
             !high[i - 1].is_nan()
@@ -1204,7 +1143,6 @@ pub fn ultosc_batch_inner_into(
         });
     }
 
-    
     let out_uninit = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -1213,8 +1151,6 @@ pub fn ultosc_batch_inner_into(
     };
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    
-    
     let mut pcmtl = vec![0.0f64; len + 1];
     let mut ptr = vec![0.0f64; len + 1];
     for i in 0..len {
@@ -1254,9 +1190,7 @@ pub fn ultosc_batch_inner_into(
         let w2: f64 = inv7_100 * 2.0f64;
         let w3: f64 = inv7_100 * 1.0f64;
 
-        
         for i in start..len {
-            
             let s1a = pcmtl[i + 1] - pcmtl[i + 1 - p1];
             let s1b = ptr[i + 1] - ptr[i + 1 - p1];
             let s2a = pcmtl[i + 1] - pcmtl[i + 1 - p2];
@@ -1264,7 +1198,6 @@ pub fn ultosc_batch_inner_into(
             let s3a = pcmtl[i + 1] - pcmtl[i + 1 - p3];
             let s3b = ptr[i + 1] - ptr[i + 1 - p3];
 
-            
             let t1 = if s1b != 0.0 { s1a * s1b.recip() } else { 0.0 };
             let t2 = if s2b != 0.0 { s2a * s2b.recip() } else { 0.0 };
             let t3 = if s3b != 0.0 { s3a * s3b.recip() } else { 0.0 };
@@ -1320,7 +1253,6 @@ pub fn ultosc_batch_inner_into(
 
     Ok(combos)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1454,71 +1386,58 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             UltOscParams::default(),
-            
             UltOscParams {
                 timeperiod1: Some(1),
                 timeperiod2: Some(2),
                 timeperiod3: Some(3),
             },
-            
             UltOscParams {
                 timeperiod1: Some(2),
                 timeperiod2: Some(4),
                 timeperiod3: Some(8),
             },
-            
             UltOscParams {
                 timeperiod1: Some(5),
                 timeperiod2: Some(10),
                 timeperiod3: Some(20),
             },
-            
             UltOscParams {
                 timeperiod1: Some(7),
                 timeperiod2: Some(14),
                 timeperiod3: Some(28),
             },
-            
             UltOscParams {
                 timeperiod1: Some(10),
                 timeperiod2: Some(20),
                 timeperiod3: Some(40),
             },
-            
             UltOscParams {
                 timeperiod1: Some(14),
                 timeperiod2: Some(28),
                 timeperiod3: Some(56),
             },
-            
             UltOscParams {
                 timeperiod1: Some(20),
                 timeperiod2: Some(40),
                 timeperiod3: Some(80),
             },
-            
             UltOscParams {
                 timeperiod1: Some(5),
                 timeperiod2: Some(6),
                 timeperiod3: Some(7),
             },
-            
             UltOscParams {
                 timeperiod1: Some(3),
                 timeperiod2: Some(10),
                 timeperiod3: Some(50),
             },
-            
             UltOscParams {
                 timeperiod1: Some(14),
                 timeperiod2: Some(14),
                 timeperiod3: Some(14),
             },
-            
             UltOscParams {
                 timeperiod1: Some(28),
                 timeperiod2: Some(14),
@@ -1530,15 +1449,13 @@ mod tests {
             let input = UltOscInput::from_candles(&candles, "high", "low", "close", params.clone());
             let output = ultosc_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1594,7 +1511,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1606,12 +1523,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=50, 1usize..=50, 1usize..=50).prop_flat_map(|(p1, p2, p3)| {
             let max_period = p1.max(p2).max(p3);
             (
-                
-                
                 prop::collection::vec(
                     (0.1f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                     (max_period + 1)..400,
@@ -1623,22 +1537,18 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(base_prices, (p1, p2, p3))| {
-                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
                 let mut close = Vec::with_capacity(base_prices.len());
 
-                
                 let mut seed = p1 + p2 * 7 + p3 * 13;
                 for &price in &base_prices {
-                    
                     seed = (seed * 1103515245 + 12345) % (1 << 31);
                     let spread_pct = 0.01 + (seed as f64 / (1u64 << 31) as f64) * 0.09;
                     let spread = price * spread_pct;
 
-                    
                     seed = (seed * 1103515245 + 12345) % (1 << 31);
-                    let close_position = seed as f64 / (1u64 << 31) as f64; 
+                    let close_position = seed as f64 / (1u64 << 31) as f64;
 
                     let h = price + spread * 0.5;
                     let l = price - spread * 0.5;
@@ -1659,16 +1569,13 @@ mod tests {
                 let result = ultosc_with_kernel(&input, kernel).unwrap();
                 let out = result.values;
 
-                
                 let ref_result = ultosc_with_kernel(&input, Kernel::Scalar).unwrap();
                 let ref_out = ref_result.values;
 
                 let max_period = p1.max(p2).max(p3);
-                
+
                 let warmup = max_period;
 
-                
-                
                 for i in 0..warmup.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1679,8 +1586,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 for (i, (&y, &r)) in out.iter().zip(ref_out.iter()).enumerate() {
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
@@ -1705,8 +1610,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         prop_assert!(
@@ -1719,23 +1622,18 @@ mod tests {
                     }
                 }
 
-                
-                
                 if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                 {
-                    
-                    
                     let stability_check_start = (warmup + p3.max(p2).max(p1)).min(out.len());
                     if stability_check_start < out.len() - 2 {
-                        
                         let stable_region = &out[stability_check_start..];
                         let first_valid = stable_region.iter().position(|&v| !v.is_nan());
 
                         if let Some(idx) = first_valid {
                             let expected_stable = stable_region[idx];
-                            
+
                             for (i, &val) in stable_region.iter().skip(idx + 1).enumerate() {
                                 if !val.is_nan() {
                                     prop_assert!(
@@ -1749,8 +1647,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let zero_range_high = vec![100.0; base_prices.len()];
                 let zero_range_low = zero_range_high.clone();
                 let zero_range_close = zero_range_high.clone();
@@ -1762,8 +1658,6 @@ mod tests {
                     params.clone(),
                 );
                 if let Ok(zero_result) = ultosc_with_kernel(&zero_input, kernel) {
-                    
-                    
                     for (i, &val) in zero_result.values.iter().enumerate().skip(warmup) {
                         if !val.is_nan() {
                             prop_assert!(
@@ -1777,18 +1671,9 @@ mod tests {
                     }
                 }
 
-                
-                
-                
-                
-                
                 if out.len() > warmup {
-                    
-                    
                     for i in warmup..out.len().min(warmup + 5) {
                         if !out[i].is_nan() {
-                            
-                            
                             prop_assert!(
                                 out[i] >= 0.0 && out[i] <= 100.0,
                                 "[{}] ULTOSC at {} should be in [0,100], got {}",
@@ -1800,8 +1685,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let reordered_params = UltOscParams {
                     timeperiod1: Some(p3),
                     timeperiod2: Some(p1),
@@ -1810,7 +1693,6 @@ mod tests {
                 let reordered_input =
                     UltOscInput::from_slices(&high, &low, &close, reordered_params);
 
-                
                 prop_assert!(
                     ultosc_with_kernel(&reordered_input, kernel).is_ok(),
                     "[{}] ULTOSC should work with any period ordering",
@@ -1868,24 +1750,21 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let sweep = UltOscBatchRange {
-            timeperiod1: (5, 9, 2),   
-            timeperiod2: (12, 16, 2), 
-            timeperiod3: (26, 30, 2), 
+            timeperiod1: (5, 9, 2),
+            timeperiod2: (12, 16, 2),
+            timeperiod3: (26, 30, 2),
         };
 
         let batch_builder = UltOscBatchBuilder::new().kernel(kernel);
         let output =
             batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, &sweep)?;
 
-        
-        assert_eq!(output.rows, 3 * 3 * 3); 
+        assert_eq!(output.rows, 3 * 3 * 3);
         assert_eq!(output.cols, candles.close.len());
         assert_eq!(output.values.len(), output.rows * output.cols);
         assert_eq!(output.combos.len(), output.rows);
 
-        
         let single_params = UltOscParams {
             timeperiod1: Some(7),
             timeperiod2: Some(14),
@@ -1895,11 +1774,9 @@ mod tests {
             UltOscInput::from_slices(&candles.high, &candles.low, &candles.close, single_params);
         let single_result = ultosc_with_kernel(&single_input, kernel)?;
 
-        
         if let Some(row_idx) = output.row_for_params(&single_params) {
             let batch_row = output.values_for(&single_params).unwrap();
 
-            
             let start = batch_row.len().saturating_sub(5);
             for i in 0..5 {
                 let diff = (batch_row[start + i] - single_result.values[start + i]).abs();
@@ -1929,16 +1806,14 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_configs = vec![
-            
-            (2, 8, 2, 4, 16, 4, 8, 32, 8),   
-            (5, 7, 1, 10, 14, 2, 20, 28, 4), 
-            (7, 7, 0, 14, 14, 0, 14, 42, 7), 
-            (1, 5, 1, 10, 10, 0, 20, 20, 0), 
-            (10, 20, 5, 20, 40, 10, 40, 80, 20), 
-            (3, 9, 3, 6, 18, 6, 12, 36, 12), 
-            (5, 10, 1, 10, 20, 2, 20, 40, 4), 
+            (2, 8, 2, 4, 16, 4, 8, 32, 8),
+            (5, 7, 1, 10, 14, 2, 20, 28, 4),
+            (7, 7, 0, 14, 14, 0, 14, 42, 7),
+            (1, 5, 1, 10, 10, 0, 20, 20, 0),
+            (10, 20, 5, 20, 40, 10, 40, 80, 20),
+            (3, 9, 3, 6, 18, 6, 12, 36, 12),
+            (5, 10, 1, 10, 20, 2, 20, 40, 4),
         ];
 
         for (
@@ -1966,7 +1841,6 @@ mod tests {
             let output =
                 batch_builder.apply_slice(&candles.high, &candles.low, &candles.close, &sweep)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2038,7 +1912,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2067,27 +1941,20 @@ mod tests {
 
     #[test]
     fn test_ultosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let input = UltOscInput::from_candles(
-            &candles,
-            "high",
-            "low",
-            "close",
-            UltOscParams::default(),
-        );
+        let input =
+            UltOscInput::from_candles(&candles, "high", "low", "close", UltOscParams::default());
 
         let baseline = ultosc(&input)?;
 
         let mut out = vec![0.0; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             ultosc_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             ultosc_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -2111,10 +1978,6 @@ mod tests {
     }
 }
 
-
-
-
-
 #[inline]
 pub fn ultosc_into_slice(
     dst: &mut [f64],
@@ -2131,28 +1994,21 @@ pub fn ultosc_into_slice(
         });
     }
 
-    
     ultosc_compute_into(high, low, close, p1, p2, p3, first_valid, chosen, dst);
 
-    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     dst[..start_idx].fill(qnan);
 
     Ok(())
 }
 
-
-
-
-
 #[derive(Debug, Clone)]
 pub struct UltOscStream {
     params: UltOscParams,
-    
+
     cmtl_buf: Vec<f64>,
     tr_buf: Vec<f64>,
 
-    
     sum1_a: f64,
     sum1_b: f64,
     sum2_a: f64,
@@ -2160,22 +2016,18 @@ pub struct UltOscStream {
     sum3_a: f64,
     sum3_b: f64,
 
-    
     buffer_idx: usize,
     count: usize,
 
-    
     max_period: usize,
     p1: usize,
     p2: usize,
     p3: usize,
 
-    
     w1: f64,
     w2: f64,
     w3: f64,
 
-    
     prev_close: Option<f64>,
 }
 
@@ -2202,8 +2054,6 @@ impl UltOscStream {
 
         let max_period = p1.max(p2).max(p3);
 
-        
-        
         const INV7_100: f64 = 100.0 / 7.0;
         let w1 = INV7_100 * 4.0;
         let w2 = INV7_100 * 2.0;
@@ -2238,7 +2088,6 @@ impl UltOscStream {
 
     #[inline(always)]
     fn idx_minus(&self, k: usize) -> usize {
-        
         let mut j = self.buffer_idx + self.max_period - k;
         if j >= self.max_period {
             j -= self.max_period;
@@ -2246,29 +2095,21 @@ impl UltOscStream {
         j
     }
 
-    /// Push one bar; returns Some(ultosc) once the largest window is filled, None otherwise.
     #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        
         let prev_close = match self.prev_close {
             Some(pc) => pc,
             None => {
                 self.prev_close = Some(close);
-                return None; 
+                return None;
             }
         };
 
-        
-        
         let valid = !(high.is_nan() | low.is_nan() | close.is_nan() | prev_close.is_nan());
 
-        
         let (c_new, t_new) = if valid {
-            
             let true_low = if low < prev_close { low } else { prev_close };
 
-            
-            
             let base = high - low;
             let d1 = (high - prev_close).abs();
             let d2 = (low - prev_close).abs();
@@ -2291,7 +2132,6 @@ impl UltOscStream {
             (0.0, 0.0)
         };
 
-        
         if self.count >= self.p1 {
             let j = self.idx_minus(self.p1);
             self.sum1_a -= self.cmtl_buf[j];
@@ -2308,11 +2148,9 @@ impl UltOscStream {
             self.sum3_b -= self.tr_buf[j];
         }
 
-        
         self.cmtl_buf[self.buffer_idx] = c_new;
         self.tr_buf[self.buffer_idx] = t_new;
 
-        
         self.sum1_a += c_new;
         self.sum1_b += t_new;
         self.sum2_a += c_new;
@@ -2320,22 +2158,18 @@ impl UltOscStream {
         self.sum3_a += c_new;
         self.sum3_b += t_new;
 
-        
         self.buffer_idx += 1;
         if self.buffer_idx == self.max_period {
             self.buffer_idx = 0;
         }
         self.count += 1;
 
-        
         self.prev_close = Some(close);
 
-        
         if self.count < self.max_period {
             return None;
         }
 
-        
         let t1 = if self.sum1_b != 0.0 {
             self.sum1_a * self.sum1_b.recip()
         } else {
@@ -2356,10 +2190,6 @@ impl UltOscStream {
         Some(f64::mul_add(self.w1, t1, acc))
     }
 }
-
-
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ultosc")]
@@ -2616,11 +2446,7 @@ impl UltOscStreamPy {
     }
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ultosc_js(
     high: &[f64],
@@ -2648,7 +2474,6 @@ pub fn ultosc_js(
     };
     let input = UltOscInput::from_slices(high, low, close, params);
 
-    
     let mut output = vec![0.0; len];
     ultosc_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2656,7 +2481,7 @@ pub fn ultosc_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ultosc_into(
     high_ptr: *const f64,
@@ -2684,19 +2509,16 @@ pub fn ultosc_into(
         };
         let input = UltOscInput::from_slices(high, low, close, params);
 
-        
         if high_ptr == out_ptr as *const f64
             || low_ptr == out_ptr as *const f64
             || close_ptr == out_ptr as *const f64
         {
-            
             let mut temp = vec![0.0; len];
             ultosc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             ultosc_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2706,7 +2528,7 @@ pub fn ultosc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ultosc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2715,7 +2537,7 @@ pub fn ultosc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ultosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2725,7 +2547,7 @@ pub fn ultosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ultosc_batch)]
 pub fn ultosc_batch_js(
     high: &[f64],

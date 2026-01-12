@@ -1,12 +1,3 @@
-//! CUDA wrapper for Nadaraya–Watson Envelope (NWE).
-//!
-//! API mirrors ALMA/CWMA-style wrappers:
-//! - PTX load with DetermineTargetFromContext + O2 fallback
-//! - Non-blocking stream
-//! - VRAM estimates and guardrails
-//! - Batch: one series × many params → returns upper/lower device arrays
-//! - Many series × one param (time-major) → returns upper/lower device arrays
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -26,7 +17,11 @@ pub enum CudaNweError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -34,7 +29,14 @@ pub enum CudaNweError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -73,7 +75,7 @@ impl CudaNwe {
             env!("OUT_DIR"),
             "/nadaraya_watson_envelope_kernel.ptx"
         ));
-        
+
         let module = Module::from_ptx(
             ptx,
             &[
@@ -163,9 +165,15 @@ impl CudaNwe {
         Ok(())
     }
 
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
-    pub fn synchronize(&self) -> Result<(), CudaNweError> { Ok(self.stream.synchronize()?) }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+    pub fn synchronize(&self) -> Result<(), CudaNweError> {
+        Ok(self.stream.synchronize()?)
+    }
 
     fn expand_grid(r: &NweBatchRange) -> Result<Vec<NweParams>, CudaNweError> {
         fn axis_usize(
@@ -193,9 +201,7 @@ impl CudaNwe {
             }
             Ok(v)
         }
-        fn axis_f64(
-            (start, end, step): (f64, f64, f64),
-        ) -> Result<Vec<f64>, CudaNweError> {
+        fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaNweError> {
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return Ok(vec![start]);
             }
@@ -263,7 +269,7 @@ impl CudaNwe {
             w.push(wk as f32);
             den += wk;
         }
-        
+
         let inv_den = if den != 0.0 {
             1.0f32 / (den as f32)
         } else {
@@ -278,7 +284,6 @@ impl CudaNwe {
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &NweBatchRange,
-    
     ) -> Result<
         (
             Vec<NweParams>,
@@ -354,7 +359,6 @@ impl CudaNwe {
             Self::prepare_batch_inputs(prices, sweep)?;
         let n = combos.len();
 
-        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let mut required = 0usize;
@@ -407,11 +411,9 @@ impl CudaNwe {
             }
         }
 
-        
         let h_prices = LockedBuffer::from_slice(prices).map_err(CudaNweError::from)?;
         let h_weights = LockedBuffer::from_slice(&weights_flat).map_err(CudaNweError::from)?;
 
-        
         let mut d_prices: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaNweError::from)?;
         let weights_len = n
@@ -429,7 +431,6 @@ impl CudaNwe {
         let mut d_lower: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(out_len) }.map_err(CudaNweError::from)?;
 
-        
         unsafe {
             d_prices
                 .async_copy_from(&h_prices, &self.stream)
@@ -516,14 +517,12 @@ impl CudaNwe {
                 name: "nadaraya_watson_envelope_batch_f32",
             })?;
 
-        
-        
-        const NWE_THREADS: u32 = 128; 
-        const NWE_TILE_T: usize = 64; 
+        const NWE_THREADS: u32 = 128;
+        const NWE_TILE_T: usize = 64;
         let grid = GridSize::xy(1, n_combos as u32);
         let block = BlockSize::xyz(NWE_THREADS, 1, 1);
         self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
-        
+
         let smem_elems = max_lb + 2 * (max_lb + NWE_TILE_T - 1);
         let smem_bytes = (smem_elems * std::mem::size_of::<f32>()) as u32;
 
@@ -588,7 +587,6 @@ impl CudaNwe {
             return Err(CudaNweError::InvalidInput("lookback must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -608,7 +606,7 @@ impl CudaNwe {
                 }
             }
         }
-        
+
         let (w_row, _l) = Self::compute_weights_row(bandwidth, lookback);
 
         let sz_f32 = std::mem::size_of::<f32>();
@@ -663,7 +661,6 @@ impl CudaNwe {
             }
         }
 
-        
         let h_tm = LockedBuffer::from_slice(data_tm).map_err(CudaNweError::from)?;
         let len_tm = cols
             .checked_mul(rows)
@@ -718,9 +715,7 @@ impl CudaNwe {
                 .map_err(CudaNweError::from)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(CudaNweError::from)?;
+        self.stream.synchronize().map_err(CudaNweError::from)?;
 
         Ok(DeviceNwePair {
             upper: DeviceArrayF32 {
@@ -737,7 +732,6 @@ impl CudaNwe {
     }
 }
 
-
 #[cfg(feature = "cuda")]
 pub mod benches {
     use super::*;
@@ -750,7 +744,6 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        
         struct BatchDevState {
             cuda: CudaNwe,
             d_prices: DeviceBuffer<f32>,
@@ -799,10 +792,10 @@ pub mod benches {
             let d_looks = DeviceBuffer::from_slice(&lookbacks).expect("d_looks");
             let d_mults = DeviceBuffer::from_slice(&multipliers).expect("d_mults");
             let out_len = n_combos * len;
-            let d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }
-                .expect("d_upper");
-            let d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }
-                .expect("d_lower");
+            let d_upper: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_upper");
+            let d_lower: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_lower");
             Box::new(BatchDevState {
                 cuda,
                 d_prices,
@@ -817,7 +810,7 @@ pub mod benches {
                 d_lower,
             }) as Box<dyn CudaBenchState>
         };
-        
+
         struct ManyState {
             cuda: CudaNwe,
             d_prices_tm: DeviceBuffer<f32>,
@@ -878,7 +871,6 @@ pub mod benches {
             let rows = MANY_SERIES_LEN;
             let data_tm = gen_time_major_prices(cols, rows);
 
-            
             let bandwidth = 8.0;
             let lookback = 256usize;
             let multiplier = 3.0f32;
@@ -905,8 +897,7 @@ pub mod benches {
                     .expect("d_prices_tm H2D");
             }
             let d_weights = DeviceBuffer::from_slice(&w_row).expect("d_weights");
-            let d_first_valids =
-                DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
+            let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
             let d_upper: DeviceBuffer<f32> =
                 unsafe { DeviceBuffer::uninitialized(len_tm) }.expect("d_upper");
             let d_lower: DeviceBuffer<f32> =
@@ -928,11 +919,10 @@ pub mod benches {
         let bytes_batch = ONE_SERIES_LEN * std::mem::size_of::<f32>()
             + (ONE_SERIES_LEN * 256) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024;
-        let bytes_many =
-            MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>()
-                + 256usize * std::mem::size_of::<f32>()
-                + MANY_SERIES_COLS * std::mem::size_of::<i32>()
-                + 64 * 1024 * 1024;
+        let bytes_many = MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>()
+            + 256usize * std::mem::size_of::<f32>()
+            + MANY_SERIES_COLS * std::mem::size_of::<i32>()
+            + 64 * 1024 * 1024;
         vec![
             CudaBenchScenario::new(
                 "nwe",

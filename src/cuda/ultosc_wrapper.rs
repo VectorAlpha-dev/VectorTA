@@ -1,15 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Ultimate Oscillator (ULTOSC)
-//!
-//! Parity goals (Agents Guide):
-//! - ALMA-style PTX load with DetermineTargetFromContext + O2 fallback
-//! - NON_BLOCKING stream
-//! - Policy enums for batch and many-series; selection debug when BENCH_DEBUG=1
-//! - VRAM check with ~64MB headroom and grid.y chunking <= 65_535
-//! - Batch: host-built f64 prefix sums for CMTL/TR shared across rows
-//! - Many-series×one-param: host-built time-major f64 prefixes + per-series first_valids
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::ultosc::{UltOscBatchRange, UltOscParams};
 use cust::context::Context;
@@ -29,7 +19,11 @@ pub enum CudaUltoscError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -37,13 +31,19 @@ pub enum CudaUltoscError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
@@ -189,7 +189,15 @@ impl CudaUltosc {
         }
     }
     #[inline]
-    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaUltoscError> {
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaUltoscError> {
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev
             .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
@@ -270,8 +278,6 @@ impl CudaUltosc {
         }
     }
 
-    
-
     pub fn ultosc_batch_dev(
         &self,
         high_f32: &[f32],
@@ -283,7 +289,6 @@ impl CudaUltosc {
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
         let (pcmtl, ptr) = build_prefix_sums_ulthlc(high_f32, low_f32, close_f32, first_valid);
 
-        
         let headroom = 64 * 1024 * 1024usize;
         let prefix_bytes = (len
             .checked_add(1)
@@ -318,13 +323,11 @@ impl CudaUltosc {
             }
         }
 
-        
         let d_pcmtl: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::from_slice_async(&pcmtl, &self.stream)? };
         let d_ptr: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::from_slice_async(&ptr, &self.stream)? };
 
-        
         let mut periods = Vec::with_capacity(combos.len());
         for c in &combos {
             periods.push(Int3 {
@@ -372,10 +375,11 @@ impl CudaUltosc {
             return Ok(());
         }
 
-        let func = self
-            .module
-            .get_function("ultosc_batch_f32")
-            .map_err(|_| CudaUltoscError::MissingKernelSymbol { name: "ultosc_batch_f32" })?;
+        let func = self.module.get_function("ultosc_batch_f32").map_err(|_| {
+            CudaUltoscError::MissingKernelSymbol {
+                name: "ultosc_batch_f32",
+            }
+        })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -440,7 +444,7 @@ impl CudaUltosc {
             return Err(CudaUltoscError::InvalidInput("empty input".into()));
         }
         let len = high.len();
-        
+
         let mut first_valid = None;
         for i in 1..len {
             if high[i - 1].is_finite()
@@ -463,7 +467,7 @@ impl CudaUltosc {
                 "no parameter combinations".into(),
             ));
         }
-        
+
         for c in &combos {
             let p1 = c.timeperiod1.unwrap_or(7);
             let p2 = c.timeperiod2.unwrap_or(14);
@@ -485,8 +489,6 @@ impl CudaUltosc {
         }
         Ok((combos, first, len))
     }
-
-    
 
     pub fn ultosc_many_series_one_param_time_major_dev(
         &self,
@@ -518,7 +520,6 @@ impl CudaUltosc {
             &prep.first_valids,
         );
 
-        
         let headroom = 64 * 1024 * 1024usize;
         let prefix_bytes = pcmtl_tm
             .len()
@@ -601,10 +602,8 @@ impl CudaUltosc {
         let func = self
             .module
             .get_function("ultosc_many_series_one_param_f32")
-            .map_err(|_| {
-                CudaUltoscError::MissingKernelSymbol {
-                    name: "ultosc_many_series_one_param_f32",
-                }
+            .map_err(|_| CudaUltoscError::MissingKernelSymbol {
+                name: "ultosc_many_series_one_param_f32",
             })?;
 
         match self.policy.many_series {
@@ -649,7 +648,6 @@ impl CudaUltosc {
                 }
             }
             ManySeriesKernelPolicy::Tiled2D { tx, ty } => {
-                
                 let block: BlockSize = (tx, ty, 1).into();
                 let grid_x = ((rows as u32) + tx - 1) / tx;
                 let grid_y = ((cols as u32) + ty - 1) / ty;
@@ -724,7 +722,6 @@ impl CudaUltosc {
             return Err(CudaUltoscError::InvalidInput("periods must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -759,8 +756,6 @@ struct PreparedManySeries {
     first_valids: Vec<i32>,
 }
 
-
-
 #[inline]
 fn split_f64_to_float2_vec(src: &[f64]) -> Vec<Float2> {
     let mut v = Vec::with_capacity(src.len());
@@ -771,7 +766,6 @@ fn split_f64_to_float2_vec(src: &[f64]) -> Vec<Float2> {
     }
     v
 }
-
 
 fn build_prefix_sums_ulthlc(
     high: &[f32],
@@ -805,9 +799,11 @@ fn build_prefix_sums_ulthlc(
         pcmtl64[i + 1] = pcmtl64[i] + add_c;
         ptr64[i + 1] = ptr64[i] + add_t;
     }
-    (split_f64_to_float2_vec(&pcmtl64), split_f64_to_float2_vec(&ptr64))
+    (
+        split_f64_to_float2_vec(&pcmtl64),
+        split_f64_to_float2_vec(&ptr64),
+    )
 }
-
 
 fn build_prefix_sums_time_major_ulthlc(
     high_tm: &[f32],
@@ -828,7 +824,7 @@ fn build_prefix_sums_time_major_ulthlc(
                 let hi = high_tm[idx] as f64;
                 let lo = low_tm[idx] as f64;
                 let ci = close_tm[idx] as f64;
-                let pc = close_tm[idx - cols] as f64; 
+                let pc = close_tm[idx - cols] as f64;
                 let tl = if lo < pc { lo } else { pc };
                 let mut trv = hi - lo;
                 let d1 = (hi - pc).abs();
@@ -842,7 +838,7 @@ fn build_prefix_sums_time_major_ulthlc(
                 add_c = ci - tl;
                 add_t = trv;
             }
-            let prev = t * cols + s; 
+            let prev = t * cols + s;
             let cur = (t + 1) * cols + s;
             pcmtl_tm64[cur] = pcmtl_tm64[prev] + add_c;
             ptr_tm64[cur] = ptr_tm64[prev] + add_t;
@@ -853,7 +849,6 @@ fn build_prefix_sums_time_major_ulthlc(
         split_f64_to_float2_vec(&ptr_tm64),
     )
 }
-
 
 fn expand_grid_ultosc(r: &UltOscBatchRange) -> Result<Vec<UltOscParams>, CudaUltoscError> {
     fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaUltoscError> {
@@ -869,9 +864,12 @@ fn expand_grid_ultosc(r: &UltOscBatchRange) -> Result<Vec<UltOscParams>, CudaUlt
                 if cur == end {
                     break;
                 }
-                let next = cur
-                    .checked_add(s)
-                    .ok_or_else(|| CudaUltoscError::InvalidInput(format!("axis overflow: start={} end={} step={}", start, end, step)))?;
+                let next = cur.checked_add(s).ok_or_else(|| {
+                    CudaUltoscError::InvalidInput(format!(
+                        "axis overflow: start={} end={} step={}",
+                        start, end, step
+                    ))
+                })?;
                 if next <= cur || next > end {
                     break;
                 }
@@ -925,26 +923,23 @@ fn expand_grid_ultosc(r: &UltOscBatchRange) -> Result<Vec<UltOscParams>, CudaUlt
     Ok(out)
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 60_000;
-    const PARAM_SWEEP: usize = 125; 
+    const PARAM_SWEEP: usize = 125;
     const MS_COLS: usize = 128;
     const MS_ROWS: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        
         let in_bytes = 2 * (ONE_SERIES_LEN + 1) * std::mem::size_of::<Float2>();
         let params_bytes = PARAM_SWEEP * std::mem::size_of::<Int3>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
-        
         let in_bytes = 2 * (MS_ROWS + 1) * MS_COLS * std::mem::size_of::<Float2>();
         let meta = MS_COLS * std::mem::size_of::<i32>();
         let out_bytes = MS_ROWS * MS_COLS * std::mem::size_of::<f32>();
@@ -1052,7 +1047,7 @@ pub mod benches {
             let _ = self.cuda.stream.synchronize();
         }
     }
-    
+
     fn synth_hlc_tm(cols: usize, rows: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
         let mut close_tm = vec![f32::NAN; cols * rows];
         let mut high_tm = vec![f32::NAN; cols * rows];

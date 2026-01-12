@@ -47,7 +47,7 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], periods: &[usize], len: usize, first_v
                 );
             } else {
                 let diff = (expected - actual).abs();
-                let tol = 3.0e-3 + expected.abs() * 8.0e-4; 
+                let tol = 3.0e-3 + expected.abs() * 8.0e-4;
                 assert!(
                     diff <= tol,
                     "row {row_idx} col {col} expected {expected} got {actual} diff {diff} tol {tol}"
@@ -116,7 +116,6 @@ fn linearreg_slope_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for col in 0..cols {
         let mut series = vec![f64::NAN; rows];

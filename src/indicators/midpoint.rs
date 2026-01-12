@@ -1,21 +1,3 @@
-//! # Midpoint Indicator
-//!
-//! Calculates the midpoint of the highest and lowest values over a rolling window.
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//! - **period**: Window size (default: 14)
-//!
-//! ## Returns
-//! - `Vec<f64>` - Midpoint values `(high + low) / 2` matching input length
-//!
-//! ## Developer Status
-//! **AVX2**: Stub (calls scalar)
-//! **AVX512**: Stub with short/long variants (all call scalar)
-//! **Streaming**: O(1) amortized via monotonic deques; matches batch
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//! **Decision log**: SIMD stubs call the scalar path; no CUDA wrapper or VRAM handles for Midpoint, batch/streaming share scalar semantics and reference outputs.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -24,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -44,8 +26,6 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum MidpointData<'a> {
@@ -72,7 +52,10 @@ pub struct MidpointOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MidpointParams {
     pub period: Option<usize>,
 }
@@ -116,8 +99,6 @@ impl<'a> MidpointInput<'a> {
         self.params.period.unwrap_or(14)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct MidpointBuilder {
@@ -174,8 +155,6 @@ impl MidpointBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum MidpointError {
     #[error("midpoint: Empty input data (All values are NaN).")]
@@ -191,19 +170,21 @@ pub enum MidpointError {
     #[error("midpoint: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("midpoint: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("midpoint: invalid input: {0}")]
     InvalidInput(String),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<MidpointError> for JsValue {
     fn from(err: MidpointError) -> Self {
         JsValue::from_str(&err.to_string())
     }
 }
-
-
 
 #[inline]
 pub fn midpoint(input: &MidpointInput) -> Result<MidpointOutput, MidpointError> {
@@ -268,12 +249,7 @@ pub fn midpoint_with_kernel(
     Ok(MidpointOutput { values: out })
 }
 
-/// Write Midpoint values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup semantics identical to `midpoint()`.
-/// - The `out` slice length must equal the input length.
-/// - Uses the module's kernel auto-detection (Kernel::Auto).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn midpoint_into(input: &MidpointInput, out: &mut [f64]) -> Result<(), MidpointError> {
     midpoint_into_slice(out, input, Kernel::Auto)
@@ -294,7 +270,6 @@ pub fn midpoint_into_slice(
         });
     }
 
-    
     for i in 0..(first + period - 1) {
         out[i] = f64::NAN;
     }
@@ -317,8 +292,6 @@ pub fn midpoint_into_slice(
 
     Ok(())
 }
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -362,20 +335,16 @@ pub fn midpoint_avx512_long(data: &[f64], period: usize, first: usize, out: &mut
     midpoint_scalar(data, period, first, out)
 }
 
-
-
-/// Streaming Midpoint using monotonic deques for O(1) amortized updates.
-/// SIMD: not applicable. Matches batch semantics and warmup behavior.
 #[derive(Debug, Clone)]
 pub struct MidpointStream {
     period: usize,
-    /// Monotonic decreasing deque for window maximum: stores (index, value)
+
     maxdq: VecDeque<(usize, f64)>,
-    /// Monotonic increasing deque for window minimum: stores (index, value)
+
     mindq: VecDeque<(usize, f64)>,
-    /// Next index to assign to an incoming sample
+
     idx: usize,
-    /// Warmup countdown: None until first non-NaN is seen, then Some(period-1)..=Some(0)
+
     warmup_left: Option<usize>,
 }
 
@@ -397,16 +366,13 @@ impl MidpointStream {
         })
     }
 
-    /// O(1) amortized update using monotonic deques
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let i = self.idx;
         self.idx = i.wrapping_add(1);
 
-        
         let start = i.saturating_add(1).saturating_sub(self.period);
 
-        
         while let Some(&(j, _)) = self.maxdq.front() {
             if j < start {
                 self.maxdq.pop_front();
@@ -422,14 +388,11 @@ impl MidpointStream {
             }
         }
 
-        
         if !value.is_nan() {
             if self.warmup_left.is_none() {
-                
                 self.warmup_left = Some(self.period.saturating_sub(1));
             }
 
-            
             while let Some(&(_, v)) = self.maxdq.back() {
                 if v <= value {
                     self.maxdq.pop_back();
@@ -439,7 +402,6 @@ impl MidpointStream {
             }
             self.maxdq.push_back((i, value));
 
-            
             while let Some(&(_, v)) = self.mindq.back() {
                 if v >= value {
                     self.mindq.pop_back();
@@ -450,7 +412,6 @@ impl MidpointStream {
             self.mindq.push_back((i, value));
         }
 
-        
         match self.warmup_left {
             None => return None,
             Some(k) if k > 0 => {
@@ -460,7 +421,6 @@ impl MidpointStream {
             _ => {}
         }
 
-        
         let hi = self.maxdq.front().map(|&(_, v)| v).unwrap_or(f64::MIN);
         let lo = self.mindq.front().map(|&(_, v)| v).unwrap_or(f64::MAX);
         Some(avg2_fast(hi, lo))
@@ -469,11 +429,8 @@ impl MidpointStream {
 
 #[inline(always)]
 fn avg2_fast(a: f64, b: f64) -> f64 {
-    
     (a + b).mul_add(0.5, 0.0)
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct MidpointBatchRange {
@@ -571,13 +528,9 @@ impl MidpointBatchOutput {
     }
 }
 
-
-
 #[inline(always)]
 fn expand_grid_checked(r: &MidpointBatchRange) -> Result<Vec<MidpointParams>, MidpointError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, MidpointError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MidpointError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -678,7 +631,6 @@ fn midpoint_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm_prefixes: Vec<usize> = combos
         .iter()
@@ -686,7 +638,6 @@ fn midpoint_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_mu: &mut [MaybeUninit<f64>] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len()) };
@@ -694,7 +645,6 @@ fn midpoint_batch_inner(
     let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let row_out: &mut [f64] =
             core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len());
 
@@ -728,7 +678,6 @@ fn midpoint_batch_inner(
         }
     }
 
-    
     let values: Vec<f64> = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -744,8 +693,6 @@ fn midpoint_batch_inner(
         cols,
     })
 }
-
-
 
 #[inline(always)]
 unsafe fn midpoint_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
@@ -771,8 +718,6 @@ unsafe fn midpoint_row_avx512_short(data: &[f64], first: usize, period: usize, o
 unsafe fn midpoint_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     midpoint_scalar(data, period, first, out)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -954,14 +899,13 @@ mod tests {
 
     fn check_midpoint_constant_data(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let constant_val = 42.5;
         let data = vec![constant_val; 100];
         let params = MidpointParams { period: Some(10) };
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
         for i in 9..100 {
             assert!(
 				(result.values[i] - constant_val).abs() < 1e-10,
@@ -977,7 +921,7 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let period = 10;
         let params = MidpointParams {
@@ -986,8 +930,6 @@ mod tests {
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
-        
         for i in (period - 1)..data.len() {
             let expected = (data[i + 1 - period] + data[i]) / 2.0;
             assert!(
@@ -1007,7 +949,7 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data: Vec<f64> = (0..100).map(|i| 100.0 - i as f64).collect();
         let period = 10;
         let params = MidpointParams {
@@ -1016,8 +958,6 @@ mod tests {
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
-        
         for i in (period - 1)..data.len() {
             let expected = (data[i] + data[i + 1 - period]) / 2.0;
             assert!(
@@ -1037,7 +977,7 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let mut data = Vec::with_capacity(100);
         for i in 0..100 {
             data.push(if i % 2 == 0 { 100.0 } else { 0.0 });
@@ -1049,7 +989,6 @@ mod tests {
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
         for i in (period - 1)..data.len() {
             assert!(
                 (result.values[i] - 50.0).abs() < 1e-10,
@@ -1064,9 +1003,9 @@ mod tests {
 
     fn check_midpoint_single_spike(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let mut data = vec![10.0; 100];
-        data[50] = 100.0; 
+        data[50] = 100.0;
 
         let period = 5;
         let params = MidpointParams {
@@ -1075,7 +1014,6 @@ mod tests {
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
         for i in (period - 1)..50 {
             assert!(
                 (result.values[i] - 10.0).abs() < 1e-10,
@@ -1086,9 +1024,8 @@ mod tests {
             );
         }
 
-        
         for i in 50..55 {
-            let expected = 55.0; 
+            let expected = 55.0;
             assert!(
                 (result.values[i] - expected).abs() < 1e-10,
                 "[{}] During spike window, midpoint should be 55 at index {}: got {}",
@@ -1098,7 +1035,6 @@ mod tests {
             );
         }
 
-        
         for i in 55..data.len() {
             assert!(
                 (result.values[i] - 10.0).abs() < 1e-10,
@@ -1116,20 +1052,18 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data = vec![f64::MAX, f64::MIN, 0.0, 1e-300, 1e300];
         let params = MidpointParams { period: Some(2) };
         let input = MidpointInput::from_slice(&data, params.clone());
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
         assert!(
             result.values[1].is_finite(),
             "[{}] Result should be finite for extreme values",
             test_name
         );
 
-        
         let small_data = vec![1e-300, 2e-300, 3e-300, 4e-300, 5e-300];
         let input_small = MidpointInput::from_slice(&small_data, params);
         let result_small = midpoint_with_kernel(&input_small, kernel)?;
@@ -1147,13 +1081,12 @@ mod tests {
 
     fn check_midpoint_period_one(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data = vec![1.0, 5.0, 3.0, 7.0, 2.0, 9.0, 4.0];
         let params = MidpointParams { period: Some(1) };
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
         for i in 0..data.len() {
             assert!(
                 (result.values[i] - data[i]).abs() < 1e-10,
@@ -1172,9 +1105,9 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let mut data = vec![50.0; 100];
-        data[30] = 150.0; 
+        data[30] = 150.0;
 
         let period = 20;
         let params = MidpointParams {
@@ -1183,9 +1116,6 @@ mod tests {
         let input = MidpointInput::from_slice(&data, params);
         let result = midpoint_with_kernel(&input, kernel)?;
 
-        
-        
-        
         for i in (period - 1)..30 {
             assert!(
                 (result.values[i] - 50.0).abs() < 1e-10,
@@ -1196,9 +1126,8 @@ mod tests {
             );
         }
 
-        
         for i in 30..50 {
-            let expected = 100.0; 
+            let expected = 100.0;
             assert!(
                 (result.values[i] - expected).abs() < 1e-10,
                 "[{}] With outlier in window, midpoint should be 100 at index {}: got {}",
@@ -1208,7 +1137,6 @@ mod tests {
             );
         }
 
-        
         for i in 50..data.len() {
             assert!(
                 (result.values[i] - 50.0).abs() < 1e-10,
@@ -1228,18 +1156,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            MidpointParams::default(),            
-            MidpointParams { period: Some(2) },   
-            MidpointParams { period: Some(5) },   
-            MidpointParams { period: Some(7) },   
-            MidpointParams { period: Some(10) },  
-            MidpointParams { period: Some(20) },  
-            MidpointParams { period: Some(30) },  
-            MidpointParams { period: Some(50) },  
-            MidpointParams { period: Some(100) }, 
-            MidpointParams { period: Some(200) }, 
+            MidpointParams::default(),
+            MidpointParams { period: Some(2) },
+            MidpointParams { period: Some(5) },
+            MidpointParams { period: Some(7) },
+            MidpointParams { period: Some(10) },
+            MidpointParams { period: Some(20) },
+            MidpointParams { period: Some(30) },
+            MidpointParams { period: Some(50) },
+            MidpointParams { period: Some(100) },
+            MidpointParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1248,12 +1175,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1300,7 +1226,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_midpoint_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1311,10 +1237,8 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..50, 50usize..400, 0usize..9, any::<u64>()).prop_map(
             |(period, len, scenario, seed)| {
-                
                 let mut lcg = seed;
                 let mut rng = || {
                     lcg = lcg.wrapping_mul(1103515245).wrapping_add(12345);
@@ -1322,71 +1246,51 @@ mod tests {
                 };
 
                 let data = match scenario {
-                    0 => {
-                        
-                        (0..len).map(|_| rng()).collect()
-                    }
+                    0 => (0..len).map(|_| rng()).collect(),
                     1 => {
-                        
                         let val = rng();
                         vec![val; len]
                     }
                     2 => {
-                        
                         let start = rng();
                         let step = rng().abs() / 100.0;
                         (0..len).map(|i| start + (i as f64) * step).collect()
                     }
                     3 => {
-                        
                         let start = rng();
                         let step = rng().abs() / 100.0;
                         (0..len).map(|i| start - (i as f64) * step).collect()
                     }
-                    4 => {
-                        
-                        (0..len)
-                            .map(|i| {
-                                if i % 2 == 0 {
-                                    1000.0 + rng()
-                                } else {
-                                    -1000.0 + rng()
-                                }
-                            })
-                            .collect()
-                    }
+                    4 => (0..len)
+                        .map(|i| {
+                            if i % 2 == 0 {
+                                1000.0 + rng()
+                            } else {
+                                -1000.0 + rng()
+                            }
+                        })
+                        .collect(),
                     5 => {
-                        
                         let amplitude = rng().abs() + 10.0;
                         let offset = rng();
                         (0..len)
                             .map(|i| offset + amplitude * (i as f64 * 0.1).sin())
                             .collect()
                     }
-                    6 => {
-                        
-                        (0..len).map(|_| rng() * 1e6).collect()
-                    }
-                    7 => {
-                        
-                        (0..len).map(|_| rng() * 1e-3).collect()
-                    }
-                    8 => {
-                        
-                        (0..len)
-                            .map(|i| {
-                                if i % 3 == 0 {
-                                    rng() * 1e6
-                                } else if i % 3 == 1 {
-                                    rng() * 1e-3
-                                } else {
-                                    rng()
-                                }
-                            })
-                            .collect()
-                    }
+                    6 => (0..len).map(|_| rng() * 1e6).collect(),
+                    7 => (0..len).map(|_| rng() * 1e-3).collect(),
+                    8 => (0..len)
+                        .map(|i| {
+                            if i % 3 == 0 {
+                                rng() * 1e6
+                            } else if i % 3 == 1 {
+                                rng() * 1e-3
+                            } else {
+                                rng()
+                            }
+                        })
+                        .collect(),
                     _ => {
-                        
                         let amplitude = rng().abs() + 10.0;
                         let period_len = 20;
                         (0..len)
@@ -1415,20 +1319,13 @@ mod tests {
             let result = midpoint_with_kernel(&input, kernel)?;
             let scalar_result = midpoint_with_kernel(&input, Kernel::Scalar)?;
 
-            
-            let tolerance = |expected: f64| -> f64 {
-                
-                (expected.abs() * 1e-12).max(1e-10)
-            };
+            let tolerance = |expected: f64| -> f64 { (expected.abs() * 1e-12).max(1e-10) };
 
-            
             prop_assert_eq!(result.values.len(), data.len());
 
-            
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_end = first + period - 1;
 
-            
             for i in 0..warmup_end.min(result.values.len()) {
                 prop_assert!(
                     result.values[i].is_nan(),
@@ -1438,7 +1335,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_end..data.len() {
                 let window = &data[(i + 1 - period)..=i];
                 let mut highest = f64::MIN;
@@ -1467,7 +1363,6 @@ mod tests {
                 );
             }
 
-            
             for i in 0..result.values.len() {
                 let kernel_val = result.values[i];
                 let scalar_val = scalar_result.values[i];
@@ -1487,7 +1382,6 @@ mod tests {
                 );
             }
 
-            
             if period == 1 {
                 for i in first..data.len() {
                     let tol = tolerance(data[i]);
@@ -1502,7 +1396,6 @@ mod tests {
                 }
             }
 
-            
             if !data.is_empty() {
                 let first_val = data[first];
                 let val_tol = tolerance(first_val);
@@ -1517,7 +1410,6 @@ mod tests {
                 }
             }
 
-            
             for i in warmup_end..data.len() {
                 let window = &data[(i + 1 - period)..=i];
                 if !window.is_empty() {
@@ -1533,9 +1425,7 @@ mod tests {
                 }
             }
 
-            
             if scenario == 2 || scenario == 3 {
-                
                 for i in warmup_end..data.len() {
                     let window_start = data[i + 1 - period];
                     let window_end = data[i];
@@ -1550,7 +1440,6 @@ mod tests {
                 }
             }
 
-            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in result.values.iter().enumerate() {
@@ -1637,17 +1526,15 @@ mod tests {
         skip_if_unsupported!(kernel, test);
         let data: Vec<f64> = (0..100).map(|i| i as f64).collect();
 
-        
         let output = MidpointBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 15, 5) 
+            .period_range(5, 15, 5)
             .apply_slice(&data)?;
 
         assert_eq!(output.rows, 3);
         assert_eq!(output.cols, 100);
         assert_eq!(output.combos.len(), 3);
 
-        
         let periods = [5, 10, 15];
         for (row_idx, &period) in periods.iter().enumerate() {
             let row = output
@@ -1656,7 +1543,6 @@ mod tests {
                 })
                 .expect(&format!("Missing row for period {}", period));
 
-            
             for i in 0..(period - 1) {
                 assert!(
                     row[i].is_nan(),
@@ -1667,7 +1553,6 @@ mod tests {
                 );
             }
 
-            
             for i in (period - 1)..100 {
                 let expected = (data[i + 1 - period] + data[i]) / 2.0;
                 assert!(
@@ -1687,11 +1572,10 @@ mod tests {
     fn check_batch_edge_cases(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
-        
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let output = MidpointBatchBuilder::new()
             .kernel(kernel)
-            .period_range(3, 5, 10) 
+            .period_range(3, 5, 10)
             .apply_slice(&data)?;
 
         assert_eq!(
@@ -1701,7 +1585,6 @@ mod tests {
         );
         assert_eq!(output.combos[0].period, Some(3));
 
-        
         let output2 = MidpointBatchBuilder::new()
             .kernel(kernel)
             .period_static(3)
@@ -1714,7 +1597,6 @@ mod tests {
         );
         assert_eq!(output2.combos[0].period, Some(3));
 
-        
         let empty_data: Vec<f64> = vec![];
         let result = MidpointBatchBuilder::new()
             .kernel(kernel)
@@ -1733,16 +1615,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (30, 60, 15),  
-            (2, 5, 1),     
-            (10, 20, 2),   
-            (50, 100, 10), 
-            (14, 14, 0),   
-            (3, 7, 1),     
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (50, 100, 10),
+            (14, 14, 0),
+            (3, 7, 1),
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -1761,7 +1642,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1834,27 +1714,24 @@ mod tests {
     gen_batch_tests!(check_batch_edge_cases);
 
     #[test]
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     fn test_midpoint_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let len = 512usize;
         let mut data = vec![0.0f64; len];
-        
+
         data[0] = f64::NAN;
         data[1] = f64::NAN;
         data[2] = f64::NAN;
         for i in 3..len {
             let x = i as f64;
-            
+
             data[i] = 100.0 + 0.05 * x + (0.01 * x).sin() * 2.0;
         }
 
         let input = MidpointInput::from_slice(&data, MidpointParams::default());
 
-        
         let baseline = midpoint(&input)?.values;
 
-        
         let mut out = vec![0.0f64; len];
         midpoint_into(&input, &mut out)?;
 
@@ -1878,8 +1755,6 @@ mod tests {
         Ok(())
     }
 }
-
-
 
 #[inline(always)]
 pub fn midpoint_batch_inner_into(
@@ -1909,12 +1784,12 @@ pub fn midpoint_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| MidpointError::InvalidInput("rows*cols overflow in midpoint_batch_inner".into()))?;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or_else(|| MidpointError::InvalidInput("rows*cols overflow in midpoint_batch_inner_into".into()))?;
+    let _total = rows.checked_mul(cols).ok_or_else(|| {
+        MidpointError::InvalidInput("rows*cols overflow in midpoint_batch_inner".into())
+    })?;
+    let expected = rows.checked_mul(cols).ok_or_else(|| {
+        MidpointError::InvalidInput("rows*cols overflow in midpoint_batch_inner_into".into())
+    })?;
     if out.len() != expected {
         return Err(MidpointError::OutputLengthMismatch {
             expected,
@@ -1922,7 +1797,6 @@ pub fn midpoint_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1968,8 +1842,6 @@ pub fn midpoint_batch_inner_into(
 
     Ok(combos)
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "midpoint")]
@@ -2075,9 +1947,7 @@ pub fn midpoint_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn midpoint_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = MidpointParams {
@@ -2085,14 +1955,14 @@ pub fn midpoint_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = MidpointInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; 
+    let mut output = vec![0.0; data.len()];
     midpoint_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn midpoint_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2101,7 +1971,7 @@ pub fn midpoint_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn midpoint_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2111,7 +1981,7 @@ pub fn midpoint_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn midpoint_into(
     in_ptr: *const f64,
@@ -2131,7 +2001,6 @@ pub fn midpoint_into(
         let input = MidpointInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             midpoint_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2146,7 +2015,7 @@ pub fn midpoint_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn midpoint_batch_into(
     in_ptr: *const f64,
@@ -2169,8 +2038,7 @@ pub fn midpoint_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let expected = rows
@@ -2186,13 +2054,13 @@ pub fn midpoint_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MidpointBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MidpointBatchJsOutput {
     pub values: Vec<f64>,
@@ -2201,7 +2069,7 @@ pub struct MidpointBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = midpoint_batch)]
 pub fn midpoint_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MidpointBatchConfig = serde_wasm_bindgen::from_value(config)

@@ -15,19 +15,8 @@ pub use aso::{aso, AsoInput, AsoOutput, AsoParams};
 pub mod atr;
 pub mod avsl;
 pub use avsl::{
-    avsl,
-    avsl_batch_with_kernel,
-    avsl_into_slice,
-    avsl_with_kernel,
-    AvslBatchBuilder,
-    AvslBatchOutput,
-    
-    AvslBatchRange,
-    AvslBuilder,
-    AvslData,
-    AvslError,
-    AvslInput,
-    AvslOutput,
+    avsl, avsl_batch_with_kernel, avsl_into_slice, avsl_with_kernel, AvslBatchBuilder,
+    AvslBatchOutput, AvslBatchRange, AvslBuilder, AvslData, AvslError, AvslInput, AvslOutput,
     AvslParams,
 };
 pub mod bandpass;
@@ -72,7 +61,7 @@ pub mod deviation;
 pub use deviation::{deviation, DeviationInput, DeviationOutput, DeviationParams};
 pub mod devstop;
 pub use devstop::{devstop, DevStopData, DevStopError, DevStopInput, DevStopOutput, DevStopParams};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use devstop::{
     devstop_alloc, devstop_batch_unified_js, devstop_free, devstop_into_js, devstop_js,
 };
@@ -154,7 +143,7 @@ pub use otto::{
     otto, OttoBatchBuilder, OttoBatchOutput, OttoBatchRange, OttoBuilder, OttoData, OttoError,
     OttoInput, OttoOutput, OttoParams, OttoStream,
 };
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use otto::{otto_alloc, otto_batch_unified_js, otto_free, otto_into, otto_js};
 #[cfg(feature = "python")]
 pub use otto::{otto_batch_py, otto_py, OttoStreamPy};
@@ -183,23 +172,10 @@ pub mod qqe;
 pub mod qstick;
 pub mod range_filter;
 pub use range_filter::{
-    range_filter,
-    range_filter_batch_par_slice,
-    range_filter_batch_slice,
-    range_filter_into_slice,
-    range_filter_with_kernel,
-    RangeFilterBatchBuilder,
-    RangeFilterBatchOutput,
-    
-    RangeFilterBatchRange,
-    RangeFilterBuilder,
-    RangeFilterData,
-    RangeFilterError,
-    RangeFilterInput,
-    RangeFilterOutput,
-    RangeFilterParams,
-    
-    RangeFilterStream,
+    range_filter, range_filter_batch_par_slice, range_filter_batch_slice, range_filter_into_slice,
+    range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterBatchOutput,
+    RangeFilterBatchRange, RangeFilterBuilder, RangeFilterData, RangeFilterError, RangeFilterInput,
+    RangeFilterOutput, RangeFilterParams, RangeFilterStream,
 };
 pub mod roc;
 pub use roc::{
@@ -251,22 +227,8 @@ pub mod wclprice;
 pub mod willr;
 pub mod wto;
 pub use wto::{
-    wto,
-    wto_batch_candles,
-    wto_batch_slice,
-    wto_into_slices,
-    wto_with_kernel,
-    WtoBatchBuilder,
-    WtoBatchOutput,
-    
-    WtoBatchRange,
-    WtoBuilder,
-    WtoData,
-    WtoError,
-    WtoInput,
-    WtoOutput,
-    WtoParams,
-    
+    wto, wto_batch_candles, wto_batch_slice, wto_into_slices, wto_with_kernel, WtoBatchBuilder,
+    WtoBatchOutput, WtoBatchRange, WtoBuilder, WtoData, WtoError, WtoInput, WtoOutput, WtoParams,
     WtoStream,
 };
 pub mod zscore;
@@ -276,7 +238,6 @@ pub use vpci::{
 };
 #[cfg(feature = "python")]
 pub use vpci::{vpci_batch_py, vpci_py, VpciStreamPy};
-
 
 #[cfg(feature = "python")]
 pub use avsl::{avsl_batch_py, avsl_py, AvslStreamPy};
@@ -293,7 +254,7 @@ pub use ift_rsi::{
     ift_rsi, IftRsiBatchBuilder, IftRsiBatchOutput, IftRsiBatchRange, IftRsiBuilder, IftRsiError,
     IftRsiInput, IftRsiOutput, IftRsiParams, IftRsiStream,
 };
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use ift_rsi::{
     ift_rsi_alloc, ift_rsi_batch_unified_js, ift_rsi_free, ift_rsi_into, ift_rsi_js,
 };
@@ -317,7 +278,7 @@ pub use squeeze_momentum::{
     SqueezeMomentumBuilder, SqueezeMomentumInput, SqueezeMomentumOutput, SqueezeMomentumParams,
     SqueezeMomentumStream,
 };
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use squeeze_momentum::{
     squeeze_momentum_alloc, squeeze_momentum_batch, squeeze_momentum_free, squeeze_momentum_into,
     squeeze_momentum_js, SmiBatchJsOutput, SmiResult,
@@ -333,7 +294,7 @@ pub use tsf::{
     tsf, TsfBatchBuilder, TsfBatchOutput, TsfBatchRange, TsfBuilder, TsfError, TsfInput, TsfOutput,
     TsfParams, TsfStream,
 };
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use tsf::{tsf_alloc, tsf_batch_into, tsf_batch_unified_js, tsf_free, tsf_into, tsf_js};
 #[cfg(feature = "python")]
 pub use tsf::{tsf_batch_py, tsf_py, TsfStreamPy};
@@ -342,11 +303,11 @@ pub use vidya::{
     vidya, VidyaBatchBuilder, VidyaBatchOutput, VidyaBatchRange, VidyaBuilder, VidyaData,
     VidyaError, VidyaInput, VidyaOutput, VidyaParams, VidyaStream,
 };
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use vidya::{vidya_alloc, vidya_batch_into, vidya_batch_js, vidya_free, vidya_into, vidya_js};
 #[cfg(feature = "python")]
 pub use vidya::{vidya_batch_py, vidya_py, VidyaStreamPy};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use vpci::{
     vpci_alloc, vpci_batch_into, vpci_batch_unified_js, vpci_free, vpci_into, vpci_js, VpciContext,
 };

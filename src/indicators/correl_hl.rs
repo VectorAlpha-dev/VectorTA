@@ -1,23 +1,3 @@
-//! # Pearson's Correlation Coefficient of High vs. Low (CORREL_HL)
-//!
-//! Measures the strength and direction of the linear relationship between
-//! the `high` and `low` fields of candle data over a rolling window of length `period`.
-//!
-//! ## Parameters
-//! - **period**: The window size (number of data points). Defaults to 9.
-//!
-//! ## Returns
-//! - **`Ok(CorrelHlOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the rolling window is filled.
-//! - **`Err(CorrelHlError)`** on various error conditions.
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 implemented to accelerate initial/rebuild reductions; slide remains scalar O(1).
-//! - **Streaming Performance**: O(1) - uses running sums for efficient incremental correlation calculation
-//! - **Batch**: Row-specific optimized variant via shared prefix sums over (h, h², l, l², h·l), segmenting on NaNs.
-//! - **CUDA/Python**: CUDA wrapper returns typed errors and VRAM-backed handles with context + device id; Python exposes CUDA Array Interface v3 and DLPack v1.x capsules while preserving numerical outputs.
-//! - **Memory**: Uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes for warmup-friendly allocations
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -29,9 +9,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
@@ -211,9 +191,13 @@ pub enum CorrelHlError {
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("correl_hl: invalid input: {0}")]
     InvalidInput(&'static str),
-    
+
     #[error("correl_hl: invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("correl_hl: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -296,7 +280,6 @@ pub fn correl_hl_with_kernel(
     Ok(CorrelHlOutput { values: out })
 }
 
-/// Write correlation coefficient directly to output slice - no allocations
 #[inline]
 pub fn correl_hl_into_slice(
     dst: &mut [f64],
@@ -305,45 +288,41 @@ pub fn correl_hl_into_slice(
 ) -> Result<(), CorrelHlError> {
     let (high, low, period, first, chosen) = correl_hl_prepare(input, kernel)?;
     if dst.len() != high.len() {
-        return Err(CorrelHlError::OutputLengthMismatch { expected: high.len(), got: dst.len() });
+        return Err(CorrelHlError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
+        });
     }
     correl_hl_compute_into(high, low, period, first, chosen, dst);
     let warm = first + period - 1;
     for v in &mut dst[..warm] {
-        
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     Ok(())
 }
 
-/// Compute CORREL_HL directly into a caller-provided buffer (no allocations).
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
-/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` otherwise.
-/// - Uses `Kernel::Auto` to select the best kernel at runtime.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn correl_hl_into(out: &mut [f64], input: &CorrelHlInput) -> Result<(), CorrelHlError> {
-    
     let (high, _low, period, first, _chosen) = correl_hl_prepare(input, Kernel::Auto)?;
     if out.len() != high.len() {
-        return Err(CorrelHlError::OutputLengthMismatch { expected: high.len(), got: out.len() });
+        return Err(CorrelHlError::OutputLengthMismatch {
+            expected: high.len(),
+            got: out.len(),
+        });
     }
 
-    
     let warm = first + period - 1;
     let warm_cap = warm.min(out.len());
     for v in &mut out[..warm_cap] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     correl_hl_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
 pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     let mut sum_h = 0.0_f64;
     let mut sum_h2 = 0.0_f64;
     let mut sum_l = 0.0_f64;
@@ -361,7 +340,6 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         sum_hl: f64,
         inv_pf: f64,
     ) -> f64 {
-        
         let cov = sum_hl - (sum_h * sum_l) * inv_pf;
         let var_h = sum_h2 - (sum_h * sum_h) * inv_pf;
         let var_l = sum_l2 - (sum_l * sum_l) * inv_pf;
@@ -372,11 +350,10 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         }
     }
 
-    
     let init_start = first;
     let init_end = first + period;
     let mut j = init_start;
-    
+
     while j + 4 <= init_end {
         let h0 = high[j + 0];
         let l0 = low[j + 0];
@@ -408,7 +385,6 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
     let warm = init_end - 1;
     out[warm] = corr_from_sums(sum_h, sum_h2, sum_l, sum_l2, sum_hl, inv_pf);
 
-    
     let n = high.len();
     for i in init_end..n {
         let old_idx = i - period;
@@ -419,7 +395,6 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
         let new_l = low[new_idx];
 
         if old_h.is_nan() || old_l.is_nan() || new_h.is_nan() || new_l.is_nan() {
-            
             let start = i + 1 - period;
             let end = i + 1;
             sum_h = 0.0;
@@ -455,7 +430,6 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
                 k += 1;
             }
         } else {
-            
             sum_h += new_h - old_h;
             sum_l += new_l - old_l;
             sum_h2 += new_h * new_h - old_h * old_h;
@@ -471,7 +445,6 @@ pub fn correl_hl_scalar(high: &[f64], low: &[f64], period: usize, first: usize, 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn correl_hl_avx2(high: &[f64], low: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     unsafe {
         #[inline(always)]
         unsafe fn hsum256_pd(v: __m256d) -> f64 {
@@ -488,7 +461,7 @@ pub fn correl_hl_avx2(high: &[f64], low: &[f64], period: usize, first: usize, ou
             high: &[f64],
             low: &[f64],
             start: usize,
-            end: usize, 
+            end: usize,
         ) -> (f64, f64, f64, f64, f64) {
             let mut v_h = _mm256_setzero_pd();
             let mut v_l = _mm256_setzero_pd();
@@ -611,7 +584,6 @@ pub unsafe fn correl_hl_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    
     correl_hl_avx512_long(high, low, period, first, out)
 }
 
@@ -646,7 +618,7 @@ pub unsafe fn correl_hl_avx512_long(
         high: &[f64],
         low: &[f64],
         start: usize,
-        end: usize, 
+        end: usize,
     ) -> (f64, f64, f64, f64, f64) {
         let mut v_h = _mm512_setzero_pd();
         let mut v_l = _mm512_setzero_pd();
@@ -672,8 +644,7 @@ pub unsafe fn correl_hl_avx512_long(
             i += 8;
         }
 
-        
-        let rem = (end - i) as i32; 
+        let rem = (end - i) as i32;
         if rem != 0 {
             let mask: __mmask8 = ((1u16 << rem) - 1) as __mmask8;
             let mh = _mm512_maskz_loadu_pd(mask, ptr_h.add(i));
@@ -752,25 +723,21 @@ pub unsafe fn correl_hl_avx512_long(
     }
 }
 
-/// Decision: Streaming kernel updated to be NaN-resilient and O(1),
-/// matching batch semantics; uses cached 1/period. Scalar-safe.
 #[derive(Debug, Clone)]
 pub struct CorrelHlStream {
     period: usize,
     buffer_high: Vec<f64>,
     buffer_low: Vec<f64>,
-    head: usize,       
-    len: usize,        
-    nan_in_win: usize, 
+    head: usize,
+    len: usize,
+    nan_in_win: usize,
 
-    
     sum_h: f64,
     sum_h2: f64,
     sum_l: f64,
     sum_l2: f64,
     sum_hl: f64,
 
-    
     inv_pf: f64,
 }
 
@@ -801,13 +768,8 @@ impl CorrelHlStream {
         })
     }
 
-    /// O(1) update. Returns:
-    /// - `None` during warmup (before we have `period` points)
-    /// - `Some(NaN)` if the current window contains any NaN pair
-    /// - `Some(r)` otherwise, where r ∈ [-1, 1] (up to rounding)
     #[inline(always)]
     pub fn update(&mut self, h: f64, l: f64) -> Option<f64> {
-        
         if self.len == self.period {
             let old_h = self.buffer_high[self.head];
             let old_l = self.buffer_low[self.head];
@@ -825,11 +787,9 @@ impl CorrelHlStream {
             }
         }
 
-        
         self.buffer_high[self.head] = h;
         self.buffer_low[self.head] = l;
 
-        
         if h.is_nan() || l.is_nan() {
             self.nan_in_win += 1;
         } else {
@@ -840,24 +800,21 @@ impl CorrelHlStream {
             self.sum_hl += h * l;
         }
 
-        
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
         }
         if self.len < self.period {
-            self.len += 1; 
+            self.len += 1;
         }
 
-        
         if self.len < self.period {
-            return None; 
+            return None;
         }
         if self.nan_in_win != 0 {
-            return Some(f64::NAN); 
+            return Some(f64::NAN);
         }
 
-        
         let cov = self.sum_hl - (self.sum_h * self.sum_l) * self.inv_pf;
         let var_h = self.sum_h2 - (self.sum_h * self.sum_h) * self.inv_pf;
         let var_l = self.sum_l2 - (self.sum_l * self.sum_l) * self.inv_pf;
@@ -884,13 +841,13 @@ impl Default for CorrelHlBatchRange {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CorrelHlBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CorrelHlBatchJsOutput {
     pub values: Vec<f64>,
@@ -959,19 +916,26 @@ pub fn expand_grid(r: &CorrelHlBatchRange) -> Result<Vec<CorrelHlParams>, Correl
                     _ => break,
                 }
             }
-            if v.is_empty() { return Err(CorrelHlError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(CorrelHlError::InvalidRange { start, end, step });
+            }
             Ok(v)
         } else {
-            
             let mut v = Vec::new();
             let mut x = start;
             while x >= end {
                 v.push(x);
-                if x < end + step { break; }
+                if x < end + step {
+                    break;
+                }
                 x = x.saturating_sub(step);
-                if x == 0 { break; }
+                if x == 0 {
+                    break;
+                }
             }
-            if v.is_empty() { return Err(CorrelHlError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(CorrelHlError::InvalidRange { start, end, step });
+            }
             Ok(v)
         }
     }
@@ -1084,25 +1048,20 @@ fn correl_hl_batch_inner(
     rows.checked_mul(cols)
         .ok_or(CorrelHlError::InvalidInput("rows*cols overflow"))?;
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let n = high.len();
     let mut ps_h = vec![0.0f64; n + 1];
     let mut ps_h2 = vec![0.0f64; n + 1];
@@ -1180,7 +1139,6 @@ fn correl_hl_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1235,7 +1193,6 @@ fn correl_hl_batch_inner_into(
         });
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1245,8 +1202,6 @@ fn correl_hl_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
-    
     let n = high.len();
     let mut ps_h = vec![0.0f64; n + 1];
     let mut ps_h2 = vec![0.0f64; n + 1];
@@ -1276,14 +1231,13 @@ fn correl_hl_batch_inner_into(
         }
     }
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let p = combos[row].period.unwrap();
         let inv_pf = 1.0 / (p as f64);
         let dst: &mut [f64] = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
-        
+
         let warm = first + p - 1;
         for i in warm..n {
             let end = i + 1;
@@ -1395,7 +1349,7 @@ pub unsafe fn correl_hl_row_avx512_long(
     correl_hl_avx512_long(high, low, period, first, out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correl_hl_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = CorrelHlParams {
@@ -1411,7 +1365,7 @@ pub fn correl_hl_js(high: &[f64], low: &[f64], period: usize) -> Result<Vec<f64>
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correl_hl_into(
     high_ptr: *const f64,
@@ -1432,16 +1386,13 @@ pub fn correl_hl_into(
         };
         let input = CorrelHlInput::from_slices(high, low, params);
 
-        
         if high_ptr == out_ptr || low_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             correl_hl_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             correl_hl_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1450,7 +1401,7 @@ pub fn correl_hl_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correl_hl_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1459,7 +1410,7 @@ pub fn correl_hl_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correl_hl_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1469,7 +1420,7 @@ pub fn correl_hl_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = correl_hl_batch)]
 pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: CorrelHlBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1479,7 +1430,6 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
         period: config.period_range,
     };
 
-    
     let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = high.len();
@@ -1488,9 +1438,6 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
     let mut values = vec![0.0f64; total];
 
-    
-    
-    
     correl_hl_batch_inner_into(high, low, &sweep, Kernel::Auto, false, &mut values)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1507,7 +1454,7 @@ pub fn correl_hl_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn correl_hl_batch_into(
     high_ptr: *const f64,
@@ -1538,7 +1485,6 @@ pub fn correl_hl_batch_into(
             .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        
         correl_hl_batch_inner_into(high, low, &sweep, Kernel::Auto, false, out_slice)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1660,9 +1606,12 @@ pub fn correl_hl_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "CorrelHlDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "CorrelHlDeviceArrayF32",
+    unsendable
+)]
 pub struct CorrelHlDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -1756,8 +1705,8 @@ impl CorrelHlDeviceArrayF32Py {
             }
         }
 
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -1775,9 +1724,8 @@ impl CorrelHlDeviceArrayF32Py {
         let shape_ptr = shape.as_mut_ptr();
         let strides_ptr = strides.as_mut_ptr();
 
-        let self_ref = unsafe {
-            PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject)
-        };
+        let self_ref =
+            unsafe { PyObject::from_borrowed_ptr(py, self as *mut _ as *mut pyo3::ffi::PyObject) };
         let mgr = Box::new(ManagerCtx {
             shape: shape_ptr,
             strides: strides_ptr,
@@ -1821,9 +1769,7 @@ impl CorrelHlDeviceArrayF32Py {
             deleter: Some(deleter),
         });
 
-        let want_versioned = max_version
-            .map(|(maj, _)| maj >= 1)
-            .unwrap_or(false);
+        let want_versioned = max_version.map(|(maj, _)| maj >= 1).unwrap_or(false);
 
         unsafe {
             if want_versioned {
@@ -1836,9 +1782,7 @@ impl CorrelHlDeviceArrayF32Py {
                 let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
                 if cap.is_null() {
                     let _ = Box::from_raw(ptr as *mut DLManagedTensorVersioned);
-                    return Err(PyValueError::new_err(
-                        "failed to create DLPack capsule",
-                    ));
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
                 }
                 Ok(PyObject::from_owned_ptr(py, cap))
             } else {
@@ -1847,9 +1791,7 @@ impl CorrelHlDeviceArrayF32Py {
                 let cap = pyffi::PyCapsule_New(ptr, name.as_ptr(), None);
                 if cap.is_null() {
                     let _ = Box::from_raw(ptr as *mut DLManagedTensor);
-                    return Err(PyValueError::new_err(
-                        "failed to create DLPack capsule",
-                    ));
+                    return Err(PyValueError::new_err("failed to create DLPack capsule"));
                 }
                 Ok(PyObject::from_owned_ptr(py, cap))
             }
@@ -1868,7 +1810,6 @@ impl CorrelHlDeviceArrayF32Py {
     }
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "correl_hl_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
@@ -1890,8 +1831,8 @@ pub fn correl_hl_cuda_batch_dev_py(
         period: period_range,
     };
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaCorrelHl::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let (dev, _combos) = cuda
             .correl_hl_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1924,8 +1865,8 @@ pub fn correl_hl_cuda_many_series_one_param_dev_py(
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaCorrelHl::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCorrelHl::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
             .correl_hl_many_series_one_param_time_major_dev(h, l, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1944,7 +1885,6 @@ mod tests {
 
     #[test]
     fn test_correl_hl_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build synthetic candles (length ~256) with realistic OHLC relationships
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -1955,7 +1895,6 @@ mod tests {
 
         let mut cur = 100.0f64;
         for i in 0..n {
-            // simple random-walk-like series with bounded spreads
             let step = ((i as f64).sin() * 0.5) + 0.1;
             let o = cur;
             let c = cur + step;
@@ -1974,24 +1913,25 @@ mod tests {
         }
 
         let candles = crate::utilities::data_loader::Candles::new(
-            ts, open, high.clone(), low.clone(), close, vol,
+            ts,
+            open,
+            high.clone(),
+            low.clone(),
+            close,
+            vol,
         );
 
-        // Default params match existing tests
         let input = CorrelHlInput::from_candles(&candles, CorrelHlParams::default());
 
-        // Baseline via Vec-returning API
         let baseline = correl_hl(&input)?;
 
-        // Preallocate output and compute via no-allocation API
         let mut out = vec![0.0f64; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             correl_hl_into(&mut out, &input)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // In wasm builds the native symbol is not present; use into_slice with Auto
             correl_hl_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -2158,14 +2098,14 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
-        // Test with single data point
+
         let single_high = [42.0];
         let single_low = [21.0];
         let params = CorrelHlParams { period: Some(1) };
         let input = CorrelHlInput::from_slices(&single_high, &single_low, params);
         let result = correl_hl_with_kernel(&input, kernel)?;
         assert_eq!(result.values.len(), 1);
-        // With period=1, correlation is undefined (returns 0.0 or NaN)
+
         assert!(result.values[0].is_nan() || result.values[0].abs() < f64::EPSILON);
         Ok(())
     }
@@ -2193,24 +2133,20 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
-        // Create data with NaN values interspersed
+
         let high = vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let low = vec![0.5, 1.0, 1.5, f64::NAN, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
         let params = CorrelHlParams { period: Some(3) };
         let input = CorrelHlInput::from_slices(&high, &low, params);
         let result = correl_hl_with_kernel(&input, kernel)?;
 
-        // Verify output length
         assert_eq!(result.values.len(), high.len());
 
-        // First valid correlation should appear after first valid window
-        // Find first valid index where we have enough non-NaN values
         let mut valid_count = 0;
         for i in 0..high.len() {
             if !high[i].is_nan() && !low[i].is_nan() {
                 valid_count += 1;
                 if valid_count >= 3 {
-                    // Should have valid output somewhere after this point
                     let has_valid = result.values[i..].iter().any(|&v| !v.is_nan());
                     assert!(
                         has_valid,
@@ -2230,32 +2166,25 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Test streaming functionality
         let params = CorrelHlParams { period: Some(3) };
         let mut stream = CorrelHlStream::try_new(params)?;
 
-        // Test data
         let high_data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let low_data = [0.5, 1.0, 1.5, 2.0, 2.5];
 
-        // First two updates should return None (warmup)
         assert!(stream.update(high_data[0], low_data[0]).is_none());
         assert!(stream.update(high_data[1], low_data[1]).is_none());
 
-        // Third update should return first correlation
         let first_corr = stream.update(high_data[2], low_data[2]);
         assert!(first_corr.is_some());
 
-        // Continue streaming
         let second_corr = stream.update(high_data[3], low_data[3]);
         assert!(second_corr.is_some());
 
-        // Compare streaming results with batch calculation
         let params_batch = CorrelHlParams { period: Some(3) };
         let input_batch = CorrelHlInput::from_slices(&high_data[..4], &low_data[..4], params_batch);
         let batch_result = correl_hl_with_kernel(&input_batch, kernel)?;
 
-        // Last non-NaN value from batch should match second streaming result
         if let Some(batch_val) = batch_result.values.iter().rev().find(|&&v| !v.is_nan()) {
             if let Some(stream_val) = second_corr {
                 assert!(
@@ -2271,7 +2200,6 @@ mod tests {
         Ok(())
     }
 
-    // Property-based testing
     #[cfg(feature = "proptest")]
     #[allow(clippy::float_cmp)]
     fn check_correl_hl_property(
@@ -2281,40 +2209,30 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic OHLC-like data
-        // Note: Period=1 correlation is mathematically undefined (returns 0)
-        // We test periods 2-100 for meaningful correlation values
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
-                // Generate base close prices, then derive high/low with realistic spreads
-                prop::collection::vec(
-                    (1.0f64..1000.0f64), // Positive price range typical for assets
-                    period..400,
-                )
-                .prop_flat_map(move |close_prices| {
-                    // For each close price, generate realistic high/low
-                    let len = close_prices.len();
-                    (
-                        Just(close_prices.clone()),
-                        prop::collection::vec(
-                            (0.001f64..0.05f64, 0.001f64..0.05f64), // 0.1% to 5% daily range (avoid zero spread)
-                            len,
-                        ),
-                    )
-                        .prop_map(move |(close, spreads)| {
-                            let mut high = Vec::with_capacity(len);
-                            let mut low = Vec::with_capacity(len);
+                prop::collection::vec((1.0f64..1000.0f64), period..400).prop_flat_map(
+                    move |close_prices| {
+                        let len = close_prices.len();
+                        (
+                            Just(close_prices.clone()),
+                            prop::collection::vec((0.001f64..0.05f64, 0.001f64..0.05f64), len),
+                        )
+                            .prop_map(move |(close, spreads)| {
+                                let mut high = Vec::with_capacity(len);
+                                let mut low = Vec::with_capacity(len);
 
-                            for (i, &close_price) in close.iter().enumerate() {
-                                let (up_spread, down_spread) = spreads[i];
-                                // High is always >= close, low is always <= close
-                                high.push(close_price * (1.0 + up_spread));
-                                low.push(close_price * (1.0 - down_spread));
-                            }
+                                for (i, &close_price) in close.iter().enumerate() {
+                                    let (up_spread, down_spread) = spreads[i];
 
-                            (high, low)
-                        })
-                }),
+                                    high.push(close_price * (1.0 + up_spread));
+                                    low.push(close_price * (1.0 - down_spread));
+                                }
+
+                                (high, low)
+                            })
+                    },
+                ),
                 Just(period),
             )
         });
@@ -2326,21 +2244,16 @@ mod tests {
                 };
                 let input = CorrelHlInput::from_slices(&high, &low, params);
 
-                // Get results from test kernel and reference scalar kernel
                 let result = correl_hl_with_kernel(&input, kernel);
                 let reference = correl_hl_with_kernel(&input, Kernel::Scalar);
 
-                // Both should succeed or fail together
                 match (result, reference) {
                     (Ok(output), Ok(ref_output)) => {
                         let out = &output.values;
                         let ref_out = &ref_output.values;
 
-                        // Property 1: Output length matches input
                         prop_assert_eq!(out.len(), high.len());
 
-                        // Property 2: Warmup period
-                        // First (period-1) values should be NaN for valid warmup
                         let warmup_len = period.saturating_sub(1).min(high.len());
                         for i in 0..warmup_len {
                             prop_assert!(
@@ -2351,13 +2264,10 @@ mod tests {
                             );
                         }
 
-                        // Property 3: Cross-kernel consistency
-                        // All kernels should produce identical results
                         for i in 0..out.len() {
                             let y = out[i];
                             let r = ref_out[i];
 
-                            // Check special values (NaN, inf) have exact bit equality
                             if !y.is_finite() || !r.is_finite() {
                                 prop_assert_eq!(
                                     y.to_bits(),
@@ -2370,7 +2280,6 @@ mod tests {
                                 continue;
                             }
 
-                            // Use ULP comparison for finite values
                             let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                             prop_assert!(
                                 (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -2382,12 +2291,8 @@ mod tests {
                             );
                         }
 
-                        // Property 4: Correlation bounds [-1, 1]
-                        // All correlations must be within valid range (with small tolerance for FP errors)
                         for (i, &val) in out.iter().enumerate() {
                             if !val.is_nan() {
-                                // Allow small numerical errors due to floating-point arithmetic.
-                                // Correlation can drift slightly outside [-1, 1] for near-degenerate windows.
                                 let tolerance = 1e-3;
                                 prop_assert!(
                                     val >= -1.0 - tolerance && val <= 1.0 + tolerance,
@@ -2397,14 +2302,8 @@ mod tests {
                                 );
                             }
                         }
-
-                        // Property 5: No additional shape assumptions.
-                        // Even for OHLC-derived series, short windows can legitimately yield
-                        // negative correlation (e.g., if close moves opposite to the spread).
                     }
-                    (Err(_), Err(_)) => {
-                        // Both kernels failed - this is acceptable
-                    }
+                    (Err(_), Err(_)) => {}
                     (Ok(_), Err(e)) => {
                         prop_assert!(
                             false,
@@ -2428,7 +2327,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_correl_hl_no_poison(
         test_name: &str,
@@ -2439,20 +2337,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
         let input = CorrelHlInput::from_candles(&candles, CorrelHlParams::default());
         let output = correl_hl_with_kernel(&input, kernel)?;
 
-        // Check every value for poison patterns
         for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -2460,7 +2354,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -2468,7 +2361,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -2480,7 +2372,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_correl_hl_no_poison(
         _test_name: &str,
@@ -2513,12 +2404,10 @@ mod tests {
         }
     }
 
-    
     #[test]
     fn test_period_one_bug() {
-        
         let high = vec![100.0, 200.0, 300.0];
-        let low = vec![90.0, 190.0, 310.0]; 
+        let low = vec![90.0, 190.0, 310.0];
 
         let params = CorrelHlParams { period: Some(1) };
         let input = CorrelHlInput::from_slices(&high, &low, params.clone());
@@ -2531,7 +2420,6 @@ mod tests {
                 i, high[i], low[i], val
             );
 
-            
             assert!(
                 val.is_nan() || (val >= -1.0 && val <= 1.0),
                 "Period=1 correlation at index {} out of bounds: {}",
@@ -2540,9 +2428,8 @@ mod tests {
             );
         }
 
-        
         let high2 = vec![100.0, 200.0, 300.0];
-        let low2 = vec![100.0, 200.0, 300.0]; 
+        let low2 = vec![100.0, 200.0, 300.0];
 
         let input2 = CorrelHlInput::from_slices(&high2, &low2, params.clone());
         let result2 = correl_hl(&input2).unwrap();
@@ -2595,7 +2482,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2603,15 +2489,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CorrelHlBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 20, 5) 
+            .period_range(5, 20, 5)
             .apply_candles(&c)?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -2620,7 +2503,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2628,7 +2510,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2636,7 +2517,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2648,7 +2528,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::qstick::{
     qstick_batch_with_kernel, qstick_with_kernel, QstickBatchRange, QstickData, QstickInput,
     QstickParams,
@@ -82,8 +80,8 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         return Ok(());
     }
 
-    let cols = 16usize; 
-    let rows = 4096usize; 
+    let cols = 16usize;
+    let rows = 4096usize;
     let mut open_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -96,7 +94,6 @@ fn qstick_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     }
     let period = 21usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut o = vec![f64::NAN; rows];

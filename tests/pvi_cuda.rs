@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::pvi::{pvi_with_kernel, PviInput, PviParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -36,17 +34,15 @@ fn pvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 4096usize;
     let mut close = vec![f64::NAN; len];
     let mut volume = vec![f64::NAN; len];
-    
+
     for i in 4..len {
         let x = i as f64;
         close[i] = (x * 0.00121).sin() + 100.0 + 0.00019 * x;
         volume[i] = (x * 0.00081).cos().abs() * 600.0 + 150.0;
     }
 
-    
     let inits = vec![500.0, 1000.0, 1500.0, 2000.0];
 
-    
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
     let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
     let close32_as_f64: Vec<f64> = close_f32.iter().map(|&v| v as f64).collect();
@@ -119,7 +115,6 @@ fn pvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let initial_value = 1200.0;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut c = vec![f64::NAN; rows];

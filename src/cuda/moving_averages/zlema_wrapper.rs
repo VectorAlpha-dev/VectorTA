@@ -1,9 +1,3 @@
-//! CUDA scaffolding for ZLEMA (Zero Lag Exponential Moving Average).
-//!
-//! Mirrors the VRAM-first design used by the ALMA integration: inputs are
-//! converted to `f32`, parameter sweeps are validated on the host, and each
-//! parameter combination is evaluated on the device, returning a `DeviceArrayF32`.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -19,8 +13,8 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use thiserror::Error;
 use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaZlemaError {
@@ -29,16 +23,27 @@ pub enum CudaZlemaError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
-    #[error("not implemented")] 
+    #[error("not implemented")]
     NotImplemented,
 }
 
@@ -91,7 +96,11 @@ impl CudaZlema {
         }
         if let Some((free, _total)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) > free {
-                return Err(CudaZlemaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+                return Err(CudaZlemaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
             }
         }
         Ok(())
@@ -102,12 +111,26 @@ impl CudaZlema {
         let max_threads_per_block = dev.get_attribute(DevAttr::MaxThreadsPerBlock)? as u32;
         let bx = block.x * block.y * block.z;
         if bx > max_threads_per_block {
-            return Err(CudaZlemaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
+            return Err(CudaZlemaError::LaunchConfigTooLarge {
+                gx: grid.x,
+                gy: grid.y,
+                gz: grid.z,
+                bx: block.x,
+                by: block.y,
+                bz: block.z,
+            });
         }
-        
+
         let max_grid_x = dev.get_attribute(DevAttr::MaxGridDimX)? as u32;
         if grid.x > max_grid_x {
-            return Err(CudaZlemaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
+            return Err(CudaZlemaError::LaunchConfigTooLarge {
+                gx: grid.x,
+                gy: grid.y,
+                gz: grid.z,
+                bx: block.x,
+                by: block.y,
+                bz: block.z,
+            });
         }
         Ok(())
     }
@@ -117,12 +140,13 @@ impl CudaZlema {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/zlema_kernel.ptx"));
-        
+
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -140,13 +164,19 @@ impl CudaZlema {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { Arc::clone(&self._context) }
+    pub fn context_arc(&self) -> Arc<Context> {
+        Arc::clone(&self._context)
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
-    pub fn stream_handle(&self) -> usize { self.stream.as_inner() as usize }
+    pub fn stream_handle(&self) -> usize {
+        self.stream.as_inner() as usize
+    }
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -208,17 +238,16 @@ impl CudaZlema {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaZlemaError> {
-        let mut func = self
-            .module
-            .get_function("zlema_batch_f32")
-            .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_batch_f32" })?;
+        let mut func = self.module.get_function("zlema_batch_f32").map_err(|_| {
+            CudaZlemaError::MissingKernelSymbol {
+                name: "zlema_batch_f32",
+            }
+        })?;
 
-        
         if Self::env_flag("ZLEMA_PREFER_L1", true) {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        
         let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -228,15 +257,14 @@ impl CudaZlema {
             let grid_x = ((n_combos as u32) + bx - 1) / bx;
             ((grid_x.max(1), 1, 1).into(), (bx, 1, 1).into())
         } else {
-            let (min_grid, block_size) = func
-                .suggested_launch_configuration(0, (0, 0, 0).into())?;
+            let (min_grid, block_size) =
+                func.suggested_launch_configuration(0, (0, 0, 0).into())?;
             let bx = block_size.clamp(64, 1024);
             let grid_x = ((n_combos as u32) + bx - 1) / bx;
             let gx = grid_x.max(min_grid);
             ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
         };
 
-        
         self.validate_launch(grid, block)?;
 
         unsafe {
@@ -266,7 +294,6 @@ impl CudaZlema {
         Ok(())
     }
 
-    
     fn launch_batch_kernel_tiled(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -282,13 +309,14 @@ impl CudaZlema {
         let mut func = self
             .module
             .get_function("zlema_batch_f32_tiled_f32")
-            .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_batch_f32_tiled_f32" })?;
+            .map_err(|_| CudaZlemaError::MissingKernelSymbol {
+                name: "zlema_batch_f32_tiled_f32",
+            })?;
 
         if Self::env_flag("ZLEMA_PREFER_L1", true) {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        
         let tile: usize = env::var("ZLEMA_BATCH_TILE")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -296,7 +324,6 @@ impl CudaZlema {
             .unwrap_or(1024);
         let shmem_bytes = (tile + (max_lag as usize)) * std::mem::size_of::<f32>();
 
-        
         let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -305,15 +332,14 @@ impl CudaZlema {
             let grid_x = ((n_combos as u32) + bx - 1) / bx;
             ((grid_x.max(1), 1, 1).into(), (bx, 1, 1).into())
         } else {
-            let (min_grid, block_size) = func
-                .suggested_launch_configuration(shmem_bytes, (0, 0, 0).into())?;
+            let (min_grid, block_size) =
+                func.suggested_launch_configuration(shmem_bytes, (0, 0, 0).into())?;
             let bx = block_size.clamp(64, 1024);
             let grid_x = ((n_combos as u32) + bx - 1) / bx;
             let gx = grid_x.max(min_grid);
             ((gx.max(1), 1, 1).into(), (bx, 1, 1).into())
         };
 
-        
         self.validate_launch(grid, block)?;
 
         unsafe {
@@ -339,7 +365,8 @@ impl CudaZlema {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream.launch(&func, grid, block, shmem_bytes as u32, args)?;
+            self.stream
+                .launch(&func, grid, block, shmem_bytes as u32, args)?;
         }
 
         Ok(())
@@ -357,13 +384,14 @@ impl CudaZlema {
         let mut func = self
             .module
             .get_function("zlema_batch_warp_scan_f32")
-            .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_batch_warp_scan_f32" })?;
+            .map_err(|_| CudaZlemaError::MissingKernelSymbol {
+                name: "zlema_batch_warp_scan_f32",
+            })?;
 
         if Self::env_flag("ZLEMA_PREFER_L1", true) {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        
         let block_x_override = env::var("ZLEMA_BATCH_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -373,7 +401,7 @@ impl CudaZlema {
         if block_x < 32 {
             block_x = 32;
         }
-        
+
         block_x = ((block_x + 31) / 32) * 32;
         if block_x > 1024 {
             block_x = 1024;
@@ -416,7 +444,6 @@ impl CudaZlema {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaZlemaError> {
-        
         let rows = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -431,18 +458,25 @@ impl CudaZlema {
             .and_then(|v| v.checked_mul(sz_f32))
             .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?;
 
-        
-        
         let n_combos = combos.len();
-        let has_warp_scan = self.module.get_function("zlema_batch_warp_scan_f32").is_ok();
+        let has_warp_scan = self
+            .module
+            .get_function("zlema_batch_warp_scan_f32")
+            .is_ok();
         let use_warp_scan = has_warp_scan && Self::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
 
-        let lags_b = if use_warp_scan { 0 } else { rows
-            .checked_mul(sz_i32)
-            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))? };
-        let alphas_b = if use_warp_scan { 0 } else { rows
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))? };
+        let lags_b = if use_warp_scan {
+            0
+        } else {
+            rows.checked_mul(sz_i32)
+                .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?
+        };
+        let alphas_b = if use_warp_scan {
+            0
+        } else {
+            rows.checked_mul(sz_f32)
+                .ok_or_else(|| CudaZlemaError::InvalidInput("byte size overflow".into()))?
+        };
 
         let bytes_required = prices_b
             .checked_add(periods_b)
@@ -487,8 +521,6 @@ impl CudaZlema {
             let d_lags = DeviceBuffer::from_slice(&lags)?;
             let d_alphas = DeviceBuffer::from_slice(&alphas)?;
 
-            
-            
             let max_lag = *lags.iter().max().unwrap_or(&0);
             let use_tiled = (n_combos >= 64) && (len >= 4096);
 
@@ -551,24 +583,18 @@ impl CudaZlema {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
-        
-        let mut pinned = unsafe {
-            LockedBuffer::<f32>::uninitialized(expected)
-                .map_err(CudaZlemaError::Cuda)?
-        };
+
+        let mut pinned =
+            unsafe { LockedBuffer::<f32>::uninitialized(expected).map_err(CudaZlemaError::Cuda)? };
         unsafe {
             dev.buf
                 .async_copy_to(&mut pinned.as_mut_slice(), &self.stream)
                 .map_err(CudaZlemaError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(CudaZlemaError::Cuda)?;
+        self.stream.synchronize().map_err(CudaZlemaError::Cuda)?;
         out.copy_from_slice(pinned.as_slice());
         Ok((combos.len(), len, combos))
     }
-
-    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -605,7 +631,6 @@ impl CudaZlema {
             )));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for series in 0..cols {
             let mut fv: Option<usize> = None;
@@ -647,14 +672,14 @@ impl CudaZlema {
         let mut func = self
             .module
             .get_function("zlema_many_series_one_param_f32")
-            .map_err(|_| CudaZlemaError::MissingKernelSymbol { name: "zlema_many_series_one_param_f32" })?;
+            .map_err(|_| CudaZlemaError::MissingKernelSymbol {
+                name: "zlema_many_series_one_param_f32",
+            })?;
 
-        
         if Self::env_flag("ZLEMA_PREFER_L1", true) {
             let _ = func.set_cache_config(CacheConfig::PreferL1);
         }
 
-        
         let block_x_override = env::var("ZLEMA_MS_BLOCK_X")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -706,7 +731,6 @@ impl CudaZlema {
         period: usize,
         alpha: f32,
     ) -> Result<DeviceArrayF32, CudaZlemaError> {
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaZlemaError::InvalidInput("rows*cols overflow".into()))?;
@@ -778,18 +802,17 @@ impl CudaZlema {
         let (first_valids, p, alpha) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, p, alpha)?;
-        
+
         let mut pinned = unsafe { LockedBuffer::<f32>::uninitialized(cols * rows)? };
         unsafe {
-            dev.buf.async_copy_to(&mut pinned.as_mut_slice(), &self.stream)?;
+            dev.buf
+                .async_copy_to(&mut pinned.as_mut_slice(), &self.stream)?;
         }
         self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -878,7 +901,10 @@ pub mod benches {
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
 
-        let has_warp_scan = cuda.module.get_function("zlema_batch_warp_scan_f32").is_ok();
+        let has_warp_scan = cuda
+            .module
+            .get_function("zlema_batch_warp_scan_f32")
+            .is_ok();
         let use_warp_scan = has_warp_scan && CudaZlema::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
 
         let (d_lags, d_alphas, max_lag) = if use_warp_scan {

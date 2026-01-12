@@ -22,11 +22,14 @@ include = [
   "/LICENSE",
   "/build.rs",
   "/src/lib.rs",
+  "/src/bin/generate_references.rs",
   "/src/bindings/**/*.rs",
   "/src/cuda/**/*.rs",
   "/src/indicators/**/*.rs",
   "/src/utilities/**/*.rs",
-  "/kernels/cuda/**",
+  "/benches/**",
+  "/kernels/cuda/**/*.cu",
+  "/kernels/cuda/**/*.cuh",
   "/kernels/ptx/**",
 ]
 

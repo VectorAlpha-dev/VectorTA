@@ -1,30 +1,6 @@
-//! # MinMax (Local Extrema)
-//!
-//! Identifies local minima and maxima over a specified `order` range.
-//! Provides SIMD and batch APIs, builder pattern, streaming, and robust input validation.
-//!
-//! ## Parameters
-//! - **order**: Neighborhood range (defaults to 3)
-//!
-//! ## Returns
-//! - **`Ok(MinmaxOutput)`** on success, containing local extrema and forward-filled values.
-//! - **`Err(MinmaxError)`** on failure
-//!
-//! ## Developer Notes / Decision Log
-//! - Scalar path optimized: hybrid small-order loop (unsafe, tight hot loop) and large-order O(n) prefix–suffix
-//!   (van Herk / Gil–Werman) precompute. Preserves strict inequalities and finiteness semantics.
-//! - SIMD (AVX2/AVX512) currently implemented as stubs delegating to the optimized scalar path; this pattern is
-//!   memory/dependency-bound and measured gains are negligible, so runtime selection short-circuits to scalar.
-//! - CUDA wrappers provide batch and many-series kernels with VRAM-backed outputs; Python interop uses the shared
-//!   CAI v3 / DLPack path so numerical outputs match the scalar reference (tests unchanged).
-//! - Batch row-specific SIMD: not implemented. Potential future work via shared RMQ/sparse-tables for min/max
-//!   and prefix finiteness counts across orders; would allow O(1) window queries per row.
-//! - Streaming: O(1) per update via monotonic deques for right-window min/max and a (k+1) delay line
-//!   to reuse those as left-window aggregates. Matches batch semantics (strict inequality; all neighbors
-//!   finite). Replaces prior O(k) ring-scan stream.
-//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
-
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -32,19 +8,15 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use numpy::PyUntypedArrayMethods;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
+use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -55,14 +27,14 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::error::Error;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
-
 
 #[derive(Debug, Clone)]
 pub enum MinmaxData<'a> {
@@ -86,7 +58,10 @@ pub struct MinmaxOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MinmaxParams {
     pub order: Option<usize>,
 }
@@ -133,8 +108,6 @@ impl<'a> MinmaxInput<'a> {
     }
 }
 
-
-
 #[derive(Copy, Clone, Debug)]
 pub struct MinmaxBuilder {
     order: Option<usize>,
@@ -178,8 +151,6 @@ impl MinmaxBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum MinmaxError {
     #[error("minmax: Empty data provided.")]
@@ -193,19 +164,20 @@ pub enum MinmaxError {
     #[error("minmax: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("minmax: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("minmax: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
-
-
 
 #[inline]
 pub fn minmax(input: &MinmaxInput) -> Result<MinmaxOutput, MinmaxError> {
     minmax_with_kernel(input, Kernel::Auto)
 }
 
-/// Write directly to output slices - no allocations
 #[inline]
 pub fn minmax_into_slice(
     is_min_dst: &mut [f64],
@@ -271,7 +243,6 @@ pub fn minmax_into_slice(
         });
     }
 
-    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for i in 0..first_valid_idx {
         is_min_dst[i] = qnan;
@@ -335,11 +306,7 @@ pub fn minmax_into_slice(
     Ok(())
 }
 
-/// Write MinMax results into caller-provided buffers without allocations.
-///
-/// Preserves the exact NaN warmup prefix semantics (quiet-NaN pattern) and requires
-/// all output slice lengths to equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn minmax_into(
     input: &MinmaxInput,
@@ -404,7 +371,7 @@ pub fn minmax_with_kernel(
             valid: len - first_valid_idx,
         });
     }
-    
+
     let mut is_min = alloc_with_nan_prefix(len, first_valid_idx);
     let mut is_max = alloc_with_nan_prefix(len, first_valid_idx);
     let mut last_min = alloc_with_nan_prefix(len, first_valid_idx);
@@ -460,12 +427,15 @@ pub fn minmax_with_kernel(
     })
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::minmax_wrapper::CudaMinmax;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "MinmaxDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "MinmaxDeviceArrayF32",
+    unsendable
+)]
 pub struct MinmaxDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -493,13 +463,12 @@ impl MinmaxDeviceArrayF32Py {
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let ptr = buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producer stream is synchronized before returning; omit "stream" per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
         (2, self.device_id as i32)
     }
 
@@ -531,14 +500,7 @@ impl MinmaxDeviceArrayF32Py {
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
 
-        export_f32_cuda_dlpack_2d(
-            py,
-            buf,
-            self.rows,
-            self.cols,
-            self.device_id as i32,
-            None,
-        )
+        export_f32_cuda_dlpack_2d(py, buf, self.rows, self.cols, self.device_id as i32, None)
     }
 }
 
@@ -723,8 +685,6 @@ pub fn minmax_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-// --- SCALAR LOGIC ---
-
 #[inline]
 pub fn minmax_scalar(
     high: &[f64],
@@ -755,7 +715,6 @@ pub fn minmax_scalar(
 
     let len = high.len();
 
-    // prefix [0..first_valid_idx)
     for i in 0..first_valid_idx {
         is_min[i] = f64::NAN;
         is_max[i] = f64::NAN;
@@ -763,18 +722,15 @@ pub fn minmax_scalar(
         last_max[i] = f64::NAN;
     }
 
-    // Fast small-order path keeps the original structure but removes bounds checks in hot loops.
     const SMALL_ORDER_THRESHOLD: usize = 8;
     if order <= SMALL_ORDER_THRESHOLD {
         let mut last_min_val = f64::NAN;
         let mut last_max_val = f64::NAN;
         for i in first_valid_idx..len {
-            // default to NaN at this index
             let mut min_here = f64::NAN;
             let mut max_here = f64::NAN;
 
             if i >= order && i + order < len {
-                // Safety: indices are checked above; we only do unchecked within bounds.
                 unsafe {
                     let ch = *high.get_unchecked(i);
                     let cl = *low.get_unchecked(i);
@@ -790,7 +746,6 @@ pub fn minmax_scalar(
                             let rl = *low.get_unchecked(i + o);
 
                             if less_than_neighbors {
-                                // all neighbors must be finite and strictly greater than center low
                                 if !(ll.is_finite() & rl.is_finite()) || !(cl < ll && cl < rl) {
                                     less_than_neighbors = false;
                                 }
@@ -833,13 +788,11 @@ pub fn minmax_scalar(
         return;
     }
 
-    // Large-order O(n) path via block decomposition (van Herk/Gil–Werman)
     let n = len;
     if first_valid_idx >= n {
         return;
     }
 
-    // Precompute left/right prefix-min (low), prefix-max (high), and finiteness masks for neighbors
     let mut left_min_low = vec![0.0f64; n];
     let mut right_min_low = vec![0.0f64; n];
     let mut left_max_high = vec![0.0f64; n];
@@ -850,7 +803,6 @@ pub fn minmax_scalar(
     let mut left_all_high = vec![0u8; n];
     let mut right_all_high = vec![0u8; n];
 
-    // Forward pass: compute left_* within blocks of size `order`
     for i in 0..n {
         unsafe {
             let l = *low.get_unchecked(i);
@@ -872,7 +824,6 @@ pub fn minmax_scalar(
         }
     }
 
-    // Backward pass: compute right_* within blocks of size `order`
     for i_rev in 0..n {
         let i = n - 1 - i_rev;
         unsafe {
@@ -895,7 +846,6 @@ pub fn minmax_scalar(
         }
     }
 
-    // Final pass: compute local extrema and forward-fill
     let mut last_min_val = f64::NAN;
     let mut last_max_val = f64::NAN;
     for i in first_valid_idx..n {
@@ -911,7 +861,6 @@ pub fn minmax_scalar(
                 let s_r = i + 1;
                 let e_r = i + order;
 
-                // All neighbors must be finite on both sides
                 let left_low_ok =
                     (*right_all_low.get_unchecked(s_l) & *left_all_low.get_unchecked(e_l)) == 1;
                 let right_low_ok =
@@ -964,8 +913,6 @@ pub fn minmax_scalar(
         }
     }
 }
-
-// --- AVX2/AVX512 STUBS ---
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -1076,45 +1023,35 @@ pub unsafe fn minmax_avx512_long(
     )
 }
 
-// --- STREAMING (O(1) per update via monotonic deques + delay line) ---
-
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
 pub struct MinmaxStream {
-    order: usize, // k
-    len: usize,   // 2k + 1
-    idx: usize,   // logical time index t
-    seen: usize,  // number of samples ingested
+    order: usize,
+    len: usize,
+    idx: usize,
+    seen: usize,
     filled: bool,
 
-    // ---- center access: last (k+1) samples as a ring ----
-    kplus1: usize,       // k + 1
-    ring_pos: usize,     // 0..k
-    ring_high: Vec<f64>, // size k+1; write at ring_pos; center at (ring_pos+1)% (k+1)
+    kplus1: usize,
+    ring_pos: usize,
+    ring_high: Vec<f64>,
     ring_low: Vec<f64>,
 
-    // ---- right window (length k) running aggregates via monotonic deques ----
-    // deques hold (index, value) for finite values only
-    rq_min_low: VecDeque<(usize, f64)>, // monotone increasing -> front is min over last k lows
-    rq_max_high: VecDeque<(usize, f64)>, // monotone decreasing -> front is max over last k highs
+    rq_min_low: VecDeque<(usize, f64)>,
+    rq_max_high: VecDeque<(usize, f64)>,
 
-    // Finite-counters for the right window (must be exactly k to be valid)
-    right_flags_pos: usize,    // ring index 0..k-1 for the finite flags
-    right_low_flags: Vec<u8>,  // len k, stores {0,1} finiteness of lows
-    right_high_flags: Vec<u8>, // len k, stores {0,1} finiteness of highs
+    right_flags_pos: usize,
+    right_low_flags: Vec<u8>,
+    right_high_flags: Vec<u8>,
     right_low_count: usize,
     right_high_count: usize,
 
-    // ---- delay line: reuse past right-window stats as current left-window stats ----
-    // At step t, read hist[*] at ring_pos to get aggregates from (t - (k+1)).
-    // Then overwrite hist[*] at ring_pos with the current right aggregates for future use.
-    hist_rmin_low: Vec<f64>,           // len k+1
-    hist_rmax_high: Vec<f64>,          // len k+1
-    hist_right_low_count: Vec<usize>,  // len k+1
-    hist_right_high_count: Vec<usize>, // len k+1
+    hist_rmin_low: Vec<f64>,
+    hist_rmax_high: Vec<f64>,
+    hist_right_low_count: Vec<usize>,
+    hist_right_high_count: Vec<usize>,
 
-    // ---- forward-filled outputs ----
     last_min: f64,
     last_max: f64,
 }
@@ -1160,7 +1097,6 @@ impl MinmaxStream {
 
     #[inline(always)]
     fn evict_old(&mut self) {
-        // Window for the RIGHT side is [t-k+1 .. t] inclusive ⇒ evict indices <= t-k
         let cutoff = self.idx.saturating_sub(self.order);
         while let Some(&(j, _)) = self.rq_min_low.front() {
             if j <= cutoff {
@@ -1180,7 +1116,6 @@ impl MinmaxStream {
 
     #[inline(always)]
     fn push_right_low(&mut self, idx: usize, val: f64) {
-        // Only finite values participate in the monotonic structure
         if val.is_finite() {
             while let Some(&(_, v)) = self.rq_min_low.back() {
                 if v >= val {
@@ -1209,7 +1144,7 @@ impl MinmaxStream {
 
     #[inline(always)]
     fn update_right_counts(&mut self, high: f64, low: f64) {
-        let pos = self.right_flags_pos; // 0..k-1
+        let pos = self.right_flags_pos;
         let old_low = self.right_low_flags[pos] as isize;
         let old_high = self.right_high_flags[pos] as isize;
         let new_low = low.is_finite() as u8;
@@ -1221,7 +1156,6 @@ impl MinmaxStream {
         self.right_high_count =
             (self.right_high_count as isize + (new_high as isize - old_high)) as usize;
 
-        // advance flag ring
         if self.right_flags_pos + 1 == self.order {
             self.right_flags_pos = 0;
         } else {
@@ -1229,25 +1163,19 @@ impl MinmaxStream {
         }
     }
 
-    /// O(1) amortized update. Returns (is_min, is_max, last_min, last_max)
-    /// - `is_min`/`is_max` are `Some(value)` only when the center (t - k) is a strict local extremum with all neighbors finite.
-    /// - `last_min`/`last_max` forward-fill the most recent extrema.
     pub fn update(&mut self, high: f64, low: f64) -> (Option<f64>, Option<f64>, f64, f64) {
         let k = self.order;
         let kp = self.kplus1;
-        let pos = self.ring_pos; // write index for rings AND read index for (k+1)-delayed left stats
+        let pos = self.ring_pos;
 
-        // 1) Read LEFT aggregates from (t - (k+1)) before overwriting them.
         let left_min_low = self.hist_rmin_low[pos];
         let left_max_high = self.hist_rmax_high[pos];
         let left_low_count = self.hist_right_low_count[pos];
         let left_high_count = self.hist_right_high_count[pos];
 
-        // 2) Write current sample into the (k+1)-ring (so center is always at (pos+1) mod (k+1)).
         self.ring_high[pos] = high;
         self.ring_low[pos] = low;
 
-        // 3) Maintain RIGHT window structures (evict, push, update counts).
         self.evict_old();
         self.push_right_low(self.idx, low);
         self.push_right_high(self.idx, high);
@@ -1260,13 +1188,11 @@ impl MinmaxStream {
             .map(|&(_, v)| v)
             .unwrap_or(f64::NAN);
 
-        // 4) Store RIGHT aggregates into delay line at 'pos' (to be used as LEFT k+1 steps later).
         self.hist_rmin_low[pos] = right_min_low;
         self.hist_rmax_high[pos] = right_max_high;
         self.hist_right_low_count[pos] = self.right_low_count;
         self.hist_right_high_count[pos] = self.right_high_count;
 
-        // 5) Advance time and ring positions.
         self.idx = self.idx.wrapping_add(1);
         self.seen = self.seen.saturating_add(1);
         if self.ring_pos + 1 == kp {
@@ -1278,13 +1204,10 @@ impl MinmaxStream {
             self.filled = true;
         }
 
-        // 6) If the full window (2k+1) isn't available yet, we can't evaluate a center.
         if !self.filled {
             return (None, None, self.last_min, self.last_max);
         }
 
-        // 7) Center sample is the one that arrived k steps ago ⇒ at (pos + 1) % (k+1).
-        //    Note: 'pos' was the slot we just wrote; after increment, center slot is (pos + 1) % (k+1).
         let cpos = if pos + 1 == kp { 0 } else { pos + 1 };
         let ch = self.ring_high[cpos];
         let cl = self.ring_low[cpos];
@@ -1292,9 +1215,6 @@ impl MinmaxStream {
         let mut out_min: Option<f64> = None;
         let mut out_max: Option<f64> = None;
 
-        // Strict-inequality detection with finiteness constraints identical to scalar batch path:
-        // - Min: cl < min(LEFT lows) && cl < min(RIGHT lows), and all k neighbors on both sides are finite.
-        // - Max: ch > max(LEFT highs) && ch > max(RIGHT highs), and all k neighbors on both sides are finite.
         if ch.is_finite() & cl.is_finite() {
             if left_low_count == k
                 && self.right_low_count == k
@@ -1317,8 +1237,6 @@ impl MinmaxStream {
         (out_min, out_max, self.last_min, self.last_max)
     }
 }
-
-// --- BATCH API ---
 
 #[derive(Clone, Debug)]
 pub struct MinmaxBatchRange {
@@ -1440,13 +1358,9 @@ impl MinmaxBatchOutput {
     }
 }
 
-// --- BATCH EXPANSION ---
-
 #[inline(always)]
 fn expand_grid(r: &MinmaxBatchRange) -> Result<Vec<MinmaxParams>, MinmaxError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, MinmaxError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MinmaxError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1556,20 +1470,17 @@ fn minmax_batch_inner(
             step: "rows*cols overflow".to_string(),
         })?;
 
-    // 4 matrices, uninitialized
     let mut min_mu = make_uninit_matrix(rows, cols);
     let mut max_mu = make_uninit_matrix(rows, cols);
     let mut lmin_mu = make_uninit_matrix(rows, cols);
     let mut lmax_mu = make_uninit_matrix(rows, cols);
 
-    // warm prefix per row
     let warm = vec![first; rows];
     init_matrix_prefixes(&mut min_mu, cols, &warm);
     init_matrix_prefixes(&mut max_mu, cols, &warm);
     init_matrix_prefixes(&mut lmin_mu, cols, &warm);
     init_matrix_prefixes(&mut lmax_mu, cols, &warm);
 
-    // flatten to &mut [f64] without copies
     let mut min_guard = core::mem::ManuallyDrop::new(min_mu);
     let mut max_guard = core::mem::ManuallyDrop::new(max_mu);
     let mut lmin_guard = core::mem::ManuallyDrop::new(lmin_mu);
@@ -1588,7 +1499,6 @@ fn minmax_batch_inner(
         core::slice::from_raw_parts_mut(lmax_guard.as_mut_ptr() as *mut f64, lmax_guard.len())
     };
 
-    // row worker
     let do_row = |row: usize,
                   out_min: &mut [f64],
                   out_max: &mut [f64],
@@ -1645,7 +1555,6 @@ fn minmax_batch_inner(
         }
     }
 
-    // reconstitute Vec<f64> without copies
     let is_min = unsafe {
         Vec::from_raw_parts(
             min_guard.as_mut_ptr() as *mut f64,
@@ -1686,7 +1595,6 @@ fn minmax_batch_inner(
     })
 }
 
-// Direct buffer writing variant for Python/WASM bindings
 #[inline(always)]
 fn minmax_batch_inner_into(
     high: &[f64],
@@ -1746,7 +1654,6 @@ fn minmax_batch_inner_into(
         });
     }
 
-    // Treat raw outputs as MaybeUninit and use prefix helper
     let warm = vec![first; rows];
     let (min_mu, max_mu, lmin_mu, lmax_mu) = unsafe {
         (
@@ -1839,8 +1746,6 @@ fn minmax_batch_inner_into(
 
     Ok(combos)
 }
-
-// --- BATCH ROW VARIANTS ---
 
 #[inline(always)]
 pub unsafe fn minmax_row_scalar(
@@ -1974,8 +1879,6 @@ pub unsafe fn minmax_row_avx512_long(
     )
 }
 
-// --- PYTHON BINDINGS ---
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "minmax")]
 #[pyo3(signature = (high, low, order, kernel=None))]
@@ -2059,7 +1962,6 @@ pub fn minmax_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow in minmax_batch_py"))?;
 
-    
     let is_min_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let is_max_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let last_min_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
@@ -2077,7 +1979,6 @@ pub fn minmax_batch_py<'py>(
                 k => k,
             };
 
-            
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2085,7 +1986,6 @@ pub fn minmax_batch_py<'py>(
                 _ => kernel,
             };
 
-            
             minmax_batch_inner_into(
                 high_slice,
                 low_slice,
@@ -2117,17 +2017,15 @@ pub fn minmax_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MinmaxResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn minmax_js(high: &[f64], low: &[f64], order: usize) -> Result<JsValue, JsValue> {
     let input = MinmaxInput::from_slices(high, low, MinmaxParams { order: Some(order) });
@@ -2150,7 +2048,7 @@ pub fn minmax_js(high: &[f64], low: &[f64], order: usize) -> Result<JsValue, JsV
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn minmax_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2159,7 +2057,7 @@ pub fn minmax_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn minmax_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2169,7 +2067,7 @@ pub fn minmax_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn minmax_into(
     high_ptr: *const f64,
@@ -2202,7 +2100,6 @@ pub fn minmax_into(
         let params = MinmaxParams { order: Some(order) };
         let input = MinmaxInput::from_slices(high, low, params);
 
-        
         let input_ptrs = [high_ptr as *const u8, low_ptr as *const u8];
         let output_ptrs = [
             is_min_ptr as *mut u8,
@@ -2225,7 +2122,6 @@ pub fn minmax_into(
         }
 
         if needs_temp {
-            
             let mut temp_is_min = vec![0.0; len];
             let mut temp_is_max = vec![0.0; len];
             let mut temp_last_min = vec![0.0; len];
@@ -2241,7 +2137,6 @@ pub fn minmax_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, len);
             let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, len);
             let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, len);
@@ -2252,7 +2147,6 @@ pub fn minmax_into(
             last_min_out.copy_from_slice(&temp_last_min);
             last_max_out.copy_from_slice(&temp_last_max);
         } else {
-            
             let is_min_out = std::slice::from_raw_parts_mut(is_min_ptr, len);
             let is_max_out = std::slice::from_raw_parts_mut(is_max_ptr, len);
             let last_min_out = std::slice::from_raw_parts_mut(last_min_ptr, len);
@@ -2273,22 +2167,22 @@ pub fn minmax_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MinmaxBatchConfig {
     pub order_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MinmaxBatchJsOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<MinmaxParams>,
-    pub rows: usize, 
-    pub cols: usize, 
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = minmax_batch)]
 pub fn minmax_batch_unified_js(
     high: &[f64],
@@ -2304,7 +2198,7 @@ pub fn minmax_batch_unified_js(
     let out = minmax_batch_with_kernel(high, low, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    let rows = out.rows; 
+    let rows = out.rows;
     let cols = out.cols;
 
     let total = rows
@@ -2314,7 +2208,7 @@ pub fn minmax_batch_unified_js(
         .checked_mul(4)
         .ok_or_else(|| JsValue::from_str("capacity overflow in minmax_batch_unified_js"))?;
     let mut values = Vec::with_capacity(cap);
-    
+
     for series in 0..4 {
         for r in 0..rows {
             let (src, start) = match series {
@@ -2336,7 +2230,7 @@ pub fn minmax_batch_unified_js(
     serde_wasm_bindgen::to_value(&js_out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn minmax_batch_into(
     high_ptr: *const f64,
@@ -2370,8 +2264,7 @@ pub fn minmax_batch_into(
             order: (order_start, order_end, order_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -2399,8 +2292,6 @@ pub fn minmax_batch_into(
         Ok(rows)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2550,23 +2441,21 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            MinmaxParams::default(),           
-            MinmaxParams { order: Some(1) },   
-            MinmaxParams { order: Some(2) },   
-            MinmaxParams { order: Some(5) },   
-            MinmaxParams { order: Some(10) },  
-            MinmaxParams { order: Some(20) },  
-            MinmaxParams { order: Some(50) },  
-            MinmaxParams { order: Some(100) }, 
+            MinmaxParams::default(),
+            MinmaxParams { order: Some(1) },
+            MinmaxParams { order: Some(2) },
+            MinmaxParams { order: Some(5) },
+            MinmaxParams { order: Some(10) },
+            MinmaxParams { order: Some(20) },
+            MinmaxParams { order: Some(50) },
+            MinmaxParams { order: Some(100) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = MinmaxInput::from_candles(&candles, "high", "low", params.clone());
             let output = minmax_with_kernel(&input, kernel)?;
 
-            
             let arrays = [
                 (&output.is_min, "is_min"),
                 (&output.is_max, "is_max"),
@@ -2577,12 +2466,11 @@ mod tests {
             for (array, array_name) in arrays.iter() {
                 for (i, &val) in array.iter().enumerate() {
                     if val.is_nan() {
-                        continue; 
+                        continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2618,7 +2506,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_minmax_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_minmax_tests {
@@ -2672,46 +2560,47 @@ mod tests {
 
     #[test]
     fn test_minmax_into_matches_api() {
-        
         let mut high = Vec::with_capacity(256);
         let mut low = Vec::with_capacity(256);
 
-        
         for _ in 0..5 {
             high.push(f64::NAN);
             low.push(f64::NAN);
         }
-        
+
         for i in 0..200usize {
             let t = i as f64;
             high.push(100.0 + (t / 5.0).sin() * 10.0 + (t / 7.0).cos() * 3.0);
-            low.push( 90.0 - (t / 6.0).sin() *  9.0 - (t / 8.0).cos() * 2.0);
+            low.push(90.0 - (t / 6.0).sin() * 9.0 - (t / 8.0).cos() * 2.0);
         }
-        
+
         for j in 0..51usize {
             let t = j as f64;
             high.push(105.0 + (t * 0.01).sin());
-            low.push( 95.0 - (t * 0.01).cos());
+            low.push(95.0 - (t * 0.01).cos());
         }
 
         let params = MinmaxParams::default();
         let input = MinmaxInput::from_slices(&high, &low, params);
 
-        
         let baseline = minmax(&input).expect("baseline minmax() should succeed");
 
-        
         let n = high.len();
         let mut is_min = vec![0.0; n];
         let mut is_max = vec![0.0; n];
         let mut last_min = vec![0.0; n];
         let mut last_max = vec![0.0; n];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
-            minmax_into(&input, &mut is_min, &mut is_max, &mut last_min, &mut last_max)
-                .expect("minmax_into should succeed");
+            minmax_into(
+                &input,
+                &mut is_min,
+                &mut is_max,
+                &mut last_min,
+                &mut last_max,
+            )
+            .expect("minmax_into should succeed");
 
             assert_eq!(is_min.len(), baseline.is_min.len());
             assert_eq!(is_max.len(), baseline.is_max.len());
@@ -2762,15 +2651,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (30, 60, 15),  
-            (2, 5, 1),     
-            (1, 1, 0),     
-            (10, 50, 10),  
-            (100, 100, 0), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (1, 1, 0),
+            (10, 50, 10),
+            (100, 100, 0),
         ];
 
         for (cfg_idx, &(order_start, order_end, order_step)) in test_configs.iter().enumerate() {
@@ -2779,7 +2667,6 @@ mod tests {
                 .order_range(order_start, order_end, order_step)
                 .apply_candles(&c)?;
 
-            
             let arrays = [
                 (&output.is_min, "is_min"),
                 (&output.is_max, "is_max"),
@@ -2798,7 +2685,6 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2841,7 +2727,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2850,12 +2736,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=50).prop_flat_map(|order| {
             (
-                
                 (order..400).prop_flat_map(move |len| {
-                    
                     prop::collection::vec(
                         (0.1f64..1000.0f64, 0.0f64..=0.2)
                             .prop_filter("finite", |(x, _)| x.is_finite()),
@@ -2867,7 +2750,7 @@ mod tests {
 
                         for (l, spread) in pairs {
                             low.push(l);
-                            high.push(l * (1.0 + spread)); 
+                            high.push(l * (1.0 + spread));
                         }
 
                         (high, low)
@@ -2882,18 +2765,14 @@ mod tests {
                 let params = MinmaxParams { order: Some(order) };
                 let input = MinmaxInput::from_slices(&high, &low, params);
 
-                
                 let output = minmax_with_kernel(&input, kernel)?;
                 let ref_output = minmax_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(output.is_min.len(), high.len());
                 prop_assert_eq!(output.is_max.len(), high.len());
                 prop_assert_eq!(output.last_min.len(), high.len());
                 prop_assert_eq!(output.last_max.len(), high.len());
 
-                
-                
                 for i in 0..order.min(high.len()) {
                     prop_assert!(
                         output.is_min[i].is_nan(),
@@ -2907,11 +2786,8 @@ mod tests {
                     );
                 }
 
-                
-                
                 for i in order..high.len().saturating_sub(order) {
                     if !output.is_min[i].is_nan() {
-                        
                         prop_assert_eq!(
                             output.is_min[i],
                             low[i],
@@ -2920,7 +2796,6 @@ mod tests {
                             i
                         );
 
-                        
                         for o in 1..=order {
                             if i >= o && i + o < low.len() {
                                 prop_assert!(
@@ -2935,7 +2810,6 @@ mod tests {
                     }
 
                     if !output.is_max[i].is_nan() {
-                        
                         prop_assert_eq!(
                             output.is_max[i],
                             high[i],
@@ -2944,7 +2818,6 @@ mod tests {
                             i
                         );
 
-                        
                         for o in 1..=order {
                             if i >= o && i + o < high.len() {
                                 prop_assert!(
@@ -2959,8 +2832,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
@@ -2968,9 +2839,7 @@ mod tests {
                     .unwrap_or(0);
 
                 for i in first_valid_idx..high.len() {
-                    
                     if i > first_valid_idx {
-                        
                         if output.is_min[i].is_nan() && !output.last_min[i - 1].is_nan() {
                             prop_assert_eq!(
                                 output.last_min[i],
@@ -2990,7 +2859,6 @@ mod tests {
                             );
                         }
 
-                        
                         if !output.is_min[i].is_nan() {
                             prop_assert_eq!(
                                 output.last_min[i],
@@ -3010,10 +2878,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in 0..high.len() {
-                    
                     if output.is_min[i].is_finite() && ref_output.is_min[i].is_finite() {
                         let ulp_diff = output.is_min[i]
                             .to_bits()
@@ -3035,7 +2900,6 @@ mod tests {
                         );
                     }
 
-                    
                     if output.is_max[i].is_finite() && ref_output.is_max[i].is_finite() {
                         let ulp_diff = output.is_max[i]
                             .to_bits()
@@ -3057,7 +2921,6 @@ mod tests {
                         );
                     }
 
-                    
                     if output.last_min[i].is_finite() && ref_output.last_min[i].is_finite() {
                         let ulp_diff = output.last_min[i]
                             .to_bits()
@@ -3079,7 +2942,6 @@ mod tests {
                         );
                     }
 
-                    
                     if output.last_max[i].is_finite() && ref_output.last_max[i].is_finite() {
                         let ulp_diff = output.last_max[i]
                             .to_bits()
@@ -3102,8 +2964,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let min_low = low.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                 let max_high = high.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
@@ -3150,11 +3010,8 @@ mod tests {
                     }
                 }
 
-                
-                
                 if order == 1 && high.len() >= 3 {
                     for i in 1..high.len() - 1 {
-                        
                         if low[i] < low[i - 1] && low[i] < low[i + 1] {
                             prop_assert!(
                                 !output.is_min[i].is_nan(),
@@ -3162,7 +3019,7 @@ mod tests {
                                 i
                             );
                         }
-                        
+
                         if high[i] > high[i - 1] && high[i] > high[i + 1] {
                             prop_assert!(
                                 !output.is_max[i].is_nan(),
@@ -3173,8 +3030,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in 0..high.len() {
                     prop_assert!(
                         high[i] >= low[i],

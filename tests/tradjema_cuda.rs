@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::tradjema::{
     tradjema_with_kernel, TradjemaBatchRange, TradjemaInput, TradjemaParams,
 };

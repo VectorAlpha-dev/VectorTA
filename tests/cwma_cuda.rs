@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::cwma::{
     cwma_batch_with_kernel, CwmaBatchRange, CwmaBuilder, CwmaParams,
 };
@@ -34,7 +32,6 @@ fn cuda_feature_off_noop() {
 #[cfg(feature = "cuda")]
 #[test]
 fn cwma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    
     if std::env::var("SKIP_CUDA_TESTS").is_ok() {
         eprintln!("[cwma_cuda_one_series_many_params_matches_cpu] skipped - SKIP_CUDA_TESTS set");
         return Ok(());
@@ -175,7 +172,7 @@ fn cwma_cuda_batched_tiled_matches_cpu() -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    let series_len = 20000usize; 
+    let series_len = 20000usize;
     let mut data = vec![f64::NAN; series_len];
     for i in 7..series_len {
         let x = i as f64;

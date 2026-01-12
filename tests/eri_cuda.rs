@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::eri::{
     eri_batch_with_kernel, eri_with_kernel, EriBatchRange, EriData, EriInput, EriParams,
 };
@@ -112,7 +110,6 @@ fn eri_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let period = 14usize;
     let ma_type = "ema";
 
-    
     let mut bull_cpu = vec![f64::NAN; cols * rows];
     let mut bear_cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -144,7 +141,6 @@ fn eri_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let src_tm_f32: Vec<f32> = src_tm.iter().map(|&v| v as f32).collect();

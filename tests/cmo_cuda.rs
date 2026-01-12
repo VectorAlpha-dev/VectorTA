@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::cmo::{
     cmo_batch_with_kernel, cmo_with_kernel, CmoBatchRange, CmoInput, CmoParams,
 };
@@ -43,12 +41,10 @@ fn cmo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = CmoBatchRange { period: (7, 28, 7) };
 
-    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let price_cpu_f64: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
     let cpu = cmo_batch_with_kernel(&price_cpu_f64, &sweep, Kernel::ScalarBatch)?;
 
-    
     let cuda = CudaCmo::new(0).expect("CudaCmo::new");
     let dev = cuda
         .cmo_batch_dev(&price_f32, &sweep)
@@ -94,7 +90,6 @@ fn cmo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -105,7 +100,7 @@ fn cmo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             period: Some(period),
         };
         let _input = CmoInput::from_slice(&p, params.clone());
-        
+
         let p_f32: Vec<f32> = p.iter().map(|&v| v as f32).collect();
         let p_cpu_f64: Vec<f64> = p_f32.iter().map(|&v| v as f64).collect();
         let input_cpu = CmoInput::from_slice(&p_cpu_f64, params);

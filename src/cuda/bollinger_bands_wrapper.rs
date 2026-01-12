@@ -1,10 +1,3 @@
-//! CUDA scaffolding for Bollinger Bands (SMA + standard deviation path).
-//!
-//! Matches ALMA-style conventions for PTX loading, stream usage, simple
-//! policies, VRAM checks, and warmup/NaN semantics. For now, this CUDA path
-//! supports only `matype = "sma"` and `devtype = 0` (stddev) to mirror the
-//! optimized scalar path; other variants should use the CPU implementation.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -31,13 +24,24 @@ pub enum CudaBollingerError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -51,7 +55,6 @@ struct BbCombo {
     devdn: f32,
 }
 
-/// VRAM-backed array handle for Bollinger Bands with context guard and device id.
 pub struct DeviceArrayF32Bb {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -61,9 +64,13 @@ pub struct DeviceArrayF32Bb {
 }
 impl DeviceArrayF32Bb {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows.saturating_mul(self.cols) }
+    pub fn len(&self) -> usize {
+        self.rows.saturating_mul(self.cols)
+    }
 }
 
 pub struct CudaBollingerBands {
@@ -80,7 +87,6 @@ impl CudaBollingerBands {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        
         let sm_count = device
             .get_attribute(DeviceAttribute::MultiprocessorCount)
             .map(|v| v as u32)
@@ -95,18 +101,28 @@ impl CudaBollingerBands {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?
-            }
+                Err(_) => Module::from_ptx(ptx, &[])?,
+            },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        Ok(Self { module, stream, _context: context, sm_count, device_id: device_id as u32 })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            sm_count,
+            device_id: device_id as u32,
+        })
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -114,13 +130,26 @@ impl CudaBollingerBands {
             Err(_) => true,
         }
     }
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaBollingerError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _)) = Self::device_mem_info() {
-            if required_bytes.saturating_add(headroom_bytes) <= free { Ok(()) }
-            else { Err(CudaBollingerError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes }) }
-        } else { Ok(()) }
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaBollingerError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
+        }
     }
 
     fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaBollingerError> {
@@ -128,7 +157,14 @@ impl CudaBollingerBands {
         let (bx, by, bz) = (block.x, block.y, block.z);
         let max_threads_per_block = 1024u32;
         if bx.saturating_mul(by).saturating_mul(bz) > max_threads_per_block {
-            return Err(CudaBollingerError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaBollingerError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -136,7 +172,7 @@ impl CudaBollingerBands {
     #[inline(always)]
     fn grid_x_for_len(&self, len: usize, block_x: u32) -> u32 {
         let need = ((len as u32) + block_x - 1) / block_x;
-        let cap  = (self.sm_count.saturating_mul(4)).max(1);
+        let cap = (self.sm_count.saturating_mul(4)).max(1);
         need.min(cap)
     }
 
@@ -180,9 +216,7 @@ impl CudaBollingerBands {
             }
             Ok(v)
         }
-        fn axis_f64(
-            (start, end, step): (f64, f64, f64),
-        ) -> Result<Vec<f64>, CudaBollingerError> {
+        fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaBollingerError> {
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return Ok(vec![start]);
             }
@@ -213,7 +247,11 @@ impl CudaBollingerBands {
             Ok(out)
         }
         fn axis_str((s, e, _): (String, String, usize)) -> Vec<String> {
-            if s == e { vec![s] } else { vec![s, e] }
+            if s == e {
+                vec![s]
+            } else {
+                vec![s, e]
+            }
         }
         let periods = axis_usize(range.period)?;
         let devups = axis_f64(range.devup)?;
@@ -285,8 +323,15 @@ impl CudaBollingerBands {
                     devt
                 )));
             }
-            if ma.to_ascii_lowercase() != "sma" { unsupported_ma.insert(ma); continue; }
-            combos.push(BbCombo { period: p, devup: u as f32, devdn: d as f32 });
+            if ma.to_ascii_lowercase() != "sma" {
+                unsupported_ma.insert(ma);
+                continue;
+            }
+            combos.push(BbCombo {
+                period: p,
+                devup: u as f32,
+                devdn: d as f32,
+            });
         }
         if combos.is_empty() {
             if unsupported_ma.is_empty() {
@@ -306,7 +351,6 @@ impl CudaBollingerBands {
         Ok((combos, first_valid, len))
     }
 
-    
     #[inline(always)]
     fn two_sum(a: f32, b: f32) -> (f32, f32) {
         let s = a + b;
@@ -326,10 +370,10 @@ impl CudaBollingerBands {
 
     fn build_prefixes(data: &[f32]) -> (Vec<[f32; 2]>, Vec<[f32; 2]>, Vec<i32>) {
         let n = data.len();
-        let mut ps  = vec![[0.0f32; 2]; n + 1];
+        let mut ps = vec![[0.0f32; 2]; n + 1];
         let mut ps2 = vec![[0.0f32; 2]; n + 1];
-        let mut pn  = vec![0i32;        n + 1];
-        let (mut s_hi,  mut s_lo)  = (0.0f32, 0.0f32);
+        let mut pn = vec![0i32; n + 1];
+        let (mut s_hi, mut s_lo) = (0.0f32, 0.0f32);
         let (mut s2_hi, mut s2_lo) = (0.0f32, 0.0f32);
         let mut an = 0i32;
         for i in 0..n {
@@ -338,11 +382,12 @@ impl CudaBollingerBands {
                 an += 1;
             } else {
                 Self::ds_add_inplace(&mut s_hi, &mut s_lo, v, 0.0);
-                let p = v * v; let err = v.mul_add(v, -p);
+                let p = v * v;
+                let err = v.mul_add(v, -p);
                 Self::ds_add_inplace(&mut s2_hi, &mut s2_lo, p, err);
             }
-            pn[i + 1]  = an;
-            ps[i + 1]  = [s_hi,  s_lo];
+            pn[i + 1] = an;
+            ps[i + 1] = [s_hi, s_lo];
             ps2[i + 1] = [s2_hi, s2_lo];
         }
         (ps, ps2, pn)
@@ -366,7 +411,9 @@ impl CudaBollingerBands {
         let func = self
             .module
             .get_function("bollinger_bands_sma_prefix_f32")
-            .map_err(|_| CudaBollingerError::MissingKernelSymbol { name: "bollinger_bands_sma_prefix_f32" })?;
+            .map_err(|_| CudaBollingerError::MissingKernelSymbol {
+                name: "bollinger_bands_sma_prefix_f32",
+            })?;
 
         let block_x: u32 = 256;
         let grid_x = self.grid_x_for_len(len, block_x);
@@ -378,7 +425,6 @@ impl CudaBollingerBands {
             let chunk = (n_combos - start).min(MAX_GRID_Y);
             let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
             unsafe {
-                
                 let mut p_data: u64 = 0;
                 let mut p_ps = d_ps.as_device_ptr().as_raw();
                 let mut p_ps2 = d_ps2.as_device_ptr().as_raw();
@@ -441,9 +487,9 @@ impl CudaBollingerBands {
     ) -> Result<(DeviceArrayF32Bb, DeviceArrayF32Bb, DeviceArrayF32Bb), CudaBollingerError> {
         let len = data_f32.len();
         let (ps, ps2, pn) = Self::build_prefixes(data_f32);
-        let d_ps:  DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps)?;
+        let d_ps: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps)?;
         let d_ps2: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps2)?;
-        let d_pn:  DeviceBuffer<i32>      = DeviceBuffer::from_slice(&pn)?;
+        let d_pn: DeviceBuffer<i32> = DeviceBuffer::from_slice(&pn)?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period as i32).collect();
         let devups: Vec<f32> = combos.iter().map(|c| c.devup).collect();
@@ -457,24 +503,64 @@ impl CudaBollingerBands {
         let d_devups = DeviceBuffer::from_slice(&devups)?;
         let d_devdns = DeviceBuffer::from_slice(&devdns)?;
 
-        let elems = combos.len().checked_mul(len).ok_or(CudaBollingerError::InvalidInput("output elems overflow".into()))?;
-        let _ = Self::will_fit(elems.checked_mul(std::mem::size_of::<f32>()).ok_or(CudaBollingerError::InvalidInput("bytes overflow".into()))?.checked_mul(3).ok_or(CudaBollingerError::InvalidInput("bytes overflow".into()))?, 32 * 1024 * 1024)?;
+        let elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or(CudaBollingerError::InvalidInput(
+                "output elems overflow".into(),
+            ))?;
+        let _ = Self::will_fit(
+            elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or(CudaBollingerError::InvalidInput("bytes overflow".into()))?
+                .checked_mul(3)
+                .ok_or(CudaBollingerError::InvalidInput("bytes overflow".into()))?,
+            32 * 1024 * 1024,
+        )?;
         let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_mid: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         self.launch_batch_kernel(
-            &d_ps, &d_ps2, &d_pn, &d_periods, &d_devups, &d_devdns,
-            len, first_valid, combos.len(), &mut d_up, &mut d_mid, &mut d_lo,
+            &d_ps,
+            &d_ps2,
+            &d_pn,
+            &d_periods,
+            &d_devups,
+            &d_devdns,
+            len,
+            first_valid,
+            combos.len(),
+            &mut d_up,
+            &mut d_mid,
+            &mut d_lo,
         )?;
         self.stream.synchronize()?;
 
         let ctx = self.context_arc();
         let dev = self.device_id();
         Ok((
-            DeviceArrayF32Bb { buf: d_up,  rows: combos.len(), cols: len, ctx: ctx.clone(), device_id: dev },
-            DeviceArrayF32Bb { buf: d_mid, rows: combos.len(), cols: len, ctx: ctx.clone(), device_id: dev },
-            DeviceArrayF32Bb { buf: d_lo,  rows: combos.len(), cols: len, ctx, device_id: dev },
+            DeviceArrayF32Bb {
+                buf: d_up,
+                rows: combos.len(),
+                cols: len,
+                ctx: ctx.clone(),
+                device_id: dev,
+            },
+            DeviceArrayF32Bb {
+                buf: d_mid,
+                rows: combos.len(),
+                cols: len,
+                ctx: ctx.clone(),
+                device_id: dev,
+            },
+            DeviceArrayF32Bb {
+                buf: d_lo,
+                rows: combos.len(),
+                cols: len,
+                ctx,
+                device_id: dev,
+            },
         ))
     }
 
@@ -484,19 +570,38 @@ impl CudaBollingerBands {
         sweep: &BollingerBandsBatchRange,
     ) -> Result<(DeviceArrayF32Bb, DeviceArrayF32Bb, DeviceArrayF32Bb), CudaBollingerError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        
+
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let prefix_each = 2 * std::mem::size_of::<[f32; 2]>() + item_i32;
-        let prefix_bytes = (len + 1).checked_mul(prefix_each).ok_or(CudaBollingerError::InvalidInput("prefix bytes overflow".into()))?;
-        let out_elems = combos.len().checked_mul(len).ok_or(CudaBollingerError::InvalidInput("output elems overflow".into()))?;
-        let out_bytes = out_elems.checked_mul(3 * item_f32).ok_or(CudaBollingerError::InvalidInput("output bytes overflow".into()))?;
-        let required = prefix_bytes.checked_add(out_bytes).ok_or(CudaBollingerError::InvalidInput("total bytes overflow".into()))?;
+        let prefix_bytes =
+            (len + 1)
+                .checked_mul(prefix_each)
+                .ok_or(CudaBollingerError::InvalidInput(
+                    "prefix bytes overflow".into(),
+                ))?;
+        let out_elems = combos
+            .len()
+            .checked_mul(len)
+            .ok_or(CudaBollingerError::InvalidInput(
+                "output elems overflow".into(),
+            ))?;
+        let out_bytes =
+            out_elems
+                .checked_mul(3 * item_f32)
+                .ok_or(CudaBollingerError::InvalidInput(
+                    "output bytes overflow".into(),
+                ))?;
+        let required =
+            prefix_bytes
+                .checked_add(out_bytes)
+                .ok_or(CudaBollingerError::InvalidInput(
+                    "total bytes overflow".into(),
+                ))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
         self.run_batch_kernel(data_f32, &combos, first_valid)
     }
 
-    
     pub fn bollinger_bands_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -528,33 +633,36 @@ impl CudaBollingerBands {
             return Err(CudaBollingerError::InvalidInput("invalid period".into()));
         }
 
-        
         let rows_p1 = rows
             .checked_add(1)
             .ok_or_else(|| CudaBollingerError::InvalidInput("rows+1 overflow".into()))?;
         let prefix_elems = rows_p1
             .checked_mul(cols)
             .ok_or_else(|| CudaBollingerError::InvalidInput("(rows+1)*cols overflow".into()))?;
-        let mut ps  = vec![[0.0f32; 2]; prefix_elems];
+        let mut ps = vec![[0.0f32; 2]; prefix_elems];
         let mut ps2 = vec![[0.0f32; 2]; prefix_elems];
-        let mut pn  = vec![0i32;        prefix_elems];
+        let mut pn = vec![0i32; prefix_elems];
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
-            let (mut s_hi,  mut s_lo)  = (0.0f32, 0.0f32);
+            let (mut s_hi, mut s_lo) = (0.0f32, 0.0f32);
             let (mut s2_hi, mut s2_lo) = (0.0f32, 0.0f32);
-            let mut an=0i32; let mut fv: Option<usize>=None;
+            let mut an = 0i32;
+            let mut fv: Option<usize> = None;
             for t in 0..rows {
                 let v = data_tm_f32[t * cols + s];
                 if v.is_nan() {
                     an += 1;
                 } else {
                     Self::ds_add_inplace(&mut s_hi, &mut s_lo, v, 0.0);
-                    let p = v * v; let err = v.mul_add(v, -p);
+                    let p = v * v;
+                    let err = v.mul_add(v, -p);
                     Self::ds_add_inplace(&mut s2_hi, &mut s2_lo, p, err);
                     fv.get_or_insert(t);
                 }
                 let idx = (t + 1) * cols + s;
-                ps[idx]=[s_hi, s_lo]; ps2[idx]=[s2_hi, s2_lo]; pn[idx]=an;
+                ps[idx] = [s_hi, s_lo];
+                ps2[idx] = [s2_hi, s2_lo];
+                pn[idx] = an;
             }
             let fv = fv
                 .ok_or_else(|| CudaBollingerError::InvalidInput(format!("series {} all NaN", s)))?;
@@ -569,10 +677,10 @@ impl CudaBollingerBands {
             first_valids[s] = fv as i32;
         }
 
-        let d_ps:  DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps)?;
+        let d_ps: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps)?;
         let d_ps2: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&ps2)?;
-        let d_pn  = DeviceBuffer::from_slice(&pn)?;
-        let d_fv  = DeviceBuffer::from_slice(&first_valids)?;
+        let d_pn = DeviceBuffer::from_slice(&pn)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
 
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
@@ -593,11 +701,12 @@ impl CudaBollingerBands {
         let mut d_md_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_tm) }?;
         let mut d_lo_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_tm) }?;
 
-        
         let func = self
             .module
             .get_function("bollinger_bands_many_series_one_param_f32")
-            .map_err(|_| CudaBollingerError::MissingKernelSymbol { name: "bollinger_bands_many_series_one_param_f32" })?;
+            .map_err(|_| CudaBollingerError::MissingKernelSymbol {
+                name: "bollinger_bands_many_series_one_param_f32",
+            })?;
         let block_x: u32 = 256;
         let grid_x = self.grid_x_for_len(rows, block_x);
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
@@ -640,15 +749,34 @@ impl CudaBollingerBands {
         let ctx = self.context_arc();
         let dev = self.device_id();
         Ok((
-            DeviceArrayF32Bb { buf: d_up_tm, rows, cols, ctx: ctx.clone(), device_id: dev },
-            DeviceArrayF32Bb { buf: d_md_tm, rows, cols, ctx: ctx.clone(), device_id: dev },
-            DeviceArrayF32Bb { buf: d_lo_tm, rows, cols, ctx, device_id: dev },
+            DeviceArrayF32Bb {
+                buf: d_up_tm,
+                rows,
+                cols,
+                ctx: ctx.clone(),
+                device_id: dev,
+            },
+            DeviceArrayF32Bb {
+                buf: d_md_tm,
+                rows,
+                cols,
+                ctx: ctx.clone(),
+                device_id: dev,
+            },
+            DeviceArrayF32Bb {
+                buf: d_lo_tm,
+                rows,
+                cols,
+                ctx,
+                device_id: dev,
+            },
         ))
     }
 
-    pub fn synchronize(&self) -> Result<(), CudaBollingerError> { self.stream.synchronize().map_err(Into::into) }
+    pub fn synchronize(&self) -> Result<(), CudaBollingerError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
 }
-
 
 pub mod benches {
     use super::*;
@@ -671,8 +799,7 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_ROWS;
         let rows_p1 = rows + 1;
-        let prefix_each =
-            2 * std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<i32>();
+        let prefix_each = 2 * std::mem::size_of::<[f32; 2]>() + std::mem::size_of::<i32>();
         let prefix_bytes = rows_p1 * cols * prefix_each;
         let fv_bytes = cols * std::mem::size_of::<i32>();
         let out_bytes = 3 * cols * rows * std::mem::size_of::<f32>();
@@ -720,7 +847,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaBollingerBands::new(0).expect("cuda bb");
         let data = gen_series(ONE_SERIES_LEN);
-        
+
         let sweep = BollingerBandsBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             devup: (2.0, 2.0, 0.0),
@@ -781,7 +908,7 @@ pub mod benches {
         d_mid_tm: DeviceBuffer<f32>,
         d_lo_tm: DeviceBuffer<f32>,
     }
-    
+
     impl CudaBenchState for BbManySeriesState {
         fn launch(&mut self) {
             let func = self

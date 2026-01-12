@@ -1,13 +1,5 @@
-//! CUDA wrapper for PWMA (Pascal Weighted Moving Average) kernels.
-//!
-//! Mirrors the ALMA/SWMA scaffold: validate host inputs, upload FP32 data and
-//! Pascal weights once, then launch kernels that keep the dot products entirely
-//! on device. Supports both the single-series × many-parameter sweep and the
-//! many-series × one-parameter path operating on time-major inputs.
-
 #![cfg(feature = "cuda")]
 
-use std::sync::Arc;
 use super::cwma_wrapper::{BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::pwma::{expand_grid, PwmaBatchRange, PwmaParams};
 use cust::context::Context;
@@ -20,11 +12,12 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::{c_void, CStr};
 use std::fmt;
-use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
-const PWMA_MAX_PERIOD_CONST: usize = 4096; 
-const BATCH_TX: u32 = 128; 
+const PWMA_MAX_PERIOD_CONST: usize = 4096;
+const BATCH_TX: u32 = 128;
 
 #[derive(Debug, Error)]
 pub enum CudaPwmaError {
@@ -33,13 +26,28 @@ pub enum CudaPwmaError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("out of memory: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("device mismatch: buf={buf}, current={current}")]
@@ -48,7 +56,6 @@ pub enum CudaPwmaError {
     NotImplemented,
 }
 
-/// VRAM-backed array for PWMA results with context lifetime and device id.
 pub struct DeviceArrayF32Pwma {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -58,9 +65,13 @@ pub struct DeviceArrayF32Pwma {
 }
 impl DeviceArrayF32Pwma {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaPwma {
@@ -74,7 +85,6 @@ pub struct CudaPwma {
     debug_batch_logged: bool,
     debug_many_logged: bool,
 
-    
     cmem_available: bool,
     cmem_scratch: [f32; PWMA_MAX_PERIOD_CONST],
 }
@@ -93,7 +103,8 @@ impl CudaPwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -102,7 +113,6 @@ impl CudaPwma {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        
         let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
         let cmem_available = module
             .get_global::<[f32; PWMA_MAX_PERIOD_CONST]>(name)
@@ -238,7 +248,6 @@ impl CudaPwma {
             ));
         }
 
-        
         let mut use_tiled = true;
         match self.policy.batch {
             BatchKernelPolicy::Auto => {}
@@ -248,7 +257,7 @@ impl CudaPwma {
 
         if use_tiled {
             if let Ok(mut func) = self.module.get_function("pwma_batch_tiled_async_f32") {
-                let tile_x: usize = BATCH_TX as usize; 
+                let tile_x: usize = BATCH_TX as usize;
                 let align16 = |x: usize| (x + 15) & !15usize;
                 let shared_bytes = (align16(max_period * std::mem::size_of::<f32>())
                     + 2 * (tile_x + max_period - 1) * std::mem::size_of::<f32>())
@@ -302,11 +311,11 @@ impl CudaPwma {
             }
         }
 
-        
-        let func = self
-            .module
-            .get_function("pwma_batch_f32")
-            .map_err(|_| CudaPwmaError::MissingKernelSymbol { name: "pwma_batch_f32" })?;
+        let func = self.module.get_function("pwma_batch_f32").map_err(|_| {
+            CudaPwmaError::MissingKernelSymbol {
+                name: "pwma_batch_f32",
+            }
+        })?;
 
         unsafe {
             let this = self as *const _ as *mut CudaPwma;
@@ -382,24 +391,30 @@ impl CudaPwma {
             .map(|p| (first_valid + p.period.unwrap() - 1) as i32)
             .collect();
 
-        
         let szf = std::mem::size_of::<f32>();
         let szi = std::mem::size_of::<i32>();
-        let prices_bytes = series_len.checked_mul(szf)
+        let prices_bytes = series_len
+            .checked_mul(szf)
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
-        let weights_bytes = n_combos.checked_mul(max_period)
+        let weights_bytes = n_combos
+            .checked_mul(max_period)
             .and_then(|v| v.checked_mul(szf))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
-        let periods_bytes = n_combos.checked_mul(szi)
+        let periods_bytes = n_combos
+            .checked_mul(szi)
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
-        let warms_bytes = n_combos.checked_mul(szi)
+        let warms_bytes = n_combos
+            .checked_mul(szi)
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
-        let out_bytes = n_combos.checked_mul(series_len)
+        let out_bytes = n_combos
+            .checked_mul(series_len)
             .and_then(|v| v.checked_mul(szf))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
         let required = prices_bytes
-            .checked_add(weights_bytes).and_then(|v| v.checked_add(periods_bytes))
-            .and_then(|v| v.checked_add(warms_bytes)).and_then(|v| v.checked_add(out_bytes))
+            .checked_add(weights_bytes)
+            .and_then(|v| v.checked_add(periods_bytes))
+            .and_then(|v| v.checked_add(warms_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
         Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
@@ -407,7 +422,8 @@ impl CudaPwma {
         let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_warms = DeviceBuffer::from_slice(&warms_i32)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
         self.launch_batch_kernel(
             &d_prices, &d_weights, &d_periods, &d_warms, series_len, n_combos, max_period,
@@ -512,7 +528,6 @@ impl CudaPwma {
             ));
         }
 
-        
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
             let fname = match (tx, ty) {
                 (128, 4) => "pwma_ms1p_tiled_f32_tx128_ty4",
@@ -523,10 +538,10 @@ impl CudaPwma {
                 Ok(f) => f,
                 Err(_) => return None,
             };
-            let wlen = period; 
+            let wlen = period;
             let align16 = |x: usize| (x + 15) & !15usize;
             let total = tx as usize + wlen - 1;
-            
+
             let ty_pad = if (32 % (ty as usize)) == 0 {
                 (ty + 1) as usize
             } else {
@@ -580,12 +595,10 @@ impl CudaPwma {
                 }
             }
             ManySeriesKernelPolicy::OneD { .. } => {}
-            
-            
+
             ManySeriesKernelPolicy::Auto => {}
         }
 
-        
         if use_const {
             let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
             if let (Ok(_sym), Ok(func)) = (
@@ -603,7 +616,6 @@ impl CudaPwma {
                     let shared_bytes = 0u32;
 
                     unsafe {
-                        
                         let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
                         let mut period_i = period as i32;
                         let mut num_series_i = num_series as i32;
@@ -630,11 +642,12 @@ impl CudaPwma {
             }
         }
 
-        
         let func = self
             .module
             .get_function("pwma_multi_series_one_param_f32")
-            .map_err(|_| CudaPwmaError::MissingKernelSymbol { name: "pwma_multi_series_one_param_f32" })?;
+            .map_err(|_| CudaPwmaError::MissingKernelSymbol {
+                name: "pwma_multi_series_one_param_f32",
+            })?;
 
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -711,24 +724,30 @@ impl CudaPwma {
         let (first_valids, weights, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
-        let prices_bytes = cols.checked_mul(rows)
+        let prices_bytes = cols
+            .checked_mul(rows)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
         let use_const = self.cmem_available
             && self.module.get_function("pwma_ms1p_const_f32").is_ok()
             && period <= PWMA_MAX_PERIOD_CONST;
-        let weights_bytes = if use_const { 0 } else {
-            period.checked_mul(std::mem::size_of::<f32>())
+        let weights_bytes = if use_const {
+            0
+        } else {
+            period
+                .checked_mul(std::mem::size_of::<f32>())
                 .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?
         };
-        let fv_bytes = cols.checked_mul(std::mem::size_of::<i32>())
+        let fv_bytes = cols
+            .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
-        let out_bytes = cols.checked_mul(rows)
+        let out_bytes = cols
+            .checked_mul(rows)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
         let required = prices_bytes
-            .checked_add(weights_bytes).and_then(|v| v.checked_add(fv_bytes))
+            .checked_add(weights_bytes)
+            .and_then(|v| v.checked_add(fv_bytes))
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaPwmaError::InvalidInput("byte size overflow".into()))?;
         Self::ensure_fit(required, 64 * 1024 * 1024)?;
@@ -738,14 +757,13 @@ impl CudaPwma {
             && self.module.get_function("pwma_ms1p_const_f32").is_ok()
             && period <= PWMA_MAX_PERIOD_CONST;
         let d_weights = if use_const {
-            
             unsafe { DeviceBuffer::uninitialized(0) }?
         } else {
             DeviceBuffer::from_slice(&weights)?
         };
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
-        
+
         if use_const {
             let name = unsafe { CStr::from_bytes_with_nul_unchecked(b"pwma_const_w\0") };
             if let Ok(mut sym) = self.module.get_global::<[f32; PWMA_MAX_PERIOD_CONST]>(name) {
@@ -831,18 +849,16 @@ impl CudaPwma {
             use_const,
         )?;
         self.stream.synchronize()?;
-        
+
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }?;
         unsafe {
-        d_out_tm.async_copy_to(&mut pinned, &self.stream)?;
+            d_out_tm.async_copy_to(&mut pinned, &self.stream)?;
         }
         self.stream.synchronize()?;
         out_tm.copy_from_slice(pinned.as_slice());
         Ok(())
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -1035,8 +1051,6 @@ pub mod benches {
         ]
     }
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaPwmaPolicy {

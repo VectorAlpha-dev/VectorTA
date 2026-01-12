@@ -1,36 +1,33 @@
-//! CUDA wrapper for Chaikin Accumulation/Distribution Oscillator (ADOSC).
-//!
-//! Category: Recurrence/IIR. We precompute the ADL once on device, then run
-//! one EMA-pair (short/long) per block over that ADL for batch sweeps.
-//! For many-series × one-param (time-major), each block handles one series.
-//!
-//! Semantics:
-//! - No warmup NaNs — ADOSC starts from index 0 (out[0] = 0.0).
-//! - Division by zero in MFM (high==low) yields 0.0 contribution.
-//! - NaN propagation is natural via arithmetic; mirrors scalar path.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::adosc::{AdoscBatchRange, AdoscParams};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{DeviceBuffer, LockedBuffer, AsyncCopyDestination, CopyDestination, mem_get_info};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaAdoscError {
     #[error("CUDA: {0}")]
     Cuda(#[from] cust::error::CudaError),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -38,14 +35,20 @@ pub enum CudaAdoscError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle for ADOSC with context guard and device id
 pub struct DeviceArrayF32Adosc {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -55,9 +58,13 @@ pub struct DeviceArrayF32Adosc {
 }
 impl DeviceArrayF32Adosc {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaAdosc {
@@ -74,7 +81,9 @@ pub struct CudaAdosc {
 
 impl CudaAdosc {
     #[inline]
-    fn div_up(&self, n: usize, d: usize) -> u32 { ((n + d - 1) / d) as u32 }
+    fn div_up(&self, n: usize, d: usize) -> u32 {
+        ((n + d - 1) / d) as u32
+    }
     #[inline]
     fn default_block_x_for_batch(&self) -> u32 {
         match self.policy.batch {
@@ -92,7 +101,9 @@ impl CudaAdosc {
     #[inline]
     fn device_max_grid_x(&self) -> Result<u32, CudaAdoscError> {
         let dev = Device::get_device(self.device_id).map_err(CudaAdoscError::Cuda)?;
-        Ok(dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaAdoscError::Cuda)? as u32)
+        Ok(dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaAdoscError::Cuda)? as u32)
     }
     pub fn new(device_id: usize) -> Result<Self, CudaAdoscError> {
         cust::init(CudaFlags::empty())?;
@@ -122,7 +133,6 @@ impl CudaAdosc {
         })
     }
 
-    /// Create using an explicit policy (for testing/tuning).
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaAdoscPolicy,
@@ -142,8 +152,6 @@ impl CudaAdosc {
         &self.policy
     }
 
-    /// One-series × many-params. Returns a row-major device matrix of size
-    /// (rows = #combos, cols = series_len).
     pub fn adosc_batch_dev(
         &self,
         high: &[f32],
@@ -154,24 +162,21 @@ impl CudaAdosc {
     ) -> Result<DeviceArrayF32Adosc, CudaAdoscError> {
         let len = high.len();
         if len == 0 || low.len() != len || close.len() != len || volume.len() != len {
-            return Err(CudaAdoscError::InvalidInput("input slices are empty or mismatched".into()));
+            return Err(CudaAdoscError::InvalidInput(
+                "input slices are empty or mismatched".into(),
+            ));
         }
         let combos = expand_grid_checked_cuda(sweep)?;
 
-        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high, &self.stream) }?;
-        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }
-            ?;
-        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }
-            ?;
-        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume, &self.stream) }
-            ?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close, &self.stream) }?;
+        let d_volume = unsafe { DeviceBuffer::from_slice_async(volume, &self.stream) }?;
 
-        
-        let mut d_adl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        let mut d_adl: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         self.launch_adl(&d_high, &d_low, &d_close, &d_volume, len, &mut d_adl)?;
 
-        
         let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
         let mut longs: Vec<i32> = Vec::with_capacity(combos.len());
         for prm in &combos {
@@ -179,7 +184,8 @@ impl CudaAdosc {
             let lp = prm.long_period.unwrap_or(10) as i32;
             if sp <= 0 || lp <= 0 || sp >= lp {
                 return Err(CudaAdoscError::InvalidInput(format!(
-                    "invalid params: short={} long={}", sp, lp
+                    "invalid params: short={} long={}",
+                    sp, lp
                 )));
             }
             shorts.push(sp);
@@ -188,7 +194,6 @@ impl CudaAdosc {
         let d_shorts = unsafe { DeviceBuffer::from_slice_async(&shorts, &self.stream) }?;
         let d_longs = unsafe { DeviceBuffer::from_slice_async(&longs, &self.stream) }?;
 
-        
         let (rows, cols) = (combos.len(), len);
         let bytes_inputs = 4usize
             .checked_mul(cols)
@@ -211,9 +216,12 @@ impl CudaAdosc {
         let headroom = 64usize * 1024 * 1024;
 
         let required = bytes_inputs
-            .checked_add(bytes_adl).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
-            .checked_add(bytes_periods).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
-            .checked_add(bytes_out_total).ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
+            .checked_add(bytes_adl)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_add(bytes_periods)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
+            .checked_add(bytes_out_total)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?;
         let fits_all = match Self::will_fit(required, headroom) {
             Ok(true) => true,
             Ok(false) => false,
@@ -222,20 +230,30 @@ impl CudaAdosc {
         };
 
         if fits_all {
-            let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
-            let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
+            let total = rows
+                .checked_mul(cols)
+                .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+            let mut d_out: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
             unsafe {
                 (*(self as *const _ as *mut CudaAdosc)).last_batch =
-                    Some(BatchKernelSelected::Plain { block_x: self.default_block_x_for_batch() });
+                    Some(BatchKernelSelected::Plain {
+                        block_x: self.default_block_x_for_batch(),
+                    });
             }
             self.launch_batch_from_adl(&d_adl, &d_shorts, &d_longs, cols, rows, &mut d_out)?;
             self.maybe_log_batch_debug();
-            
+
             self.stream.synchronize()?;
-            return Ok(DeviceArrayF32Adosc { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id });
+            return Ok(DeviceArrayF32Adosc {
+                buf: d_out,
+                rows,
+                cols,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            });
         }
 
-        
         let can_hold_whole_output = match mem_get_info() {
             Ok((free, _)) => {
                 let static_now = bytes_inputs + bytes_adl + headroom;
@@ -246,8 +264,11 @@ impl CudaAdosc {
         let max_grid = self.device_max_grid_x().unwrap_or(65_535) as usize;
 
         if can_hold_whole_output {
-            let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
-            let mut d_out_full: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
+            let total = rows
+                .checked_mul(cols)
+                .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+            let mut d_out_full: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
             let mut start = 0usize;
             while start < rows {
                 let remain = rows - start;
@@ -258,24 +279,37 @@ impl CudaAdosc {
                 let d_longs_off = unsafe {
                     DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)?
                 };
-                let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
-                    DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)?
-                };
-                self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
+                let mut d_out_chunk: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)? };
+                self.launch_batch_from_adl(
+                    &d_adl,
+                    &d_shorts_off,
+                    &d_longs_off,
+                    cols,
+                    chunk,
+                    &mut d_out_chunk,
+                )?;
                 let base = start * cols;
                 let mut dst_slice = d_out_full.index(base..base + chunk * cols);
                 unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }?;
                 start += chunk;
             }
-            
+
             self.stream.synchronize()?;
-            return Ok(DeviceArrayF32Adosc { buf: d_out_full, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id });
+            return Ok(DeviceArrayF32Adosc {
+                buf: d_out_full,
+                rows,
+                cols,
+                ctx: Arc::clone(&self._context),
+                device_id: self.device_id,
+            });
         }
 
-        
-        
-        let total = rows.checked_mul(cols).ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
-        let mut d_out_full: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| CudaAdoscError::InvalidInput("rows*cols overflow".into()))?;
+        let mut d_out_full: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total, &self.stream)? };
         let mut start = 0usize;
         while start < rows {
             let remain = rows - start;
@@ -286,23 +320,33 @@ impl CudaAdosc {
             let d_longs_off = unsafe {
                 DeviceBuffer::from_slice_async(&longs[start..start + chunk], &self.stream)?
             };
-            
-            let mut d_out_chunk: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)?
-            };
-            self.launch_batch_from_adl(&d_adl, &d_shorts_off, &d_longs_off, cols, chunk, &mut d_out_chunk)?;
+
+            let mut d_out_chunk: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(chunk * cols, &self.stream)? };
+            self.launch_batch_from_adl(
+                &d_adl,
+                &d_shorts_off,
+                &d_longs_off,
+                cols,
+                chunk,
+                &mut d_out_chunk,
+            )?;
             let base = start * cols;
             let mut dst_slice = d_out_full.index(base..base + chunk * cols);
             unsafe { dst_slice.async_copy_from(&d_out_chunk, &self.stream) }?;
             start += chunk;
         }
-        
+
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32Adosc { buf: d_out_full, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
+        Ok(DeviceArrayF32Adosc {
+            buf: d_out_full,
+            rows,
+            cols,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
+        })
     }
 
-    /// Many-series × one-param (time-major). Returns a (rows x cols) device matrix
-    /// in time-major layout.
     pub fn adosc_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -330,7 +374,6 @@ impl CudaAdosc {
             return Err(CudaAdoscError::InvalidInput("invalid short/long".into()));
         }
 
-        
         let bytes_inputs = 4usize
             .checked_mul(len)
             .ok_or_else(|| CudaAdoscError::InvalidInput("size overflow".into()))?
@@ -350,13 +393,20 @@ impl CudaAdosc {
         let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }?;
         let d_volume = unsafe { DeviceBuffer::from_slice_async(volume_tm, &self.stream) }?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         self.launch_many_series_one_param(
             &d_high, &d_low, &d_close, &d_volume, cols, rows, short, long, &mut d_out,
         )?;
-        
+
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32Adosc { buf: d_out, rows, cols, ctx: Arc::clone(&self._context), device_id: self.device_id })
+        Ok(DeviceArrayF32Adosc {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: Arc::clone(&self._context),
+            device_id: self.device_id,
+        })
     }
 
     fn launch_adl(
@@ -368,10 +418,11 @@ impl CudaAdosc {
         series_len: usize,
         d_adl_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAdoscError> {
-        let func = self
-            .module
-            .get_function("adosc_adl_f32")
-            .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_adl_f32" })?;
+        let func = self.module.get_function("adosc_adl_f32").map_err(|_| {
+            CudaAdoscError::MissingKernelSymbol {
+                name: "adosc_adl_f32",
+            }
+        })?;
         let grid: GridSize = (1, 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
         unsafe {
@@ -409,8 +460,10 @@ impl CudaAdosc {
         let func = self
             .module
             .get_function("adosc_batch_from_adl_f32")
-            .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_batch_from_adl_f32" })?;
-        
+            .map_err(|_| CudaAdoscError::MissingKernelSymbol {
+                name: "adosc_batch_from_adl_f32",
+            })?;
+
         let mut block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
             BatchKernelPolicy::Auto => 256,
@@ -483,8 +536,10 @@ impl CudaAdosc {
         let func = self
             .module
             .get_function("adosc_many_series_one_param_f32")
-            .map_err(|_| CudaAdoscError::MissingKernelSymbol { name: "adosc_many_series_one_param_f32" })?;
-        
+            .map_err(|_| CudaAdoscError::MissingKernelSymbol {
+                name: "adosc_many_series_one_param_f32",
+            })?;
+
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
             ManySeriesKernelPolicy::Auto => 256,
@@ -523,8 +578,6 @@ impl CudaAdosc {
         Ok(())
     }
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -604,17 +657,15 @@ impl CudaAdosc {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; 
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        
         let in_bytes = 4 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let adl_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
@@ -671,8 +722,6 @@ pub mod benches {
             volume[i] = (x.cos().abs() + 0.4) * 1000.0;
         }
         let sweep = AdoscBatchRange {
-            
-            
             short_period: (3, 3, 0),
             long_period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
@@ -687,10 +736,6 @@ pub mod benches {
             longs.push(prm.long_period.unwrap_or(0) as i32);
         }
 
-        
-        
-        
-        
         let d_high = DeviceBuffer::from_slice(&high).expect("H2D");
         let d_low = DeviceBuffer::from_slice(&low).expect("H2D");
         let d_close = DeviceBuffer::from_slice(&close).expect("H2D");
@@ -745,17 +790,23 @@ fn expand_grid_checked_cuda(r: &AdoscBatchRange) -> Result<Vec<AdoscParams>, Cud
         }
         if start < end {
             let v: Vec<_> = (start..=end).step_by(step).collect();
-            if v.is_empty() { return Err(CudaAdoscError::InvalidInput("empty range".into())); }
+            if v.is_empty() {
+                return Err(CudaAdoscError::InvalidInput("empty range".into()));
+            }
             Ok(v)
         } else {
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
-                if cur - end < step { break; }
+                if cur - end < step {
+                    break;
+                }
                 cur -= step;
             }
-            if v.is_empty() { return Err(CudaAdoscError::InvalidInput("empty range".into())); }
+            if v.is_empty() {
+                return Err(CudaAdoscError::InvalidInput("empty range".into()));
+            }
             Ok(v)
         }
     }
@@ -764,11 +815,18 @@ fn expand_grid_checked_cuda(r: &AdoscBatchRange) -> Result<Vec<AdoscParams>, Cud
     let mut out = Vec::new();
     for &s in &shorts {
         for &l in &longs {
-            if s == 0 || l == 0 || s >= l { continue; }
-            out.push(AdoscParams { short_period: Some(s), long_period: Some(l) });
+            if s == 0 || l == 0 || s >= l {
+                continue;
+            }
+            out.push(AdoscParams {
+                short_period: Some(s),
+                long_period: Some(l),
+            });
         }
     }
-    if out.is_empty() { return Err(CudaAdoscError::InvalidInput("no parameter combos".into())); }
+    if out.is_empty() {
+        return Err(CudaAdoscError::InvalidInput("no parameter combos".into()));
+    }
     Ok(out)
 }
 
@@ -781,7 +839,11 @@ impl CudaAdosc {
                 if need <= free {
                     Ok(true)
                 } else {
-                    Err(CudaAdoscError::OutOfMemory { required, free, headroom })
+                    Err(CudaAdoscError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    })
                 }
             }
             Err(_) => Ok(true),

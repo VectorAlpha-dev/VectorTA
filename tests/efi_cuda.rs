@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::efi::{efi_batch_with_kernel, EfiBatchRange, EfiParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -83,8 +81,8 @@ fn efi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     let mut volume_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -97,7 +95,6 @@ fn efi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 13usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

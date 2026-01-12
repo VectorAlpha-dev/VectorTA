@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::apo::{
     apo_batch_with_kernel, apo_with_kernel, ApoBatchRange, ApoData, ApoInput, ApoParams,
 };
@@ -97,7 +95,6 @@ fn apo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let short = 10usize;
     let long = 21usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

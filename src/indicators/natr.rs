@@ -1,23 +1,3 @@
-//! # Normalized Average True Range (NATR)
-//!
-//! Normalizes ATR by closing price as a percentage for cross-asset volatility comparison.
-//!
-//! ## Parameters
-//! - **high**: High price data
-//! - **low**: Low price data
-//! - **close**: Close price data
-//! - **period**: ATR calculation period (default: 14)
-//!
-//! ## Returns
-//! - `Vec<f64>` - NATR values (percentage) matching input length
-//!
-//! ## Developer Status
-//! **SIMD**: Implemented AVX2/AVX512 for TR batching; recurrence remains scalar
-//! **Streaming**: O(1) – minimal state Wilder update (prev_close, sum_tr warmup, atr)
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//! Note: Streaming path refactored to lean Wilder kernel; matches batch outputs.
-//! **Decision log**: SIMD enabled (AVX2/AVX512 TR batching with scalar recurrence); CUDA wrapper present; Python CUDA interop exposes CAI v3 + DLPack v1.x; scalar path remains the reference implementation.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -42,9 +22,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -65,7 +45,10 @@ pub struct NatrOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct NatrParams {
     pub period: Option<usize>,
 }
@@ -190,7 +173,11 @@ pub enum NatrError {
     #[error("natr: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("natr: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("natr: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("natr: Mismatched lengths: expected = {expected}, actual = {actual}")]
@@ -303,10 +290,9 @@ pub fn natr_scalar(
     let inv_p: f64 = 1.0 / (period as f64);
     let k100: f64 = 100.0;
 
-    
     let warm_end = first + period - 1;
     let mut sum_tr = 0.0;
-    
+
     sum_tr += high[first] - low[first];
     for i in (first + 1)..=warm_end {
         let hi = high[i];
@@ -324,7 +310,6 @@ pub fn natr_scalar(
         f64::NAN
     };
 
-    
     let mut idx = warm_end + 1;
     while idx + 3 < len {
         let pc0 = close[idx - 1];
@@ -409,7 +394,6 @@ pub fn natr_avx512(
     out: &mut [f64],
 ) {
     unsafe {
-        
         natr_avx512_body(high, low, close, period, first, out);
     }
 }
@@ -440,7 +424,6 @@ pub unsafe fn natr_avx2(
     let c = close.as_ptr();
     let o = out.as_mut_ptr();
 
-    
     let mut i = first;
     let mut sum_tr = *h.add(i) - *l.add(i);
     i += 1;
@@ -483,7 +466,6 @@ pub unsafe fn natr_avx2(
         f64::NAN
     };
 
-    
     let mut idx = warm_end + 1;
     while idx + 3 < len {
         let vh = _mm256_loadu_pd(h.add(idx));
@@ -578,7 +560,6 @@ unsafe fn natr_avx512_body(
     let c = close.as_ptr();
     let o = out.as_mut_ptr();
 
-    
     let mut i = first;
     let mut sum_tr = *h.add(i) - *l.add(i);
     i += 1;
@@ -621,7 +602,6 @@ unsafe fn natr_avx512_body(
         f64::NAN
     };
 
-    
     let mut idx = warm_end + 1;
     while idx + 7 < len {
         let vh = _mm512_loadu_pd(h.add(idx));
@@ -741,19 +721,18 @@ pub unsafe fn natr_avx512_long(
     natr_avx512_body(high, low, close, period, first, out);
 }
 
-/// Decision: Streaming uses minimal-state Wilder kernel; matches batch within tests.
 #[derive(Debug, Clone)]
 pub struct NatrStream {
     period: usize,
-    alpha: f64, 
-    k100: f64,  
-    
-    count: usize,    
-    sum_tr: f64,     
-    atr: f64,        
-    prev_close: f64, 
-    have_prev: bool, 
-    ready: bool,     
+    alpha: f64,
+    k100: f64,
+
+    count: usize,
+    sum_tr: f64,
+    atr: f64,
+    prev_close: f64,
+    have_prev: bool,
+    ready: bool,
 }
 
 impl NatrStream {
@@ -779,32 +758,21 @@ impl NatrStream {
         })
     }
 
-    /// O(1) update. Returns:
-    /// - None until warmup completes (i.e., after `period` updates),
-    /// - Some(NaN) if `close` is non-finite or zero at emission step,
-    /// - Some(natr) otherwise.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        
-        
-        
         let tr = if self.have_prev {
             let pc = self.prev_close;
             high.max(pc) - low.min(pc)
         } else {
-            
             high - low
         };
 
-        
         self.prev_close = close;
         self.have_prev = true;
 
         self.count += 1;
 
         if !self.ready {
-            
-            
             self.sum_tr += tr;
             if self.count == self.period {
                 self.atr = self.sum_tr / (self.period as f64);
@@ -813,12 +781,9 @@ impl NatrStream {
                 return None;
             }
         } else {
-            
-            
             self.atr = (tr - self.atr).mul_add(self.alpha, self.atr);
         }
 
-        
         if close.is_finite() && close != 0.0 {
             Some((self.atr / close) * self.k100)
         } else {
@@ -1055,10 +1020,9 @@ fn natr_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    let use_tr_shared = combos.len() >= 24; 
+    let use_tr_shared = combos.len() >= 24;
 
     if use_tr_shared {
-        
         let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
         tr.resize(len, 0.0);
         if first < len {
@@ -1073,7 +1037,7 @@ fn natr_batch_inner(
                 i += 1;
             }
         }
-        
+
         let mut pref: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len + 1);
         pref.resize(len + 1, 0.0);
         for i in first..len {
@@ -1086,7 +1050,6 @@ fn natr_batch_inner(
             let k100 = 100.0;
             let warm_end = first + period - 1;
 
-            
             let sum_tr = pref[warm_end + 1] - pref[first];
             let mut atr = sum_tr * inv_p;
             let cw = close[warm_end];
@@ -1096,7 +1059,6 @@ fn natr_batch_inner(
                 f64::NAN
             };
 
-            
             let mut i = warm_end + 1;
             while i < len {
                 atr = (tr[i] - atr).mul_add(inv_p, atr);
@@ -1218,7 +1180,6 @@ fn natr_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let warmup_end = first + period - 1;
@@ -1230,7 +1191,6 @@ fn natr_batch_inner_into(
 
     let use_tr_shared = combos.len() >= 24;
     if use_tr_shared {
-        
         let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
         tr.resize(len, 0.0);
         if first < len {
@@ -1245,7 +1205,7 @@ fn natr_batch_inner_into(
                 i += 1;
             }
         }
-        
+
         let mut pref: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len + 1);
         pref.resize(len + 1, 0.0);
         for i in first..len {
@@ -1364,7 +1324,6 @@ unsafe fn natr_row_scalar_from_tr(
     let k100 = 100.0;
     let warm_end = first + period - 1;
 
-    
     let mut sum_tr = 0.0;
     for i in first..=warm_end {
         sum_tr += tr[i];
@@ -1377,7 +1336,6 @@ unsafe fn natr_row_scalar_from_tr(
         f64::NAN
     };
 
-    
     let mut i = warm_end + 1;
     while i < len {
         atr = (tr[i] - atr).mul_add(inv_p, atr);
@@ -1452,7 +1410,6 @@ unsafe fn natr_row_avx2_from_tr(
     period: usize,
     out: &mut [f64],
 ) {
-    
     natr_row_scalar_from_tr(tr, close, first, period, out)
 }
 
@@ -1478,22 +1435,17 @@ mod tests {
 
     #[test]
     fn test_natr_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = NatrInput::with_default_candles(&candles);
 
-        
         let baseline = natr(&input)?.values;
 
-        
         let mut out = vec![0.0; candles.close.len()];
         #[allow(unused_variables)]
         {
-            
-            #[cfg(not(feature = "wasm"))]
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
             {
                 natr_into(&input, &mut out)?;
             }
@@ -1501,7 +1453,6 @@ mod tests {
 
         assert_eq!(baseline.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -1782,16 +1733,16 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            NatrParams::default(),            
-            NatrParams { period: Some(2) },   
-            NatrParams { period: Some(5) },   
-            NatrParams { period: Some(7) },   
-            NatrParams { period: Some(10) },  
-            NatrParams { period: Some(20) },  
-            NatrParams { period: Some(30) },  
-            NatrParams { period: Some(50) },  
-            NatrParams { period: Some(100) }, 
-            NatrParams { period: Some(200) }, 
+            NatrParams::default(),
+            NatrParams { period: Some(2) },
+            NatrParams { period: Some(5) },
+            NatrParams { period: Some(7) },
+            NatrParams { period: Some(10) },
+            NatrParams { period: Some(20) },
+            NatrParams { period: Some(30) },
+            NatrParams { period: Some(50) },
+            NatrParams { period: Some(100) },
+            NatrParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1800,12 +1751,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1855,7 +1805,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     fn check_batch_default_row(
@@ -1879,15 +1829,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (30, 60, 15),  
-            (2, 5, 1),     
-            (10, 20, 2),   
-            (50, 100, 10), 
-            (14, 14, 0),   
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (50, 100, 10),
+            (14, 14, 0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1906,7 +1855,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1972,59 +1920,43 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50, 50usize..=400, 0usize..=2)
             .prop_flat_map(|(period, len, scenario)| {
-                
                 let close_strategy = match scenario {
-                    0 => {
-                        
-                        prop::collection::vec(
-                            (1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
-                            len,
-                        )
-                        .boxed()
-                    }
-                    1 => {
-                        
-                        prop::collection::vec(
-                            (0.01f64..1.0f64).prop_filter("finite", |x| x.is_finite()),
-                            len,
-                        )
-                        .boxed()
-                    }
-                    _ => {
-                        
-                        (1.0f64..100.0f64)
-                            .prop_map(move |val| vec![val; len])
-                            .boxed()
-                    }
+                    0 => prop::collection::vec(
+                        (1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+                        len,
+                    )
+                    .boxed(),
+                    1 => prop::collection::vec(
+                        (0.01f64..1.0f64).prop_filter("finite", |x| x.is_finite()),
+                        len,
+                    )
+                    .boxed(),
+                    _ => (1.0f64..100.0f64)
+                        .prop_map(move |val| vec![val; len])
+                        .boxed(),
                 };
 
                 (close_strategy, Just(period), Just(len), Just(scenario))
             })
             .prop_flat_map(|(close_prices, period, len, scenario)| {
-                
                 let mut high_vec = Vec::with_capacity(len);
                 let mut low_vec = Vec::with_capacity(len);
 
-                
                 for (i, &close) in close_prices.iter().enumerate() {
                     if scenario == 2 {
-                        
                         high_vec.push(close);
                         low_vec.push(close);
                     } else {
-                        
                         let volatility_factor = 0.001 + 0.20 * ((i * 7919) % 100) as f64 / 100.0;
                         let spread = close * volatility_factor;
 
-                        
                         let high = close + spread * 0.5;
                         let low = close - spread * 0.5;
 
                         high_vec.push(high);
-                        low_vec.push(low.max(0.001)); 
+                        low_vec.push(low.max(0.001));
                     }
                 }
 
@@ -2045,18 +1977,14 @@ mod tests {
                 };
                 let input = NatrInput::from_slices(&high, &low, &close, params);
 
-                
                 let result = natr_with_kernel(&input, kernel)?;
 
-                
                 let ref_result = natr_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(result.values.len(), high.len());
                 prop_assert_eq!(result.values.len(), low.len());
                 prop_assert_eq!(result.values.len(), close.len());
 
-                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         result.values[i].is_nan(),
@@ -2066,7 +1994,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in period..result.values.len() {
                     if result.values[i].is_finite() {
                         prop_assert!(
@@ -2076,7 +2003,6 @@ mod tests {
                             result.values[i]
                         );
 
-                        
                         prop_assert!(
                             result.values[i] < 10000.0,
                             "NATR seems unreasonably high at index {}: got {}",
@@ -2086,7 +2012,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..result.values.len() {
                     let val = result.values[i];
                     let ref_val = ref_result.values[i];
@@ -2096,7 +2021,6 @@ mod tests {
                     }
 
                     if val.is_finite() && ref_val.is_finite() {
-                        
                         let diff = (val - ref_val).abs();
                         let tolerance = (ref_val.abs() * 1e-10).max(1e-10);
                         prop_assert!(
@@ -2108,7 +2032,6 @@ mod tests {
                             diff
                         );
                     } else {
-                        
                         prop_assert_eq!(
                             val.is_finite(),
                             ref_val.is_finite(),
@@ -2120,10 +2043,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 if scenario == 2 {
-                    
                     let is_constant = high
                         .iter()
                         .zip(&low)
@@ -2131,8 +2051,6 @@ mod tests {
                         .all(|((h, l), c)| (*h - *l).abs() < 1e-10 && (*h - *c).abs() < 1e-10);
 
                     if is_constant && result.values.len() > period + 5 {
-                        
-                        
                         for i in (period + 5)..result.values.len() {
                             if result.values[i].is_finite() {
                                 prop_assert!(
@@ -2146,12 +2064,9 @@ mod tests {
                     }
                 }
 
-                
                 if scenario == 1 {
-                    
                     for i in period..result.values.len() {
                         if result.values[i].is_finite() && close[i] > 0.0 {
-                            
                             prop_assert!(
                                 result.values[i] >= 0.0 && result.values[i] < 100000.0,
                                 "NATR out of bounds with small prices at index {}: got {}",
@@ -2162,10 +2077,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 if close.iter().any(|&c| c.abs() < 1e-10) {
-                    
                     for (i, &c) in close.iter().enumerate() {
                         if c.abs() < 1e-10 && i >= period - 1 {
                             prop_assert!(
@@ -2178,7 +2090,6 @@ mod tests {
                     }
                 }
 
-                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in result.values.iter().enumerate() {
@@ -2399,7 +2310,6 @@ impl NatrStreamPy {
     }
 }
 
-/// Write directly to output slice - no allocations
 pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Result<(), NatrError> {
     let (high, low, close, period) = match &input.data {
         NatrData::Candles { candles } => (
@@ -2422,7 +2332,6 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         });
     }
 
-    
     if len == 0 {
         return Err(NatrError::EmptyInputData);
     }
@@ -2439,7 +2348,6 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         });
     }
 
-    
     let first_valid_idx = {
         let first_valid_idx_h = high.iter().position(|&x| !x.is_nan());
         let first_valid_idx_l = low.iter().position(|&x| !x.is_nan());
@@ -2463,13 +2371,11 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         });
     }
 
-    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -2487,7 +2393,6 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
         }
     }
 
-    
     for v in &mut dst[..(first_valid_idx + period - 1)] {
         *v = f64::NAN;
     }
@@ -2495,18 +2400,13 @@ pub fn natr_into_slice(dst: &mut [f64], input: &NatrInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-/// Zero-allocation native API that writes results into a caller-provided buffer.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-/// - Uses `Kernel::Auto` dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn natr_into(input: &NatrInput, out: &mut [f64]) -> Result<(), NatrError> {
     natr_into_slice(out, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn natr_js(
     high: &[f64],
@@ -2527,7 +2427,7 @@ pub fn natr_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn natr_into(
     high_ptr: *const f64,
@@ -2550,7 +2450,6 @@ pub fn natr_into(
         };
         let input = NatrInput::from_slices(high, low, close, params);
 
-        
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             natr_into_slice(&mut temp, &input, detect_best_kernel())
@@ -2566,7 +2465,7 @@ pub fn natr_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn natr_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2575,7 +2474,7 @@ pub fn natr_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn natr_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2585,13 +2484,13 @@ pub fn natr_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NatrBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NatrBatchJsOutput {
     pub values: Vec<f64>,
@@ -2600,7 +2499,7 @@ pub struct NatrBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = natr_batch)]
 pub fn natr_batch_unified_js(
     high: &[f64],
@@ -2631,7 +2530,7 @@ pub fn natr_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn natr_batch_into(
     high_ptr: *const f64,
@@ -2656,8 +2555,7 @@ pub fn natr_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -2686,7 +2584,6 @@ pub fn register_natr_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     Ok(())
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::natr_wrapper::DeviceArrayF32Natr;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2734,7 +2631,7 @@ impl NatrDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2752,8 +2649,7 @@ impl NatrDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2775,7 +2671,6 @@ impl NatrDeviceArrayF32Py {
         }
         let _ = stream;
 
-        
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -2785,7 +2680,6 @@ impl NatrDeviceArrayF32Py {
             }
         }
 
-        
         let rows = self.rows;
         let cols = self.cols;
         let buf = self
@@ -2831,7 +2725,13 @@ pub fn natr_cuda_batch_dev_py(
         cuda.natr_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let DeviceArrayF32Natr { buf, rows, cols, ctx, device_id } = dev;
+    let DeviceArrayF32Natr {
+        buf,
+        rows,
+        cols,
+        ctx,
+        device_id,
+    } = dev;
     Ok(NatrDeviceArrayF32Py {
         buf: Some(buf),
         rows,
@@ -2871,7 +2771,13 @@ pub fn natr_cuda_many_series_one_param_dev_py(
         cuda.natr_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let DeviceArrayF32Natr { buf, rows, cols, ctx, device_id } = dev;
+    let DeviceArrayF32Natr {
+        buf,
+        rows,
+        cols,
+        ctx,
+        device_id,
+    } = dev;
     Ok(NatrDeviceArrayF32Py {
         buf: Some(buf),
         rows,

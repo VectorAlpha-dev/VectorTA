@@ -1,12 +1,3 @@
-//! CUDA wrapper for Chande Momentum Oscillator (CMO).
-//!
-//! Parity points with ALMA/CWMA wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/cmo_kernel.ptx"))
-//! - Stream NON_BLOCKING
-//! - Lightweight policy + introspection hooks
-//! - VRAM checks and simple chunking guards
-//! - Public device entry points that return VRAM-resident DeviceArrayF32
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
@@ -27,7 +18,11 @@ pub enum CudaCmoError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -35,13 +30,19 @@ pub enum CudaCmoError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -106,11 +107,10 @@ impl CudaCmo {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?
-            }
+                Err(_) => Module::from_ptx(ptx, &[])?,
+            },
         };
 
-        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -140,8 +140,12 @@ impl CudaCmo {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn synchronize(&self) -> Result<(), CudaCmoError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -208,8 +212,6 @@ impl CudaCmo {
         }
     }
 
-    
-
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &CmoBatchRange,
@@ -223,7 +225,6 @@ impl CudaCmo {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaCmoError::InvalidInput("all values are NaN".into()))?;
 
-        
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
             if step == 0 || start == end {
                 return vec![start];
@@ -234,16 +235,22 @@ impl CudaCmo {
                 while x <= end {
                     vals.push(x);
                     let next = x.saturating_add(step);
-                    if next == x { break; }
+                    if next == x {
+                        break;
+                    }
                     x = next;
                 }
             } else {
                 let mut x = start;
                 loop {
                     vals.push(x);
-                    if x <= end { break; }
+                    if x <= end {
+                        break;
+                    }
                     let next = x.saturating_sub(step);
-                    if next >= x { break; }
+                    if next >= x {
+                        break;
+                    }
                     x = next;
                 }
             }
@@ -269,10 +276,9 @@ impl CudaCmo {
         Ok((combos, first_valid, len))
     }
 
-    
-fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<f64>) {
-    unimplemented!()
-}
+    fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<f64>) {
+        unimplemented!()
+    }
 
     fn launch_batch_kernel(
         &self,
@@ -283,16 +289,14 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaCmoError> {
-        let mut func: Function = self
-            .module
-            .get_function("cmo_batch_f32")
-            .map_err(|_| CudaCmoError::MissingKernelSymbol { name: "cmo_batch_f32" })?;
+        let mut func: Function = self.module.get_function("cmo_batch_f32").map_err(|_| {
+            CudaCmoError::MissingKernelSymbol {
+                name: "cmo_batch_f32",
+            }
+        })?;
 
-        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        
-        
         let block_x: u32 = match std::env::var("CMO_BLOCK_X").ok().as_deref() {
             Some(s) if s != "auto" => s
                 .parse::<u32>()
@@ -305,17 +309,22 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             }
         };
 
-        
         let warps_per_block = (block_x / 32).max(1);
         let grid_x = ((n_combos as u32) + warps_per_block - 1) / warps_per_block;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
         if block_x > 1024 {
-            return Err(CudaCmoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaCmoError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaCmo)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });
@@ -350,20 +359,34 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
     ) -> Result<DeviceArrayF32, CudaCmoError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(prices, sweep)?;
 
-        
         let rows = combos.len();
         let out_elems = rows
             .checked_mul(len)
             .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
         let bytes = len
             .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|b| b.checked_add(rows.checked_mul(std::mem::size_of::<i32>()).unwrap_or(usize::MAX)))
-            .and_then(|b| b.checked_add(out_elems.checked_mul(std::mem::size_of::<f32>()).unwrap_or(usize::MAX)))
+            .and_then(|b| {
+                b.checked_add(
+                    rows.checked_mul(std::mem::size_of::<i32>())
+                        .unwrap_or(usize::MAX),
+                )
+            })
+            .and_then(|b| {
+                b.checked_add(
+                    out_elems
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .unwrap_or(usize::MAX),
+                )
+            })
             .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             let (free, _) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaCmoError::OutOfMemory { required: bytes, free, headroom });
+            return Err(CudaCmoError::OutOfMemory {
+                required: bytes,
+                free,
+                headroom,
+            });
         }
 
         let periods_i32: Vec<i32> = combos
@@ -371,13 +394,14 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
             .map(|c| c.period.unwrap_or(14) as i32)
             .collect();
 
-        
         let h_prices = LockedBuffer::from_slice(prices)?;
         let h_p = LockedBuffer::from_slice(&periods_i32)?;
 
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
-        let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
-        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }?;
+        let mut d_periods =
+            unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows * len, &self.stream) }?;
 
         unsafe {
             d_prices.async_copy_from(&h_prices, &self.stream)?;
@@ -388,10 +412,12 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: len,
+        })
     }
-
-    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -413,7 +439,7 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
                 "invalid period for many-series".into(),
             ));
         }
-        
+
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -451,9 +477,10 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let func = self
             .module
             .get_function("cmo_many_series_one_param_f32")
-            .map_err(|_| CudaCmoError::MissingKernelSymbol { name: "cmo_many_series_one_param_f32" })?;
+            .map_err(|_| CudaCmoError::MissingKernelSymbol {
+                name: "cmo_many_series_one_param_f32",
+            })?;
 
-        
         let block_x: u32 = match std::env::var("CMO_MS_BLOCK_X").ok().as_deref() {
             Some(s) if s != "auto" => s
                 .parse::<u32>()
@@ -469,10 +496,16 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         if block_x > 1024 {
-            return Err(CudaCmoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaCmoError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaCmo)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -509,28 +542,45 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
         let bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|b| b.checked_add(first_valids.len().checked_mul(std::mem::size_of::<i32>()).unwrap_or(usize::MAX)))
-            .and_then(|b| b.checked_add(elems.checked_mul(std::mem::size_of::<f32>()).unwrap_or(usize::MAX)))
+            .and_then(|b| {
+                b.checked_add(
+                    first_valids
+                        .len()
+                        .checked_mul(std::mem::size_of::<i32>())
+                        .unwrap_or(usize::MAX),
+                )
+            })
+            .and_then(|b| {
+                b.checked_add(
+                    elems
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .unwrap_or(usize::MAX),
+                )
+            })
             .ok_or_else(|| CudaCmoError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             let (free, _) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaCmoError::OutOfMemory { required: bytes, free, headroom });
+            return Err(CudaCmoError::OutOfMemory {
+                required: bytes,
+                free,
+                headroom,
+            });
         }
 
-        
         let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 
-        let mut d_prices_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
+        let mut d_prices_tm =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
         let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
-        let mut d_out_tm = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
+        let mut d_out_tm =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
 
         unsafe {
             d_prices_tm.async_copy_from(&h_prices, &self.stream)?;
@@ -540,7 +590,11 @@ fn _unused_prefix_build(_prices: &[f32], _first_valid: usize) -> (Vec<f64>, Vec<
         self.launch_many_series_kernel(&d_prices_tm, &d_first, cols, rows, period, &mut d_out_tm)?;
 
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 }
 

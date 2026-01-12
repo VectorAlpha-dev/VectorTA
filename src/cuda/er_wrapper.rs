@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Kaufman Efficiency Ratio (ER).
-//!
-//! Parity with ALMA/CUDA wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/er_kernel.ptx")) with JIT options
-//!   DetermineTargetFromContext + OptLevel O2, then simpler fallbacks.
-//! - NON_BLOCKING stream
-//! - VRAM guard and grid.y chunking (<= 65_535)
-//! - Public device entry points for batch and many-series (time-major)
-
 use crate::indicators::er::ErBatchRange;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -25,8 +16,10 @@ use thiserror::Error;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub(super) struct Float2 { pub x: f32, pub y: f32 }
-
+pub(super) struct Float2 {
+    pub x: f32,
+    pub y: f32,
+}
 
 unsafe impl cust::memory::DeviceCopy for Float2 {}
 
@@ -35,7 +28,11 @@ pub enum CudaErError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -43,7 +40,14 @@ pub enum CudaErError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -55,7 +59,6 @@ struct ErCombo {
     period: i32,
 }
 
-/// VRAM-backed array for ER with context guard and device id
 pub struct DeviceArrayF32Er {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -65,9 +68,13 @@ pub struct DeviceArrayF32Er {
 }
 impl DeviceArrayF32Er {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaEr {
@@ -91,7 +98,12 @@ impl CudaEr {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-        Ok(Self { module, stream, _ctx: ctx, device_id: device_id as u32 })
+        Ok(Self {
+            module,
+            stream,
+            _ctx: ctx,
+            device_id: device_id as u32,
+        })
     }
 
     #[inline]
@@ -106,8 +118,12 @@ impl CudaEr {
     #[inline]
     fn device_max_grid_xy(&self) -> Result<(u32, u32), CudaErError> {
         let dev = Device::get_device(self.device_id).map_err(CudaErError::Cuda)?;
-        let gx = dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaErError::Cuda)? as u32;
-        let gy = dev.get_attribute(DeviceAttribute::MaxGridDimY).map_err(CudaErError::Cuda)? as u32;
+        let gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaErError::Cuda)? as u32;
+        let gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .map_err(CudaErError::Cuda)? as u32;
         Ok((gx, gy))
     }
 
@@ -122,10 +138,16 @@ impl CudaEr {
             let mut x = start as isize;
             let end_i = end as isize;
             let st = (step.max(1)) as isize;
-            while x >= end_i { v.push(x as usize); x -= st; }
+            while x >= end_i {
+                v.push(x as usize);
+                x -= st;
+            }
             v
         };
-        periods.into_iter().map(|p| ErCombo { period: p as i32 }).collect()
+        periods
+            .into_iter()
+            .map(|p| ErCombo { period: p as i32 })
+            .collect()
     }
 
     fn prepare_batch_inputs(
@@ -155,7 +177,7 @@ impl CudaEr {
                 "no parameter combinations".into(),
             ));
         }
-        
+
         for c in &combos {
             let p = c.period as usize;
             if p == 0 || p > len {
@@ -189,7 +211,6 @@ impl CudaEr {
     }
 
     fn build_prefix_absdiff_dsf(data_f32: &[f32]) -> Vec<Float2> {
-        
         let n = data_f32.len();
         let mut pref = vec![Float2 { x: 0.0, y: 0.0 }; n];
         let two_sumf = |a: f32, b: f32| -> (f32, f32) {
@@ -207,7 +228,8 @@ impl CudaEr {
                 let (s1, e1) = two_sumf(hi, d);
                 let lo1 = lo + e1;
                 let (s2, e2) = two_sumf(s1, lo1);
-                hi = s2; lo = e2;
+                hi = s2;
+                lo = e2;
                 pref[j + 1] = Float2 { x: hi, y: lo };
                 j += 1;
             }
@@ -217,7 +239,7 @@ impl CudaEr {
 
     #[inline]
     fn chunk_rows(n_rows: usize, len: usize) -> usize {
-        let max_grid_y = 65_000usize; 
+        let max_grid_y = 65_000usize;
         let out_bytes = n_rows
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
@@ -225,7 +247,7 @@ impl CudaEr {
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
         if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64usize << 20; 
+            let headroom = 64usize << 20;
             if free > headroom {
                 return (free - headroom)
                     .saturating_div(len * std::mem::size_of::<f32>())
@@ -245,21 +267,24 @@ impl CudaEr {
         let len = data_f32.len();
         let n_combos = combos.len();
 
-        
         let prefix = Self::build_prefix_absdiff_dsf(data_f32);
 
-        
         let bytes_est = len
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_add(n_combos.checked_mul(std::mem::size_of::<i32>())?))
-            .and_then(|b| b.checked_add(n_combos.checked_mul(len)?.checked_mul(std::mem::size_of::<f32>())?))
+            .and_then(|b| {
+                b.checked_add(
+                    n_combos
+                        .checked_mul(len)?
+                        .checked_mul(std::mem::size_of::<f32>())?,
+                )
+            })
             .and_then(|b| b.checked_add(len.checked_mul(std::mem::size_of::<Float2>())?))
             .ok_or_else(|| CudaErError::InvalidInput("size overflow".into()))?;
         if !Self::will_fit(bytes_est, 64usize << 20) {
             return self.er_batch_dev_fallback_rolling(data_f32, &combos, first_valid);
         }
 
-        
         let d_data = DeviceBuffer::from_slice(data_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
@@ -272,7 +297,9 @@ impl CudaEr {
         let func = self
             .module
             .get_function("er_batch_prefix_f32")
-            .map_err(|_| CudaErError::MissingKernelSymbol { name: "er_batch_prefix_f32" })?;
+            .map_err(|_| CudaErError::MissingKernelSymbol {
+                name: "er_batch_prefix_f32",
+            })?;
         let block_x: u32 = 256;
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
         let chunk = Self::chunk_rows(n_combos, len);
@@ -283,16 +310,29 @@ impl CudaEr {
             let grid: GridSize = (grid_x.max(1), cur as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             if grid_x > max_gx || (cur as u32) > max_gy {
-                return Err(CudaErError::LaunchConfigTooLarge { gx: grid_x, gy: cur as u32, gz: 1, bx: block_x, by: 1, bz: 1 });
+                return Err(CudaErError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: cur as u32,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
             }
             unsafe {
                 let mut data_ptr = d_data.as_device_ptr().as_raw();
                 let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut fv_i = first_valid as i32;
-                let mut per_ptr = d_periods.as_device_ptr().as_raw().wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
+                let mut per_ptr = d_periods
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
                 let mut ncomb_i = cur as i32;
-                let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
+                let mut out_ptr = d_out
+                    .as_device_ptr()
+                    .as_raw()
+                    .wrapping_add((launched * len * std::mem::size_of::<f32>()) as u64);
                 let args: &mut [*mut c_void] = &mut [
                     &mut data_ptr as *mut _ as *mut c_void,
                     &mut pref_ptr as *mut _ as *mut c_void,
@@ -307,10 +347,21 @@ impl CudaEr {
             launched += cur;
         }
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32Er { buf: d_out, rows: n_combos, cols: len, ctx: Arc::clone(&self._ctx), device_id: self.device_id })
+        Ok(DeviceArrayF32Er {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+            ctx: Arc::clone(&self._ctx),
+            device_id: self.device_id,
+        })
     }
 
-    fn er_batch_dev_fallback_rolling(&self, data_f32: &[f32], combos: &[ErCombo], first_valid: usize) -> Result<DeviceArrayF32Er, CudaErError> {
+    fn er_batch_dev_fallback_rolling(
+        &self,
+        data_f32: &[f32],
+        combos: &[ErCombo],
+        first_valid: usize,
+    ) -> Result<DeviceArrayF32Er, CudaErError> {
         let len = data_f32.len();
         let n_combos = combos.len();
         let d_data = DeviceBuffer::from_slice(data_f32)?;
@@ -325,22 +376,34 @@ impl CudaEr {
         if let Ok((free, _)) = mem_get_info() {
             let headroom = 64usize << 20;
             if out_bytes.saturating_add(headroom) > free {
-                return Err(CudaErError::OutOfMemory { required: out_bytes, free, headroom });
+                return Err(CudaErError::OutOfMemory {
+                    required: out_bytes,
+                    free,
+                    headroom,
+                });
             }
         }
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
-        let func = self
-            .module
-            .get_function("er_batch_f32")
-            .map_err(|_| CudaErError::MissingKernelSymbol { name: "er_batch_f32" })?;
+        let func = self.module.get_function("er_batch_f32").map_err(|_| {
+            CudaErError::MissingKernelSymbol {
+                name: "er_batch_f32",
+            }
+        })?;
         let block_x: u32 = 256;
         let grid_x: u32 = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let (max_gx, _max_gy) = self.device_max_grid_xy()?;
         if grid_x > max_gx {
-            return Err(CudaErError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaErError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         unsafe {
             let mut data_ptr = d_data.as_device_ptr().as_raw();
@@ -360,7 +423,13 @@ impl CudaEr {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32Er { buf: d_out, rows: n_combos, cols: len, ctx: Arc::clone(&self._ctx), device_id: self.device_id })
+        Ok(DeviceArrayF32Er {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+            ctx: Arc::clone(&self._ctx),
+            device_id: self.device_id,
+        })
     }
 
     pub fn er_many_series_one_param_time_major_dev(
@@ -399,7 +468,6 @@ impl CudaEr {
             return Err(CudaErError::InvalidInput("invalid period".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -425,7 +493,6 @@ impl CudaEr {
             first_valids[s] = fv;
         }
 
-        
         let d_data = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
         let out_bytes = expected
@@ -434,7 +501,11 @@ impl CudaEr {
         if let Ok((free, _)) = mem_get_info() {
             let headroom = 64usize << 20;
             if out_bytes.saturating_add(headroom) > free {
-                return Err(CudaErError::OutOfMemory { required: out_bytes, free, headroom });
+                return Err(CudaErError::OutOfMemory {
+                    required: out_bytes,
+                    free,
+                    headroom,
+                });
             }
         }
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
@@ -442,12 +513,21 @@ impl CudaEr {
         let func = self
             .module
             .get_function("er_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaErError::MissingKernelSymbol { name: "er_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaErError::MissingKernelSymbol {
+                name: "er_many_series_one_param_time_major_f32",
+            })?;
         let block_x: u32 = 256;
         let grid_x: u32 = ((cols as u32) + block_x - 1) / block_x;
         let (max_gx, _max_gy) = self.device_max_grid_xy()?;
         if grid_x > max_gx {
-            return Err(CudaErError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaErError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -469,7 +549,13 @@ impl CudaEr {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32Er { buf: d_out, rows, cols, ctx: Arc::clone(&self._ctx), device_id: self.device_id })
+        Ok(DeviceArrayF32Er {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: Arc::clone(&self._ctx),
+            device_id: self.device_id,
+        })
     }
 
     pub fn synchronize(&self) -> Result<(), CudaErError> {
@@ -513,7 +599,6 @@ pub mod benches {
     }
     impl CudaBenchState for ErBatchState {
         fn launch(&mut self) {
-            
             let func = self
                 .cuda
                 .module

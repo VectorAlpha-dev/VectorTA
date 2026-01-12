@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::bollinger_bands_width::{
     bollinger_bands_width_batch_with_kernel, bollinger_bands_width_with_kernel,
     BollingerBandsWidthBatchRange, BollingerBandsWidthData, BollingerBandsWidthInput,
@@ -103,7 +101,7 @@ fn bollinger_bands_width_cuda_many_series_one_param_matches_cpu(
     let devdn = 2.0f64;
 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
-    
+
     let price_tm_quant: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

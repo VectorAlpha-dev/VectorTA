@@ -1,12 +1,3 @@
-//! CUDA support for the Accelerator Oscillator (ACOSC).
-//!
-//! Mirrors ALMA-style integration where applicable:
-//! - PTX loaded via include_str!(.../acosc_kernel.ptx) with DetermineTargetFromContext + OptLevel O2
-//! - Stream NON_BLOCKING
-//! - Conservative VRAM checks with ~64MB headroom
-//! - Public device entry points for one-series×batch (degenerate single row) and
-//!   many-series×one-param (time-major)
-
 #![cfg(feature = "cuda")]
 
 use cust::context::Context;
@@ -21,7 +12,6 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-
 const P5: usize = 5;
 const P34: usize = 34;
 const WARP: usize = 32;
@@ -32,8 +22,14 @@ const SHMEM_WARP_BYTES: u32 = ((P34 + P5 + P5) * WARP * std::mem::size_of::<f32>
 pub enum CudaAcoscError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -41,7 +37,14 @@ pub enum CudaAcoscError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -57,9 +60,13 @@ pub struct DeviceArrayF32Acosc {
 }
 impl DeviceArrayF32Acosc {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct DeviceAcoscPair {
@@ -99,7 +106,12 @@ impl CudaAcosc {
             Err(_) => Module::from_ptx(ptx, &[])?,
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-        Ok(Self { module, stream, _context: context, device_id: device_id as u32 })
+        Ok(Self {
+            module,
+            stream,
+            _context: context,
+            device_id: device_id as u32,
+        })
     }
 
     fn mem_check_enabled() -> bool {
@@ -108,38 +120,58 @@ impl CudaAcosc {
             Err(_) => true,
         }
     }
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaAcoscError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
-            if required_bytes.saturating_add(headroom_bytes) <= free { Ok(()) } else { Err(CudaAcoscError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes }) }
-        } else { Ok(()) }
+            if required_bytes.saturating_add(headroom_bytes) <= free {
+                Ok(())
+            } else {
+                Err(CudaAcoscError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
+        } else {
+            Ok(())
+        }
     }
 
-    
     pub fn acosc_batch_dev(
         &self,
         high_f32: &[f32],
         low_f32: &[f32],
     ) -> Result<DeviceAcoscPair, CudaAcoscError> {
         let len = high_f32.len();
-        if len == 0 || low_f32.len() != len { return Err(CudaAcoscError::InvalidInput("input slices are empty or mismatched".into())); }
+        if len == 0 || low_f32.len() != len {
+            return Err(CudaAcoscError::InvalidInput(
+                "input slices are empty or mismatched".into(),
+            ));
+        }
         let first_valid = (0..len)
             .find(|&i| high_f32[i].is_finite() && low_f32[i].is_finite())
             .unwrap_or(len);
 
-        
-        let in_bytes = 2usize.saturating_mul(len).saturating_mul(std::mem::size_of::<f32>());
-        let out_bytes = 2usize.saturating_mul(len).saturating_mul(std::mem::size_of::<f32>());
+        let in_bytes = 2usize
+            .saturating_mul(len)
+            .saturating_mul(std::mem::size_of::<f32>());
+        let out_bytes = 2usize
+            .saturating_mul(len)
+            .saturating_mul(std::mem::size_of::<f32>());
         let required = in_bytes.saturating_add(out_bytes);
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAcoscError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAcoscError::Cuda)?;
-        let mut d_osc: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAcoscError::Cuda)?;
-        let mut d_change: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAcoscError::Cuda)?;
+        let mut d_osc: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAcoscError::Cuda)?;
+        let mut d_change: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAcoscError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_high,
@@ -151,8 +183,20 @@ impl CudaAcosc {
         )?;
 
         Ok(DeviceAcoscPair {
-            osc: DeviceArrayF32Acosc { buf: d_osc, rows: 1, cols: len, ctx: self._context.clone(), device_id: self.device_id },
-            change: DeviceArrayF32Acosc { buf: d_change, rows: 1, cols: len, ctx: self._context.clone(), device_id: self.device_id },
+            osc: DeviceArrayF32Acosc {
+                buf: d_osc,
+                rows: 1,
+                cols: len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            },
+            change: DeviceArrayF32Acosc {
+                buf: d_change,
+                rows: 1,
+                cols: len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            },
         })
     }
 
@@ -171,10 +215,11 @@ impl CudaAcosc {
         if series_len <= 0 {
             return Ok(());
         }
-        let func = self
-            .module
-            .get_function("acosc_batch_f32")
-            .map_err(|_| CudaAcoscError::MissingKernelSymbol { name: "acosc_batch_f32" })?;
+        let func = self.module.get_function("acosc_batch_f32").map_err(|_| {
+            CudaAcoscError::MissingKernelSymbol {
+                name: "acosc_batch_f32",
+            }
+        })?;
 
         let block_x: u32 = 256;
         let mut grid_x = (series_len as u32 + block_x - 1) / block_x;
@@ -200,12 +245,11 @@ impl CudaAcosc {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        
+
         self.stream.synchronize()?;
         Ok(())
     }
 
-    
     pub fn acosc_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -221,7 +265,7 @@ impl CudaAcosc {
                 "time-major inputs must be same length and match rows*cols".into(),
             ));
         }
-        
+
         let mut first_valids = vec![series_len as i32; num_series];
         for s in 0..num_series {
             for t in 0..series_len {
@@ -274,13 +318,23 @@ impl CudaAcosc {
         )?;
 
         Ok(DeviceAcoscPair {
-            osc: DeviceArrayF32Acosc { buf: d_osc, rows: num_series, cols: series_len, ctx: self._context.clone(), device_id: self.device_id },
-            change: DeviceArrayF32Acosc { buf: d_change, rows: num_series, cols: series_len, ctx: self._context.clone(), device_id: self.device_id },
+            osc: DeviceArrayF32Acosc {
+                buf: d_osc,
+                rows: num_series,
+                cols: series_len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            },
+            change: DeviceArrayF32Acosc {
+                buf: d_change,
+                rows: num_series,
+                cols: series_len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            },
         })
     }
 
-    /// Many-series × one-param (time-major) using device-resident inputs to avoid H2D copies.
-    /// `d_first_valids` must have length `num_series`.
     pub fn acosc_many_series_one_param_time_major_dev_device_inputs(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -295,10 +349,10 @@ impl CudaAcosc {
         let elems = num_series
             .checked_mul(series_len)
             .ok_or_else(|| CudaAcoscError::InvalidInput("size overflow (rows*cols)".into()))?;
-        let mut d_osc: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAcoscError::Cuda)?;
-        let mut d_change: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAcoscError::Cuda)?;
+        let mut d_osc: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAcoscError::Cuda)?;
+        let mut d_change: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAcoscError::Cuda)?;
 
         self.launch_many_series_kernel(
             d_high_tm,
@@ -311,8 +365,20 @@ impl CudaAcosc {
         )?;
 
         Ok(DeviceAcoscPair {
-            osc: DeviceArrayF32Acosc { buf: d_osc, rows: num_series, cols: series_len, ctx: self._context.clone(), device_id: self.device_id },
-            change: DeviceArrayF32Acosc { buf: d_change, rows: num_series, cols: series_len, ctx: self._context.clone(), device_id: self.device_id },
+            osc: DeviceArrayF32Acosc {
+                buf: d_osc,
+                rows: num_series,
+                cols: series_len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            },
+            change: DeviceArrayF32Acosc {
+                buf: d_change,
+                rows: num_series,
+                cols: series_len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            },
         })
     }
 
@@ -330,7 +396,7 @@ impl CudaAcosc {
         if num_series <= 0 || series_len <= 0 {
             return Ok(());
         }
-        
+
         let use_warp = (num_series as usize) >= 64 && (series_len as usize) >= 128;
         unsafe {
             let mut high_ptr = d_high_tm.as_device_ptr().as_raw();
@@ -357,35 +423,66 @@ impl CudaAcosc {
                 {
                     let grid: GridSize = (((num_series as u32) + 31) / 32, 1, 1).into();
                     let block: BlockSize = (32, 1, 1).into();
-                    if 32 > 1024 || grid.x == 0 { return Err(CudaAcoscError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: 32, by: 1, bz: 1 }); }
-                    self.stream.launch(&func, grid, block, SHMEM_WARP_BYTES, &mut args)?;
+                    if 32 > 1024 || grid.x == 0 {
+                        return Err(CudaAcoscError::LaunchConfigTooLarge {
+                            gx: grid.x,
+                            gy: grid.y,
+                            gz: grid.z,
+                            bx: 32,
+                            by: 1,
+                            bz: 1,
+                        });
+                    }
+                    self.stream
+                        .launch(&func, grid, block, SHMEM_WARP_BYTES, &mut args)?;
                 } else {
                     let func = self
                         .module
                         .get_function("acosc_many_series_one_param_f32")
-                        .map_err(|_| CudaAcoscError::MissingKernelSymbol { name: "acosc_many_series_one_param_f32" })?;
+                        .map_err(|_| CudaAcoscError::MissingKernelSymbol {
+                            name: "acosc_many_series_one_param_f32",
+                        })?;
                     let grid: GridSize = (num_series as u32, 1, 1).into();
                     let block: BlockSize = (256, 1, 1).into();
-                    if 256 > 1024 || grid.x == 0 { return Err(CudaAcoscError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: 256, by: 1, bz: 1 }); }
+                    if 256 > 1024 || grid.x == 0 {
+                        return Err(CudaAcoscError::LaunchConfigTooLarge {
+                            gx: grid.x,
+                            gy: grid.y,
+                            gz: grid.z,
+                            bx: 256,
+                            by: 1,
+                            bz: 1,
+                        });
+                    }
                     self.stream.launch(&func, grid, block, 0, &mut args)?;
                 }
             } else {
                 let func = self
                     .module
                     .get_function("acosc_many_series_one_param_f32")
-                    .map_err(|_| CudaAcoscError::MissingKernelSymbol { name: "acosc_many_series_one_param_f32" })?;
+                    .map_err(|_| CudaAcoscError::MissingKernelSymbol {
+                        name: "acosc_many_series_one_param_f32",
+                    })?;
                 let grid: GridSize = (num_series as u32, 1, 1).into();
                 let block: BlockSize = (256, 1, 1).into();
-                if 256 > 1024 || grid.x == 0 { return Err(CudaAcoscError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: 256, by: 1, bz: 1 }); }
+                if 256 > 1024 || grid.x == 0 {
+                    return Err(CudaAcoscError::LaunchConfigTooLarge {
+                        gx: grid.x,
+                        gy: grid.y,
+                        gz: grid.z,
+                        bx: 256,
+                        by: 1,
+                        bz: 1,
+                    });
+                }
                 self.stream.launch(&func, grid, block, 0, &mut args)?;
             }
         }
-        
+
         self.stream.synchronize()?;
         Ok(())
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -503,7 +600,7 @@ pub mod benches {
     }
     fn prep_many_series() -> Box<dyn CudaBenchState> {
         let cuda = CudaAcosc::new(0).unwrap();
-        
+
         let mut high_tm = vec![f32::NAN; NUM_SERIES * SERIES_LEN];
         let mut low_tm = vec![f32::NAN; NUM_SERIES * SERIES_LEN];
         for s in 0..NUM_SERIES {

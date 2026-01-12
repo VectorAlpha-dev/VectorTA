@@ -407,7 +407,7 @@ pub unsafe fn talib_sma(
         return Err(format!("TA_SMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -438,7 +438,7 @@ pub unsafe fn talib_ema(
         return Err(format!("TA_EMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -469,7 +469,7 @@ pub unsafe fn talib_rsi(
         return Err(format!("TA_RSI failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -509,7 +509,7 @@ pub unsafe fn talib_bbands(
         return Err(format!("TA_BBANDS failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output_upper[i] = f64::NAN;
         output_middle[i] = f64::NAN;
@@ -550,7 +550,7 @@ pub unsafe fn talib_macd(
         return Err(format!("TA_MACD failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output_macd[i] = f64::NAN;
         output_signal[i] = f64::NAN;
@@ -587,7 +587,7 @@ pub unsafe fn talib_atr(
         return Err(format!("TA_ATR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -630,7 +630,7 @@ pub unsafe fn talib_stoch(
         return Err(format!("TA_STOCH failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
@@ -667,7 +667,7 @@ pub unsafe fn talib_ad(
         return Err(format!("TA_AD failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -707,7 +707,7 @@ pub unsafe fn talib_adosc(
         return Err(format!("TA_ADOSC failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -743,7 +743,7 @@ pub unsafe fn talib_adx(
         return Err(format!("TA_ADX failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -779,7 +779,7 @@ pub unsafe fn talib_adxr(
         return Err(format!("TA_ADXR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -815,7 +815,7 @@ pub unsafe fn talib_apo(
         return Err(format!("TA_APO failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -851,7 +851,7 @@ pub unsafe fn talib_aroon(
         return Err(format!("TA_AROON failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output_down[i] = f64::NAN;
         output_up[i] = f64::NAN;
@@ -886,7 +886,7 @@ pub unsafe fn talib_aroonosc(
         return Err(format!("TA_AROONOSC failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -922,7 +922,7 @@ pub unsafe fn talib_bop(
         return Err(format!("TA_BOP failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -958,7 +958,7 @@ pub unsafe fn talib_cci(
         return Err(format!("TA_CCI failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -990,7 +990,7 @@ pub unsafe fn talib_cmo(
         return Err(format!("TA_CMO failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1022,7 +1022,7 @@ pub unsafe fn talib_dema(
         return Err(format!("TA_DEMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1058,7 +1058,7 @@ pub unsafe fn talib_dx(
         return Err(format!("TA_DX failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1094,7 +1094,7 @@ pub unsafe fn talib_plus_di(
         return Err(format!("TA_PLUS_DI failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1130,7 +1130,7 @@ pub unsafe fn talib_minus_di(
         return Err(format!("TA_MINUS_DI failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1164,7 +1164,7 @@ pub unsafe fn talib_plus_dm(
         return Err(format!("TA_PLUS_DM failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1198,7 +1198,7 @@ pub unsafe fn talib_minus_dm(
         return Err(format!("TA_MINUS_DM failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1230,7 +1230,7 @@ pub unsafe fn talib_kama(
         return Err(format!("TA_KAMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1262,7 +1262,7 @@ pub unsafe fn talib_linearreg(
         return Err(format!("TA_LINEARREG failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1294,7 +1294,7 @@ pub unsafe fn talib_medprice(
         return Err(format!("TA_MEDPRICE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1332,7 +1332,7 @@ pub unsafe fn talib_mfi(
         return Err(format!("TA_MFI failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1364,7 +1364,7 @@ pub unsafe fn talib_midpoint(
         return Err(format!("TA_MIDPOINT failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1398,7 +1398,7 @@ pub unsafe fn talib_midprice(
         return Err(format!("TA_MIDPRICE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1430,7 +1430,7 @@ pub unsafe fn talib_mom(
         return Err(format!("TA_MOM failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1466,7 +1466,7 @@ pub unsafe fn talib_natr(
         return Err(format!("TA_NATR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1498,7 +1498,7 @@ pub unsafe fn talib_obv(
         return Err(format!("TA_OBV failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1534,7 +1534,7 @@ pub unsafe fn talib_ppo(
         return Err(format!("TA_PPO failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1566,7 +1566,7 @@ pub unsafe fn talib_roc(
         return Err(format!("TA_ROC failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1598,7 +1598,7 @@ pub unsafe fn talib_rocp(
         return Err(format!("TA_ROCP failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1630,7 +1630,7 @@ pub unsafe fn talib_rocr(
         return Err(format!("TA_ROCR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1666,7 +1666,7 @@ pub unsafe fn talib_sar(
         return Err(format!("TA_SAR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1700,7 +1700,7 @@ pub unsafe fn talib_stddev(
         return Err(format!("TA_STDDEV failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1742,7 +1742,7 @@ pub unsafe fn talib_stochf(
         return Err(format!("TA_STOCHF failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
@@ -1783,7 +1783,7 @@ pub unsafe fn talib_stochrsi(
         return Err(format!("TA_STOCHRSI failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output_k[i] = f64::NAN;
         output_d[i] = f64::NAN;
@@ -1816,7 +1816,7 @@ pub unsafe fn talib_tema(
         return Err(format!("TA_TEMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1848,7 +1848,7 @@ pub unsafe fn talib_trima(
         return Err(format!("TA_TRIMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1880,7 +1880,7 @@ pub unsafe fn talib_trix(
         return Err(format!("TA_TRIX failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1912,7 +1912,7 @@ pub unsafe fn talib_tsf(
         return Err(format!("TA_TSF failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1952,7 +1952,7 @@ pub unsafe fn talib_ultosc(
         return Err(format!("TA_ULTOSC failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -1986,7 +1986,7 @@ pub unsafe fn talib_var(
         return Err(format!("TA_VAR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2020,7 +2020,7 @@ pub unsafe fn talib_wclprice(
         return Err(format!("TA_WCLPRICE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2056,7 +2056,7 @@ pub unsafe fn talib_willr(
         return Err(format!("TA_WILLR failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2088,7 +2088,7 @@ pub unsafe fn talib_wma(
         return Err(format!("TA_WMA failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2120,7 +2120,7 @@ pub unsafe fn talib_linearreg_slope(
         return Err(format!("TA_LINEARREG_SLOPE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2152,7 +2152,7 @@ pub unsafe fn talib_linearreg_intercept(
         return Err(format!("TA_LINEARREG_INTERCEPT failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2184,7 +2184,7 @@ pub unsafe fn talib_linearreg_angle(
         return Err(format!("TA_LINEARREG_ANGLE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2218,7 +2218,7 @@ pub unsafe fn talib_typprice(
         return Err(format!("TA_TYPPRICE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2254,7 +2254,7 @@ pub unsafe fn talib_avgprice(
         return Err(format!("TA_AVGPRICE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2288,7 +2288,7 @@ pub unsafe fn talib_trange(
         return Err(format!("TA_TRANGE failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2320,7 +2320,7 @@ pub unsafe fn talib_min(
         return Err(format!("TA_MIN failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2352,7 +2352,7 @@ pub unsafe fn talib_max(
         return Err(format!("TA_MAX failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }
@@ -2384,7 +2384,7 @@ pub unsafe fn talib_sum(
         return Err(format!("TA_SUM failed with code {:?}", ret));
     }
 
-    
+
     for i in 0..out_beg_idx as usize {
         output[i] = f64::NAN;
     }

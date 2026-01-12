@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::swma::{
     swma_batch_with_kernel, SwmaBatchRange, SwmaBuilder, SwmaParams,
 };

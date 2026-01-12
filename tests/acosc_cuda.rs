@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::acosc::{acosc_with_kernel, AcoscData, AcoscInput, AcoscParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -44,7 +42,6 @@ fn acosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         low[i] = base - 0.6;
     }
 
-    
     let input = AcoscInput {
         data: AcoscData::Slices {
             high: &high,
@@ -54,7 +51,6 @@ fn acosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
     let cpu = acosc_with_kernel(&input, Kernel::Scalar)?;
 
-    
     let cuda = CudaAcosc::new(0).expect("CudaAcosc::new");
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
@@ -70,7 +66,7 @@ fn acosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.osc.buf.copy_to(&mut osc_host).unwrap();
     pair.change.buf.copy_to(&mut chg_host).unwrap();
 
-    let tol = 5e-4; 
+    let tol = 5e-4;
     for i in 0..series_len {
         let cpu_o = cpu.osc[i];
         let cpu_c = cpu.change[i];
@@ -108,7 +104,6 @@ fn acosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let mut high_tm = vec![f32::NAN; num_series * series_len];
     let mut low_tm = vec![f32::NAN; num_series * series_len];
 
-    
     for s in 0..num_series {
         for t in 10..series_len {
             let x = (t as f64) + (s as f64) * 0.01;
@@ -120,7 +115,6 @@ fn acosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    
     let cuda = CudaAcosc::new(0).expect("CudaAcosc::new");
     let pair = cuda
         .acosc_many_series_one_param_time_major_dev(&high_tm, &low_tm, num_series, series_len)
@@ -128,7 +122,6 @@ fn acosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     assert_eq!(pair.rows(), num_series);
     assert_eq!(pair.cols(), series_len);
 
-    
     let mut osc_host = vec![0f32; pair.osc.len()];
     let mut chg_host = vec![0f32; pair.change.len()];
     pair.osc.buf.copy_to(&mut osc_host).unwrap();
@@ -136,7 +129,6 @@ fn acosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
 
     let tol = 8e-4;
     for s in [0usize, 7, 13, 31, 63] {
-        
         let mut high = vec![f64::NAN; series_len];
         let mut low = vec![f64::NAN; series_len];
         for t in 0..series_len {

@@ -1,13 +1,5 @@
-//! CUDA wrapper for SMMA (Smoothed Moving Average) kernels.
-//!
-//! Mirrors the ALMA/SWMA scaffolding: validate host inputs, upload FP32 data
-//! once, and launch kernels that keep the dependency-aware recursion on the
-//! device. Supports both the single-series × many-parameter sweep and the
-//! many-series × one-parameter time-major path.
-
 #![cfg(feature = "cuda")]
 
-use std::sync::Arc;
 use crate::indicators::moving_averages::smma::{expand_grid, SmmaBatchRange, SmmaParams};
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
@@ -19,6 +11,7 @@ use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -26,24 +19,31 @@ pub enum CudaSmmaError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer on {buf}, current {current}")]
     DeviceMismatch { buf: i32, current: i32 },
-    #[error("not implemented")] 
+    #[error("not implemented")]
     NotImplemented,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -71,8 +71,6 @@ impl Default for CudaSmmaPolicy {
     }
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     OneD { block_x: u32 },
@@ -84,7 +82,6 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-/// VRAM-backed array for SMMA results with context lifetime and device id.
 pub struct DeviceArrayF32Smma {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -94,9 +91,13 @@ pub struct DeviceArrayF32Smma {
 }
 impl DeviceArrayF32Smma {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaSmma {
@@ -118,7 +119,7 @@ impl CudaSmma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/smma_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -126,7 +127,8 @@ impl CudaSmma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -152,7 +154,11 @@ impl CudaSmma {
     fn will_fit(required: usize, headroom: usize) -> Result<(), CudaSmmaError> {
         if let Ok((free, _total)) = mem_get_info() {
             if required.saturating_add(headroom) > free {
-                return Err(CudaSmmaError::OutOfMemory { required, free, headroom });
+                return Err(CudaSmmaError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             }
         }
         Ok(())
@@ -319,10 +325,11 @@ impl CudaSmma {
             }
         }
 
-        let mut func = self
-            .module
-            .get_function("smma_batch_f32")
-            .map_err(|_| CudaSmmaError::MissingKernelSymbol { name: "smma_batch_f32" })?;
+        let mut func = self.module.get_function("smma_batch_f32").map_err(|_| {
+            CudaSmmaError::MissingKernelSymbol {
+                name: "smma_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x = match self.policy.batch {
@@ -354,7 +361,9 @@ impl CudaSmma {
                 &mut n_combos_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(CudaSmmaError::Cuda)?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaSmmaError::Cuda)?;
         }
 
         self.maybe_log_batch_debug();
@@ -390,7 +399,6 @@ impl CudaSmma {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaSmmaError::InvalidInput("size overflow in VRAM estimate".into()))?;
@@ -433,8 +441,9 @@ impl CudaSmma {
         let d_prices = DeviceBuffer::from_slice(data_f32).map_err(CudaSmmaError::Cuda)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32).map_err(CudaSmmaError::Cuda)?;
         let d_warms = DeviceBuffer::from_slice(&warms_i32).map_err(CudaSmmaError::Cuda)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }
+                .map_err(CudaSmmaError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -543,7 +552,9 @@ impl CudaSmma {
         let mut func = self
             .module
             .get_function("smma_multi_series_one_param_f32")
-            .map_err(|_| CudaSmmaError::MissingKernelSymbol { name: "smma_multi_series_one_param_f32" })?;
+            .map_err(|_| CudaSmmaError::MissingKernelSymbol {
+                name: "smma_multi_series_one_param_f32",
+            })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -572,7 +583,9 @@ impl CudaSmma {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(CudaSmmaError::Cuda)?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaSmmaError::Cuda)?;
         }
 
         self.maybe_log_many_debug();
@@ -613,7 +626,6 @@ impl CudaSmma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
         let input_bytes = cols
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -632,9 +644,10 @@ impl CudaSmma {
         Self::will_fit(required, 64usize * 1024 * 1024)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaSmmaError::Cuda)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.map_err(CudaSmmaError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -674,9 +687,10 @@ impl CudaSmma {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaSmmaError::Cuda)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.map_err(CudaSmmaError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -692,8 +706,6 @@ impl CudaSmma {
         Ok(())
     }
 
-    /// Like `smma_multi_series_one_param_time_major_into_host_f32`, but returns
-    /// a page-locked host buffer to avoid pageable staging on D2H.
     pub fn smma_multi_series_one_param_time_major_into_locked(
         &self,
         data_tm_f32: &[f32],
@@ -705,9 +717,10 @@ impl CudaSmma {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaSmmaError::Cuda)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.map_err(CudaSmmaError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -718,9 +731,8 @@ impl CudaSmma {
             &mut d_out_tm,
         )?;
 
-        
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let mut pinned: LockedBuffer<f32> =
+            unsafe { LockedBuffer::uninitialized(cols * rows) }.map_err(CudaSmmaError::Cuda)?;
         unsafe {
             d_out_tm
                 .async_copy_to(pinned.as_mut_slice(), &self.stream)
@@ -730,8 +742,6 @@ impl CudaSmma {
         Ok(pinned)
     }
 
-    /// Variant that accepts time-major prices in page-locked memory and returns
-    /// a page-locked result, enabling true async paths end-to-end.
     pub fn smma_multi_series_one_param_time_major_from_locked_to_locked(
         &self,
         data_tm_locked: &LockedBuffer<f32>,
@@ -742,14 +752,13 @@ impl CudaSmma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_locked.as_slice(), cols, rows, params)?;
 
-        
-        let d_prices_tm = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_locked.as_slice(), &self.stream)
-        }
-        .map_err(CudaSmmaError::Cuda)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let d_prices_tm =
+            unsafe { DeviceBuffer::from_slice_async(data_tm_locked.as_slice(), &self.stream) }
+                .map_err(CudaSmmaError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaSmmaError::Cuda)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.map_err(CudaSmmaError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -760,8 +769,8 @@ impl CudaSmma {
             &mut d_out_tm,
         )?;
 
-        let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows) }
-            .map_err(CudaSmmaError::Cuda)?;
+        let mut pinned: LockedBuffer<f32> =
+            unsafe { LockedBuffer::uninitialized(cols * rows) }.map_err(CudaSmmaError::Cuda)?;
         unsafe {
             d_out_tm
                 .async_copy_to(pinned.as_mut_slice(), &self.stream)
@@ -771,8 +780,6 @@ impl CudaSmma {
         Ok(pinned)
     }
 }
-
-
 
 pub mod benches {
     use super::*;

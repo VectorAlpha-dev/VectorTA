@@ -1,21 +1,3 @@
-//! # Chande Forecast Oscillator (CFO)
-//!
-//! CFO measures the percentage difference between the current price and a linear regression forecast.
-//! It helps identify overbought/oversold conditions and potential trend changes.
-//!
-//! ## Parameters
-//! - **period**: Window size for linear regression calculation (default: 14)
-//! - **scalar**: Multiplier for percentage output (default: 100.0)
-//!
-//! ## Returns
-//! - **`Ok(CfoOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CfoError)`** on various error conditions.
-//!
-//! ## Developer Status / Decision Log
-//! - SIMD: AVX2/AVX512 paths stub to scalar for accuracy and because CFO is effectively sequential; scalar is the reference path.
-//! - CUDA: enabled for batch and many-series prefixes (PTX via `cfo_kernel.cu`), with typed errors, checked VRAM sizing, and CAI v3/DLPack v1.x interop.
-//! - Bindings: WASM and Python APIs mirror scalar semantics; batch sweeps share ALMA-style helpers and keep reference outputs unchanged.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
@@ -27,9 +9,9 @@ use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "python")]
 use pyo3::PyErr;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -49,8 +31,6 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum CfoData<'a> {
@@ -77,7 +57,10 @@ pub struct CfoOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CfoParams {
     pub period: Option<usize>,
     pub scalar: Option<f64>,
@@ -195,8 +178,6 @@ impl CfoBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum CfoError {
     #[error("cfo: All values are NaN.")]
@@ -212,17 +193,19 @@ pub enum CfoError {
     #[error("cfo: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("cfo: Invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<CfoError> for JsValue {
     fn from(err: CfoError) -> Self {
         JsValue::from_str(&err.to_string())
     }
 }
-
-
 
 #[inline]
 pub fn cfo(input: &CfoInput) -> Result<CfoOutput, CfoError> {
@@ -241,7 +224,10 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
     }
 
     if dst.len() != data.len() {
-        return Err(CfoError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(CfoError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     let first = data
@@ -267,7 +253,6 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
         other => other,
     };
 
-    
     let warmup_end = first + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
@@ -292,11 +277,7 @@ pub fn cfo_into_slice(dst: &mut [f64], input: &CfoInput, kernel: Kernel) -> Resu
     Ok(())
 }
 
-/// Writes CFO values into a caller-provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - `out.len()` must equal the input length; errors mirror the existing API.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cfo_into(input: &CfoInput, out: &mut [f64]) -> Result<(), CfoError> {
     cfo_into_slice(out, input, Kernel::Auto)
@@ -335,7 +316,6 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
         other => other,
     };
 
-    
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     unsafe {
@@ -351,7 +331,6 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                
                 cfo_scalar(data, period, scalar, first, &mut out)
             }
             _ => unreachable!(),
@@ -361,21 +340,17 @@ pub fn cfo_with_kernel(input: &CfoInput, kernel: Kernel) -> Result<CfoOutput, Cf
     Ok(CfoOutput { values: out })
 }
 
-
-
 #[inline]
 pub fn cfo_scalar(data: &[f64], period: usize, scalar: f64, first_valid: usize, out: &mut [f64]) {
     let size = data.len();
 
-    
     let n = period as f64;
     let inv_n = 1.0 / n;
-    let sx = ((period * (period + 1)) / 2) as f64; 
-    let sx2 = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; 
+    let sx = ((period * (period + 1)) / 2) as f64;
+    let sx2 = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
     let inv_denom = 1.0 / (n * sx2 - sx * sx);
-    let half_nm1 = 0.5 * (n - 1.0); 
+    let half_nm1 = 0.5 * (n - 1.0);
 
-    
     let start = first_valid;
     let pre = period - 1;
     let mut sum_y = 0.0;
@@ -387,7 +362,6 @@ pub fn cfo_scalar(data: &[f64], period: usize, scalar: f64, first_valid: usize, 
         sum_xy = v.mul_add(w, sum_xy);
     }
 
-    
     let mut i = start + pre;
     while i < size {
         let v = data[i];
@@ -407,8 +381,6 @@ pub fn cfo_scalar(data: &[f64], period: usize, scalar: f64, first_valid: usize, 
         i += 1;
     }
 }
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -430,8 +402,6 @@ pub unsafe fn cfo_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
-    
     cfo_scalar(data, period, scalar, first_valid, out);
 }
 
@@ -445,8 +415,6 @@ pub unsafe fn cfo_avx512_short(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
-    
     cfo_scalar(data, period, scalar, first_valid, out);
 }
 
@@ -460,8 +428,6 @@ pub unsafe fn cfo_avx512_long(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
-    
     cfo_scalar(data, period, scalar, first_valid, out);
 }
 
@@ -509,7 +475,6 @@ unsafe fn cfo_avx512_impl(
         j += 8;
     }
 
-    
     let mut tmp8 = [0.0f64; 8];
     _mm512_storeu_pd(tmp8.as_mut_ptr(), acc_y);
     let mut sum_y = tmp8.iter().sum::<f64>();
@@ -543,14 +508,12 @@ unsafe fn cfo_avx512_impl(
     }
 }
 
-
-
 #[inline(always)]
 pub fn cfo_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    _stride: usize, 
+    _stride: usize,
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -563,7 +526,7 @@ pub unsafe fn cfo_row_avx2(
     data: &[f64],
     first: usize,
     period: usize,
-    _stride: usize, 
+    _stride: usize,
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -593,7 +556,7 @@ pub unsafe fn cfo_row_avx512_short(
     data: &[f64],
     first: usize,
     period: usize,
-    _stride: usize, 
+    _stride: usize,
     scalar: f64,
     out: &mut [f64],
 ) {
@@ -606,36 +569,30 @@ pub unsafe fn cfo_row_avx512_long(
     data: &[f64],
     first: usize,
     period: usize,
-    _stride: usize, 
+    _stride: usize,
     scalar: f64,
     out: &mut [f64],
 ) {
     cfo_scalar(data, period, scalar, first, out)
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct CfoStream {
-    
     period: usize,
     scalar: f64,
 
-    
     buf: Vec<f64>,
-    idx: usize, 
+    idx: usize,
     filled: bool,
 
-    
-    sum_y: f64,  
-    sum_xy: f64, 
+    sum_y: f64,
+    sum_xy: f64,
 
-    
     n: f64,
     inv_n: f64,
-    sx: f64,        
-    inv_denom: f64, 
-    half_nm1: f64,  
+    sx: f64,
+    inv_denom: f64,
+    half_nm1: f64,
 }
 
 impl CfoStream {
@@ -650,8 +607,8 @@ impl CfoStream {
         let scalar = params.scalar.unwrap_or(100.0);
         let n = period as f64;
         let inv_n = 1.0 / n;
-        let sx = ((period * (period + 1)) / 2) as f64; 
-        let sx2 = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; 
+        let sx = ((period * (period + 1)) / 2) as f64;
+        let sx2 = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
         let inv_denom = 1.0 / (n * sx2 - sx * sx);
         let half_nm1 = 0.5 * (n - 1.0);
 
@@ -671,16 +628,9 @@ impl CfoStream {
         })
     }
 
-    /// O(1) per tick:
-    /// - while warming: append, accumulate S_y and S_xy with proper weights (k=1..m).
-    /// - after full: evict oldest y_old = buf[idx], do:
-    ///       S_xy <- S_xy - S_y + n*v
-    ///       S_y  <- S_y - y_old + v
-    ///   then advance idx (circular) and emit CFO for the new window.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         if !self.filled {
-            
             let k = (self.idx as f64) + 1.0;
             self.sum_y += value;
             self.sum_xy = value.mul_add(k, self.sum_xy);
@@ -691,53 +641,43 @@ impl CfoStream {
             if self.idx == self.period {
                 self.idx = 0;
                 self.filled = true;
-                
+
                 return Some(self.calc_current());
             } else {
                 return None;
             }
         }
 
-        
-        let y_old = self.buf[self.idx]; 
+        let y_old = self.buf[self.idx];
 
-        
         let new_sum_xy = (self.n * value) + (self.sum_xy - self.sum_y);
         let new_sum_y = self.sum_y - y_old + value;
 
-        
         self.buf[self.idx] = value;
         self.sum_xy = new_sum_xy;
         self.sum_y = new_sum_y;
 
-        
         self.idx = (self.idx + 1) % self.period;
 
         Some(self.calc_current())
     }
 
-    
     #[inline(always)]
     fn calc_current(&self) -> f64 {
         debug_assert!(self.filled, "calc_current() called before buffer filled");
-        
-        
+
         let cur = self.buf[(self.idx + self.period - 1) % self.period];
 
         if cur.is_finite() && cur != 0.0 {
-            
             let b = (-self.sx).mul_add(self.sum_y, self.n * self.sum_xy) * self.inv_denom;
             let f = b.mul_add(self.half_nm1, self.sum_y * self.inv_n);
 
-            
             self.scalar.mul_add(-f / cur, self.scalar)
         } else {
             f64::NAN
         }
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct CfoBatchRange {
@@ -749,7 +689,7 @@ impl Default for CfoBatchRange {
     fn default() -> Self {
         Self {
             period: (14, 14, 0),
-            scalar: (100.0, 124.9, 0.1), 
+            scalar: (100.0, 124.9, 0.1),
         }
     }
 }
@@ -850,38 +790,84 @@ impl CfoBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &CfoBatchRange) -> Result<Vec<CfoParams>, CfoError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CfoError> {
-        if step == 0 || start == end { return Ok(vec![start]); }
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
         let mut vals = Vec::new();
         if start < end {
             let mut cur = start;
             while cur <= end {
                 vals.push(cur);
-                match cur.checked_add(step) { Some(next) => cur = next, None => break }
+                match cur.checked_add(step) {
+                    Some(next) => cur = next,
+                    None => break,
+                }
             }
         } else {
             return Err(CfoError::InvalidRange { start, end, step });
         }
-        if vals.is_empty() { return Err(CfoError::InvalidRange { start, end, step }); }
+        if vals.is_empty() {
+            return Err(CfoError::InvalidRange { start, end, step });
+        }
         Ok(vals)
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CfoError> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
-        let mut vals = Vec::new();
-        let delta = if start <= end { step.abs() } else { -step.abs() };
-        if delta.is_sign_positive() {
-            let mut x = start; while x <= end + 1e-12 { vals.push(x); x += delta; if !x.is_finite() { break; } }
-        } else {
-            let mut x = start; while x >= end - 1e-12 { vals.push(x); x += delta; if !x.is_finite() { break; } }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
         }
-        if vals.is_empty() { return Err(CfoError::InvalidRange { start: 0, end: 0, step: 0 }); }
+        let mut vals = Vec::new();
+        let delta = if start <= end {
+            step.abs()
+        } else {
+            -step.abs()
+        };
+        if delta.is_sign_positive() {
+            let mut x = start;
+            while x <= end + 1e-12 {
+                vals.push(x);
+                x += delta;
+                if !x.is_finite() {
+                    break;
+                }
+            }
+        } else {
+            let mut x = start;
+            while x >= end - 1e-12 {
+                vals.push(x);
+                x += delta;
+                if !x.is_finite() {
+                    break;
+                }
+            }
+        }
+        if vals.is_empty() {
+            return Err(CfoError::InvalidRange {
+                start: 0,
+                end: 0,
+                step: 0,
+            });
+        }
         Ok(vals)
     }
     let periods = axis_usize(r.period)?;
     let scalars = axis_f64(r.scalar)?;
-    let combos_len = periods.len().checked_mul(scalars.len())
-        .ok_or(CfoError::InvalidRange { start: periods.len(), end: scalars.len(), step: 0 })?;
+    let combos_len = periods
+        .len()
+        .checked_mul(scalars.len())
+        .ok_or(CfoError::InvalidRange {
+            start: periods.len(),
+            end: scalars.len(),
+            step: 0,
+        })?;
     let mut out = Vec::with_capacity(combos_len);
-    for &p in &periods { for &s in &scalars { out.push(CfoParams { period: Some(p), scalar: Some(s) }); } }
+    for &p in &periods {
+        for &s in &scalars {
+            out.push(CfoParams {
+                period: Some(p),
+                scalar: Some(s),
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -911,8 +897,10 @@ fn cfo_batch_inner(
     parallel: bool,
 ) -> Result<CfoBatchOutput, CfoError> {
     let combos = expand_grid(sweep)?;
-    if data.is_empty() { return Err(CfoError::EmptyInputData); }
-    
+    if data.is_empty() {
+        return Err(CfoError::EmptyInputData);
+    }
+
     for combo in &combos {
         let period = combo.period.unwrap();
         if period == 0 || period > data.len() {
@@ -935,29 +923,27 @@ fn cfo_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    rows
-        .checked_mul(cols)
-        .ok_or(CfoError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    rows.checked_mul(cols).ok_or(CfoError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     cfo_batch_prefix_scalar_rows(data, first, &combos, values, rows, cols, parallel);
-    
+
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -988,7 +974,7 @@ fn cfo_batch_prefix_scalar_rows(
     if valid_len == 0 || rows == 0 {
         return;
     }
-    
+
     let mut p = Vec::with_capacity(valid_len + 1);
     let mut q = Vec::with_capacity(valid_len + 1);
     p.push(0.0);
@@ -1016,13 +1002,13 @@ fn cfo_batch_prefix_scalar_rows(
         if cols < first + period {
             return;
         }
-        
+
         let start_idx = first + period - 1;
         for di in start_idx..cols {
-            let idx = di - first; 
-                                  
-            let r1 = idx + 1; 
-            let l1_minus1 = idx + 1 - period; 
+            let idx = di - first;
+
+            let r1 = idx + 1;
+            let l1_minus1 = idx + 1 - period;
 
             let sum_y = p[r1] - p[l1_minus1];
             let sum_xy = (q[r1] - q[l1_minus1]) - (l1_minus1 as f64) * sum_y;
@@ -1060,7 +1046,6 @@ fn cfo_batch_prefix_scalar_rows(
     }
 }
 
-
 #[inline(always)]
 pub fn cfo_batch_inner_into(
     data: &[f64],
@@ -1070,8 +1055,10 @@ pub fn cfo_batch_inner_into(
     output: &mut [f64],
 ) -> Result<Vec<CfoParams>, CfoError> {
     let combos = expand_grid(sweep)?;
-    if data.is_empty() { return Err(CfoError::EmptyInputData); }
-    
+    if data.is_empty() {
+        return Err(CfoError::EmptyInputData);
+    }
+
     for combo in &combos {
         let period = combo.period.unwrap();
         if period == 0 || period > data.len() {
@@ -1094,14 +1081,18 @@ pub fn cfo_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(CfoError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    let total = rows.checked_mul(cols).ok_or(CfoError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
     if output.len() != total {
-        return Err(CfoError::OutputLengthMismatch { expected: total, got: output.len() });
+        return Err(CfoError::OutputLengthMismatch {
+            expected: total,
+            got: output.len(),
+        });
     }
 
-    
     let out_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             output.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -1114,7 +1105,6 @@ pub fn cfo_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
     cfo_batch_prefix_scalar_rows(data, first, &combos, values, rows, cols, parallel);
@@ -1351,9 +1341,8 @@ mod tests {
 
     #[test]
     fn test_cfo_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(256);
-        
+
         data.push(f64::NAN);
         data.push(f64::NAN);
         for i in 1..=254u32 {
@@ -1362,18 +1351,15 @@ mod tests {
 
         let input = CfoInput::from_slice(&data, CfoParams::default());
 
-        
         let baseline = cfo(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             cfo_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             cfo_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1396,7 +1382,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_cfo_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1404,7 +1389,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let param_sets = vec![
             CfoParams {
                 period: Some(14),
@@ -1428,16 +1412,13 @@ mod tests {
             let input = CfoInput::from_candles(&candles, "close", params.clone());
             let output = cfo_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params {:?}",
@@ -1445,7 +1426,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params {:?}",
@@ -1453,7 +1433,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params {:?}",
@@ -1466,7 +1445,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_cfo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1505,8 +1483,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1531,11 +1507,8 @@ mod tests {
                 let CfoOutput { values: ref_out } =
                     cfo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
-                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1545,8 +1518,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 if data.len() >= period {
                     let first_valid_idx = period - 1;
                     prop_assert!(
@@ -1557,13 +1528,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in (period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
-                    
                     prop_assert!(
                         y.is_finite(),
                         "Expected finite output at index {}, got {}",
@@ -1571,13 +1539,9 @@ mod tests {
                         y
                     );
 
-                    
-                    
-                    
                     let window_start = i.saturating_sub(period - 1);
                     let window = &data[window_start..=i];
                     if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
-                        
                         let expected = 0.0;
                         prop_assert!(
                             (y - expected).abs() < 1e-6,
@@ -1587,8 +1551,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1614,8 +1576,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 if data.len() > period {
                     let params_double = CfoParams {
                         period: Some(period),
@@ -1626,7 +1586,6 @@ mod tests {
                         cfo_with_kernel(&input_double, kernel).unwrap();
 
                     for i in (period - 1)..data.len().min(period + 10) {
-                        
                         if out[i].is_finite() && out_double[i].is_finite() && out[i].abs() > 1e-6 {
                             let ratio = out_double[i] / out[i];
                             prop_assert!(
@@ -1639,10 +1598,9 @@ mod tests {
                     }
                 }
 
-                
                 if period == 2 && data.len() >= 2 {
                     prop_assert!(out[0].is_nan(), "Period=2: first value should be NaN");
-                    
+
                     prop_assert!(
                         out[1].is_finite(),
                         "Period=2: second value should be finite, got {}",
@@ -1729,7 +1687,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1737,16 +1694,13 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CfoBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 30, 5) 
-            .scalar_range(50.0, 200.0, 50.0) 
+            .period_range(5, 30, 5)
+            .scalar_range(50.0, 200.0, 50.0)
             .apply_candles(&c, "close")?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -1755,7 +1709,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1763,7 +1716,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1771,7 +1723,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1783,7 +1734,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1814,12 +1764,10 @@ pub fn cfo_py<'py>(
     };
     let cfo_in = CfoInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| cfo_with_kernel(&cfo_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1843,8 +1791,6 @@ impl CfoStreamPy {
         Ok(CfoStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated CFO value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -1916,7 +1862,6 @@ pub fn cfo_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cfo_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, scalar_range=(100.0, 100.0, 0.0), device_id=0))]
@@ -1938,12 +1883,11 @@ pub fn cfo_cuda_batch_dev_py<'py>(
         scalar: scalar_range,
     };
 
-    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let (inner, ctx_arc, dev_id) = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::cfo_wrapper::CudaCfo::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        
+
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
         let arr = cuda
@@ -1969,7 +1913,14 @@ pub fn cfo_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DeviceArrayF32CfoPy { inner, ctx: ctx_arc, device_id: dev_id }, dict))
+    Ok((
+        DeviceArrayF32CfoPy {
+            inner,
+            ctx: ctx_arc,
+            device_id: dev_id,
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2008,10 +1959,14 @@ pub fn cfo_cuda_many_series_one_param_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((arr, ctx, dev as i32))
     })?;
-    Ok(DeviceArrayF32CfoPy { inner, ctx: ctx_arc, device_id: dev_id })
+    Ok(DeviceArrayF32CfoPy {
+        inner,
+        ctx: ctx_arc,
+        device_id: dev_id,
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cfo_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsValue> {
     let params = CfoParams {
@@ -2020,15 +1975,14 @@ pub fn cfo_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsVa
     };
     let input = CfoInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
     cfo_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// Deprecated - use cfo_batch instead
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(note = "Use cfo_batch instead")]
 pub fn cfo_batch_js(
@@ -2040,20 +1994,17 @@ pub fn cfo_batch_js(
     scalar_end: f64,
     scalar_step: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    // Deprecated - use cfo_batch instead
     let sweep = CfoBatchRange {
         period: (period_start, period_end, period_step),
         scalar: (scalar_start, scalar_end, scalar_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     cfo_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// Deprecated - use cfo_batch instead
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(note = "Use cfo_batch instead")]
 pub fn cfo_batch_metadata_js(
@@ -2064,7 +2015,6 @@ pub fn cfo_batch_metadata_js(
     scalar_end: f64,
     scalar_step: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    // Deprecated - use cfo_batch instead
     let sweep = CfoBatchRange {
         period: (period_start, period_end, period_step),
         scalar: (scalar_start, scalar_end, scalar_step),
@@ -2081,15 +2031,14 @@ pub fn cfo_batch_metadata_js(
     Ok(metadata)
 }
 
-// ---- Python CUDA interop: CAI v3 + DLPack with context guard ----
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context as CudaContext;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc as StdArc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc as StdArc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -2121,12 +2070,14 @@ impl DeviceArrayF32CfoPy {
             inner.device_ptr() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> { Ok((2, self.device_id)) }
+    fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
+        Ok((2, self.device_id))
+    }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -2137,8 +2088,7 @@ impl DeviceArrayF32CfoPy {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; 
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2158,12 +2108,15 @@ impl DeviceArrayF32CfoPy {
         }
         let _ = stream;
 
-        
         let dummy = cust::memory::DeviceBuffer::<f32>::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -2176,15 +2129,14 @@ impl DeviceArrayF32CfoPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CfoBatchConfig {
     pub period_range: (usize, usize, usize),
     pub scalar_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CfoBatchJsOutput {
     pub values: Vec<f64>,
@@ -2193,10 +2145,9 @@ pub struct CfoBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cfo_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    
     let config: CfoBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -2205,11 +2156,9 @@ pub fn cfo_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         scalar: config.scalar_range,
     };
 
-    
     let output = cfo_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let js_output = CfoBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2217,13 +2166,11 @@ pub fn cfo_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         cols: output.cols,
     };
 
-    
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cfo_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2232,7 +2179,7 @@ pub fn cfo_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cfo_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2240,7 +2187,7 @@ pub fn cfo_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cfo_into(
     in_ptr: *const f64,
@@ -2267,7 +2214,6 @@ pub fn cfo_into(
         let input = CfoInput::from_slice(data, params);
 
         if core::ptr::eq(in_ptr, out_ptr as *const f64) {
-            
             let mut temp = vec![0.0; len];
             cfo_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2282,7 +2228,7 @@ pub fn cfo_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cfo_batch_into(
     in_ptr: *const f64,

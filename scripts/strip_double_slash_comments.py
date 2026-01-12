@@ -10,9 +10,6 @@ from pathlib import Path
 from typing import Optional
 
 
-KEEP_PREFIXES = (b"///", b"//!")
-
-
 @dataclass(frozen=True)
 class StripStats:
     files_seen: int
@@ -45,7 +42,98 @@ def _is_ascii_ident_char(b: int) -> bool:
     return (ord("a") <= b <= ord("z")) or (ord("A") <= b <= ord("Z")) or (ord("0") <= b <= ord("9")) or b == ord("_")
 
 
-def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
+def _is_ascii_hexdigit(b: int) -> bool:
+    return (ord("0") <= b <= ord("9")) or (ord("a") <= b <= ord("f")) or (ord("A") <= b <= ord("F"))
+
+
+def _try_parse_rust_char_literal(data: bytes, start: int) -> Optional[int]:
+    
+    n = len(data)
+    if start >= n or data[start] != ord("'"):
+        return None
+    if start + 1 >= n:
+        return None
+
+    b1 = data[start + 1]
+    if b1 in (ord("\n"), ord("\r")):
+        return None
+
+    
+    if b1 == ord("\\"):
+        if start + 2 >= n:
+            return None
+        esc = data[start + 2]
+        
+        if esc in (ord("n"), ord("r"), ord("t"), ord("0"), ord("\\"), ord("'"), ord('"')):
+            end = start + 3
+            if end < n and data[end] == ord("'"):
+                return end + 1
+            return None
+        
+        if esc == ord("x"):
+            if start + 5 < n and _is_ascii_hexdigit(data[start + 3]) and _is_ascii_hexdigit(data[start + 4]) and data[start + 5] == ord("'"):
+                return start + 6
+            return None
+        
+        if esc == ord("u"):
+            if start + 3 >= n or data[start + 3] != ord("{"):
+                return None
+            j = start + 4
+            digits = 0
+            while j < n and data[j] != ord("}"):
+                if not _is_ascii_hexdigit(data[j]):
+                    return None
+                digits += 1
+                if digits > 6:
+                    
+                    return None
+                j += 1
+            if digits == 0:
+                return None
+            if j >= n or data[j] != ord("}"):
+                return None
+            if j + 1 < n and data[j + 1] == ord("'"):
+                return j + 2
+            return None
+        return None
+
+    
+    if b1 < 0x80:
+        if _is_ascii_ident_char(b1) or (ord("0") <= b1 <= ord("9")) or b1 in (ord("_"),):
+            end = start + 2
+            if end < n and data[end] == ord("'"):
+                return end + 1
+            return None
+        
+        if b1 in (ord("'"), ord("\\")):
+            return None
+        end = start + 2
+        if end < n and data[end] == ord("'"):
+            return end + 1
+        return None
+
+    
+    first = b1
+    if 0xC2 <= first <= 0xDF:
+        size = 2
+    elif 0xE0 <= first <= 0xEF:
+        size = 3
+    elif 0xF0 <= first <= 0xF4:
+        size = 4
+    else:
+        return None
+    if start + 1 + size >= n:
+        return None
+    for k in range(1, size):
+        if not (0x80 <= data[start + 1 + k] <= 0xBF):
+            return None
+    end = start + 1 + size
+    if data[end] == ord("'"):
+        return end + 1
+    return None
+
+
+def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_rust_doc_comments: bool) -> bytes:
     out = bytearray()
     i = 0
     n = len(data)
@@ -160,21 +248,22 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                 i += 2
                 continue
             if nxt == ord("/"):
-                
-                if i + 3 <= n and data[i : i + 3] == b"///":
-                    out.extend(b"///")
-                    i += 3
-                    continue
-                if i + 3 <= n and data[i : i + 3] == b"//!":
-                    out.extend(b"//!")
-                    i += 3
-                    continue
+                if rust_mode and keep_rust_doc_comments:
+                    
+                    if i + 3 <= n and data[i : i + 3] == b"///":
+                        out.extend(b"///")
+                        i += 3
+                        continue
+                    if i + 3 <= n and data[i : i + 3] == b"//!":
+                        out.extend(b"//!")
+                        i += 3
+                        continue
                 in_line_comment = True
                 i += 2
                 continue
 
         
-        if b in (ord("b"), ord("r")):
+        if rust_mode and b in (ord("b"), ord("r")):
             start_i = i
             j = i
 
@@ -215,6 +304,15 @@ def _strip_double_slash_comments_c_like(data: bytes) -> bytes:
                 continue
 
         if b == ord("'"):
+            if rust_mode:
+                end = _try_parse_rust_char_literal(data, i)
+                if end is not None:
+                    out.extend(data[i:end])
+                    i = end
+                    continue
+                out.append(b)
+                i += 1
+                continue
             in_single_quote = True
             out.append(b)
             i += 1
@@ -385,8 +483,12 @@ def _strip_hash_comments_python(data: bytes) -> bytes:
 
 
 def _strip_file(path: Path) -> tuple[bool, int]:
+    raise RuntimeError("_strip_file is no longer used; call _strip_for_path instead.")
+
+
+def _strip_for_path(path: Path, *, rust_mode: bool, keep_rust_doc_comments: bool) -> tuple[bool, int]:
     original = path.read_bytes()
-    stripped = _strip_double_slash_comments_c_like(original)
+    stripped = _strip_double_slash_comments_c_like(original, rust_mode=rust_mode, keep_rust_doc_comments=keep_rust_doc_comments)
     if stripped == original:
         return False, 0
     path.write_bytes(stripped)
@@ -400,6 +502,11 @@ def main(argv: list[str]) -> int:
         action="append",
         default=[],
         help="File extension to process (include dot), can be specified multiple times.",
+    )
+    ap.add_argument(
+        "--strip-rust-doc",
+        action="store_true",
+        help="Also strip Rust doc comments (`///` and `//!`) when processing `.rs` files.",
     )
     ap.add_argument("--dry-run", action="store_true", help="Show what would change without editing files.")
     args = ap.parse_args(argv)
@@ -442,7 +549,13 @@ def main(argv: list[str]) -> int:
             if rel.lower().endswith(".py"):
                 stripped = _strip_hash_comments_python(original)
             else:
-                stripped = _strip_double_slash_comments_c_like(original)
+                rust_mode = rel.lower().endswith(".rs")
+                keep_rust_doc_comments = rust_mode and (not args.strip_rust_doc)
+                stripped = _strip_double_slash_comments_c_like(
+                    original,
+                    rust_mode=rust_mode,
+                    keep_rust_doc_comments=keep_rust_doc_comments,
+                )
             if stripped == original:
                 continue
 

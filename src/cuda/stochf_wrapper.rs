@@ -1,12 +1,3 @@
-//! CUDA wrapper for StochF (Fast Stochastic Oscillator: %K and %D).
-//!
-//! Mirrors ALMA/KDJ integration patterns:
-//! - PTX loaded via include_str!(concat!(env!("OUT_DIR"), "/stochf_kernel.ptx"))
-//! - Stream NON_BLOCKING; JIT options: DetermineTargetFromContext + O2 with fallbacks
-//! - VRAM checks with ~64MB headroom; chunk rows to <= 65_535
-//! - Batch (one series × many-params) and many-series (time-major, one-param)
-//! - Batch uses WILLR sparse tables for HH/LL queries (shared precompute across rows)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -28,8 +19,14 @@ use thiserror::Error;
 pub enum CudaStochfError {
     #[error("CUDA: {0}")]
     Cuda(#[from] cust::error::CudaError),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -37,7 +34,14 @@ pub enum CudaStochfError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -65,7 +69,9 @@ pub enum BatchKernelPolicy {
     Plain { block_x: u32 },
 }
 impl Default for BatchKernelPolicy {
-    fn default() -> Self { Self::Auto }
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -74,7 +80,9 @@ pub enum ManySeriesKernelPolicy {
     OneD { block_x: u32 },
 }
 impl Default for ManySeriesKernelPolicy {
-    fn default() -> Self { Self::Auto }
+    fn default() -> Self {
+        Self::Auto
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -144,7 +152,11 @@ impl CudaStochf {
         }
         if let Some((free, _total)) = Self::device_mem_info() {
             if required.saturating_add(headroom) > free {
-                return Err(CudaStochfError::OutOfMemory { required, free, headroom });
+                return Err(CudaStochfError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             }
             Ok(())
         } else {
@@ -154,10 +166,13 @@ impl CudaStochf {
         }
     }
 
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
-    
     pub fn stochf_batch_dev(
         &self,
         high_f32: &[f32],
@@ -173,7 +188,6 @@ impl CudaStochf {
             return Err(CudaStochfError::InvalidInput("empty input".into()));
         }
 
-        
         fn axis_usize(
             (start, end, step): (usize, usize, usize),
         ) -> Result<Vec<usize>, CudaStochfError> {
@@ -198,7 +212,7 @@ impl CudaStochf {
                 }
                 return Ok(v);
             }
-            
+
             let mut v = Vec::new();
             let st = step.max(1) as isize;
             let mut x = start as isize;
@@ -216,7 +230,8 @@ impl CudaStochf {
         }
         let fastks = axis_usize(sweep.fastk_period).unwrap_or_else(|_| Vec::new());
         let fastds = axis_usize(sweep.fastd_period).unwrap_or_else(|_| Vec::new());
-        let mut combos = Vec::<StochfParams>::with_capacity(fastks.len().saturating_mul(fastds.len()));
+        let mut combos =
+            Vec::<StochfParams>::with_capacity(fastks.len().saturating_mul(fastds.len()));
         for &k in &fastks {
             for &d in &fastds {
                 combos.push(StochfParams {
@@ -232,13 +247,12 @@ impl CudaStochf {
             ));
         }
 
-        
         let first_valid = (0..len)
             .find(|&i| {
                 high_f32[i].is_finite() && low_f32[i].is_finite() && close_f32[i].is_finite()
             })
             .ok_or_else(|| CudaStochfError::InvalidInput("all values NaN".into()))?;
-        
+
         let max_fk = combos
             .iter()
             .map(|p| p.fastk_period.unwrap())
@@ -260,8 +274,6 @@ impl CudaStochf {
             ));
         }
 
-        
-        
         let rows = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -281,7 +293,7 @@ impl CudaStochf {
         let out_bytes = out_elems
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaStochfError::InvalidInput("out_bytes overflow".into()))?;
-        
+
         let tables_overhead = len
             .checked_mul(8)
             .and_then(|n| n.checked_mul(sz_f32))
@@ -293,29 +305,24 @@ impl CudaStochf {
             .ok_or_else(|| CudaStochfError::InvalidInput("required bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        
         let tables = build_willr_gpu_tables(high_f32, low_f32);
 
-        
-        let tables_bytes =
-            tables.log2.len().saturating_mul(sz_i32) +
-            tables.level_offsets.len().saturating_mul(sz_i32) +
-            tables.st_max.len().saturating_mul(sz_f32) +
-            tables.st_min.len().saturating_mul(sz_f32) +
-            tables.nan_psum.len().saturating_mul(sz_i32);
+        let tables_bytes = tables.log2.len().saturating_mul(sz_i32)
+            + tables.level_offsets.len().saturating_mul(sz_i32)
+            + tables.st_max.len().saturating_mul(sz_f32)
+            + tables.st_min.len().saturating_mul(sz_f32)
+            + tables.nan_psum.len().saturating_mul(sz_i32);
         let required_exact = in_bytes_close
             .saturating_add(tables_bytes)
             .saturating_add(params_bytes)
             .saturating_add(out_bytes);
         let _ = Self::will_fit(required_exact, 64 * 1024 * 1024);
 
-        
         let use_pinned = len >= 131_072;
         let mut pinned_close: Option<LockedBuffer<f32>> = None;
         let d_close = if use_pinned {
             let host = LockedBuffer::from_slice(close_f32)?;
-            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
-                ?;
+            let mut dc = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
             unsafe { dc.async_copy_from(&host, &self.stream) }?;
             pinned_close = Some(host);
             dc
@@ -323,39 +330,46 @@ impl CudaStochf {
             DeviceBuffer::from_slice(close_f32)?
         };
 
-        
         let d_log2 = DeviceBuffer::from_slice(&tables.log2)?;
         let d_offs = DeviceBuffer::from_slice(&tables.level_offsets)?;
         let d_st_max = DeviceBuffer::from_slice(&tables.st_max)?;
         let d_st_min = DeviceBuffer::from_slice(&tables.st_min)?;
         let d_nan_ps = DeviceBuffer::from_slice(&tables.nan_psum)?;
 
-        
         let out_len = rows
             .checked_mul(len)
             .ok_or_else(|| CudaStochfError::InvalidInput("rows*len overflow".into()))?;
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
 
-        
-        let fk_host: Vec<i32> = combos.iter().map(|p| p.fastk_period.unwrap() as i32).collect();
-        let fd_host: Vec<i32> = combos.iter().map(|p| p.fastd_period.unwrap() as i32).collect();
-        let mt_host: Vec<i32> = combos.iter().map(|p| p.fastd_matype.unwrap_or(0) as i32).collect();
+        let fk_host: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fastk_period.unwrap() as i32)
+            .collect();
+        let fd_host: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fastd_period.unwrap() as i32)
+            .collect();
+        let mt_host: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fastd_matype.unwrap_or(0) as i32)
+            .collect();
 
         let d_fk_all = DeviceBuffer::from_slice(&fk_host)?;
         let d_fd_all = DeviceBuffer::from_slice(&fd_host)?;
         let d_mt_all = DeviceBuffer::from_slice(&mt_host)?;
 
-        
-        let mut func: Function = self.module
-            .get_function("stochf_batch_f32")
-            .map_err(|_| CudaStochfError::MissingKernelSymbol { name: "stochf_batch_f32" })?;
+        let mut func: Function = self.module.get_function("stochf_batch_f32").map_err(|_| {
+            CudaStochfError::MissingKernelSymbol {
+                name: "stochf_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => 256,
         };
-        let combos_per_launch = 65_535usize; 
+        let combos_per_launch = 65_535usize;
         let mut row0 = 0usize;
         while row0 < rows {
             let n = (rows - row0).min(combos_per_launch);
@@ -374,22 +388,21 @@ impl CudaStochf {
             }
 
             unsafe {
-                
                 let mut high_ptr: u64 = 0;
-                let mut low_ptr:  u64 = 0;
+                let mut low_ptr: u64 = 0;
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
                 let mut log2_ptr = d_log2.as_device_ptr().as_raw();
                 let mut offs_ptr = d_offs.as_device_ptr().as_raw();
                 let mut stmax_ptr = d_st_max.as_device_ptr().as_raw();
                 let mut stmin_ptr = d_st_min.as_device_ptr().as_raw();
                 let mut npsum_ptr = d_nan_ps.as_device_ptr().as_raw();
-                let mut fk_ptr    = d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
-                let mut fd_ptr    = d_fd_all.as_device_ptr().offset(row0 as isize).as_raw();
-                let mut mt_ptr    = d_mt_all.as_device_ptr().offset(row0 as isize).as_raw();
-                let mut len_i     = len as i32;
-                let mut first_i   = first_valid as i32;
-                let mut levels_i  = (tables.level_offsets.len() as i32);
-                let mut n_i       = n as i32;
+                let mut fk_ptr = d_fk_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut fd_ptr = d_fd_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut mt_ptr = d_mt_all.as_device_ptr().offset(row0 as isize).as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut levels_i = (tables.level_offsets.len() as i32);
+                let mut n_i = n as i32;
                 let mut k_out_ptr = d_k.as_device_ptr().offset((row0 * len) as isize).as_raw();
                 let mut d_out_ptr = d_d.as_device_ptr().offset((row0 * len) as isize).as_raw();
 
@@ -412,26 +425,30 @@ impl CudaStochf {
                     &mut k_out_ptr as *mut _ as *mut c_void,
                     &mut d_out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream
-                    .launch(&func, grid, block, 0, args)
-                    ?;
+                self.stream.launch(&func, grid, block, 0, args)?;
             }
             row0 += n;
         }
 
-        self.stream
-            .synchronize()?;
+        self.stream.synchronize()?;
 
         Ok((
             DeviceArrayF32Pair {
-                a: DeviceArrayF32 { buf: d_k, rows, cols: len },
-                b: DeviceArrayF32 { buf: d_d, rows, cols: len },
+                a: DeviceArrayF32 {
+                    buf: d_k,
+                    rows,
+                    cols: len,
+                },
+                b: DeviceArrayF32 {
+                    buf: d_d,
+                    rows,
+                    cols: len,
+                },
             },
             combos,
         ))
     }
 
-    
     pub fn stochf_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -449,9 +466,7 @@ impl CudaStochf {
         let tm_len = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaStochfError::InvalidInput("rows*cols overflow".into()))?;
-        if high_tm_f32.len() != tm_len
-            || low_tm_f32.len() != tm_len
-            || close_tm_f32.len() != tm_len
+        if high_tm_f32.len() != tm_len || low_tm_f32.len() != tm_len || close_tm_f32.len() != tm_len
         {
             return Err(CudaStochfError::InvalidInput(
                 "time-major slices mismatch dims".into(),
@@ -461,7 +476,6 @@ impl CudaStochf {
         let fd = params.fastd_period.unwrap_or(3);
         let mt = params.fastd_matype.unwrap_or(0);
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -486,17 +500,19 @@ impl CudaStochf {
             first_valids[s] = f;
         }
 
-        
         let mut pinned_h: Option<LockedBuffer<f32>> = None;
         let mut pinned_l: Option<LockedBuffer<f32>> = None;
         let mut pinned_c: Option<LockedBuffer<f32>> = None;
         let (d_h, d_l, d_c) = if tm_len >= 131_072 {
             let h_h = LockedBuffer::from_slice(high_tm_f32)?;
-            let h_l = LockedBuffer::from_slice(low_tm_f32 )?;
-            let h_c = LockedBuffer::from_slice(close_tm_f32 )?;
-            let mut d_h = unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }?;
-            let mut d_l = unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }?;
-            let mut d_c = unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }?;
+            let h_l = LockedBuffer::from_slice(low_tm_f32)?;
+            let h_c = LockedBuffer::from_slice(close_tm_f32)?;
+            let mut d_h =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }?;
+            let mut d_l =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }?;
+            let mut d_c =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(tm_len, &self.stream) }?;
             unsafe { d_h.async_copy_from(&h_h, &self.stream) }?;
             unsafe { d_l.async_copy_from(&h_l, &self.stream) }?;
             unsafe { d_c.async_copy_from(&h_c, &self.stream) }?;
@@ -507,11 +523,11 @@ impl CudaStochf {
         } else {
             (
                 DeviceBuffer::from_slice(high_tm_f32)?,
-                DeviceBuffer::from_slice(low_tm_f32 )?,
-                DeviceBuffer::from_slice(close_tm_f32 )?,
+                DeviceBuffer::from_slice(low_tm_f32)?,
+                DeviceBuffer::from_slice(close_tm_f32)?,
             )
         };
-        let d_fv= DeviceBuffer::from_slice(&first_valids )?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
 
         let out_len = cols
             .checked_mul(rows)
@@ -519,24 +535,25 @@ impl CudaStochf {
         let mut d_k = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
         let mut d_d = unsafe { DeviceBuffer::<f32>::uninitialized(out_len) }?;
 
-        
-        let mut func: Function = self.module
+        let mut func: Function = self
+            .module
             .get_function("stochf_many_series_one_param_f32")
-            .map_err(|_| CudaStochfError::MissingKernelSymbol { name: "stochf_many_series_one_param_f32" })?;
+            .map_err(|_| CudaStochfError::MissingKernelSymbol {
+                name: "stochf_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
         };
-        let cols_u32 = u32::try_from(cols)
-            .map_err(|_| CudaStochfError::LaunchConfigTooLarge {
-                gx: u32::MAX,
-                gy: 1,
-                gz: 1,
-                bx: block_x,
-                by: 1,
-                bz: 1,
-            })?;
+        let cols_u32 = u32::try_from(cols).map_err(|_| CudaStochfError::LaunchConfigTooLarge {
+            gx: u32::MAX,
+            gy: 1,
+            gz: 1,
+            bx: block_x,
+            by: 1,
+            bz: 1,
+        })?;
         let grid_x = (cols_u32 + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -576,21 +593,28 @@ impl CudaStochf {
                 &mut ko_ptr as *mut _ as *mut c_void,
                 &mut do_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args)
-                ?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        
         self.stream.synchronize()?;
-        drop(pinned_h); drop(pinned_l); drop(pinned_c);
+        drop(pinned_h);
+        drop(pinned_l);
+        drop(pinned_c);
 
         Ok((
-            DeviceArrayF32 { buf: d_k, rows, cols },
-            DeviceArrayF32 { buf: d_d, rows, cols },
+            DeviceArrayF32 {
+                buf: d_k,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_d,
+                rows,
+                cols,
+            },
         ))
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -599,14 +623,16 @@ pub mod benches {
     use crate::indicators::stochf::StochfBatchRange;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 256; 
+    const PARAM_SWEEP: usize = 256;
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
         let mut low = close.to_vec();
         for i in 0..close.len() {
             let v = close[i];
-            if !v.is_finite() { continue; }
+            if !v.is_finite() {
+                continue;
+            }
             let x = i as f32 * 0.0019;
             let off = (0.0031 * x.sin()).abs() + 0.08;
             high[i] = v + off;
@@ -616,7 +642,6 @@ pub mod benches {
     }
 
     fn bytes_one_series_many_params() -> usize {
-        
         let in_bytes = 1 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
@@ -652,7 +677,6 @@ pub mod benches {
                 let grid: GridSize = (gx, 1, 1).into();
                 let block: BlockSize = (self.block_x, 1, 1).into();
                 unsafe {
-                    // Kernel ignores high/low; pass null device pointers
                     let mut high_ptr: u64 = 0;
                     let mut low_ptr: u64 = 0;
                     let mut close_ptr = self.d_close.as_device_ptr().as_raw();
@@ -668,8 +692,16 @@ pub mod benches {
                     let mut first_i = self.first_valid as i32;
                     let mut levels_i = self.levels;
                     let mut n_i = n as i32;
-                    let mut k_out_ptr = self.d_k.as_device_ptr().offset((row0 * self.len) as isize).as_raw();
-                    let mut d_out_ptr = self.d_d.as_device_ptr().offset((row0 * self.len) as isize).as_raw();
+                    let mut k_out_ptr = self
+                        .d_k
+                        .as_device_ptr()
+                        .offset((row0 * self.len) as isize)
+                        .as_raw();
+                    let mut d_out_ptr = self
+                        .d_d
+                        .as_device_ptr()
+                        .offset((row0 * self.len) as isize)
+                        .as_raw();
                     let args: &mut [*mut c_void] = &mut [
                         &mut high_ptr as *mut _ as *mut c_void,
                         &mut low_ptr as *mut _ as *mut c_void,
@@ -704,19 +736,18 @@ pub mod benches {
         let cuda = CudaStochf::new(0).expect("cuda stochf");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
-        // Sweep fast_k only; keep fast_d fixed to 3
+
         let sweep = StochfBatchRange {
             fastk_period: (5, 5 + PARAM_SWEEP - 1, 1),
             fastd_period: (3, 3, 0),
         };
-        // Build WILLR sparse tables once on host
+
         let tables = build_willr_gpu_tables(&high, &low);
         let levels = tables.level_offsets.len() as i32;
         let first_valid = (0..ONE_SERIES_LEN)
             .find(|&i| close[i].is_finite())
             .unwrap_or(0);
 
-        // Precompute parameter arrays (same semantics as wrapper)
         let mut fk_host = Vec::with_capacity(PARAM_SWEEP);
         let mut fd_host = Vec::with_capacity(PARAM_SWEEP);
         let mut mt_host = Vec::with_capacity(PARAM_SWEEP);
@@ -727,7 +758,6 @@ pub mod benches {
         }
         let rows = fk_host.len();
 
-        // Upload buffers once
         let d_close =
             unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
         let d_log2 = DeviceBuffer::from_slice(&tables.log2).expect("d_log2");
@@ -739,10 +769,8 @@ pub mod benches {
         let d_fd_all = DeviceBuffer::from_slice(&fd_host).expect("d_fd_all");
         let d_mt_all = DeviceBuffer::from_slice(&mt_host).expect("d_mt_all");
         let out_len = rows * ONE_SERIES_LEN;
-        let d_k: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_k");
-        let d_d: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_d");
+        let d_k: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_k");
+        let d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_len) }.expect("d_d");
 
         let func = cuda
             .module

@@ -1,4 +1,4 @@
-//! Python module registration for technical indicators
+
 
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 #[pymodule]
 fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Register indicator modules
+
     crate::indicators::zscore::register_zscore_module(m)?;
     crate::indicators::moving_averages::alma::register_alma_module(m)?;
     crate::indicators::moving_averages::cwma::register_cwma_module(m)?;
@@ -38,7 +38,7 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::linearreg_angle::register_linearreg_angle_module(m)?;
     crate::indicators::kst::register_kst_module(m)?;
 
-    // Add other indicators here as they are updated
+
 
     Ok(())
 }

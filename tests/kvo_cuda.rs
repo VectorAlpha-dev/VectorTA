@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::kvo::{kvo_with_kernel, KvoBatchBuilder, KvoInput, KvoParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -51,12 +49,23 @@ fn kvo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         volume[i] = ((x * 0.0031).cos().abs() + 1.0) * 500.0;
     }
 
-    let sweep = vector_ta::indicators::kvo::KvoBatchRange { short_period: (2, 8, 2), long_period: (10, 18, 2) };
-    
+    let sweep = vector_ta::indicators::kvo::KvoBatchRange {
+        short_period: (2, 8, 2),
+        long_period: (10, 18, 2),
+    };
+
     let cpu = KvoBatchBuilder::new()
         .kernel(Kernel::ScalarBatch)
-        .short_range(sweep.short_period.0, sweep.short_period.1, sweep.short_period.2)
-        .long_range(sweep.long_period.0, sweep.long_period.1, sweep.long_period.2)
+        .short_range(
+            sweep.short_period.0,
+            sweep.short_period.1,
+            sweep.short_period.2,
+        )
+        .long_range(
+            sweep.long_period.0,
+            sweep.long_period.1,
+            sweep.long_period.2,
+        )
         .apply_slices(&high, &low, &close, &volume)?;
 
     let h_f32: Vec<f32> = high.iter().copied().map(|v| v as f32).collect();
@@ -78,7 +87,7 @@ fn kvo_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-1; 
+    let tol = 2e-1;
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -130,7 +139,6 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let short = 6usize;
     let long = 20usize;
 
-    
     let mut cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -185,7 +193,7 @@ fn kvo_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut g = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut g)?;
 
-    let tol = 2.5; 
+    let tol = 2.5;
     for idx in 0..g.len() {
         assert!(
             approx_eq(cpu[idx], g[idx] as f64, tol),

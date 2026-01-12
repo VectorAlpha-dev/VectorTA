@@ -1,45 +1,9 @@
-//! # Volume Weighted Average Price (VWAP)
-//!
-//! VWAP computes the average price of a security weighted by traded volume.
-//! You can customize the anchor (e.g., `1m`, `4h`, `2d`, or `1M`) for
-//! aggregation periods in minutes, hours, days, or months. This implementation
-//! supports flexible input, streaming, batch/grid evaluation, and SIMD feature stubs.
-//!
-//! ## Parameters
-//! - **anchor**: Defines the grouping period (e.g., `1m`, `4h`, `1d`, `1M`). Defaults to `"1d"`.
-//!
-//! ## Errors
-//! - **MismatchTimestampsPricesVolumes**: vwap: Mismatch in length of timestamps, prices, or volumes.
-//! - **NoData**: vwap: No data available for VWAP calculation.
-//! - **MismatchPricesVolumes**: vwap: Mismatch in length of prices and volumes.
-//! - **ParseAnchorError**: vwap: Error parsing the anchor string.
-//! - **UnsupportedAnchorUnit**: vwap: The specified anchor unit is not supported.
-//! - **MonthConversionError**: vwap: Error converting timestamp to month-based anchor.
-//!
-//! ## Returns
-//! - **`Ok(VwapOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(VwapError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Currently stubs calling scalar implementation
-//! - **Streaming update**: O(1) - maintains running sums for current anchor period
-//! - **Memory optimization**: Uses `alloc_with_nan_prefix` for zero-copy allocation
-//! - **Current status**:
-//!   - Scalar path optimized (pointer indexing, small unroll, fused `mul_add`).
-//!   - SIMD kept as stubs via runtime selection (segmented prefix + int division limits wins).
-//!   - Batch path now reuses a precomputed `pv[i] = price[i]*volume[i]` across rows.
-//! - **Notes**:
-//!   - Decision: keep SIMD disabled by default for VWAP; runtime selection short-circuits to scalar.
-//!   - Rationale: per-element bucket IDs require integer division; segmented prefix-sum makes effective SIMD complex and data-dependent; stubs ensure correctness.
-
-//! Decision: Streaming kernel uses boundary-only division and lazy month cutoffs; matches scalar/batch outputs and reduces per-tick overhead.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaVwap;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::vwap_wrapper::VwapDeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaVwap;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
@@ -50,9 +14,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -71,7 +35,6 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-/// VWAP input data
 #[derive(Debug, Clone)]
 pub enum VwapData<'a> {
     Candles {
@@ -89,9 +52,11 @@ pub enum VwapData<'a> {
     },
 }
 
-/// VWAP parameters
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VwapParams {
     pub anchor: Option<String>,
 }
@@ -104,7 +69,6 @@ impl Default for VwapParams {
     }
 }
 
-/// VWAP input
 #[derive(Debug, Clone)]
 pub struct VwapInput<'a> {
     pub data: VwapData<'a>,
@@ -166,13 +130,11 @@ impl<'a> VwapInput<'a> {
     }
 }
 
-/// VWAP output
 #[derive(Debug, Clone)]
 pub struct VwapOutput {
     pub values: Vec<f64>,
 }
 
-/// VWAP builder
 #[derive(Clone, Debug)]
 pub struct VwapBuilder {
     anchor: Option<String>,
@@ -274,13 +236,17 @@ pub enum VwapError {
     UnsupportedAnchorUnit { unit_char: char },
     #[error("vwap: Error converting timestamp {ts_ms} to month-based anchor.")]
     MonthConversionError { ts_ms: i64 },
-    
+
     #[error("vwap: Output length mismatch (expected {expected}, got {got}).")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vwap: Invalid kernel for batch path: {0:?}.")]
     InvalidKernelForBatch(Kernel),
     #[error("vwap: Invalid range expansion (start='{start}', end='{end}', step={step}).")]
-    InvalidRange { start: String, end: String, step: u32 },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: u32,
+    },
     #[error("vwap: Not enough valid data (needed {needed}, have {valid}).")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("vwap: All input values are NaN.")]
@@ -362,7 +328,6 @@ pub fn vwap_with_kernel(input: &VwapInput, kernel: Kernel) -> Result<VwapOutput,
     Ok(VwapOutput { values })
 }
 
-/// Write VWAP values directly to output slice - no allocations
 #[inline]
 pub fn vwap_into_slice(dst: &mut [f64], input: &VwapInput, kern: Kernel) -> Result<(), VwapError> {
     let (timestamps, volumes, prices) = match &input.data {
@@ -435,21 +400,12 @@ pub fn vwap_into_slice(dst: &mut [f64], input: &VwapInput, kern: Kernel) -> Resu
         }
     }
 
-    
-    
-    
-
     Ok(())
 }
 
-/// Writes VWAP values into a caller-provided slice without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API does.
-/// - The output slice length must equal the input length; returns an error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn vwap_into(input: &VwapInput, out: &mut [f64]) -> Result<(), VwapError> {
-    
     vwap_into_slice(out, input, Kernel::Auto)
 }
 
@@ -464,8 +420,7 @@ pub fn vwap_scalar(
 ) -> Result<(), VwapError> {
     debug_assert_eq!(out.len(), prices.len(), "output slice length mismatch");
 
-    
-    let mut current_group_id: i64 = i64::MIN; 
+    let mut current_group_id: i64 = i64::MIN;
     let mut volume_sum: f64 = 0.0;
     let mut vol_price_sum: f64 = 0.0;
 
@@ -474,7 +429,6 @@ pub fn vwap_scalar(
         return Ok(());
     }
 
-    
     unsafe {
         let ts_ptr = timestamps.as_ptr();
         let vol_ptr = volumes.as_ptr();
@@ -489,18 +443,16 @@ pub fn vwap_scalar(
             let unit_ms: i64 = match unit_char {
                 'm' => MINUTE_MS,
                 'h' => HOUR_MS,
-                _ => DAY_MS, 
+                _ => DAY_MS,
             };
             let bucket_ms: i64 = (count as i64) * unit_ms;
 
-            
             let mut i: usize = 0;
-            let unroll_end = n & !1usize; 
+            let unroll_end = n & !1usize;
             let mut window_start: i64 = 0;
             let mut next_cutoff: i64 = i64::MIN;
 
             while i < unroll_end {
-                
                 let ts0 = *ts_ptr.add(i);
                 if ts0 >= 0 {
                     if ts0 >= next_cutoff || ts0 < window_start {
@@ -531,7 +483,6 @@ pub fn vwap_scalar(
                     f64::NAN
                 };
 
-                
                 let idx1 = i + 1;
                 let ts1 = *ts_ptr.add(idx1);
                 if ts1 >= 0 {
@@ -566,7 +517,6 @@ pub fn vwap_scalar(
                 i += 2;
             }
 
-            
             if unroll_end != n {
                 let ts = *ts_ptr.add(unroll_end);
                 if ts >= 0 {
@@ -602,7 +552,6 @@ pub fn vwap_scalar(
             return Ok(());
         }
 
-        
         if unit_char == 'M' {
             let mut i: usize = 0;
             while i < n {
@@ -660,25 +609,16 @@ pub unsafe fn vwap_avx512(
     vwap_scalar(timestamps, volumes, prices, count, unit_char, out)
 }
 
-/// Streaming VWAP (per anchor bucket) — O(1) update with minimized divisions.
-/// Divisions:
-///   - 'm'/'h'/'d': at most one integer division when entering a new window,
-///     zero divisions for all subsequent ticks inside the same window.
-///   - 'M' (months): no chrono conversion on every tick; we compute the next
-///     boundary only when the tick crosses it.
 #[derive(Debug, Clone)]
 pub struct VwapStream {
-    
     anchor: String,
     count: u32,
     unit_char: char,
 
-    
-    bucket_ms: i64,   
-    next_cutoff: i64, 
+    bucket_ms: i64,
+    next_cutoff: i64,
     current_group_id: i64,
 
-    
     volume_sum: f64,
     vol_price_sum: f64,
 }
@@ -690,7 +630,6 @@ impl VwapStream {
         let (count, unit_char) = parse_anchor(&anchor)
             .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })?;
 
-        
         const MINUTE_MS: i64 = 60_000;
         const HOUR_MS: i64 = 3_600_000;
         const DAY_MS: i64 = 86_400_000;
@@ -708,15 +647,13 @@ impl VwapStream {
             count,
             unit_char,
             bucket_ms,
-            next_cutoff: i64::MIN,      
-            current_group_id: i64::MIN, 
+            next_cutoff: i64::MIN,
+            current_group_id: i64::MIN,
             volume_sum: 0.0,
             vol_price_sum: 0.0,
         })
     }
 
-    /// Amortized O(1) update with zero divisions inside a window for m/h/d.
-    /// Returns `Some(vwap)` if cumulative volume in the current window > 0, else `None`.
     #[inline(always)]
     pub fn update(&mut self, timestamp: i64, price: f64, volume: f64) -> Option<f64> {
         match self.unit_char {
@@ -726,14 +663,11 @@ impl VwapStream {
         }
     }
 
-    
-
     #[inline(always)]
     fn init_linear(&mut self, ts: i64) {
-        
         let gid = ts / self.bucket_ms;
         self.current_group_id = gid;
-        
+
         self.next_cutoff = gid.saturating_add(1).saturating_mul(self.bucket_ms);
         self.volume_sum = 0.0;
         self.vol_price_sum = 0.0;
@@ -741,8 +675,6 @@ impl VwapStream {
 
     #[inline(always)]
     fn roll_linear_to(&mut self, ts: i64) {
-        
-        
         let delta = ts.saturating_sub(self.next_cutoff);
         let k = (delta / self.bucket_ms).saturating_add(1);
         self.current_group_id = self.current_group_id.saturating_add(k);
@@ -759,10 +691,9 @@ impl VwapStream {
         if self.current_group_id == i64::MIN {
             self.init_linear(ts);
         } else if ts >= self.next_cutoff {
-            self.roll_linear_to(ts); 
+            self.roll_linear_to(ts);
         }
 
-        
         self.volume_sum += volume;
         self.vol_price_sum = price.mul_add(volume, self.vol_price_sum);
 
@@ -773,35 +704,28 @@ impl VwapStream {
         }
     }
 
-    
-
-    
-    
     #[inline]
     fn month_gid_and_next_cutoff(&self, ts_ms: i64) -> Result<(i64, i64), VwapError> {
-        
         let seconds = ts_ms / 1000;
         let nanos = ((ts_ms % 1000) * 1_000_000) as u32;
         let dt = NaiveDateTime::from_timestamp_opt(seconds, nanos)
             .ok_or_else(|| VwapError::MonthConversionError { ts_ms })?;
 
         let year = dt.year();
-        let month = dt.month() as i32; 
+        let month = dt.month() as i32;
         let total_months = (year - 1970) as i64 * 12 + (month - 1) as i64;
         let gid = total_months / (self.count as i64);
 
-        
         let next_bucket_months = gid.saturating_add(1).saturating_mul(self.count as i64);
 
         let next_year = 1970 + next_bucket_months.div_euclid(12);
-        let next_month0 = next_bucket_months.rem_euclid(12); 
+        let next_month0 = next_bucket_months.rem_euclid(12);
         let next_date = NaiveDate::from_ymd_opt(next_year as i32, (next_month0 + 1) as u32, 1)
             .ok_or_else(|| VwapError::MonthConversionError { ts_ms })?;
         let next_dt = next_date
             .and_hms_opt(0, 0, 0)
             .ok_or_else(|| VwapError::MonthConversionError { ts_ms })?;
 
-        
         let next_ms = next_dt.timestamp().saturating_mul(1000);
 
         Ok((gid, next_ms))
@@ -828,7 +752,6 @@ impl VwapStream {
                 return None;
             }
         } else if ts >= self.next_cutoff {
-            
             match self.month_gid_and_next_cutoff(ts) {
                 Ok((gid, next_ms)) => {
                     self.current_group_id = gid;
@@ -952,20 +875,18 @@ impl VwapBatchOutput {
 
 #[inline(always)]
 pub(crate) fn expand_grid_vwap(r: &VwapBatchRange) -> Vec<VwapParams> {
-    
     if r.anchor.2 == 0 || r.anchor.0 == r.anchor.1 {
         return vec![VwapParams {
             anchor: Some(r.anchor.0.clone()),
         }];
     }
-    
+
     let step = r.anchor.2.max(1);
     let start = anchor_to_num_and_unit(&r.anchor.0);
     let end = anchor_to_num_and_unit(&r.anchor.1);
     let mut result = Vec::new();
     if let (Some((mut a, unit_a)), Some((b, unit_b))) = (start, end) {
         if unit_a != unit_b {
-            
             return result;
         }
         if a <= b {
@@ -976,12 +897,13 @@ pub(crate) fn expand_grid_vwap(r: &VwapBatchRange) -> Vec<VwapParams> {
                 a = a.saturating_add(step);
             }
         } else {
-            
             while a >= b {
                 result.push(VwapParams {
                     anchor: Some(format!("{}{}", a, unit_a)),
                 });
-                if a < step { break; }
+                if a < step {
+                    break;
+                }
                 a -= step;
             }
         }
@@ -1080,9 +1002,8 @@ fn vwap_batch_inner(
     let rows = combos.len();
     let cols = prices.len();
 
-    let mut raw = make_uninit_matrix(rows, cols); 
+    let mut raw = make_uninit_matrix(rows, cols);
 
-    
     let mut warm: Vec<usize> = Vec::with_capacity(rows);
     for prm in &combos {
         let (cnt, unit) = parse_anchor(prm.anchor.as_deref().unwrap_or("1d"))
@@ -1092,22 +1013,18 @@ fn vwap_batch_inner(
     }
     init_matrix_prefixes(&mut raw, cols, &warm);
 
-    
-    
     let pv: Vec<f64> = prices
         .iter()
         .zip(volumes.iter())
         .map(|(&p, &v)| p * v)
         .collect();
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let params = combos.get(row).unwrap();
         let (count, unit_char) = parse_anchor(params.anchor.as_deref().unwrap_or("1d"))
             .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })
             .unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1125,7 +1042,6 @@ fn vwap_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1146,7 +1062,6 @@ fn vwap_batch_inner(
         }
     }
 
-    
     let mut raw_guard = core::mem::ManuallyDrop::new(raw);
     let values: Vec<f64> = unsafe {
         Vec::from_raw_parts(
@@ -1193,7 +1108,6 @@ fn vwap_batch_inner_into(
     let rows = combos.len();
     let cols = prices.len();
 
-    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| VwapError::InvalidRange {
@@ -1208,21 +1122,18 @@ fn vwap_batch_inner_into(
         });
     }
 
-    
     let pv: Vec<f64> = prices
         .iter()
         .zip(volumes.iter())
         .map(|(&p, &v)| p * v)
         .collect();
 
-    
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let params = combos.get(row).unwrap();
         let (count, unit_char) = parse_anchor(params.anchor.as_deref().unwrap_or("1d"))
             .map_err(|e| VwapError::ParseAnchorError { msg: e.to_string() })
             .unwrap();
 
-        
         let out_row = dst;
 
         match kern {
@@ -1239,7 +1150,6 @@ fn vwap_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1297,28 +1207,23 @@ pub(crate) fn parse_anchor(anchor: &str) -> Result<(u32, char), Box<dyn std::err
 
 #[inline]
 pub(crate) fn floor_to_month(ts_ms: i64, count: u32) -> Result<i64, Box<dyn Error>> {
-    
     let seconds = ts_ms / 1000;
     let nanos = ((ts_ms % 1000) * 1_000_000) as u32;
 
     let dt = NaiveDateTime::from_timestamp_opt(seconds, nanos)
         .ok_or_else(|| format!("Invalid timestamp: {}", ts_ms))?;
 
-    
     let year = dt.year();
     let month = dt.month() as i32;
     let total_months = (year - 1970) as i64 * 12 + (month - 1) as i64;
 
     if count == 1 {
-        
         Ok(total_months)
     } else {
-        
         Ok(total_months / (count as i64))
     }
 }
 
-/// Row-parallel helpers
 #[inline(always)]
 pub unsafe fn vwap_row_scalar(
     timestamps: &[i64],
@@ -1341,7 +1246,7 @@ unsafe fn vwap_row_scalar_pv(
     out: &mut [f64],
 ) {
     debug_assert_eq!(pv.len(), out.len(), "pv length must match out len");
-    
+
     let n = out.len();
     if n == 0 {
         return;
@@ -1507,7 +1412,6 @@ pub unsafe fn vwap_row_avx512_long(
     vwap_row_scalar(timestamps, volumes, prices, count, unit_char, out);
 }
 
-
 #[inline(always)]
 fn expand_grid(r: &VwapBatchRange) -> Vec<VwapParams> {
     expand_grid_vwap(r)
@@ -1532,38 +1436,31 @@ mod tests {
 
     #[test]
     fn test_vwap_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let timestamps = candles.get_timestamp().map_err(|e| e.to_string())?;
         let volumes = candles
             .select_candle_field("volume")
             .map_err(|e| e.to_string())?;
         let prices = source_type(&candles, "hlc3");
 
-        
         let take = 512usize.min(prices.len());
         let start = prices.len().saturating_sub(take);
         let ts_slice = &timestamps[start..start + take];
         let vol_slice = &volumes[start..start + take];
         let price_slice = &prices[start..start + take];
 
-        
         let params = VwapParams { anchor: None };
         let input = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params);
 
-        
         let baseline = vwap(&input)?.values;
 
-        
         let mut out = vec![0.0; price_slice.len()];
         vwap_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -1735,7 +1632,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_vwap_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1743,7 +1639,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_anchors = vec!["1m", "5m", "15m", "30m", "1h", "4h", "1d", "3d"];
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
@@ -1755,16 +1650,13 @@ mod tests {
                 let input = VwapInput::from_candles(&candles, source, params);
                 let output = vwap_with_kernel(&input, kernel)?;
 
-                
                 for (i, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (anchor={}, source={})",
@@ -1772,7 +1664,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (anchor={}, source={})",
@@ -1780,7 +1671,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (anchor={}, source={})",
@@ -1794,7 +1684,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_vwap_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1808,33 +1697,28 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let timestamps = candles.get_timestamp().unwrap();
         let volumes = candles.select_candle_field("volume").unwrap();
         let close_prices = &candles.close;
         let high_prices = &candles.high;
         let low_prices = &candles.low;
 
-        
         let anchor_periods = vec!["30m", "1h", "4h", "12h", "1d", "2d", "3d"];
 
-        
         let strat = (
-            0usize..anchor_periods.len(),                 
-            0usize..timestamps.len().saturating_sub(200), 
-            100usize..=200,                               
+            0usize..anchor_periods.len(),
+            0usize..timestamps.len().saturating_sub(200),
+            100usize..=200,
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(anchor_idx, start_idx, slice_len)| {
-                
                 let end_idx = (start_idx + slice_len).min(timestamps.len());
                 if end_idx <= start_idx || end_idx - start_idx < 10 {
-                    return Ok(()); 
+                    return Ok(());
                 }
 
                 let anchor = anchor_periods[anchor_idx];
@@ -1849,30 +1733,23 @@ mod tests {
                 };
                 let input = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params.clone());
 
-                
                 let result = vwap_with_kernel(&input, kernel);
 
-                
                 let scalar_input =
                     VwapInput::from_slice(ts_slice, vol_slice, price_slice, params.clone());
                 let scalar_result = vwap_with_kernel(&scalar_input, Kernel::Scalar);
 
-                
                 match (result, scalar_result) {
                     (Ok(VwapOutput { values: out }), Ok(VwapOutput { values: ref_out })) => {
-                        
                         prop_assert_eq!(out.len(), price_slice.len());
                         prop_assert_eq!(ref_out.len(), price_slice.len());
 
-                        
                         let (count, unit_char) = parse_anchor(anchor).unwrap();
 
-                        
                         for i in 0..out.len() {
                             let y = out[i];
                             let r = ref_out[i];
 
-                            
                             if y.is_finite() && r.is_finite() {
                                 let y_bits = y.to_bits();
                                 let r_bits = r.to_bits();
@@ -1886,7 +1763,6 @@ mod tests {
                                     ulp_diff
                                 );
                             } else if y.is_nan() && r.is_nan() {
-                                
                                 continue;
                             } else {
                                 prop_assert_eq!(
@@ -1899,7 +1775,6 @@ mod tests {
                                 );
                             }
 
-                            
                             if y.is_finite() && vol_slice[i] > 0.0 && price_slice[i] > 0.0 {
                                 prop_assert!(
 									y > 0.0,
@@ -1909,7 +1784,6 @@ mod tests {
                             }
                         }
 
-                        
                         let mut current_group_id = -1_i64;
                         let mut group_start = 0;
 
@@ -1923,11 +1797,8 @@ mod tests {
                                 _ => -1,
                             };
 
-                            
                             if group_id != current_group_id {
-                                
                                 if current_group_id != -1 && i > group_start {
-                                    
                                     let mut vol_sum = 0.0;
                                     let mut vol_price_sum = 0.0;
                                     let mut min_price = f64::INFINITY;
@@ -1942,17 +1813,14 @@ mod tests {
 
                                     if vol_sum > 0.0 {
                                         let expected_vwap = vol_price_sum / vol_sum;
-                                        let actual_vwap = out[i - 1]; 
+                                        let actual_vwap = out[i - 1];
 
-                                        
                                         prop_assert!(
 											(actual_vwap - expected_vwap).abs() < 1e-6,
 											"VWAP formula mismatch at group ending at {}: {} vs expected {}",
 											i - 1, actual_vwap, expected_vwap
 										);
 
-                                        
-                                        
                                         prop_assert!(
                                             actual_vwap >= min_price - 1e-9
                                                 && actual_vwap <= max_price + 1e-9,
@@ -1970,7 +1838,6 @@ mod tests {
                             }
                         }
 
-                        
                         if price_slice.len() <= 50 {
                             let mut stream = VwapStream::try_new(params).unwrap();
                             let mut stream_values = Vec::with_capacity(price_slice.len());
@@ -1982,7 +1849,6 @@ mod tests {
                                 }
                             }
 
-                            
                             for (i, (&batch_val, &stream_val)) in
                                 out.iter().zip(stream_values.iter()).enumerate()
                             {
@@ -2001,20 +1867,12 @@ mod tests {
                             }
                         }
 
-                        
-                        
                         {
-                            
-                            let base_ts = 1609459200000_i64; 
-                            let test_ts = vec![
-                                base_ts,           
-                                base_ts + 3600000, 
-                                base_ts + 7200000, 
-                            ];
+                            let base_ts = 1609459200000_i64;
+                            let test_ts = vec![base_ts, base_ts + 3600000, base_ts + 7200000];
                             let test_prices = vec![100.0, 200.0, 300.0];
                             let test_volumes = vec![1.0, 2.0, 3.0];
 
-                            
                             let test_params = VwapParams {
                                 anchor: Some("1d".to_string()),
                             };
@@ -2028,11 +1886,6 @@ mod tests {
                             if let Ok(VwapOutput { values: test_out }) =
                                 vwap_with_kernel(&test_input, kernel)
                             {
-                                
-                                
-                                
-                                
-
                                 if test_out.len() >= 3 {
                                     if test_out[0].is_finite() {
                                         prop_assert!(
@@ -2064,7 +1917,6 @@ mod tests {
                         }
                     }
                     (Err(e1), Err(e2)) => {
-                        
                         prop_assert_eq!(
                             std::mem::discriminant(&e1),
                             std::mem::discriminant(&e2),
@@ -2189,7 +2041,7 @@ mod tests {
             }
         };
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2199,12 +2051,11 @@ mod tests {
         let timestamps = c.get_timestamp().unwrap();
         let volumes = c.select_candle_field("volume").unwrap();
 
-        
         let anchor_ranges = vec![
-            ("1m", "5m", 1),  
-            ("1h", "6h", 1),  
-            ("1d", "5d", 1),  
-            ("7d", "14d", 7), 
+            ("1m", "5m", 1),
+            ("1h", "6h", 1),
+            ("1d", "5d", 1),
+            ("7d", "14d", 7),
         ];
 
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
@@ -2224,9 +2075,7 @@ mod tests {
                     .anchor_range(start, end, step)
                     .apply_slice(timestamps, volumes, prices)?;
 
-                
                 for (idx, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
@@ -2235,7 +2084,6 @@ mod tests {
                     let row = idx / output.cols;
                     let col = idx % output.cols;
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with anchor_range({},{},{}) source={}",
@@ -2243,7 +2091,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with anchor_range({},{},{}) source={}",
@@ -2251,7 +2098,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with anchor_range({},{},{}) source={}",
@@ -2265,7 +2111,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2279,34 +2124,7 @@ mod tests {
 #[cfg(feature = "python")]
 #[pyfunction(name = "vwap")]
 #[pyo3(signature = (timestamps, volumes, prices, anchor=None, kernel=None))]
-/// Compute the Volume Weighted Average Price (VWAP) of the input data.
-///
-/// VWAP calculates the average price of a security weighted by traded volume,
-/// grouped by the specified time anchor (e.g., "1d", "4h", "1M").
-///
-/// Parameters:
-/// -----------
-/// timestamps : np.ndarray
-///     Array of Unix timestamps in milliseconds (int64).
-/// volumes : np.ndarray
-///     Array of trading volumes (float64).
-/// prices : np.ndarray
-///     Array of prices (float64).
-/// anchor : str, optional
-///     Time period for grouping (e.g., "1d", "4h", "1M"). Default is "1d".
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of VWAP values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If array lengths don't match, anchor is invalid, or data is empty.
+
 pub fn vwap_py<'py>(
     py: Python<'py>,
     timestamps: numpy::PyReadonlyArray1<'py, i64>,
@@ -2321,21 +2139,17 @@ pub fn vwap_py<'py>(
     let vol_slice = volumes.as_slice()?;
     let price_slice = prices.as_slice()?;
 
-    // Parse and validate kernel before allow_threads
     let kern = crate::utilities::kernel_validation::validate_kernel(kernel, false)?;
 
-    // Build input struct
     let params = VwapParams {
         anchor: anchor.map(|s| s.to_string()),
     };
     let vwap_in = VwapInput::from_slice(ts_slice, vol_slice, price_slice, params);
 
-    // Get Vec<f64> from Rust function with all computation inside allow_threads
     let result_vec: Vec<f64> = py
         .allow_threads(|| vwap_with_kernel(&vwap_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2358,8 +2172,6 @@ impl VwapStreamPy {
         Ok(VwapStreamPy { stream })
     }
 
-    /// Updates the stream with new values and returns the calculated VWAP value.
-    /// Returns `None` if volume sum is zero.
     fn update(&mut self, timestamp: i64, price: f64, volume: f64) -> Option<f64> {
         self.stream.update(timestamp, price, volume)
     }
@@ -2368,26 +2180,7 @@ impl VwapStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "vwap_batch")]
 #[pyo3(signature = (timestamps, volumes, prices, anchor_range, kernel=None))]
-/// Compute VWAP for multiple anchor parameter combinations in a single pass.
-///
-/// Parameters:
-/// -----------
-/// timestamps : np.ndarray
-///     Array of Unix timestamps in milliseconds (int64).
-/// volumes : np.ndarray
-///     Array of trading volumes (float64).
-/// prices : np.ndarray
-///     Array of prices (float64).
-/// anchor_range : tuple
-///     (start, end, step) for anchor values to compute (e.g., ("1d", "3d", 1)).
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'anchors' array.
+
 pub fn vwap_batch_py<'py>(
     py: Python<'py>,
     timestamps: numpy::PyReadonlyArray1<'py, i64>,
@@ -2403,7 +2196,6 @@ pub fn vwap_batch_py<'py>(
     let vol_slice = volumes.as_slice()?;
     let price_slice = prices.as_slice()?;
 
-    // Validate kernel before allow_threads
     let kern = crate::utilities::kernel_validation::validate_kernel(kernel, true)?;
 
     let sweep = VwapBatchRange {
@@ -2444,7 +2236,6 @@ pub fn vwap_batch_py<'py>(
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Create Python list of anchor strings
     let anchors_list = PyList::new(
         py,
         combos
@@ -2489,14 +2280,20 @@ pub fn vwap_cuda_batch_dev_py(
     };
 
     let (inner, dev) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
-            let cuda = CudaVwap::new(device_id)?;
-            let arr = cuda.vwap_batch_dev_retaining_ctx(ts_slice, vol_slice, price_slice, &sweep)?;
-            Ok((arr, cuda.device_id()))
-        })
+        .allow_threads(
+            || -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
+                let cuda = CudaVwap::new(device_id)?;
+                let arr =
+                    cuda.vwap_batch_dev_retaining_ctx(ts_slice, vol_slice, price_slice, &sweep)?;
+                Ok((arr, cuda.device_id()))
+            },
+        )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32VwapPy { inner: Some(inner), device_id: dev })
+    Ok(DeviceArrayF32VwapPy {
+        inner: Some(inner),
+        device_id: dev,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2536,24 +2333,28 @@ pub fn vwap_cuda_many_series_one_param_dev_py(
     let volumes_flat = volumes_tm.as_slice()?;
 
     let (inner, dev) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
-            let cuda = CudaVwap::new(device_id)?;
-            let arr = cuda.vwap_many_series_one_param_time_major_dev_retaining_ctx(
-                ts_slice,
-                volumes_flat,
-                prices_flat,
-                cols,
-                rows,
-                &anchor,
-            )?;
-            Ok((arr, cuda.device_id()))
-        })
+        .allow_threads(
+            || -> Result<_, crate::cuda::moving_averages::vwap_wrapper::CudaVwapError> {
+                let cuda = CudaVwap::new(device_id)?;
+                let arr = cuda.vwap_many_series_one_param_time_major_dev_retaining_ctx(
+                    ts_slice,
+                    volumes_flat,
+                    prices_flat,
+                    cols,
+                    rows,
+                    &anchor,
+                )?;
+                Ok((arr, cuda.device_id()))
+            },
+        )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32VwapPy { inner: Some(inner), device_id: dev })
+    Ok(DeviceArrayF32VwapPy {
+        inner: Some(inner),
+        device_id: dev,
+    })
 }
 
-// ---------------- VWAP Python device handle (CAI v3 + DLPack) ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Vwap", unsendable)]
 pub struct DeviceArrayF32VwapPy {
@@ -2580,9 +2381,13 @@ impl DeviceArrayF32VwapPy {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 { 0 } else { inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 {
+            0
+        } else {
+            inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2600,7 +2405,6 @@ impl DeviceArrayF32VwapPy {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2621,7 +2425,6 @@ impl DeviceArrayF32VwapPy {
         }
         let _ = stream;
 
-        
         let inner = self
             .inner
             .take()
@@ -2631,22 +2434,20 @@ impl DeviceArrayF32VwapPy {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vwap_js(
-    timestamps: &[f64], 
+    timestamps: &[f64],
     volumes: &[f64],
     prices: &[f64],
     anchor: Option<String>,
     kernel: Option<String>,
 ) -> Result<Vec<f64>, JsValue> {
-    
     let ts_i64: Vec<i64> = timestamps
         .iter()
         .map(|&t| {
@@ -2657,9 +2458,8 @@ pub fn vwap_js(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    
     let kern = match kernel.as_deref() {
-        None | Some("auto") => Kernel::Auto, 
+        None | Some("auto") => Kernel::Auto,
         Some("scalar") => Kernel::Scalar,
         Some("scalar_batch") => Kernel::ScalarBatch,
         Some(k) => return Err(JsValue::from_str(&format!("Unknown kernel: {}", k))),
@@ -2668,7 +2468,6 @@ pub fn vwap_js(
     let params = VwapParams { anchor };
     let input = VwapInput::from_slice(&ts_i64, volumes, prices, params);
 
-    
     let mut output = vec![0.0; prices.len()];
 
     vwap_into_slice(&mut output, &input, kern).map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2676,7 +2475,7 @@ pub fn vwap_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vwap_into(
     timestamps_ptr: *const f64,
@@ -2699,7 +2498,6 @@ pub fn vwap_into(
         let vols = std::slice::from_raw_parts(volumes_ptr, len);
         let pric = std::slice::from_raw_parts(prices_ptr, len);
 
-        
         let mut ts_i64 = Vec::with_capacity(len);
         ts_i64.set_len(len);
         for i in 0..len {
@@ -2714,7 +2512,6 @@ pub fn vwap_into(
         let input = VwapInput::from_slice(&ts_i64, vols, pric, params);
 
         if core::ptr::eq(prices_ptr, out_ptr as *const f64) {
-            
             let mut tmp = vec![0.0; len];
             vwap_into_slice(&mut tmp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2729,7 +2526,7 @@ pub fn vwap_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vwap_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2738,7 +2535,7 @@ pub fn vwap_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vwap_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2748,13 +2545,13 @@ pub fn vwap_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VwapBatchConfig {
     pub anchor_range: (String, String, u32),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VwapBatchJsOutput {
     pub values: Vec<f64>,
@@ -2763,7 +2560,7 @@ pub struct VwapBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "vwap_batch")]
 pub fn vwap_batch_unified_js(
     timestamps: &[f64],
@@ -2773,7 +2570,6 @@ pub fn vwap_batch_unified_js(
     end: String,
     step: u32,
 ) -> Result<JsValue, JsValue> {
-    
     let ts_i64: Vec<i64> = timestamps
         .iter()
         .map(|&t| {
@@ -2788,7 +2584,6 @@ pub fn vwap_batch_unified_js(
         anchor: (start, end, step),
     };
 
-    
     let kernel = match detect_best_kernel() {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -2806,7 +2601,7 @@ pub fn vwap_batch_unified_js(
     serde_wasm_bindgen::to_value(&js).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vwap_batch_into(
     timestamps_ptr: *const f64,
@@ -2831,7 +2626,6 @@ pub fn vwap_batch_into(
         let volumes = std::slice::from_raw_parts(volumes_ptr, len);
         let prices = std::slice::from_raw_parts(prices_ptr, len);
 
-        
         let ts_i64: Vec<i64> = timestamps_f64.iter().map(|&t| t as i64).collect();
 
         let sweep = VwapBatchRange {
@@ -2844,7 +2638,6 @@ pub fn vwap_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         vwap_batch_inner_into(
             &ts_i64,
             volumes,
@@ -2860,7 +2653,7 @@ pub fn vwap_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vwap_batch_metadata_js(
     anchor_start: String,
@@ -2880,7 +2673,7 @@ pub fn vwap_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2888,11 +2681,9 @@ pub fn vwap_batch_metadata_js(
 )]
 pub struct VwapContext {
     anchor: String,
-    
-    
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl VwapContext {
@@ -2906,7 +2697,6 @@ impl VwapContext {
             return Err(JsValue::from_str("Invalid anchor: empty string"));
         }
 
-        
         let _ = parse_anchor(&anchor).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(VwapContext { anchor })
@@ -2933,7 +2723,6 @@ impl VwapContext {
             let volumes = std::slice::from_raw_parts(volumes_ptr, len);
             let prices = std::slice::from_raw_parts(prices_ptr, len);
 
-            
             let ts_i64: Vec<i64> = timestamps_f64
                 .iter()
                 .map(|&t| {

@@ -1,15 +1,3 @@
-//! CUDA wrapper for ROCP (Rate of Change Percentage without 100x).
-//!
-//! Parity goals (aligned with ALMA):
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/rocp_kernel.ptx"))
-//!   with DetermineTargetFromContext and OptLevel O2 fallback.
-//! - NON_BLOCKING stream.
-//! - Warmup/NaN semantics match scalar rocp.rs exactly.
-//! - Batch path optionally reuses host-precomputed reciprocals across rows.
-//! - Many-series × one-param uses time-major layout with per-series first_valid indices.
-//! - Typed CUDA errors, VRAM checks via `will_fit`, and launch config validation
-//!   to avoid oversubscribing the device.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -56,11 +44,27 @@ impl Default for CudaRocpPolicy {
 pub enum CudaRocpError {
     Cuda(CudaError),
     InvalidInput(String),
-    MissingKernelSymbol { name: &'static str },
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     InvalidPolicy(&'static str),
-    DeviceMismatch { buf: u32, current: u32 },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 impl fmt::Display for CudaRocpError {
@@ -80,7 +84,14 @@ impl fmt::Display for CudaRocpError {
                 "Out of memory on device: required={}B, free={}B, headroom={}B",
                 required, free, headroom
             ),
-            CudaRocpError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaRocpError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
             ),
@@ -120,8 +131,7 @@ impl CudaRocp {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))
             .map_err(CudaRocpError::Cuda)?;
-        let stream =
-            Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaRocpError::Cuda)?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaRocpError::Cuda)?;
         Ok(Self {
             module,
             stream,
@@ -267,7 +277,6 @@ impl CudaRocp {
         Ok(v)
     }
 
-    
     fn prepare_batch(
         data: &[f32],
         sweep: &RocpBatchRange,
@@ -309,7 +318,7 @@ impl CudaRocp {
         sweep: &RocpBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<RocpParams>), CudaRocpError> {
         let (combos, first_valid, len) = Self::prepare_batch(data, sweep)?;
-        // Rough VRAM estimate: inputs + periods + out
+
         let rows = combos.len();
         let in_bytes = 2usize
             .checked_mul(len)
@@ -339,10 +348,8 @@ impl CudaRocp {
             }
         }
 
-        // Host precompute reciprocals (shared across rows)
         let inv_host = Self::build_reciprocals(data);
 
-        // Upload inputs without page-locked staging (synchronous Vec->Device)
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods_host).map_err(CudaRocpError::Cuda)?;
         let d_data = DeviceBuffer::from_slice(data).map_err(CudaRocpError::Cuda)?;
@@ -356,9 +363,16 @@ impl CudaRocp {
         }
         .map_err(CudaRocpError::Cuda)?;
 
-        self.launch_batch(&d_data, &d_inv, &d_periods, len, rows, first_valid, &mut d_out)?;
+        self.launch_batch(
+            &d_data,
+            &d_inv,
+            &d_periods,
+            len,
+            rows,
+            first_valid,
+            &mut d_out,
+        )?;
 
-        // Ensure completion before handing off VRAM handle (CAI stream omitted).
         self.stream.synchronize().map_err(CudaRocpError::Cuda)?;
 
         Ok((
@@ -371,7 +385,6 @@ impl CudaRocp {
         ))
     }
 
-    
     pub fn rocp_batch_into_host_f32(
         &self,
         data: &[f32],
@@ -390,7 +403,7 @@ impl CudaRocp {
                 need
             )));
         }
-        // Ensure all work queued on our NON_BLOCKING stream has completed before D->H copy
+
         self.stream.synchronize().map_err(CudaRocpError::Cuda)?;
         arr.buf.copy_to(out).map_err(CudaRocpError::Cuda)?;
         Ok((arr.rows, arr.cols, combos))
@@ -406,10 +419,11 @@ impl CudaRocp {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaRocpError> {
-        let func = self
-            .module
-            .get_function("rocp_batch_f32")
-            .map_err(|_| CudaRocpError::MissingKernelSymbol { name: "rocp_batch_f32" })?;
+        let func = self.module.get_function("rocp_batch_f32").map_err(|_| {
+            CudaRocpError::MissingKernelSymbol {
+                name: "rocp_batch_f32",
+            }
+        })?;
         let suggested = func
             .suggested_launch_configuration(0, (256u32, 1u32, 1u32).into())
             .map(|(_min_grid, bs)| bs)
@@ -419,7 +433,6 @@ impl CudaRocp {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_batch_logged {
-            
             eprintln!(
                 "[rocp] batch kernel: block_x={} rows={} len={}",
                 block_x, rows, len
@@ -429,7 +442,6 @@ impl CudaRocp {
             }
         }
         unsafe {
-            // Grid: one block per row (combo)
             let gx = rows as u32;
             let grid: GridSize = (gx, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -453,12 +465,10 @@ impl CudaRocp {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(CudaRocpError::Cuda)?;
-            
         }
         Ok(())
     }
 
-    
     pub fn rocp_many_series_one_param_time_major_dev(
         &self,
         data_tm: &[f32],
@@ -480,9 +490,8 @@ impl CudaRocp {
             return Err(CudaRocpError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first_valid detection
         let mut firsts = vec![rows as i32; cols];
-        
+
         for s in 0..cols {
             for t in 0..rows {
                 let v = data_tm[t * cols + s];
@@ -498,7 +507,6 @@ impl CudaRocp {
             return Err(CudaRocpError::InvalidInput("not enough valid data".into()));
         }
 
-        // VRAM estimate (data + out + firsts)
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaRocpError::InvalidInput("size overflow".into()))?;
@@ -515,21 +523,30 @@ impl CudaRocp {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(req, headroom)?;
 
-        // Upload buffers (synchronous copy; avoids extra host->host copy)
         let d_data = DeviceBuffer::from_slice(data_tm).map_err(CudaRocpError::Cuda)?;
         let d_firsts = DeviceBuffer::from_slice(&firsts).map_err(CudaRocpError::Cuda)?;
-        let mut d_out = unsafe {
-            DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream)
-        }
-        .map_err(CudaRocpError::Cuda)?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }
+            .map_err(CudaRocpError::Cuda)?;
 
         self.launch_many_series(&d_data, &d_firsts, cols, rows, period, &mut d_out)?;
-        // Ensure completion before handing off VRAM handle.
+
         self.stream.synchronize().map_err(CudaRocpError::Cuda)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
-    fn launch_many_series(&self, d_data: &DeviceBuffer<f32>, d_firsts: &DeviceBuffer<i32>, cols: usize, rows: usize, period: usize, d_out: &mut DeviceBuffer<f32>) -> Result<(), CudaRocpError> {
+    fn launch_many_series(
+        &self,
+        d_data: &DeviceBuffer<f32>,
+        d_firsts: &DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        period: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaRocpError> {
         let func = self
             .module
             .get_function("rocp_many_series_one_param_f32")
@@ -545,7 +562,6 @@ impl CudaRocp {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
         };
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") && !self.debug_many_logged {
-            
             eprintln!(
                 "[rocp] many-series kernel: block_x={} cols={} rows={} period={}",
                 block_x, cols, rows, period
@@ -577,20 +593,17 @@ impl CudaRocp {
             self.stream
                 .launch(&func, grid, block, 0, &mut args)
                 .map_err(CudaRocpError::Cuda)?;
-            
         }
         Ok(())
     }
 }
 
-// ---------- Bench Profiles ----------
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            // Batch: 100k samples, 256 combos (device-resident)
             CudaBenchScenario::new(
                 "rocp",
                 "one_series_many_params",
@@ -634,7 +647,8 @@ pub mod benches {
                     };
                     let (combos, first_valid, len) =
                         CudaRocp::prepare_batch(&data, &sweep).expect("prepare_batch");
-                    let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
+                    let periods: Vec<i32> =
+                        combos.iter().map(|c| c.period.unwrap() as i32).collect();
                     let inv_host = CudaRocp::build_reciprocals(&data);
                     let rows = combos.len();
                     let cuda = CudaRocp::new(0).unwrap();
@@ -656,7 +670,6 @@ pub mod benches {
                 },
             )
             .with_sample_size(20),
-            // Many-series: 1024 rows, 512 columns (device-resident)
             CudaBenchScenario::new(
                 "rocp",
                 "many_series_one_param",

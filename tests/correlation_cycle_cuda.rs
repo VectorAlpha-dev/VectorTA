@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::correlation_cycle::{
     correlation_cycle_batch_with_kernel, correlation_cycle_with_kernel, CorrelationCycleBatchRange,
     CorrelationCycleInput, CorrelationCycleParams,
@@ -45,7 +43,7 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
         period: (16, 64, 8),
         threshold: (9.0, 9.0, 0.0),
     };
-    
+
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let price_q: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
     let cpu = correlation_cycle_batch_with_kernel(&price_q, &sweep, Kernel::ScalarBatch)?;
@@ -66,7 +64,6 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
     quad.angle.buf.copy_to(&mut g_ang)?;
     quad.state.buf.copy_to(&mut g_st)?;
 
-    
     let tol = 1.25e-2;
     let tol_ang = 0.45f64;
     let state_eps = 0.1f64;
@@ -103,7 +100,7 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
                 tol_ang
             );
         }
-        
+
         let cs = cpu.state[idx];
         let gs = g_st[idx] as f64;
         if cs.is_nan() && gs.is_nan() {
@@ -115,7 +112,10 @@ fn correlation_cycle_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::
         let row = idx / cpu.cols;
         let col = idx % cpu.cols;
         if col == 0 {
-            panic!("state mismatch at idx={} col=0 cpu_state={} gpu_state={}", idx, cs, gs);
+            panic!(
+                "state mismatch at idx={} col=0 cpu_state={} gpu_state={}",
+                idx, cs, gs
+            );
         }
         let period = sweep.period.0 + row * sweep.period.2;
         let thr = sweep.threshold.0 + (row as f64) * sweep.threshold.2;
@@ -170,12 +170,11 @@ fn correlation_cycle_cuda_many_series_one_param_matches_cpu(
     let period = 32usize;
     let threshold = 9.0f64;
 
-    
     let mut cpu_real = vec![f64::NAN; cols * rows];
     let mut cpu_imag = vec![f64::NAN; cols * rows];
     let mut cpu_ang = vec![f64::NAN; cols * rows];
     let mut cpu_st = vec![f64::NAN; cols * rows];
-    
+
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let price_tm_q: Vec<f64> = price_tm_f32.iter().map(|&v| v as f64).collect();
     for s in 0..cols {
@@ -265,7 +264,10 @@ fn correlation_cycle_cuda_many_series_one_param_matches_cpu(
         }
         let row = idx / cols;
         if row == 0 {
-            panic!("state mismatch at idx={} row=0 cpu_state={} gpu_state={}", idx, cs, gs);
+            panic!(
+                "state mismatch at idx={} row=0 cpu_state={} gpu_state={}",
+                idx, cs, gs
+            );
         }
         let col = idx % cols;
         let cpu_a = cpu_ang[idx];

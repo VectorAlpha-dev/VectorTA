@@ -1,31 +1,21 @@
-//! CUDA support for the Exponential Moving Average (EMA).
-//!
-//! Brought in line with the ALMA wrapper design: policy-driven launch choices,
-//! VRAM estimates with headroom checks, chunked launches to respect grid
-//! limits, NON_BLOCKING stream, and JIT target-from-context PTX loading with
-//! stable fallbacks. EMA is a recurrence/IIR pattern: one thread per combo
-//! (or per series) executes the sequential scan; optional block size knobs are
-//! provided for experimentation.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::ema::{EmaBatchRange, EmaParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::error::CudaError;
-use thiserror::Error;
-use std::sync::Arc;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaEmaError {
@@ -34,28 +24,33 @@ pub enum CudaEmaError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("arithmetic overflow computing {0}")]
     ArithmeticOverflow(&'static str),
     #[error("not implemented")]
     NotImplemented,
 }
 
-
-
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    /// Plain 1D grid, one block per combo; thread 0 performs the scan.
-    Plain {
-        block_x: u32,
-    },
+
+    Plain { block_x: u32 },
 }
 
 impl Default for BatchKernelPolicy {
@@ -67,10 +62,8 @@ impl Default for BatchKernelPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    /// One-dimensional time-major mapping (grid.x = num_series).
-    OneD {
-        block_x: u32,
-    },
+
+    OneD { block_x: u32 },
 }
 
 impl Default for ManySeriesKernelPolicy {
@@ -105,7 +98,7 @@ pub struct CudaEma {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    
+
     max_grid_x: usize,
     warp_size: u32,
     max_threads_per_block: u32,
@@ -136,7 +129,7 @@ impl CudaEma {
         let ctx = Arc::new(context);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/ema_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -145,20 +138,16 @@ impl CudaEma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => {
-                    Module::from_ptx(ptx, &[])?
-                }
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        
         let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
         let warp_size = device.get_attribute(cust::device::DeviceAttribute::WarpSize)? as u32;
         let max_threads_per_block =
             device.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
 
-        
         let has_coalesced_ms = module
             .get_function("ema_many_series_one_param_f32_coalesced")
             .is_ok();
@@ -180,7 +169,6 @@ impl CudaEma {
         })
     }
 
-    /// Optional: override policy (e.g., benches/tests).
     pub fn new_with_policy(device_id: usize, policy: CudaEmaPolicy) -> Result<Self, CudaEmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
@@ -193,10 +181,14 @@ impl CudaEma {
     }
 
     #[inline]
-    pub(crate) fn context_arc(&self) -> Arc<Context> { self._ctx.clone() }
+    pub(crate) fn context_arc(&self) -> Arc<Context> {
+        self._ctx.clone()
+    }
 
     #[inline]
-    pub(crate) fn device_id(&self) -> u32 { self.device_id }
+    pub(crate) fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     pub fn ema_batch_dev(
         &self,
@@ -206,7 +198,6 @@ impl CudaEma {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -229,15 +220,18 @@ impl CudaEma {
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaEmaError::ArithmeticOverflow("required_bytes"))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
-        
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)? };
-        let d_alphas = unsafe { DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)? };
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)? };
+
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)? };
+        let d_alphas =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized_async(prepared.series_len * n_combos, &self.stream)?
+        };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -249,7 +243,6 @@ impl CudaEma {
             &mut d_out,
         )?;
 
-        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -271,7 +264,9 @@ impl CudaEma {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEmaError> {
         if series_len == 0 {
-            return Err(CudaEmaError::InvalidInput("series_len must be positive".into()));
+            return Err(CudaEmaError::InvalidInput(
+                "series_len must be positive".into(),
+            ));
         }
         if first_valid >= series_len {
             return Err(CudaEmaError::InvalidInput(format!(
@@ -337,7 +332,6 @@ impl CudaEma {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        
         let prices_bytes = num_series
             .checked_mul(series_len)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -355,11 +349,12 @@ impl CudaEma {
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaEmaError::ArithmeticOverflow("required_bytes"))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
-        let d_first = unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream)? };
+        let d_first =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)? };
 
@@ -373,7 +368,6 @@ impl CudaEma {
             &mut d_out,
         )?;
 
-        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -444,10 +438,7 @@ impl CudaEma {
             series_len,
             params,
         )?;
-        handle
-            .buf
-            .copy_to(out_tm)
-            .map_err(CudaEmaError::Cuda)
+        handle.buf.copy_to(out_tm).map_err(CudaEmaError::Cuda)
     }
 
     fn launch_batch_kernel(
@@ -464,12 +455,12 @@ impl CudaEma {
             return Ok(());
         }
 
-        let func = self
-            .module
-            .get_function("ema_batch_f32")
-            .map_err(|_| CudaEmaError::MissingKernelSymbol { name: "ema_batch_f32" })?;
+        let func = self.module.get_function("ema_batch_f32").map_err(|_| {
+            CudaEmaError::MissingKernelSymbol {
+                name: "ema_batch_f32",
+            }
+        })?;
 
-        
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => env::var("EMA_BLOCK_X")
@@ -491,14 +482,12 @@ impl CudaEma {
             });
         }
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaEma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        
         let cap = self.max_grid_x.max(1).min(usize::MAX / 2);
         for (start, len) in Self::grid_chunks(n_combos, cap) {
             let grid: GridSize = (len as u32, 1, 1).into();
@@ -546,13 +535,13 @@ impl CudaEma {
             return Ok(());
         }
 
-        
         let func = self
             .module
             .get_function("ema_many_series_one_param_f32")
-            .map_err(|_| CudaEmaError::MissingKernelSymbol { name: "ema_many_series_one_param_f32" })?;
+            .map_err(|_| CudaEmaError::MissingKernelSymbol {
+                name: "ema_many_series_one_param_f32",
+            })?;
 
-        
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => env::var("EMA_MS_BLOCK_X")
@@ -574,7 +563,6 @@ impl CudaEma {
             });
         }
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaEma)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -702,8 +690,6 @@ impl CudaEma {
         })
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -851,12 +837,24 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("ema", "one_series_many_params", "ema_cuda_batch_dev", "1m_x_250", prep_one_series_many_params)
-                .with_sample_size(10)
-                .with_mem_required(bytes_one_series_many_params()),
-            CudaBenchScenario::new("ema", "many_series_one_param", "ema_cuda_many_series_one_param", "250x1m", prep_many_series_one_param)
-                .with_sample_size(5)
-                .with_mem_required(bytes_many_series_one_param()),
+            CudaBenchScenario::new(
+                "ema",
+                "one_series_many_params",
+                "ema_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "ema",
+                "many_series_one_param",
+                "ema_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
         ]
     }
 }
@@ -866,7 +864,11 @@ fn expand_grid(range: &EmaBatchRange) -> Result<Vec<EmaParams>, CudaEmaError> {
         if step == 0 || start == end {
             return vec![start];
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         (lo..=hi).step_by(step).collect()
     }
 
@@ -877,10 +879,11 @@ fn expand_grid(range: &EmaBatchRange) -> Result<Vec<EmaParams>, CudaEmaError> {
             range.period.0, range.period.1, range.period.2
         )));
     }
-    Ok(vals.into_iter().map(|p| EmaParams { period: Some(p) }).collect())
+    Ok(vals
+        .into_iter()
+        .map(|p| EmaParams { period: Some(p) })
+        .collect())
 }
-
-
 
 impl CudaEma {
     #[inline]
@@ -904,7 +907,11 @@ impl CudaEma {
                 if need <= free {
                     Ok(())
                 } else {
-                    Err(CudaEmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                    Err(CudaEmaError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom: headroom_bytes,
+                    })
                 }
             }
             Err(_) => Ok(()),

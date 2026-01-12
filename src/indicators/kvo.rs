@@ -1,32 +1,3 @@
-//! # Klinger Volume Oscillator (KVO)
-//!
-//! The Klinger Volume Oscillator (KVO) is designed to capture long-term
-//! money flow trends, while remaining sensitive enough to short-term
-//! fluctuations. It uses high, low, close prices and volume to measure
-//! volume force (VF), then applies two separate EMAs (short and long)
-//! to VF and calculates the difference.
-//!
-//! ## Parameters
-//! - **short_period**: The short EMA period (default: 2)
-//! - **long_period**: The long EMA period (default: 5)
-//!
-//! ## Returns
-//! - **`Ok(KvoOutput)`** containing a `Vec<f64>` of oscillator values
-//!
-//! ## Developer Notes
-//! ### Implementation Status
-//! - SIMD: Single-series AVX2/AVX512 kept as stubs redirecting to scalar due to loop-carried dependencies (trend/CM + EMA) making vectorization across time unprofitable; scalar is fastest and passes all tests.
-//! - **AVX2 Kernel**: Stub (calls scalar implementation)
-//! - **AVX512 Kernel**: Stub with short/long variants (both call scalar)
-//! - **Streaming Update**: O(1) - efficient with maintained EMA states and trend tracking
-//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
-//! - **Batch Operations**: Optimized row path by precomputing the shared VF series once (O(N)), then running per-row EMA updates over VF; uses `make_uninit_matrix` and `init_matrix_prefixes`
-//! - **Decision log**: SIMD remains stubbed (scalar path fastest for this IIR structure); CUDA batch and many-series kernels enabled with VRAM checks and synchronized launches, matching scalar within f32 tolerance.
-//!
-//! ### TODO - Performance Improvements
-//! - [ ] Implement actual AVX2/AVX512 batch SIMD (rows-in-lanes) over shared VF if/when beneficial
-//! - [ ] Consider AVX512 short/long specialized row kernels only if measurable wins
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -55,9 +26,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -79,7 +50,10 @@ pub struct KvoOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct KvoParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -231,7 +205,11 @@ pub enum KvoError {
     #[error("kvo: Output buffer length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("kvo: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("kvo: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -288,8 +266,6 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
 
     let mut out = alloc_with_nan_prefix(high.len(), first_valid_idx + 1);
     let chosen = match kernel {
-        
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -334,7 +310,6 @@ pub fn kvo_with_kernel(input: &KvoInput, kernel: Kernel) -> Result<KvoOutput, Kv
     Ok(KvoOutput { values: out })
 }
 
-/// Compute KVO directly into the provided output buffer for zero-copy operations
 #[inline]
 pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Result<(), KvoError> {
     let (high, low, close, volume): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
@@ -356,7 +331,6 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
         return Err(KvoError::EmptyInputData);
     }
 
-    
     if out.len() != high.len() {
         return Err(KvoError::OutputLengthMismatch {
             expected: high.len(),
@@ -390,8 +364,6 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
     }
 
     let chosen = match kernel {
-        
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -434,7 +406,6 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
         }
     }
 
-    
     for v in &mut out[..=first_valid_idx] {
         *v = f64::NAN;
     }
@@ -442,19 +413,12 @@ pub fn kvo_compute_into(out: &mut [f64], input: &KvoInput, kernel: Kernel) -> Re
     Ok(())
 }
 
-/// Compute KVO into slice with API matching alma.rs
 #[inline]
 pub fn kvo_into_slice(dst: &mut [f64], input: &KvoInput, kern: Kernel) -> Result<(), KvoError> {
     kvo_compute_into(dst, input, kern)
 }
 
-/// Write KVO values directly into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (prefix up to and
-///   including the first valid index is set to NaN).
-/// - The output slice length must equal the input series length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn kvo_into(input: &KvoInput, out: &mut [f64]) -> Result<(), KvoError> {
     kvo_compute_into(out, input, Kernel::Auto)
@@ -471,18 +435,15 @@ pub unsafe fn kvo_scalar(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    
     let short_alpha = 2.0 / (short_period as f64 + 1.0);
     let long_alpha = 2.0 / (long_period as f64 + 1.0);
 
-    
     let hp = high.as_ptr();
     let lp = low.as_ptr();
     let cp = close.as_ptr();
     let vp = volume.as_ptr();
     let outp = out.as_mut_ptr();
 
-    
     let mut trend: i32 = -1;
     let mut cm: f64 = 0.0;
 
@@ -490,25 +451,20 @@ pub unsafe fn kvo_scalar(
         *hp.add(first_valid_idx) + *lp.add(first_valid_idx) + *cp.add(first_valid_idx);
     let mut prev_dm = *hp.add(first_valid_idx) - *lp.add(first_valid_idx);
 
-    
     let mut short_ema = 0.0f64;
     let mut long_ema = 0.0f64;
 
-    
     let mut i = first_valid_idx + 1;
     let len = high.len();
     while i < len {
-        
         let h = *hp.add(i);
         let l = *lp.add(i);
         let c = *cp.add(i);
         let v = *vp.add(i);
 
-        
         let hlc = h + l + c;
         let dm = h - l;
 
-        
         if hlc > prev_hlc && trend != 1 {
             trend = 1;
             cm = prev_dm;
@@ -518,12 +474,10 @@ pub unsafe fn kvo_scalar(
         }
         cm += dm;
 
-        
         let temp = ((dm / cm) * 2.0 - 1.0).abs();
         let sign = if trend == 1 { 1.0 } else { -1.0 };
         let vf = v * temp * 100.0 * sign;
 
-        
         if i == first_valid_idx + 1 {
             short_ema = vf;
             long_ema = vf;
@@ -532,10 +486,8 @@ pub unsafe fn kvo_scalar(
             long_ema += (vf - long_ema) * long_alpha;
         }
 
-        
         *outp.add(i) = short_ema - long_ema;
 
-        
         prev_hlc = hlc;
         prev_dm = dm;
         i += 1;
@@ -791,9 +743,9 @@ fn expand_grid(r: &KvoBatchRange) -> Result<Vec<KvoParams>, KvoError> {
             let mut v = start;
             loop {
                 out.push(v);
-                let next = v
-                    .checked_add(step)
-                    .ok_or(KvoError::InvalidRange { start, end, step })?;
+                let next =
+                    v.checked_add(step)
+                        .ok_or(KvoError::InvalidRange { start, end, step })?;
                 if next > end {
                     break;
                 }
@@ -809,9 +761,9 @@ fn expand_grid(r: &KvoBatchRange) -> Result<Vec<KvoParams>, KvoError> {
                 if v < step {
                     break;
                 }
-                let next = v
-                    .checked_sub(step)
-                    .ok_or(KvoError::InvalidRange { start, end, step })?;
+                let next =
+                    v.checked_sub(step)
+                        .ok_or(KvoError::InvalidRange { start, end, step })?;
                 if next < end {
                     break;
                 }
@@ -874,9 +826,6 @@ pub fn kvo_batch_par_slice(
     kvo_batch_inner(high, low, close, volume, sweep, kern, true)
 }
 
-/// Compute KVO batch directly into the provided output buffer for zero-copy operations
-/// The output buffer must have size: rows * cols where rows is the number of parameter combinations
-/// and cols is the length of the input data. Data is laid out in row-major order.
 #[inline]
 pub fn kvo_batch_into_slice(
     out: &mut [f64],
@@ -888,7 +837,6 @@ pub fn kvo_batch_into_slice(
     kern: Kernel,
     parallel: bool,
 ) -> Result<Vec<KvoParams>, KvoError> {
-    
     let len = high.len();
     if low.len() != len || close.len() != len || volume.len() != len {
         return Err(KvoError::OutputLengthMismatch {
@@ -897,7 +845,6 @@ pub fn kvo_batch_into_slice(
         });
     }
 
-    
     let combos = expand_grid(sweep)?;
     let expected_size = combos
         .len()
@@ -932,10 +879,8 @@ fn kvo_batch_inner(
     let cols = high.len();
     let rows = combos.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let first = high
         .iter()
         .zip(low)
@@ -946,12 +891,10 @@ fn kvo_batch_inner(
     let warm: Vec<usize> = combos.iter().map(|_| first + 1).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let simd = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -959,7 +902,6 @@ fn kvo_batch_inner(
     let combos_back =
         kvo_batch_inner_into(high, low, close, volume, sweep, simd, parallel, out_slice)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1108,30 +1050,24 @@ unsafe fn kvo_row_avx512_long(
     )
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct KvoStream {
-    
     short_period: usize,
     long_period: usize,
     short_alpha: f64,
     long_alpha: f64,
 
-    
     prev_hlc: f64,
     prev_dm: f64,
     cm: f64,
-    trend: i32, 
-    sign: f64,  
+    trend: i32,
+    sign: f64,
 
-    
     short_ema: f64,
     long_ema: f64,
 
-    
-    first: bool,  
-    seeded: bool, 
+    first: bool,
+    seeded: bool,
 }
 
 impl KvoStream {
@@ -1152,8 +1088,8 @@ impl KvoStream {
             prev_hlc: 0.0,
             prev_dm: 0.0,
             cm: 0.0,
-            trend: -1,  
-            sign: -1.0, 
+            trend: -1,
+            sign: -1.0,
             short_ema: 0.0,
             long_ema: 0.0,
             first: true,
@@ -1163,7 +1099,6 @@ impl KvoStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> Option<f64> {
-        
         if self.first {
             self.prev_hlc = high + low + close;
             self.prev_dm = high - low;
@@ -1171,31 +1106,27 @@ impl KvoStream {
             return None;
         }
 
-        
         let hlc = high + low + close;
         let dm = high - low;
 
-        
         if hlc > self.prev_hlc {
             if self.trend != 1 {
                 self.trend = 1;
-                self.cm = self.prev_dm; 
+                self.cm = self.prev_dm;
                 self.sign = 1.0;
             }
         } else if hlc < self.prev_hlc {
             if self.trend != 0 {
                 self.trend = 0;
-                self.cm = self.prev_dm; 
+                self.cm = self.prev_dm;
                 self.sign = -1.0;
             }
         }
         self.cm += dm;
 
-        
         let temp = ((dm / self.cm) * 2.0 - 1.0).abs();
         let vf = volume * temp * 100.0 * self.sign;
 
-        
         if !self.seeded {
             self.short_ema = vf;
             self.long_ema = vf;
@@ -1205,7 +1136,6 @@ impl KvoStream {
             self.long_ema += (vf - self.long_ema) * self.long_alpha;
         }
 
-        
         self.prev_hlc = hlc;
         self.prev_dm = dm;
 
@@ -1440,7 +1370,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            KvoParams::default(), 
+            KvoParams::default(),
             KvoParams {
                 short_period: Some(1),
                 long_period: Some(1),
@@ -1493,12 +1423,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1548,7 +1477,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_kvo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1559,30 +1488,24 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
-        let strat = (2usize..=10, 5usize..=20) 
-            .prop_flat_map(|(short, long)| {
-                (
-                    
-                    prop::collection::vec(
-                        (
-                            
-                            (100.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                            0.01f64..0.1f64, 
-                            
-                            (100.0f64..1_000_000.0f64)
-                                .prop_filter("positive", |x| *x > 0.0 && x.is_finite()),
-                        ),
-                        50..=500,
+        let strat = (2usize..=10, 5usize..=20).prop_flat_map(|(short, long)| {
+            (
+                prop::collection::vec(
+                    (
+                        (100.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+                        0.01f64..0.1f64,
+                        (100.0f64..1_000_000.0f64)
+                            .prop_filter("positive", |x| *x > 0.0 && x.is_finite()),
                     ),
-                    Just(short),
-                    Just(long.max(short)), 
-                )
-            });
+                    50..=500,
+                ),
+                Just(short),
+                Just(long.max(short)),
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(price_data, short_period, long_period)| {
-                
                 let mut high = Vec::with_capacity(price_data.len());
                 let mut low = Vec::with_capacity(price_data.len());
                 let mut close = Vec::with_capacity(price_data.len());
@@ -1592,7 +1515,7 @@ mod tests {
                     let range = base_price * volatility;
                     let h = base_price + range * 0.5;
                     let l = base_price - range * 0.5;
-                    let c = l + (h - l) * 0.6; 
+                    let c = l + (h - l) * 0.6;
 
                     high.push(h);
                     low.push(l);
@@ -1600,18 +1523,15 @@ mod tests {
                     volume.push(*vol);
                 }
 
-                
                 let params = KvoParams {
                     short_period: Some(short_period),
                     long_period: Some(long_period),
                 };
                 let input = KvoInput::from_slices(&high, &low, &close, &volume, params.clone());
 
-                
                 let result = kvo_with_kernel(&input, kernel)?;
                 let reference = kvo_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 for i in 0..result.values.len() {
                     let val = result.values[i];
                     let ref_val = reference.values[i];
@@ -1644,7 +1564,6 @@ mod tests {
                     }
                 }
 
-                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
@@ -1655,8 +1574,6 @@ mod tests {
                     })
                     .unwrap_or(0);
 
-                
-                
                 for i in 0..result.values.len() {
                     if i < first_valid_idx + 1 {
                         prop_assert!(
@@ -1669,7 +1586,6 @@ mod tests {
                     }
                 }
 
-                
                 if result.values.len() > first_valid_idx + 1 {
                     for i in (first_valid_idx + 1)..result.values.len() {
                         prop_assert!(
@@ -1682,14 +1598,12 @@ mod tests {
                     }
                 }
 
-                
                 let all_same_price = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 let all_same_volume = volume.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                 if all_same_price && all_same_volume && result.values.len() > 100 {
-                    
                     let last_values = &result.values[result.values.len() - 10..];
                     for val in last_values {
                         if val.is_finite() {
@@ -1703,8 +1617,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if short_period <= 2 && result.values.len() > first_valid_idx + 20 {
                     let valid_values: Vec<f64> = result.values[(first_valid_idx + 2)..]
                         .iter()
@@ -1713,7 +1625,6 @@ mod tests {
                         .collect();
 
                     if valid_values.len() > 10 {
-                        
                         let changes: Vec<f64> = valid_values
                             .windows(2)
                             .map(|w| (w[1] - w[0]).abs())
@@ -1721,7 +1632,6 @@ mod tests {
 
                         let avg_change = changes.iter().sum::<f64>() / changes.len() as f64;
 
-                        
                         if !all_same_price {
                             prop_assert!(
                                 avg_change > 1e-12,
@@ -1733,10 +1643,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 if result.values.len() > first_valid_idx + 20 {
-                    
                     let trend_start = result.values.len().saturating_sub(20);
                     let trend_end = result.values.len();
 
@@ -1746,22 +1653,18 @@ mod tests {
                             hlc_values.push(high[i] + low[i] + close[i]);
                         }
 
-                        
                         let mut up_moves = 0;
                         let mut down_moves = 0;
                         for window in hlc_values.windows(2) {
                             if window[1] > window[0] * 1.001 {
-                                
                                 up_moves += 1;
                             } else if window[1] < window[0] * 0.999 {
                                 down_moves += 1;
                             }
                         }
 
-                        
                         let avg_volume = volume[trend_start..trend_end].iter().sum::<f64>() / 20.0;
                         if avg_volume > 1000.0 {
-                            
                             let last_oscillator_values =
                                 &result.values[trend_end.saturating_sub(5)..trend_end];
                             let avg_oscillator = last_oscillator_values
@@ -1770,18 +1673,15 @@ mod tests {
                                 .sum::<f64>()
                                 / last_oscillator_values.len() as f64;
 
-                            
                             if up_moves > 15 && down_moves < 3 {
                                 prop_assert!(
-									avg_oscillator > -100.0,  
+									avg_oscillator > -100.0,
 									"[{}] Strong uptrend should not produce strongly negative oscillator: {}",
 									test_name, avg_oscillator
 								);
-                            }
-                            
-                            else if down_moves > 15 && up_moves < 3 {
+                            } else if down_moves > 15 && up_moves < 3 {
                                 prop_assert!(
-									avg_oscillator < 100.0,  
+									avg_oscillator < 100.0,
 									"[{}] Strong downtrend should not produce strongly positive oscillator: {}",
 									test_name, avg_oscillator
 								);
@@ -1790,7 +1690,6 @@ mod tests {
                     }
                 }
 
-                
                 prop_assert!(
                     long_period >= short_period,
                     "[{}] Long period {} should be >= short period {}",
@@ -1799,20 +1698,16 @@ mod tests {
                     short_period
                 );
 
-                
-                
                 let mut small_vol = volume.clone();
                 for v in &mut small_vol {
-                    *v *= 1e-10; 
+                    *v *= 1e-10;
                 }
 
                 let small_vol_input =
                     KvoInput::from_slices(&high, &low, &close, &small_vol, params.clone());
                 if let Ok(small_vol_result) = kvo_with_kernel(&small_vol_input, kernel) {
-                    
                     for i in (first_valid_idx + 1)..result.values.len() {
                         if result.values[i].is_finite() && small_vol_result.values[i].is_finite() {
-                            
                             prop_assert!(
 								small_vol_result.values[i].abs() <= result.values[i].abs() * 1e-8 + 1e-10,
 								"[{}] Small volume should produce smaller oscillator at idx {}: {} vs {}",
@@ -1822,11 +1717,7 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if result.values.len() > first_valid_idx + 10 {
-                    
                     let mut cm = 0.0;
                     let mut trend = -1;
                     let mut prev_hlc =
@@ -1836,7 +1727,6 @@ mod tests {
                         let hlc = high[i] + low[i] + close[i];
                         let dm = high[i] - low[i];
 
-                        
                         if hlc > prev_hlc && trend != 1 {
                             trend = 1;
                             cm = high[i - 1] - low[i - 1];
@@ -1846,12 +1736,10 @@ mod tests {
                         }
                         cm += dm;
 
-                        
                         if cm > 1e-10 {
-                            
                             let vf_component = (dm / cm * 2.0 - 1.0).abs();
                             prop_assert!(
-								vf_component <= 1.0 + 1e-9,  
+								vf_component <= 1.0 + 1e-9,
 								"[{}] Volume force component out of bounds at idx {}: {} (dm={}, cm={})",
 								test_name, i, vf_component, dm, cm
 							);
@@ -1940,16 +1828,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (1, 5, 1, 2, 10, 2),    
-            (2, 10, 2, 5, 20, 5),   
-            (5, 25, 5, 10, 50, 10), 
-            (1, 3, 1, 1, 5, 1),     
-            (10, 20, 2, 20, 40, 4), 
-            (2, 2, 0, 5, 50, 5),    
-            (1, 10, 1, 20, 20, 0),  
+            (1, 5, 1, 2, 10, 2),
+            (2, 10, 2, 5, 20, 5),
+            (5, 25, 5, 10, 50, 10),
+            (1, 3, 1, 1, 5, 1),
+            (10, 20, 2, 20, 40, 4),
+            (2, 2, 0, 5, 50, 5),
+            (1, 10, 1, 20, 20, 0),
         ];
 
         for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in
@@ -1971,7 +1857,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2027,7 +1912,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2053,10 +1938,9 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_kvo_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 512usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -2068,7 +1952,7 @@ mod tests {
             let spread = 0.5 + ((i % 7) as f64) * 0.03;
             let lo = base - spread;
             let hi = base + spread;
-            let frac = ((i % 97) as f64) / 96.0; 
+            let frac = ((i % 97) as f64) / 96.0;
             let cl = lo + (hi - lo) * frac;
             let vol = 1_000.0 + ((i * 37) % 10_000) as f64;
 
@@ -2080,10 +1964,8 @@ mod tests {
 
         let input = KvoInput::from_slices(&high, &low, &close, &volume, KvoParams::default());
 
-        
         let baseline = kvo(&input)?.values;
 
-        
         let mut out = vec![0.0; len];
         kvo_into(&input, &mut out)?;
 
@@ -2185,24 +2067,21 @@ pub fn kvo_batch_py<'py>(
     let c = close.as_slice()?;
     let v = volume.as_slice()?;
 
-    
     let sweep = KvoBatchRange {
         short_period: short_range,
         long_period: long_range,
     };
-    let combos =
-        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
     let arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_flat: &mut [f64] = unsafe { arr.as_slice_mut()? };
 
-    let kern = validate_kernel(kernel, true)?; 
+    let kern = validate_kernel(kernel, true)?;
     let simd = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -2232,7 +2111,6 @@ pub fn kvo_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kvo_cuda_batch_dev")]
@@ -2344,7 +2222,6 @@ pub fn kvo_cuda_many_series_one_param_dev_py<'py>(
     Ok(dev)
 }
 
-// Helper function for batch processing that writes directly into the provided slice
 #[inline(always)]
 fn kvo_batch_inner_into(
     high: &[f64],
@@ -2358,7 +2235,6 @@ fn kvo_batch_inner_into(
 ) -> Result<Vec<KvoParams>, KvoError> {
     let combos = expand_grid(sweep)?;
 
-    // First valid index across all inputs
     let first = high
         .iter()
         .zip(low)
@@ -2374,13 +2250,11 @@ fn kvo_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(KvoError::InvalidRange {
-            start: sweep.short_period.0,
-            end: sweep.long_period.1,
-            step: sweep.short_period.2.max(sweep.long_period.2),
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(KvoError::InvalidRange {
+        start: sweep.short_period.0,
+        end: sweep.long_period.1,
+        step: sweep.short_period.2.max(sweep.long_period.2),
+    })?;
     if out.len() != expected {
         return Err(KvoError::OutputLengthMismatch {
             expected,
@@ -2388,21 +2262,17 @@ fn kvo_batch_inner_into(
         });
     }
 
-    // Initialize warm prefixes as NaN per row without extra copies
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     let warm: Vec<usize> = combos.iter().map(|_| first + 1).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Choose concrete kernel (scalar/avx/avx512) for rows
     let actual = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
-    // Precompute VF once for all rows (shared across parameter sets)
-    // Warmup semantics: indices 0..=first are considered warmup; VF is only consumed from first+1.
     #[inline(always)]
     fn precompute_vf(
         high: &[f64],
@@ -2416,7 +2286,7 @@ fn kvo_batch_inner_into(
         if len <= first + 1 {
             return vf;
         }
-        // Use raw pointers to keep this pass tight
+
         unsafe {
             let hp = high.as_ptr();
             let lp = low.as_ptr();
@@ -2461,7 +2331,6 @@ fn kvo_batch_inner_into(
 
     let vf = precompute_vf(high, low, close, volume, first);
 
-    // Row writer that consumes shared VF and performs only EMA work per parameter set
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let s = combos[row].short_period.unwrap();
         let l = combos[row].long_period.unwrap();
@@ -2469,20 +2338,18 @@ fn kvo_batch_inner_into(
         let short_alpha = 2.0 / (s as f64 + 1.0);
         let long_alpha = 2.0 / (l as f64 + 1.0);
 
-        // Cast row to &mut [f64] once; we only write into it
         let dst = unsafe {
             std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
 
-        // EMA over shared VF stream
         let mut short_ema = 0.0f64;
         let mut long_ema = 0.0f64;
-        // Seed at first+1 to match single-series semantics
+
         if first + 1 < cols {
             let seed = vf[first + 1];
             short_ema = seed;
             long_ema = seed;
-            dst[first + 1] = 0.0; // seed difference = 0.0
+            dst[first + 1] = 0.0;
             for i in (first + 2)..cols {
                 let vfi = vf[i];
                 short_ema += (vfi - short_ema) * short_alpha;
@@ -2491,8 +2358,7 @@ fn kvo_batch_inner_into(
             }
         }
 
-        // Respect kernel selection for API parity (Avx paths currently stubbed)
-        let _ = actual; // keep variable used for readability; selection handled above if needed
+        let _ = actual;
     };
 
     if parallel {
@@ -2519,12 +2385,7 @@ fn kvo_batch_inner_into(
     Ok(combos)
 }
 
-// =============================================================================
-// WASM BINDINGS
-// =============================================================================
-
-/// Helper function for WASM that writes directly to output slice - no allocations
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[inline]
 fn kvo_wasm_into_slice(
     dst: &mut [f64],
@@ -2536,7 +2397,6 @@ fn kvo_wasm_into_slice(
     long_period: usize,
     kern: Kernel,
 ) -> Result<(), KvoError> {
-    // Validate output length
     if dst.len() != high.len()
         || dst.len() != low.len()
         || dst.len() != close.len()
@@ -2548,7 +2408,6 @@ fn kvo_wasm_into_slice(
         });
     }
 
-    // Create input
     let params = KvoParams {
         short_period: Some(short_period),
         long_period: Some(long_period),
@@ -2563,12 +2422,10 @@ fn kvo_wasm_into_slice(
         params,
     };
 
-    // Use existing kvo_compute_into which already handles NaN prefix
     kvo_compute_into(dst, &input, kern)
 }
 
-/// Safe WASM API for KVO calculation
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kvo_js(
     high: &[f64],
@@ -2578,7 +2435,7 @@ pub fn kvo_js(
     short_period: usize,
     long_period: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    let mut output = vec![0.0; high.len()]; // Single allocation
+    let mut output = vec![0.0; high.len()];
 
     kvo_wasm_into_slice(
         &mut output,
@@ -2595,8 +2452,7 @@ pub fn kvo_js(
     Ok(output)
 }
 
-/// Fast WASM API for KVO with aliasing detection
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kvo_into(
     high_ptr: *const f64,
@@ -2623,13 +2479,11 @@ pub fn kvo_into(
         let close = std::slice::from_raw_parts(close_ptr, len);
         let volume = std::slice::from_raw_parts(volume_ptr, len);
 
-        // Check for aliasing - if any input pointer equals output pointer
         if high_ptr == out_ptr
             || low_ptr == out_ptr
             || close_ptr == out_ptr
             || volume_ptr == out_ptr
         {
-            // Need temporary buffer
             let mut temp = vec![0.0; len];
             kvo_wasm_into_slice(
                 &mut temp,
@@ -2645,7 +2499,6 @@ pub fn kvo_into(
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, can write directly
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             kvo_wasm_into_slice(
                 out,
@@ -2664,8 +2517,7 @@ pub fn kvo_into(
     }
 }
 
-/// Allocate memory for WASM operations
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kvo_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2674,8 +2526,7 @@ pub fn kvo_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-/// Free memory allocated by kvo_alloc
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kvo_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2685,26 +2536,23 @@ pub fn kvo_free(ptr: *mut f64, len: usize) {
     }
 }
 
-/// Batch configuration for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KvoBatchConfig {
-    pub short_period_range: (usize, usize, usize), // (start, end, step)
-    pub long_period_range: (usize, usize, usize),  // (start, end, step)
+    pub short_period_range: (usize, usize, usize),
+    pub long_period_range: (usize, usize, usize),
 }
 
-/// Batch output for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KvoBatchJsOutput {
-    pub values: Vec<f64>, // Flattened matrix
+    pub values: Vec<f64>,
     pub combos: Vec<KvoParams>,
     pub rows: usize,
     pub cols: usize,
 }
 
-/// Safe batch API for KVO
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = kvo_batch)]
 pub fn kvo_batch_js(
     high: &[f64],
@@ -2743,8 +2591,7 @@ pub fn kvo_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-/// Fast batch API for KVO with raw pointers
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kvo_batch_into(
     high_ptr: *const f64,
@@ -2788,14 +2635,12 @@ pub fn kvo_batch_into(
             long_period: (long_period_start, long_period_end, long_period_step),
         };
 
-        // Check for aliasing
         let aliased = high_ptr == out_ptr
             || low_ptr == out_ptr
             || close_ptr == out_ptr
             || volume_ptr == out_ptr;
 
         if aliased {
-            // Need temporary buffer for batch results
             let output = kvo_batch_inner(
                 high,
                 low,
@@ -2813,18 +2658,14 @@ pub fn kvo_batch_into(
 
             Ok(output.rows)
         } else {
-            // Calculate number of rows
-            let combos =
-                expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+            let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
             let rows = combos.len();
             let total_size = rows
                 .checked_mul(len)
                 .ok_or_else(|| JsValue::from_str("rows * len overflow"))?;
 
-            // Get output slice
             let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-            // Use direct write helper that avoids allocation
             kvo_batch_inner_into(
                 high,
                 low,

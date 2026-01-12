@@ -1,30 +1,3 @@
-//! # Optimized Trend Tracker Oscillator (OTTO)
-//!
-//! The OTTO indicator combines VIDYA (Variable Index Dynamic Average) with OTT (Optimized Trend Tracker)
-//! logic to create dynamic trend-following bands. It outputs two values: HOTT (upper band) and LOTT (lower band/source).
-//!
-//! ## Parameters
-//! - **ott_period**: OTT period for moving average (default: 2)
-//! - **ott_percent**: OTT optimization coefficient (default: 0.6)
-//! - **fast_vidya_length**: Fast VIDYA length (default: 10)
-//! - **slow_vidya_length**: Slow VIDYA length (default: 25)
-//! - **correcting_constant**: Correcting constant for calculation (default: 100000)
-//! - **ma_type**: Moving average type (default: "VAR" for VIDYA)
-//!
-//! ## Returns
-//! - **`Ok(OttoOutput)`** on success, containing HOTT and LOTT vectors
-//! - **`Err(OttoError)`** on failure
-//!
-//! ## Developer Notes
-//! - SIMD: Disabled for OTTO. Loop-carried recurrences (VIDYA, OTT state) make lane-parallelism ineffective; runtime short-circuits to scalar.
-//! - Scalar path: Optimized single-pass kernel computes CMO(9) and three VIDYA tracks together (slow/2, slow, slow*fast), then LOTT and OTT.
-//! - Batch: Row-specific optimization precomputes the CMO(9) stream once per series and reuses it across rows.
-//! - Streaming: O(1) per update via ring buffers and running sums.
-//!   Decision: SIMD remains disabled; streaming is now constant-time and
-//!   mirrors the scalar path after warmup (slow*fast + 10).
-//! - Memory: Uses standard Vec; MA selection remains dynamic; no unsafe in scalar.
-//! - Decision log: SIMD disabled; CUDA wrapper present for batch and many-series paths; Python CUDA handles expose CAI v3 + DLPack v1.x; numerical outputs match the scalar reference path.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
@@ -36,9 +9,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -48,7 +21,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-
 
 use crate::indicators::cmo::{cmo, CmoData, CmoInput, CmoParams};
 use crate::indicators::moving_averages::dema::{dema, DemaData, DemaInput, DemaParams};
@@ -60,7 +32,6 @@ use crate::indicators::moving_averages::trima::{trima, TrimaData, TrimaInput, Tr
 use crate::indicators::moving_averages::wma::{wma, WmaData, WmaInput, WmaParams};
 use crate::indicators::moving_averages::zlema::{zlema, ZlemaData, ZlemaInput, ZlemaParams};
 use crate::indicators::tsf::{tsf, TsfData, TsfInput, TsfParams};
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -98,7 +69,10 @@ pub struct OttoOutput {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct OttoParams {
     pub ott_period: Option<usize>,
     pub ott_percent: Option<f64>,
@@ -202,14 +176,16 @@ pub enum OttoError {
     #[error("otto: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("otto: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("otto: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("otto: Invalid input: {0}")]
     InvalidInput(String),
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct OttoBuilder {
@@ -326,11 +302,8 @@ impl OttoBuilder {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct OttoStream {
-    
     ott_period: usize,
     ott_percent: f64,
     fast_vidya_length: usize,
@@ -338,24 +311,19 @@ pub struct OttoStream {
     correcting_constant: f64,
     ma_type: String,
 
-    
-    required_len: usize, 
-    idx: usize,          
+    required_len: usize,
+    idx: usize,
 
-    
-    
-    a1_base: f64, 
-    a2_base: f64, 
-    a3_base: f64, 
-    
-    a_ott_base: f64, 
+    a1_base: f64,
+    a2_base: f64,
+    a3_base: f64,
 
-    
-    fark: f64,     
-    scale_up: f64, 
-    scale_dn: f64, 
+    a_ott_base: f64,
 
-    
+    fark: f64,
+    scale_up: f64,
+    scale_dn: f64,
+
     ring_up_in: [f64; 9],
     ring_dn_in: [f64; 9],
     sum_up_in: f64,
@@ -364,16 +332,12 @@ pub struct OttoStream {
     prev_x_in: f64,
     have_prev_in: bool,
 
-    
     v1: f64,
     v2: f64,
     v3: f64,
 
-    
     last_lott: f64,
 
-    
-    
     ring_up_lott: [f64; 9],
     ring_dn_lott: [f64; 9],
     sum_up_lott: f64,
@@ -381,33 +345,28 @@ pub struct OttoStream {
     head_lott: usize,
     prev_lott: f64,
     have_prev_lott: bool,
-    ma_prev: f64, 
+    ma_prev: f64,
 
-    
     ema_alpha: f64,
     ema_init: bool,
 
-    
     dema_alpha: f64,
     dema_ema1: f64,
     dema_ema2: f64,
     dema_init: bool,
 
-    
     sma_sum: f64,
     sma_buf: Vec<f64>,
     sma_head: usize,
     sma_count: usize,
 
-    
     wma_buf: Vec<f64>,
     wma_head: usize,
     wma_count: usize,
-    wma_sumx: f64,  
-    wma_sumwx: f64, 
-    wma_denom: f64, 
+    wma_sumx: f64,
+    wma_sumwx: f64,
+    wma_denom: f64,
 
-    
     tma_p1: usize,
     tma_p2: usize,
     tma_ring1: Vec<f64>,
@@ -419,7 +378,6 @@ pub struct OttoStream {
     tma_sum2: f64,
     tma_count2: usize,
 
-    
     zlema_alpha: f64,
     zlema_prev: f64,
     zlema_init: bool,
@@ -428,7 +386,6 @@ pub struct OttoStream {
     zlema_head: usize,
     zlema_count: usize,
 
-    
     long_stop_prev: f64,
     short_stop_prev: f64,
     dir_prev: i32,
@@ -436,7 +393,6 @@ pub struct OttoStream {
 }
 
 impl OttoStream {
-    /// Create a new streaming OTTO with O(1) per update.
     pub fn try_new(params: OttoParams) -> Result<Self, OttoError> {
         let ott_period = params.ott_period.unwrap_or(2);
         let slow = params.slow_vidya_length.unwrap_or(25);
@@ -452,7 +408,6 @@ impl OttoStream {
             });
         }
 
-        
         let p1 = slow / 2;
         let p2 = slow;
         let p3 = slow.saturating_mul(fast);
@@ -463,26 +418,23 @@ impl OttoStream {
             });
         }
 
-        
         let a1_base = 2.0 / (p1 as f64 + 1.0);
         let a2_base = 2.0 / (p2 as f64 + 1.0);
         let a3_base = 2.0 / (p3 as f64 + 1.0);
         let a_ott_base = 2.0 / (ott_period as f64 + 1.0);
 
-        let required_len = p3 + 10; 
+        let required_len = p3 + 10;
 
-        
         let fark = ott_percent * 0.01;
         let scale_up = (200.0 + ott_percent) / 200.0;
         let scale_dn = (200.0 - ott_percent) / 200.0;
 
-        
         let sma_buf = vec![0.0; ott_period];
         let wma_buf = vec![0.0; ott_period];
         let wma_denom = (ott_period as f64) * (ott_period as f64 + 1.0) * 0.5;
 
-        let tma_p1 = (ott_period + 1) / 2; 
-        let tma_p2 = ott_period / 2 + 1; 
+        let tma_p1 = (ott_period + 1) / 2;
+        let tma_p2 = ott_period / 2 + 1;
         let tma_ring1 = vec![0.0; tma_p1.max(1)];
         let tma_ring2 = vec![0.0; tma_p2.max(1)];
 
@@ -588,23 +540,19 @@ impl OttoStream {
         }
     }
 
-    /// Update with one value; returns (HOTT, LOTT) after warmup, otherwise None.
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
         let i = self.idx;
         self.idx = self.idx.wrapping_add(1);
 
-        
         let x = if value.is_nan() { 0.0 } else { value };
 
-        
         if self.have_prev_in {
             let mut d = value - self.prev_x_in;
             if !value.is_finite() || !self.prev_x_in.is_finite() {
                 d = 0.0;
             }
             if i >= 9 {
-                
                 self.sum_up_in -= self.ring_up_in[self.head_in];
                 self.sum_dn_in -= self.ring_dn_in[self.head_in];
             }
@@ -622,15 +570,12 @@ impl OttoStream {
         }
         self.prev_x_in = value;
 
-        
         let c_abs = if i >= 9 {
             Self::cmo_abs_from_ring(self.sum_up_in, self.sum_dn_in)
         } else {
             0.0
         };
 
-        
-        
         let a1 = self.a1_base * c_abs;
         let a2 = self.a2_base * c_abs;
         let a3 = self.a3_base * c_abs;
@@ -639,15 +584,12 @@ impl OttoStream {
         self.v2 = a2.mul_add(x, (1.0 - a2) * self.v2);
         self.v3 = a3.mul_add(x, (1.0 - a3) * self.v3);
 
-        
         let denom_l = (self.v2 - self.v3) + self.correcting_constant;
         let lott = self.v1 / denom_l;
         self.last_lott = lott;
 
-        
         let ma_opt = match self.ma_type.as_str() {
             "VAR" => {
-                
                 if self.have_prev_lott {
                     let mut d = lott - self.prev_lott;
                     if !lott.is_finite() || !self.prev_lott.is_finite() {
@@ -693,7 +635,6 @@ impl OttoStream {
             }
 
             "WWMA" => {
-                
                 let a = 1.0 / (self.ott_period as f64);
                 if !self.ema_init {
                     self.ma_prev = lott;
@@ -705,7 +646,6 @@ impl OttoStream {
             }
 
             "DEMA" => {
-                
                 let a = self.dema_alpha;
                 if !self.dema_init {
                     self.dema_ema1 = lott;
@@ -719,7 +659,6 @@ impl OttoStream {
             }
 
             "SMA" => {
-                
                 let p = self.ott_period;
                 let _old = if self.sma_count < p {
                     self.sma_count += 1;
@@ -743,9 +682,6 @@ impl OttoStream {
             }
 
             "WMA" => {
-                
-                
-                
                 let p = self.ott_period;
                 let x_old = if self.wma_count < p {
                     self.wma_count += 1;
@@ -753,13 +689,13 @@ impl OttoStream {
                 } else {
                     self.wma_buf[self.wma_head]
                 };
-                
+
                 self.wma_buf[self.wma_head] = lott;
                 self.wma_head += 1;
                 if self.wma_head == p {
                     self.wma_head = 0;
                 }
-                
+
                 self.wma_sumwx = self.wma_sumwx - self.wma_sumx + (p as f64) * lott;
                 self.wma_sumx = self.wma_sumx + lott - x_old;
                 if self.wma_count >= p {
@@ -770,7 +706,6 @@ impl OttoStream {
             }
 
             "TMA" => {
-                
                 let p1 = self.tma_p1;
                 let _o1 = if self.tma_count1 < p1 {
                     self.tma_count1 += 1;
@@ -792,7 +727,6 @@ impl OttoStream {
                     return None;
                 };
 
-                
                 let p2 = self.tma_p2;
                 let _o2 = if self.tma_count2 < p2 {
                     self.tma_count2 += 1;
@@ -816,7 +750,6 @@ impl OttoStream {
             }
 
             "ZLEMA" => {
-                
                 let lag = self.zlema_lag;
                 let x_lag = if self.zlema_count <= lag {
                     0.0
@@ -826,7 +759,6 @@ impl OttoStream {
                 };
                 let x_adj = 2.0 * lott - x_lag;
 
-                
                 if self.zlema_count < self.zlema_ring.len() {
                     self.zlema_count += 1;
                 }
@@ -846,11 +778,9 @@ impl OttoStream {
                 Some(self.zlema_prev)
             }
 
-            
             _ => None,
         };
 
-        
         if self.idx < self.required_len {
             return None;
         }
@@ -860,7 +790,6 @@ impl OttoStream {
             None => return None,
         };
 
-        
         if !self.ott_init {
             self.long_stop_prev = ma * (1.0 - self.fark);
             self.short_stop_prev = ma * (1.0 + self.fark);
@@ -874,7 +803,6 @@ impl OttoStream {
             return Some((hott0, lott));
         }
 
-        
         let ls = ma * (1.0 - self.fark);
         let ss = ma * (1.0 + self.fark);
         let long_stop = if ma > self.long_stop_prev {
@@ -922,7 +850,6 @@ impl OttoStream {
     }
 }
 
-
 fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
     let mut output = vec![f64::NAN; data.len()];
 
@@ -934,7 +861,6 @@ fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
         let mut sum_up = 0.0;
         let mut sum_down = 0.0;
 
-        
         for j in 1..=period {
             let idx = i - period + j;
             if idx > 0 {
@@ -958,7 +884,6 @@ fn cmo_sum_based(data: &[f64], period: usize) -> Vec<f64> {
     output
 }
 
-
 fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if data.is_empty() {
         return Err(OttoError::EmptyInputData);
@@ -972,15 +897,12 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     }
 
     let alpha = 2.0 / (period as f64 + 1.0);
-    let mut output = vec![f64::NAN; data.len()]; 
+    let mut output = vec![f64::NAN; data.len()];
 
-    
     let cmo_values = cmo_sum_based(data, 9);
 
-    
     let mut var_prev = 0.0;
 
-    
     for i in 0..data.len() {
         let current_value = if data[i].is_nan() { 0.0 } else { data[i] };
         let current_cmo = if cmo_values[i].is_nan() {
@@ -990,7 +912,6 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
         };
 
         if i == 0 {
-            
             let abs_cmo = current_cmo.abs();
             let adaptive_alpha = alpha * abs_cmo;
             var_prev = adaptive_alpha * current_value + (1.0 - adaptive_alpha) * 0.0;
@@ -1006,7 +927,6 @@ fn vidya(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     Ok(output)
 }
 
-
 fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if period <= 0 || period > data.len() {
         return Err(OttoError::InvalidPeriod {
@@ -1015,18 +935,15 @@ fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
         });
     }
 
-    
-    let first_period = (period + 1) / 2; 
-    let second_period = period / 2 + 1; 
+    let first_period = (period + 1) / 2;
+    let second_period = period / 2 + 1;
 
-    
     let params1 = SmaParams {
         period: Some(first_period),
     };
     let input1 = SmaInput::from_slice(data, params1);
     let sma1 = sma(&input1).map_err(|e| OttoError::MaError(e.to_string()))?;
 
-    
     let params2 = SmaParams {
         period: Some(second_period),
     };
@@ -1035,7 +952,6 @@ fn tma_custom(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
 
     Ok(sma2.values)
 }
-
 
 fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     if data.is_empty() {
@@ -1052,10 +968,8 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
     let alpha = 1.0 / period as f64;
     let mut output = vec![f64::NAN; data.len()];
 
-    
     let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
 
-    
     let mut sum = 0.0;
     let mut count = 0;
     for i in first_valid..first_valid.saturating_add(period).min(data.len()) {
@@ -1069,7 +983,6 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
         let mut wwma_prev = sum / count as f64;
         output[first_valid + period - 1] = wwma_prev;
 
-        
         for i in first_valid + period..data.len() {
             if !data[i].is_nan() {
                 wwma_prev = alpha * data[i] + (1.0 - alpha) * wwma_prev;
@@ -1082,7 +995,6 @@ fn wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttoError> {
 
     Ok(output)
 }
-
 
 fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, OttoError> {
     match ma_type {
@@ -1113,10 +1025,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
                 .map(|o| o.values)
                 .map_err(|e| OttoError::MaError(e.to_string()))
         }
-        "WWMA" => {
-            
-            wwma(data, period)
-        }
+        "WWMA" => wwma(data, period),
         "DEMA" => {
             let params = DemaParams {
                 period: Some(period),
@@ -1126,10 +1035,7 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
                 .map(|o| o.values)
                 .map_err(|e| OttoError::MaError(e.to_string()))
         }
-        "TMA" => {
-            
-            tma_custom(data, period)
-        }
+        "TMA" => tma_custom(data, period),
         "VAR" => vidya(data, period),
         "ZLEMA" => {
             let params = ZlemaParams {
@@ -1141,7 +1047,6 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
                 .map_err(|e| OttoError::MaError(e.to_string()))
         }
         "TSF" => {
-            
             let params = TsfParams {
                 period: Some(period),
             };
@@ -1164,8 +1069,6 @@ fn calculate_ma(data: &[f64], period: usize, ma_type: &str) -> Result<Vec<f64>, 
         }),
     }
 }
-
-
 
 #[inline]
 fn resolve_single_kernel(k: Kernel) -> Kernel {
@@ -1214,10 +1117,9 @@ fn otto_prepare<'a>(
     let ott_percent = input.get_ott_percent();
     let ma_type = input.get_ma_type().to_string();
 
-    // Compute minimum needed data - vidya processes from the beginning
     let slow = input.get_slow_vidya_length();
     let fast = input.get_fast_vidya_length();
-    // We need at least slow_vidya * fast_vidya for the third vidya calculation
+
     let needed = (slow * fast).max(10);
     let valid = data.len() - first;
     if valid < needed {
@@ -1242,14 +1144,12 @@ pub fn otto_into_slices(
         return Err(OttoError::OutputLengthMismatch { expected, got });
     }
 
-    // Periods for VIDYA tracks (match original logic)
     let slow = input.get_slow_vidya_length();
     let fast = input.get_fast_vidya_length();
     let p1 = slow / 2;
     let p2 = slow;
     let p3 = slow.saturating_mul(fast);
 
-    // Preserve error semantics for zero-length VIDYA periods
     if p1 == 0 || p2 == 0 || p3 == 0 {
         return Err(OttoError::InvalidPeriod {
             period: 0,
@@ -1259,12 +1159,10 @@ pub fn otto_into_slices(
 
     let coco = input.get_correcting_constant();
 
-    // Base VIDYA alphas
     let a1_base = 2.0 / (p1 as f64 + 1.0);
     let a2_base = 2.0 / (p2 as f64 + 1.0);
     let a3_base = 2.0 / (p3 as f64 + 1.0);
 
-    // CMO sliding window (period fixed at 9)
     const CMO_P: usize = 9;
     let mut ring_up = [0.0f64; CMO_P];
     let mut ring_dn = [0.0f64; CMO_P];
@@ -1272,12 +1170,10 @@ pub fn otto_into_slices(
     let mut sum_dn = 0.0f64;
     let mut head = 0usize;
 
-    // VIDYA state
     let mut v1 = 0.0f64;
     let mut v2 = 0.0f64;
     let mut v3 = 0.0f64;
 
-    // prev sample for diff
     let mut prev_x = if n > 0 { data[0] } else { f64::NAN };
 
     for i in 0..n {
@@ -1320,7 +1216,6 @@ pub fn otto_into_slices(
             0.0
         };
 
-        // Adaptive alphas and VIDYA updates (preserve arithmetic layout)
         let a1 = a1_base * cmo_abs;
         let a2 = a2_base * cmo_abs;
         let a3 = a3_base * cmo_abs;
@@ -1328,18 +1223,15 @@ pub fn otto_into_slices(
         v2 = a2 * val + (1.0 - a2) * v2;
         v3 = a3 * val + (1.0 - a3) * v3;
 
-        // LOTT for this bar
         let denom_l = (v2 - v3) + coco;
         lott_dst[i] = v1 / denom_l;
     }
 
-    // Two paths for MA(LOTT): fast integrated VIDYA (default path "VAR"), or generic MA via selector
     let fark = ott_percent * 0.01;
     let scale_up = (200.0 + ott_percent) / 200.0;
     let scale_dn = (200.0 - ott_percent) / 200.0;
 
     if ma_type == "VAR" {
-        // Integrated MA path: VIDYA(LOTT) with CMO(9) computed on LOTT using a sliding window
         const CMO_P2: usize = 9;
         let mut ring_up2 = [0.0f64; CMO_P2];
         let mut ring_dn2 = [0.0f64; CMO_P2];
@@ -1348,17 +1240,14 @@ pub fn otto_into_slices(
         let mut head2 = 0usize;
         let mut prev_lott = lott_dst[0];
 
-        // Base alpha for VIDYA on LOTT
         let a_base = 2.0 / (ott_p as f64 + 1.0);
         let mut ma_prev = 0.0f64;
 
-        // OTT state machine
         let mut long_stop_prev = f64::NAN;
         let mut short_stop_prev = f64::NAN;
         let mut dir_prev: i32 = 1;
 
         for i in 0..n {
-            // CMO on LOTT diffs
             if i > 0 {
                 let x = lott_dst[i];
                 let mut d = x - prev_lott;
@@ -1392,12 +1281,10 @@ pub fn otto_into_slices(
                 0.0
             };
 
-            // VIDYA(LOTT)
             let a = a_base * c_abs;
             let ma = a * lott_dst[i] + (1.0 - a) * ma_prev;
             ma_prev = ma;
 
-            // OTT update (start at i=0)
             if i == 0 {
                 long_stop_prev = ma * (1.0 - fark);
                 short_stop_prev = ma * (1.0 + fark);
@@ -1439,10 +1326,8 @@ pub fn otto_into_slices(
             }
         }
     } else {
-        // Generic MA path using selector, then OTT second pass
         let mavg = calculate_ma(lott_dst, ott_p, &ma_type)?;
 
-        // OTT state machine
         let mut long_stop_prev = f64::NAN;
         let mut short_stop_prev = f64::NAN;
         let mut dir_prev: i32 = 1;
@@ -1502,7 +1387,6 @@ pub fn otto_into_slices(
     Ok(())
 }
 
-// Main OTTO calculation with kernel support
 pub fn otto_with_kernel(input: &OttoInput, kern: Kernel) -> Result<OttoOutput, OttoError> {
     let chosen = resolve_single_kernel(kern);
     let data = input.as_ref();
@@ -1510,7 +1394,6 @@ pub fn otto_with_kernel(input: &OttoInput, kern: Kernel) -> Result<OttoOutput, O
         return Err(OttoError::EmptyInputData);
     }
 
-    // Allocate uninitialized outputs; kernel writes all indices deterministically
     let mut hott = alloc_with_nan_prefix(data.len(), 0);
     let mut lott = alloc_with_nan_prefix(data.len(), 0);
 
@@ -1523,12 +1406,7 @@ pub fn otto(input: &OttoInput) -> Result<OttoOutput, OttoError> {
     otto_with_kernel(input, Kernel::Auto)
 }
 
-/// Write OTTO outputs (HOTT and LOTT) into caller-provided buffers without allocating.
-///
-/// - Preserves the indicator's existing NaN warmup behavior for HOTT when using non-"VAR" MA types.
-/// - `hott_out.len()` and `lott_out.len()` must equal the input length; otherwise an `InvalidPeriod` error is returned.
-/// - Equivalent to `otto_with_kernel(input, Kernel::Auto)` but writes in-place.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn otto_into(
     input: &OttoInput,
@@ -1537,8 +1415,6 @@ pub fn otto_into(
 ) -> Result<(), OttoError> {
     otto_into_slices(hott_out, lott_out, input, Kernel::Auto)
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct OttoBatchRange {
@@ -1753,7 +1629,6 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Result<Vec<OttoParams>, OttoError> {
     Ok(v)
 }
 
-
 #[inline]
 fn cmo_abs9_stream(data: &[f64]) -> Vec<f64> {
     const CMO_P: usize = 9;
@@ -1823,17 +1698,14 @@ pub fn otto_batch_with_kernel(
         .checked_mul(cols)
         .ok_or_else(|| OttoError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let mut hott = vec![f64::NAN; total];
     let mut lott = vec![f64::NAN; total];
 
-    
     let cmo_abs = cmo_abs9_stream(data);
 
-    
     for (row, prm) in combos.iter().enumerate() {
         let input = OttoInput::from_slice(data, prm.clone());
-        
+
         let (_d, _first, ott_p, _needed, ott_percent, ma_type) = otto_prepare(&input)?;
 
         let n = data.len();
@@ -1857,7 +1729,6 @@ pub fn otto_batch_with_kernel(
         let row_l = &mut lott[row * cols..(row + 1) * cols];
         let row_h = &mut hott[row * cols..(row + 1) * cols];
 
-        
         let mut v1 = 0.0f64;
         let mut v2 = 0.0f64;
         let mut v3 = 0.0f64;
@@ -1874,7 +1745,6 @@ pub fn otto_batch_with_kernel(
             row_l[i] = v1 / ((v2 - v3) + coco);
         }
 
-        
         let mavg = calculate_ma(row_l, ott_p, &ma_type)?;
         let fark = ott_percent * 0.01;
         let scale_up = (200.0 + ott_percent) / 200.0;
@@ -1946,8 +1816,6 @@ pub fn otto_batch_with_kernel(
     })
 }
 
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "otto")]
 #[pyo3(signature = (data, ott_period, ott_percent, fast_vidya_length, slow_vidya_length, correcting_constant, ma_type, kernel=None))]
@@ -1980,7 +1848,6 @@ pub fn otto_py<'py>(
     };
     let input = OttoInput::from_slice(slice_in, params);
 
-    // Compute with threads released; move Vecs into NumPy without copy.
     let out = py
         .allow_threads(|| otto_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2004,7 +1871,7 @@ pub fn otto_batch_py<'py>(
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // parse for errors
+    let kern = validate_kernel(kernel, true)?;
     let sweep = OttoBatchRange {
         ott_period: ott_period_range,
         ott_percent: ott_percent_range,
@@ -2098,7 +1965,6 @@ impl OttoStreamPy {
     pub fn update(&mut self, value: f64) -> PyResult<(Option<f64>, Option<f64>)> {
         self.buffer.push(value);
 
-        // Need extra values for CMO calculation inside VIDYA
         let required_len = self.slow_vidya_length * self.fast_vidya_length + 10;
         if self.buffer.len() < required_len {
             return Ok((None, None));
@@ -2129,17 +1995,15 @@ impl OttoStreamPy {
     }
 }
 
-// ============= WASM BINDINGS =============
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct OttoResult {
-    pub values: Vec<f64>, // [hott..., lott...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // data length
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn otto_js(
     data: &[f64],
@@ -2176,7 +2040,7 @@ pub fn otto_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct OttoBatchConfig {
     pub ott_period: (usize, usize, usize),
@@ -2187,17 +2051,17 @@ pub struct OttoBatchConfig {
     pub ma_types: Vec<String>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct OttoBatchJsOutput {
-    pub values: Vec<f64>, // row-major: for each combo: HOTT row, then LOTT row
+    pub values: Vec<f64>,
     pub combos: Vec<OttoParams>,
-    pub rows: usize,           // combos.len() * 2
-    pub cols: usize,           // data length
-    pub rows_per_combo: usize, // = 2
+    pub rows: usize,
+    pub cols: usize,
+    pub rows_per_combo: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = otto_batch)]
 pub fn otto_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: OttoBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2233,7 +2097,7 @@ pub fn otto_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn otto_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2242,7 +2106,7 @@ pub fn otto_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn otto_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2250,7 +2114,7 @@ pub fn otto_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn otto_into(
     in_ptr: *const f64,
@@ -2272,7 +2136,6 @@ pub fn otto_into(
         let mut hott_tmp;
         let mut lott_tmp;
 
-        // choose output slices; if any alias, compute into temps then copy once
         let alias_h = in_ptr == hott_ptr || hott_ptr == lott_ptr;
         let alias_l = in_ptr == lott_ptr || hott_ptr == lott_ptr;
 
@@ -2308,7 +2171,6 @@ pub fn otto_into(
     }
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "otto_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, ott_period_range, ott_percent_range=(0.6,0.6,0.0), fast_vidya_range=(10,10,0), slow_vidya_range=(25,25,0), correcting_constant_range=(100000.0,100000.0,0.0), ma_types=vec!["VAR".to_string()], device_id=0))]
@@ -2388,21 +2250,12 @@ pub fn otto_cuda_many_series_one_param_dev_py(
     Ok((hott_dev, lott_dev))
 }
 
-// ============= TESTS =============
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
 
-    /// Generate synthetic test data pattern used in PineScript tests
-    /// Pattern: 0.612 - (i * 0.00001) for i from 0 to n-1
-    /// Note: The PineScript reference values were calculated with this pattern:
-    /// HOTT: [0.61437486, 0.61421295, 0.61409778, 0.61404352, 0.61388393]
-    /// LOTT: [0.61221457, 0.61219084, 0.61197922, 0.61179661, 0.61142377]
-    /// However, our implementation produces different values due to differences
-    /// in how the VIDYA and OTT calculations handle the correcting constant.
     fn generate_otto_test_data(n: usize) -> Vec<f64> {
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
@@ -2418,12 +2271,12 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let params = OttoParams {
-            ott_period: None, // Use default
+            ott_period: None,
             ott_percent: Some(0.8),
-            fast_vidya_length: None, // Use default
+            fast_vidya_length: None,
             slow_vidya_length: Some(20),
-            correcting_constant: None, // Use default
-            ma_type: None,             // Use default
+            correcting_constant: None,
+            ma_type: None,
         };
 
         let input = OttoInput::from_candles(&candles, "close", params);
@@ -2438,7 +2291,6 @@ mod tests {
     fn check_otto_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Use CSV data like ALMA does
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -2446,8 +2298,6 @@ mod tests {
         let input = OttoInput::from_candles(&candles, "close", params);
         let result = otto_with_kernel(&input, kernel)?;
 
-        // Reference values for last 5 bars with CSV data and default params
-        // These were obtained from running the scalar kernel implementation
         let expected_hott = [
             0.6137310801679211,
             0.6136758137211143,
@@ -2463,7 +2313,6 @@ mod tests {
             0.6110393343841534,
         ];
 
-        // Check the last 5 values match expected
         let start = result.hott.len().saturating_sub(5);
         for (i, &expected) in expected_hott.iter().enumerate() {
             let actual = result.hott[start + i];
@@ -2543,7 +2392,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Use a small slice of the data
         let small_data = &candles.close[0..3];
 
         let params = OttoParams {
@@ -2572,7 +2420,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Need at least 15 values for CMO inside VIDYA
         let small_data = &candles.close[0..15];
 
         let params = OttoParams {
@@ -2587,7 +2434,6 @@ mod tests {
         let input = OttoInput::from_slice(small_data, params);
         let result = otto_with_kernel(&input, kernel);
 
-        // Should succeed with minimal valid parameters
         assert!(
             result.is_ok(),
             "[{}] Should handle very small dataset: {:?}",
@@ -2682,7 +2528,6 @@ mod tests {
         let result1 = otto_with_kernel(&input, kernel)?;
         let result2 = otto_with_kernel(&input, kernel)?;
 
-        // Results should be identical
         for i in 0..result1.hott.len() {
             if result1.hott[i].is_finite() && result2.hott[i].is_finite() {
                 assert!(
@@ -2712,7 +2557,7 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let mut data = candles.close.clone();
-        // Insert some NaN values
+
         data[100] = f64::NAN;
         data[150] = f64::NAN;
         data[200] = f64::NAN;
@@ -2724,7 +2569,6 @@ mod tests {
         assert_eq!(result.hott.len(), data.len());
         assert_eq!(result.lott.len(), data.len());
 
-        // Should still produce some valid values
         let valid_count = result
             .hott
             .iter()
@@ -2748,11 +2592,9 @@ mod tests {
 
         let params = OttoParams::default();
 
-        // Batch calculation
         let input = OttoInput::from_candles(&candles, "close", params.clone());
         let batch_output = otto_with_kernel(&input, kernel)?;
 
-        // Streaming calculation
         let mut stream = OttoStream::try_new(params)?;
         let mut stream_hott = Vec::new();
         let mut stream_lott = Vec::new();
@@ -2770,14 +2612,11 @@ mod tests {
             }
         }
 
-        // Compare last few values (streaming starts producing after warmup)
-        // Note: Due to Pine-style initialization in batch vs rolling window in streaming,
-        // differences are expected, especially with real market data
         let start = stream_hott.len() - 10;
         for i in start..stream_hott.len() {
             if stream_hott[i].is_finite() && batch_output.hott[i].is_finite() {
                 let diff = (stream_hott[i] - batch_output.hott[i]).abs();
-                // Higher tolerance needed for real market data due to initialization differences
+
                 assert!(
                     diff < 0.2,
                     "[{}] Stream HOTT mismatch at {}: {} vs {} (diff: {})",
@@ -2815,7 +2654,6 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate all test variants
     macro_rules! generate_all_otto_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2863,7 +2701,6 @@ mod tests {
         check_otto_builder
     );
 
-    // Batch tests
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2874,7 +2711,6 @@ mod tests {
             .kernel(kernel)
             .apply_candles(&candles, "close")?;
 
-        // Find the default params in the output
         let def = OttoParams::default();
         let default_idx = output
             .combos
@@ -2895,7 +2731,6 @@ mod tests {
         assert_eq!(hott_row.len(), candles.close.len());
         assert_eq!(lott_row.len(), candles.close.len());
 
-        // Verify some values are not NaN after warmup
         let non_nan_hott = hott_row.iter().filter(|&&x| !x.is_nan()).count();
         let non_nan_lott = lott_row.iter().filter(|&&x| !x.is_nan()).count();
         assert!(
@@ -2928,7 +2763,7 @@ mod tests {
             .ma_types(vec!["VAR".into(), "EMA".into()])
             .apply_candles(&candles, "close")?;
 
-        let expected_combos = 3 * 3 * 3 * 3 * 1 * 2; // 3 periods * 3 percents * 3 fast * 3 slow * 1 constant * 2 MA types
+        let expected_combos = 3 * 3 * 3 * 3 * 1 * 2;
         assert_eq!(
             output.combos.len(),
             expected_combos,
@@ -3027,14 +2862,12 @@ mod tests {
     #[cfg(debug_assertions)]
     gen_batch_tests!(check_no_poison_batch);
 
-    // Add poison check for single operations
     #[cfg(debug_assertions)]
     generate_all_otto_tests!(check_no_poison_single);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_otto_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare synthetic input with enough length to satisfy OTTO's warmup
         let n = 512usize;
         let data: Vec<f64> = (0..n)
             .map(|i| ((i as f64) * 0.013).sin() * 0.5 + 1.0)
@@ -3042,14 +2875,11 @@ mod tests {
 
         let input = super::OttoInput::from_slice(&data, super::OttoParams::default());
 
-        
         let baseline = super::otto(&input)?;
 
-        
         let mut hott_out = vec![0.0f64; n];
         let mut lott_out = vec![0.0f64; n];
 
-        
         super::otto_into(&input, &mut hott_out, &mut lott_out)?;
 
         assert_eq!(baseline.hott.len(), n);
@@ -3057,7 +2887,6 @@ mod tests {
         assert_eq!(hott_out.len(), n);
         assert_eq!(lott_out.len(), n);
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

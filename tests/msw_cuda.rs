@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::msw::{
     msw_batch_with_kernel, msw_with_kernel, MswBatchRange, MswInput, MswParams,
 };
@@ -56,11 +54,10 @@ fn msw_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
 
-    
-    let tol = 1.5e-3; 
+    let tol = 1.5e-3;
     for (r, prm) in combos.iter().enumerate() {
         let base = r * cpu.cols;
-        
+
         let g_sine = &out[(2 * r) * cpu.cols..(2 * r + 1) * cpu.cols];
         let g_lead = &out[(2 * r + 1) * cpu.cols..(2 * r + 2) * cpu.cols];
         let c_sine = &cpu.sine[base..base + cpu.cols];
@@ -94,19 +91,17 @@ fn msw_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[msw_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            
             let x = (t as f64) + (s as f64) * 0.25;
             price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 21usize;
 
-    
     let mut cpu_sine_tm = vec![f64::NAN; cols * rows];
     let mut cpu_lead_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -124,7 +119,6 @@ fn msw_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaMsw::new(0).expect("CudaMsw::new");
     let dev = cuda

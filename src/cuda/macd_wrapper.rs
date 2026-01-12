@@ -1,19 +1,8 @@
-//! CUDA wrapper for MACD (EMA fast path)
-//!
-//! Category: Recurrence/IIR – per-parameter time scan with SMA seeding then EMA.
-//! We currently support `ma_type = "ema"` to match the scalar classic path.
-//! Other MA types can be layered via the Cuda MA selector in the future.
-//!
-//! Parity items mirrored from ALMA/CWMA:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/macd_kernel.ptx"))
-//! - Stream NON_BLOCKING
-//! - JIT opts DetermineTargetFromContext + OptLevel O2 (with graceful fallbacks)
-//! - VRAM check using mem_get_info with ~64MB headroom and grid.x<=65_535
-//! - Bench profile hooks
-
 #![cfg(feature = "cuda")]
 
-use crate::indicators::macd::{expand_grid as expand_grid_host, MacdBatchRange, MacdError, MacdParams};
+use crate::indicators::macd::{
+    expand_grid as expand_grid_host, MacdBatchRange, MacdError, MacdParams,
+};
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
 use cust::error::CudaError;
@@ -31,7 +20,11 @@ pub enum CudaMacdError {
     #[error("CUDA error: {0}")]
     Cuda(#[from] CudaError),
     #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -39,14 +32,20 @@ pub enum CudaMacdError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle for MACD CUDA outputs.
 pub struct DeviceArrayF32Macd {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -56,9 +55,13 @@ pub struct DeviceArrayF32Macd {
 }
 impl DeviceArrayF32Macd {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -95,10 +98,8 @@ impl CudaMacd {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/macd_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -141,12 +142,17 @@ impl CudaMacd {
         Ok(())
     }
 
+    #[inline]
+    pub fn set_policy(&mut self, p: CudaMacdPolicy) {
+        self.policy = p;
+    }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaMacdPolicy) { self.policy = p; }
-
-    #[inline]
-    fn launch_1d(&self, total_items: usize, user_block_x: Option<u32>) -> (GridSize, BlockSize, u32) {
+    fn launch_1d(
+        &self,
+        total_items: usize,
+        user_block_x: Option<u32>,
+    ) -> (GridSize, BlockSize, u32) {
         let block_x = user_block_x.unwrap_or(256);
         let blocks_needed = ((total_items as u32 + block_x - 1) / block_x).max(1);
         let max_blocks = self.sm_count.max(1).saturating_mul(6);
@@ -154,7 +160,6 @@ impl CudaMacd {
         (((grid_x, 1, 1)).into(), ((block_x, 1, 1)).into(), block_x)
     }
 
-    
     pub fn macd_batch_dev(
         &self,
         data_f32: &[f32],
@@ -169,7 +174,6 @@ impl CudaMacd {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaMacdError::InvalidInput("all values are NaN".into()))?;
 
-        
         let ma0 = &sweep.ma_type.0;
         if !ma0.eq_ignore_ascii_case("ema") {
             return Err(CudaMacdError::InvalidInput(format!(
@@ -184,7 +188,6 @@ impl CudaMacd {
             return Err(CudaMacdError::InvalidInput("no parameter combos".into()));
         }
 
-        
         let rows = combos.len();
         let mut fasts: Vec<i32> = Vec::with_capacity(rows);
         let mut slows: Vec<i32> = Vec::with_capacity(rows);
@@ -208,7 +211,6 @@ impl CudaMacd {
             signals.push(g);
         }
 
-        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let bytes_prices = len
@@ -231,19 +233,14 @@ impl CudaMacd {
         let headroom = 64usize * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_f = DeviceBuffer::from_slice(&fasts)?;
         let d_s = DeviceBuffer::from_slice(&slows)?;
         let d_g = DeviceBuffer::from_slice(&signals)?;
 
-        
-        let mut d_macd: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems_out) }?;
-        let mut d_sig: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems_out) }?;
-        let mut d_hist: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems_out) }?;
+        let mut d_macd: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -304,11 +301,11 @@ impl CudaMacd {
             return Ok(());
         }
 
-        
-        let func = self
-            .module
-            .get_function("macd_batch_f32")
-            .map_err(|_| CudaMacdError::MissingKernelSymbol { name: "macd_batch_f32" })?;
+        let func = self.module.get_function("macd_batch_f32").map_err(|_| {
+            CudaMacdError::MissingKernelSymbol {
+                name: "macd_batch_f32",
+            }
+        })?;
         let mut block_x: u32 = self.policy.batch_block_x.unwrap_or(256);
         block_x = block_x.max(32);
         block_x -= block_x % 32;
@@ -376,7 +373,6 @@ impl CudaMacd {
         Ok(())
     }
 
-    
     pub fn macd_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -410,7 +406,6 @@ impl CudaMacd {
             return Err(CudaMacdError::InvalidInput("non-positive periods".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -421,8 +416,8 @@ impl CudaMacd {
                     break;
                 }
             }
-            let fv = fv
-                .ok_or_else(|| CudaMacdError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaMacdError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < slow {
                 return Err(CudaMacdError::InvalidInput(format!(
                     "series {} lacks data: needed >= {}, valid = {}",
@@ -434,7 +429,6 @@ impl CudaMacd {
             first_valids[s] = fv as i32;
         }
 
-        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let bytes_data = expected
@@ -456,28 +450,24 @@ impl CudaMacd {
         let headroom = 64usize * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_macd: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(expected) }?;
-        let mut d_sig: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(expected) }?;
-        let mut d_hist: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(expected) }?;
+        let mut d_macd: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
+        let mut d_sig: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
+        let mut d_hist: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
 
         let func = self
             .module
             .get_function("macd_many_series_one_param_f32")
-            .map_err(|_| {
-                CudaMacdError::MissingKernelSymbol {
-                    name: "macd_many_series_one_param_f32",
-                }
+            .map_err(|_| CudaMacdError::MissingKernelSymbol {
+                name: "macd_many_series_one_param_f32",
             })?;
         let (grid, block, block_x_used) = self.launch_1d(cols, self.policy.many_block_x);
         unsafe {
             (*(self as *const _ as *mut CudaMacd)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x: block_x_used });
+                Some(ManySeriesKernelSelected::OneD {
+                    block_x: block_x_used,
+                });
         }
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -578,7 +568,9 @@ impl CudaMacd {
         let (grid, block, block_x_used) = self.launch_1d(cols, self.policy.many_block_x);
         unsafe {
             (*(self as *const _ as *mut CudaMacd)).last_many =
-                Some(ManySeriesKernelSelected::OneD { block_x: block_x_used });
+                Some(ManySeriesKernelSelected::OneD {
+                    block_x: block_x_used,
+                });
         }
 
         unsafe {
@@ -611,7 +603,6 @@ impl CudaMacd {
     }
 }
 
-/// MACD triple outputs (macd, signal, hist) retained on device.
 pub struct DeviceMacdTriplet {
     pub macd: DeviceArrayF32Macd,
     pub signal: DeviceArrayF32Macd,
@@ -660,7 +651,6 @@ impl CudaMacd {
         }
     }
 }
-
 
 pub mod benches {
     use super::*;

@@ -1,17 +1,3 @@
-//! CUDA wrapper for RSMK (Relative Strength Mark).
-//!
-//! Mirrors ALMA/CWMA conventions:
-//! - PTX loaded via include_str!(concat!(env!("OUT_DIR"), "/rsmk_kernel.ptx"))
-//! - Stream NON_BLOCKING; JIT options: DetermineTargetFromContext + O2 (fallbacks applied)
-//! - VRAM checks with ~64MB headroom
-//! - Public device entry points:
-//!     - `rsmk_batch_dev(&[f32], &[f32], &RsmkBatchRange)` -> (indicator, signal, combos)
-//!     - `rsmk_many_series_one_param_time_major_dev(&[f32], &[f32], cols, rows, &RsmkParams)` -> (indicator, signal)
-//!
-//! Batch implementation reuses shared precompute across rows:
-//! - For each unique lookback, compute momentum once on device (rsmk_momentum_f32)
-//! - Apply EMA/EMA path per-row via a light single-row kernel
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -37,15 +23,24 @@ pub enum CudaRsmkError {
     #[error("rsmk cuda: unsupported: {0}")]
     Unsupported(String),
     #[error("rsmk cuda: out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("rsmk cuda: missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("rsmk cuda: invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "rsmk cuda: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("rsmk cuda: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("rsmk cuda: device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("rsmk cuda: not implemented")]
@@ -141,14 +136,12 @@ impl CudaRsmk {
         Ok(())
     }
 
-    
     fn first_valid(main: &[f32], compare: &[f32]) -> Option<usize> {
         main.iter()
             .zip(compare.iter())
             .position(|(&m, &c)| m.is_finite() && c.is_finite() && c != 0.0)
     }
 
-    /// Batch: one series × many params (EMA/EMA path as in scalar batch expand_grid)
     pub fn rsmk_batch_dev(
         &self,
         main_f32: &[f32],
@@ -165,7 +158,6 @@ impl CudaRsmk {
         let first_valid = Self::first_valid(main_f32, compare_f32)
             .ok_or_else(|| CudaRsmkError::InvalidInput("all values NaN or compare==0".into()))?;
 
-        
         fn axis(a: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = a;
             if step == 0 || start == end {
@@ -220,7 +212,6 @@ impl CudaRsmk {
             ));
         }
 
-        
         let rows = combos.len();
         let uniq_looks: BTreeSet<usize> = combos.iter().map(|p| p.lookback.unwrap()).collect();
         let el = std::mem::size_of::<f32>();
@@ -244,23 +235,17 @@ impl CudaRsmk {
             .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        
         let d_main = DeviceBuffer::from_slice(main_f32)?;
         let d_comp = DeviceBuffer::from_slice(compare_f32)?;
 
-        
-        let mut d_indicator: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(rows_len) }?;
-        let mut d_signal: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(rows_len) }?;
+        let mut d_indicator: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
+        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows_len) }?;
 
-        
-        let mut k_mom: Function = self
-            .module
-            .get_function("rsmk_momentum_f32")
-            .map_err(|_| CudaRsmkError::MissingKernelSymbol {
+        let mut k_mom: Function = self.module.get_function("rsmk_momentum_f32").map_err(|_| {
+            CudaRsmkError::MissingKernelSymbol {
                 name: "rsmk_momentum_f32",
-            })?;
+            }
+        })?;
         let mut k_apply_row: Function = self
             .module
             .get_function("rsmk_apply_mom_single_row_ema_ema_f32")
@@ -268,11 +253,9 @@ impl CudaRsmk {
                 name: "rsmk_apply_mom_single_row_ema_ema_f32",
             })?;
 
-        
         let mut mom_dev: HashMap<usize, DeviceBuffer<f32>> = HashMap::new();
         for &lb in &uniq_looks {
-            let mut d_m: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
+            let mut d_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
             unsafe {
                 let mut main_ptr = d_main.as_device_ptr().as_raw();
                 let mut comp_ptr = d_comp.as_device_ptr().as_raw();
@@ -299,7 +282,6 @@ impl CudaRsmk {
             mom_dev.insert(lb, d_m);
         }
 
-        
         for (row, prm) in combos.iter().enumerate() {
             let lb = prm.lookback.unwrap();
             let period = prm.period.unwrap();
@@ -312,7 +294,7 @@ impl CudaRsmk {
                 let mut fv_m_i = first_mom as i32;
                 let mut p_i = period as i32;
                 let mut s_i = sig as i32;
-                
+
                 let mut ind_ptr = unsafe {
                     d_indicator
                         .as_device_ptr()
@@ -363,7 +345,6 @@ impl CudaRsmk {
         ))
     }
 
-    /// Many-series × one-param (time-major), EMA/EMA path.
     pub fn rsmk_many_series_one_param_time_major_dev(
         &self,
         main_tm_f32: &[f32],
@@ -383,7 +364,7 @@ impl CudaRsmk {
         let lb = params.lookback.unwrap_or(90);
         let p = params.period.unwrap_or(3);
         let s = params.signal_period.unwrap_or(20);
-        
+
         if !params
             .matype
             .as_deref()
@@ -400,7 +381,6 @@ impl CudaRsmk {
             ));
         }
 
-        
         let mut firsts = vec![0i32; cols];
         for sidx in 0..cols {
             let mut fv = -1i32;
@@ -420,7 +400,6 @@ impl CudaRsmk {
             firsts[sidx] = fv;
         }
 
-        
         let el_f32 = std::mem::size_of::<f32>();
         let el_i32 = std::mem::size_of::<i32>();
         let series_elems = rows
@@ -441,7 +420,6 @@ impl CudaRsmk {
             .ok_or_else(|| CudaRsmkError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        
         let d_main = DeviceBuffer::from_slice(main_tm_f32)?;
         let d_comp = DeviceBuffer::from_slice(compare_tm_f32)?;
         let h_firsts = LockedBuffer::from_slice(&firsts)?;
@@ -451,13 +429,10 @@ impl CudaRsmk {
             d_firsts.async_copy_from(&h_firsts, &self.stream)?;
         }
 
-        
         let mut d_indicator: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(series_elems) }?;
-        let mut d_signal: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_elems) }?;
+        let mut d_signal: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_elems) }?;
 
-        
         let mut func: Function = self
             .module
             .get_function("rsmk_many_series_one_param_time_major_ema_ema_f32")
@@ -489,8 +464,7 @@ impl CudaRsmk {
                 &mut ind_ptr as *mut _ as *mut c_void,
                 &mut sig_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&mut func, grid, block, 0, args)?;
+            self.stream.launch(&mut func, grid, block, 0, args)?;
         }
 
         self.stream.synchronize()?;
@@ -520,7 +494,6 @@ pub mod benches {
     const MANY_ROWS: usize = 500_000;
 
     fn bytes_batch() -> usize {
-        
         let rows = 27usize;
         let in_bytes = 2 * BATCH_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * rows * BATCH_LEN * std::mem::size_of::<f32>();

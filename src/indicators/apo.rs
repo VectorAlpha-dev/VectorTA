@@ -1,28 +1,3 @@
-//! # Absolute Price Oscillator (APO)
-//!
-//! Calculates the difference between two exponential moving averages (EMAs) of
-//! different lengths (`short_period` and `long_period`), measuring momentum and
-//! trend shifts. The interface and performance are structured similar to ALMA.
-//!
-//! ## Parameters
-//! - **short_period**: EMA window size for the short period (defaults to 10).
-//! - **long_period**: EMA window size for the long period (defaults to 20).
-//!
-//! ## Returns
-//! - **`Ok(ApoOutput)`** on success, containing a `Vec<f64>` matching input length.
-//! - **`Err(ApoError)`** otherwise.
-//!
-//! ## Developer Status
-//! - **AVX2/AVX512 kernels**: Implemented (pairwise EMA lanes, no FMA for parity)
-//! - Rationale: EMA is sequential; SIMD across time needs scans. Our kernels
-//!   parallelize short/long EMAs per sample in lanes. On tested CPUs they were
-//!   not >5% faster than the scalar path due to front-end/memory limits. Auto
-//!   selection uses `detect_best_kernel()`; if you observe regressions, force
-//!   `Kernel::Scalar` explicitly at call site.
-//! - **Streaming update**: O(1) - Efficient dual EMA updates
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
-//! - **CUDA + Python interop**: CUDA wrapper returns VRAM handles with CAI v3 + DLPack v1.x; SIMD is implemented but kept on par with scalar for correctness and stability.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -32,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -52,8 +27,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum ApoData<'a> {
@@ -74,15 +47,16 @@ impl<'a> AsRef<[f64]> for ApoInput<'a> {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct ApoOutput {
     pub values: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ApoParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -133,8 +107,6 @@ impl<'a> ApoInput<'a> {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum ApoError {
     #[error("apo: Input data slice is empty.")]
@@ -150,12 +122,14 @@ pub enum ApoError {
     #[error("apo: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("apo: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("apo: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct ApoBuilder {
@@ -220,8 +194,6 @@ impl ApoBuilder {
     }
 }
 
-
-
 #[inline]
 pub fn apo(input: &ApoInput) -> Result<ApoOutput, ApoError> {
     apo_with_kernel(input, Kernel::Auto)
@@ -261,9 +233,7 @@ fn apo_prepare<'a>(
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
-    // APO is two EMAs (sequential recurrence); SIMD typically provides no benefit and can be slower
-    // due to downclock/extra call overhead. Keep SIMD kernels for future work and batch use, but
-    // prefer the scalar reference for `Kernel::Auto`.
+
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx2 | Kernel::Avx512) {
         chosen = Kernel::Scalar;
@@ -282,10 +252,7 @@ fn apo_compute_into(
 ) {
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-        {
-            // Keep scalar for correctness; EMA is sequential.
-            // SIMD path removed as it incorrectly uses the same previous EMA for both lanes
-        }
+        {}
 
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => apo_scalar(data, short, long, first, out),
@@ -301,10 +268,8 @@ fn apo_compute_into(
 pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, ApoError> {
     let (data, first, short, long, len, chosen) = apo_prepare(input, kernel)?;
 
-    // Calculate warmup period: first valid data point
     let warmup_period = first;
 
-    // Use zero-copy allocation with NaN prefix
     let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     apo_compute_into(data, first, short, long, chosen, &mut out);
@@ -312,12 +277,7 @@ pub fn apo_with_kernel(input: &ApoInput, kernel: Kernel) -> Result<ApoOutput, Ap
     Ok(ApoOutput { values: out })
 }
 
-/// Writes APO values into a caller-provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (prefix filled
-///   with a quiet-NaN pattern).
-/// - The `out` length must match the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn apo_into(input: &ApoInput, out: &mut [f64]) -> Result<(), ApoError> {
     let (data, first, short, long, len, chosen) = apo_prepare(input, Kernel::Auto)?;
     if out.len() != len {
@@ -327,7 +287,6 @@ pub fn apo_into(input: &ApoInput, out: &mut [f64]) -> Result<(), ApoError> {
         });
     }
 
-    // Prefill NaN warmup prefix using the same quiet-NaN pattern as allocations
     if first > 0 {
         for v in &mut out[..first] {
             *v = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -338,11 +297,8 @@ pub fn apo_into(input: &ApoInput, out: &mut [f64]) -> Result<(), ApoError> {
     Ok(())
 }
 
-// --- Scalar Kernel
-
 #[inline(always)]
 pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
-    // Hoist constants and avoid repeated (1 - alpha) recomputation.
     let alpha_s = 2.0 / (short as f64 + 1.0);
     let alpha_l = 2.0 / (long as f64 + 1.0);
     let oma_s = 1.0 - alpha_s;
@@ -351,12 +307,10 @@ pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &m
     let n = data.len();
     debug_assert_eq!(out.len(), n);
 
-    // Initialize EMAs at the first valid element; prefix NaNs are already set by caller.
     let mut se = data[first];
     let mut le = se;
     out[first] = 0.0;
 
-    // Main loop unrolled by 2 to reduce loop overhead while preserving sequential EMA deps.
     let mut i = first + 1;
     while i + 1 < n {
         let p0 = data[i];
@@ -372,7 +326,6 @@ pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &m
         i += 2;
     }
 
-    // Tail element
     if i < n {
         let p = data[i];
         se = alpha_s * p + oma_s * se;
@@ -380,8 +333,6 @@ pub fn apo_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &m
         out[i] = se - le;
     }
 }
-
-// --- AVX2/AVX512 Kernels
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -399,32 +350,25 @@ pub unsafe fn apo_avx2(data: &[f64], short: usize, long: usize, first: usize, ou
 
     let mut i = first;
     let x0 = *data.get_unchecked(i);
-    // EMA state replicated across lanes; initial se = le = x0 in all lanes
+
     let mut ema = _mm256_set_pd(x0, x0, x0, x0);
 
-    // Pack constants as [al, as, al, as] and [1-al, 1-as, 1-al, 1-as]
-    // Note: set_pd places args as [lane3, lane2, lane1, lane0]
     let a = _mm256_set_pd(alpha_l, alpha_s, alpha_l, alpha_s);
     let oma = _mm256_set_pd(oma_l, oma_s, oma_l, oma_s);
 
-    // First output at the first valid index is always 0.0 (se-le)
     *out.get_unchecked_mut(i) = 0.0;
     i += 1;
 
     while i < n {
-        // Broadcast current price
         let p = _mm256_set1_pd(*data.get_unchecked(i));
 
-        // ema = alpha*price + (1-alpha)*ema; keep mul,mul,add order (no FMA) for parity
         let t1 = _mm256_mul_pd(a, p);
         let t2 = _mm256_mul_pd(oma, ema);
         ema = _mm256_add_pd(t1, t2);
 
-        // Form se-le by swapping adjacent pairs in each 128-bit lane
         let swapped = _mm256_permute_pd(ema, 0x5);
         let diff = _mm256_sub_pd(ema, swapped);
 
-        // Extract lane 0 (se-le)
         let apo_val = _mm256_cvtsd_f64(diff);
         *out.get_unchecked_mut(i) = apo_val;
 
@@ -436,7 +380,6 @@ pub unsafe fn apo_avx2(data: &[f64], short: usize, long: usize, first: usize, ou
 #[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn apo_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
-    // For APO the long/short split does not change mechanics; forward to one path.
     apo_avx512_short(data, short, long, first, out);
 }
 
@@ -463,10 +406,8 @@ pub unsafe fn apo_avx512_short(
     let mut i = first;
     let x0 = *data.get_unchecked(i);
 
-    // Replicate se/le pair across lanes: start with all equal to x0
     let mut ema = _mm512_set_pd(x0, x0, x0, x0, x0, x0, x0, x0);
 
-    // Pack constants as [al,as,al,as,...]
     let a = _mm512_set_pd(
         alpha_l, alpha_s, alpha_l, alpha_s, alpha_l, alpha_s, alpha_l, alpha_s,
     );
@@ -478,16 +419,13 @@ pub unsafe fn apo_avx512_short(
     while i < n {
         let p = _mm512_set1_pd(*data.get_unchecked(i));
 
-        // ema = a*p + (1-a)*ema (mul,mul,add order; no FMA)
         let t1 = _mm512_mul_pd(a, p);
         let t2 = _mm512_mul_pd(oma, ema);
         ema = _mm512_add_pd(t1, t2);
 
-        // Pairwise swap inside 128-bit lanes, then compute se-le
         let swapped = _mm512_permute_pd(ema, 0b01010101);
         let diff = _mm512_sub_pd(ema, swapped);
 
-        // Extract low lane value
         let low128 = _mm512_castpd512_pd128(diff);
         let apo_val = _mm_cvtsd_f64(low128);
         *out.get_unchecked_mut(i) = apo_val;
@@ -506,14 +444,8 @@ pub unsafe fn apo_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    // Identical mechanics; keep one highly-tuned body for both.
     apo_avx512_short(data, short, long, first, out);
 }
-
-// --- SIMD128 for WASM
-// NOTE: This function is intentionally unused. EMA calculations are sequential (each value depends
-// on the previous), so vectorizing two values at once using the same previous EMA would produce
-// incorrect results. We fall back to scalar implementation for correctness.
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline(always)]
@@ -527,14 +459,11 @@ unsafe fn apo_simd128(data: &[f64], short: usize, long: usize, first: usize, out
     let one_minus_alpha_short = 1.0 - alpha_short;
     let one_minus_alpha_long = 1.0 - alpha_long;
 
-    // Initialize EMAs with the first valid value
     let mut short_ema = data[first];
     let mut long_ema = data[first];
 
-    // First value is always 0.0 (difference between identical EMAs)
     out[first] = 0.0;
 
-    // Process values using SIMD where possible
     let alpha_short_vec = f64x2_splat(alpha_short);
     let alpha_long_vec = f64x2_splat(alpha_long);
     let one_minus_alpha_short_vec = f64x2_splat(one_minus_alpha_short);
@@ -542,16 +471,12 @@ unsafe fn apo_simd128(data: &[f64], short: usize, long: usize, first: usize, out
 
     let mut i = first + 1;
 
-    // Process pairs of values
     while i + 1 < data.len() {
-        // Load two consecutive values
         let price_vec = v128_load(&data[i] as *const f64 as *const v128);
 
-        // Create EMA vectors
         let short_ema_vec = f64x2_splat(short_ema);
         let long_ema_vec = f64x2_splat(long_ema);
 
-        // Calculate new EMAs for both values
         let new_short_ema_vec = f64x2_add(
             f64x2_mul(alpha_short_vec, price_vec),
             f64x2_mul(one_minus_alpha_short_vec, short_ema_vec),
@@ -562,20 +487,16 @@ unsafe fn apo_simd128(data: &[f64], short: usize, long: usize, first: usize, out
             f64x2_mul(one_minus_alpha_long_vec, long_ema_vec),
         );
 
-        // Calculate APO (short_ema - long_ema)
         let apo_vec = f64x2_sub(new_short_ema_vec, new_long_ema_vec);
 
-        // Store results
         v128_store(&mut out[i] as *mut f64 as *mut v128, apo_vec);
 
-        // Update EMAs for next iteration (use second value)
         short_ema = f64x2_extract_lane::<1>(new_short_ema_vec);
         long_ema = f64x2_extract_lane::<1>(new_long_ema_vec);
 
         i += 2;
     }
 
-    // Handle remaining value if any
     if i < data.len() {
         let price = data[i];
         short_ema = alpha_short * price + one_minus_alpha_short * short_ema;
@@ -584,19 +505,13 @@ unsafe fn apo_simd128(data: &[f64], short: usize, long: usize, first: usize, out
     }
 }
 
-// --- Batch, Streaming, and Builder APIs
-
-// Decision: Streaming update uses parity-preserving form s = a*x + (1-a)*s_prev
-// with precomputed (1-a) to reduce per-tick work. An opt-in update_fastmath()
-// implements the delta+FMA form; default update() remains parity-aligned.
-
 #[derive(Clone, Debug)]
 pub struct ApoStream {
     short: usize,
     long: usize,
     alpha_short: f64,
     alpha_long: f64,
-    // precomputed 1 - alpha terms
+
     oma_short: f64,
     oma_long: f64,
     short_ema: f64,
@@ -617,7 +532,7 @@ impl ApoStream {
         if short >= long {
             return Err(ApoError::ShortPeriodNotLessThanLong { short, long });
         }
-        // α = 2/(n+1)
+
         let alpha_short = 2.0 / (short as f64 + 1.0);
         let alpha_long = 2.0 / (long as f64 + 1.0);
         Ok(Self {
@@ -637,7 +552,6 @@ impl ApoStream {
 
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
-        // Preserve leading-NaN semantics
         if !self.filled {
             if price.is_nan() {
                 self.nan_leading += 1;
@@ -652,14 +566,12 @@ impl ApoStream {
 
         self.seen += 1;
 
-        // Mid-stream NaN: propagate and taint state (mirrors batch behavior)
         if price.is_nan() {
             self.short_ema = f64::NAN;
             self.long_ema = f64::NAN;
             return Some(f64::NAN);
         }
 
-        // s = a*x + (1-a)*s_prev (parity-preserving order)
         let se_prev = self.short_ema;
         let le_prev = self.long_ema;
         self.short_ema = self.alpha_short * price + self.oma_short * se_prev;
@@ -667,8 +579,6 @@ impl ApoStream {
         Some(self.short_ema - self.long_ema)
     }
 
-    /// Optional fast-math streaming update using delta form with mul_add (FMA where available).
-    /// Default tests use `update`; use this when tiny rounding differences are acceptable.
     #[inline(always)]
     pub fn update_fastmath(&mut self, price: f64) -> Option<f64> {
         if !self.filled {
@@ -699,7 +609,6 @@ impl ApoStream {
     }
 }
 
-/// Helper function for WASM bindings - writes directly to output slice with zero allocations
 pub fn apo_into_slice(dst: &mut [f64], input: &ApoInput, kern: Kernel) -> Result<(), ApoError> {
     let (data, first, short, long, len, chosen) = apo_prepare(input, kern)?;
     if dst.len() != len {
@@ -714,12 +623,6 @@ pub fn apo_into_slice(dst: &mut [f64], input: &ApoInput, kern: Kernel) -> Result
     }
     Ok(())
 }
-
-// --- Batch Sweeping API
-// Decision: Row-specific SIMD batch kernels not attempted here. With the current
-// row-major output layout, cross-row SIMD would require scatter stores or a
-// layout change to time-major blocks to be beneficial. Keep per-row kernels and
-// revisit if batch layout changes to enable contiguous vector stores.
 
 #[derive(Clone, Debug)]
 pub struct ApoBatchRange {
@@ -803,8 +706,6 @@ impl ApoBatchOutput {
     }
 }
 
-// --- Grid Expansion
-
 #[inline(always)]
 fn expand_grid(r: &ApoBatchRange) -> Result<Vec<ApoParams>, ApoError> {
     fn axis((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, ApoError> {
@@ -825,8 +726,14 @@ fn expand_grid(r: &ApoBatchRange) -> Result<Vec<ApoParams>, ApoError> {
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
-                if let Some(n) = cur.checked_sub(step) { cur = n; } else { break; }
-                if cur == usize::MAX { break; }
+                if let Some(n) = cur.checked_sub(step) {
+                    cur = n;
+                } else {
+                    break;
+                }
+                if cur == usize::MAX {
+                    break;
+                }
             }
         }
         if v.is_empty() {
@@ -840,14 +747,15 @@ fn expand_grid(r: &ApoBatchRange) -> Result<Vec<ApoParams>, ApoError> {
     for &s in &shorts {
         for &l in &longs {
             if s < l && s > 0 && l > 0 {
-                out.push(ApoParams { short_period: Some(s), long_period: Some(l) });
+                out.push(ApoParams {
+                    short_period: Some(s),
+                    long_period: Some(l),
+                });
             }
         }
     }
     Ok(out)
 }
-
-// --- Batch Slice API
 
 #[inline(always)]
 pub fn apo_batch_with_kernel(
@@ -890,7 +798,11 @@ fn apo_batch_inner(
 ) -> Result<ApoBatchOutput, ApoError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(ApoError::InvalidRange { start: sweep.short.0, end: sweep.short.1, step: sweep.short.2 });
+        return Err(ApoError::InvalidRange {
+            start: sweep.short.0,
+            end: sweep.short.1,
+            step: sweep.short.2,
+        });
     }
     let first = data
         .iter()
@@ -906,29 +818,19 @@ fn apo_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    // Checked arithmetic guard
+
     let _ = rows.checked_mul(cols).ok_or(ApoError::InvalidRange {
         start: rows,
         end: cols,
         step: 0,
     })?;
 
-    // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|_c| {
-            // For APO, warmup is simply the first valid data index
-            first
-        })
-        .collect();
+    let warm: Vec<usize> = combos.iter().map(|_c| first).collect();
 
-    // Step 3: Initialize NaN prefixes for each row
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slice for computation
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -963,7 +865,6 @@ fn apo_batch_inner(
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => {
-            // Per-row AVX2 (existing behavior)
             let do_row = |row: usize, out_row: &mut [f64]| unsafe {
                 let s = combos[row].short_period.unwrap();
                 let l = combos[row].long_period.unwrap();
@@ -987,7 +888,6 @@ fn apo_batch_inner(
         }
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => {
-            // Per-row AVX512 (existing behavior)
             let do_row = |row: usize, out_row: &mut [f64]| unsafe {
                 let s = combos[row].short_period.unwrap();
                 let l = combos[row].long_period.unwrap();
@@ -1062,7 +962,6 @@ fn apo_batch_inner(
         _ => unreachable!(),
     }
 
-    // Step 6: Reclaim as Vec<f64>
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1089,7 +988,11 @@ fn apo_batch_inner_into(
 ) -> Result<Vec<ApoParams>, ApoError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(ApoError::InvalidRange { start: sweep.short.0, end: sweep.short.1, step: sweep.short.2 });
+        return Err(ApoError::InvalidRange {
+            start: sweep.short.0,
+            end: sweep.short.1,
+            step: sweep.short.2,
+        });
     }
 
     let first = data
@@ -1112,17 +1015,18 @@ fn apo_batch_inner_into(
         step: 0,
     })?;
     if out.len() != expected {
-        return Err(ApoError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(ApoError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    // 1) Treat caller buffer as uninitialized and set NaN warm prefixes with helper.
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     let warm = vec![first; rows];
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // 2) Compute into initialized region; support row-optimized batch kernels
     match kern {
         Kernel::Scalar | Kernel::ScalarBatch => {
             let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -1256,8 +1160,6 @@ fn apo_batch_inner_into(
     Ok(combos)
 }
 
-// --- Row Kernels
-
 #[inline(always)]
 pub unsafe fn apo_row_scalar(
     data: &[f64],
@@ -1315,7 +1217,6 @@ pub unsafe fn apo_row_avx512_long(
     apo_avx512_long(data, short, long, first, out)
 }
 
-// --- Row-optimized batch kernels (vectorize across parameter rows)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2")]
@@ -1330,7 +1231,6 @@ unsafe fn apo_batch_rows_avx2(
     let lanes = 4usize;
     let l = combos_block.len();
 
-    // Precompute per-lane constants
     let mut as_arr = [0.0f64; 4];
     let mut al_arr = [0.0f64; 4];
     let mut os_arr = [1.0f64; 4];
@@ -1350,19 +1250,17 @@ unsafe fn apo_batch_rows_avx2(
     let o_s = _mm256_setr_pd(os_arr[0], os_arr[1], os_arr[2], os_arr[3]);
     let o_l = _mm256_setr_pd(ol_arr[0], ol_arr[1], ol_arr[2], ol_arr[3]);
 
-    // EMA states per lane
     let x0 = *data.get_unchecked(first);
     let mut se = _mm256_set1_pd(x0);
     let mut le = _mm256_set1_pd(x0);
 
-    // First output for each row is 0.0 at index `first`
     for j in 0..l {
         *out_block.get_unchecked_mut(j * cols + first) = 0.0;
     }
     let mut i = first + 1;
     while i < cols {
         let p = _mm256_set1_pd(*data.get_unchecked(i));
-        // se = a_s*p + (1-a_s)*se; le = a_l*p + (1-a_l)*le
+
         let se1 = _mm256_add_pd(_mm256_mul_pd(a_s, p), _mm256_mul_pd(o_s, se));
         let le1 = _mm256_add_pd(_mm256_mul_pd(a_l, p), _mm256_mul_pd(o_l, le));
         se = se1;
@@ -1392,7 +1290,6 @@ unsafe fn apo_batch_rows_avx512(
     let lanes = 8usize;
     let l = combos_block.len();
 
-    // Precompute per-lane constants
     let mut as_arr = [0.0f64; 8];
     let mut al_arr = [0.0f64; 8];
     let mut os_arr = [1.0f64; 8];
@@ -1445,45 +1342,43 @@ unsafe fn apo_batch_rows_avx512(
     }
 }
 
-// --- Tests
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_apo_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input with a NaN warmup prefix
         let mut data: Vec<f64> = Vec::with_capacity(256);
         for _ in 0..5 {
             data.push(f64::NAN);
         }
         for i in 0..251 {
-            // Mix of linear trend and mild oscillation
             let x = i as f64;
             data.push(100.0 + 0.1 * x + (x * 0.05).sin());
         }
 
         let input = ApoInput::from_slice(&data, ApoParams::default());
 
-        // Baseline via existing Vec-returning API
         let baseline = apo(&input)?.values;
 
-        // Preallocate output and call the new into API
         let mut out = vec![0.0; data.len()];
         apo_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        // Equality helper: NaN == NaN or exact equality; allow tiny epsilon fallback
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
 
-        for (i, (a, b)) in baseline.iter().copied().zip(out.iter().copied()).enumerate() {
+        for (i, (a, b)) in baseline
+            .iter()
+            .copied()
+            .zip(out.iter().copied())
+            .enumerate()
+        {
             assert!(
                 eq_or_both_nan(a, b),
                 "mismatch at index {}: api={} into={}",
@@ -1602,11 +1497,9 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let params = ApoParams::default();
 
-        // Batch calculation
         let input = ApoInput::from_candles(&candles, "close", params.clone());
         let batch_result = apo_with_kernel(&input, kernel)?;
 
-        // Streaming calculation
         let mut stream = ApoStream::try_new(params)?;
         let mut streaming_results = vec![];
 
@@ -1618,7 +1511,6 @@ mod tests {
             }
         }
 
-        // Compare results (allowing for small floating point differences)
         assert_eq!(batch_result.values.len(), streaming_results.len());
         let first_valid = candles.close.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
@@ -1791,15 +1683,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Random price data with realistic period ranges
         let random_data_strat = (3usize..=20, 10usize..=50)
             .prop_filter("short < long", |(s, l)| s < l)
             .prop_flat_map(|(short_period, long_period)| {
-                // Generate data length that's sufficient for the long period
                 let len = long_period * 2..400;
                 (
                     prop::collection::vec(
-                        
                         (10f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
@@ -1809,7 +1698,6 @@ mod tests {
                 )
             });
 
-        
         let constant_data_strat = (3usize..=20, 10usize..=50)
             .prop_filter("short < long", |(s, l)| s < l)
             .prop_flat_map(|(short_period, long_period)| {
@@ -1822,7 +1710,6 @@ mod tests {
                 )
             });
 
-        
         let trending_data_strat = (3usize..=20, 10usize..=50)
             .prop_filter("short < long", |(s, l)| s < l)
             .prop_flat_map(|(short_period, long_period)| {
@@ -1841,7 +1728,6 @@ mod tests {
                 )
             });
 
-        
         let strat = prop_oneof![random_data_strat, constant_data_strat, trending_data_strat,];
 
         proptest::test_runner::TestRunner::default()
@@ -1857,10 +1743,8 @@ mod tests {
 
                 let ApoOutput { values: out } = result.unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 if first_valid < data.len() {
                     prop_assert!(
@@ -1871,7 +1755,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in first_valid..out.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1881,9 +1764,6 @@ mod tests {
                     );
                 }
 
-                
-                
-                
                 let data_min = data
                     .iter()
                     .filter(|x| x.is_finite())
@@ -1894,7 +1774,6 @@ mod tests {
                     .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                 let data_range = data_max - data_min;
 
-                
                 let apo_bound = data_range * 0.3;
 
                 for i in first_valid..out.len() {
@@ -1907,10 +1786,8 @@ mod tests {
                     );
                 }
 
-                
                 match data_type {
                     "constant" => {
-                        
                         for i in first_valid..out.len() {
                             prop_assert!(
                                 out[i].abs() < 1e-9,
@@ -1921,16 +1798,12 @@ mod tests {
                         }
                     }
                     "trending" => {
-                        
-                        
                         if data.len() > long_period * 2 {
                             let check_start = first_valid + long_period;
                             let check_end = out.len();
                             if check_start < check_end {
-                                
                                 let is_increasing = data[first_valid] < data[data.len() - 1];
 
-                                
                                 let positive_count = out[check_start..check_end]
                                     .iter()
                                     .filter(|&&v| v > 0.0)
@@ -1938,7 +1811,6 @@ mod tests {
                                 let total_count = check_end - check_start;
 
                                 if is_increasing {
-                                    
                                     prop_assert!(
 										positive_count > total_count / 2,
 										"APO should be mostly positive for uptrend, got {} positive out of {}",
@@ -1946,7 +1818,6 @@ mod tests {
 										total_count
 									);
                                 } else {
-                                    
                                     prop_assert!(
 										positive_count < total_count / 2,
 										"APO should be mostly negative for downtrend, got {} positive out of {}",
@@ -1957,18 +1828,16 @@ mod tests {
                             }
                         }
                     }
-                    _ => {} 
+                    _ => {}
                 }
 
-                
                 if data.len() >= 3 && first_valid + 2 < data.len() {
                     let alpha_short = 2.0 / (short_period as f64 + 1.0);
                     let alpha_long = 2.0 / (long_period as f64 + 1.0);
 
-                    
                     let mut short_ema = data[first_valid];
                     let mut long_ema = data[first_valid];
-                    let expected_first = 0.0; 
+                    let expected_first = 0.0;
                     prop_assert!(
                         (out[first_valid] - expected_first).abs() < 1e-9,
                         "First value mismatch: expected {}, got {}",
@@ -1976,7 +1845,6 @@ mod tests {
                         out[first_valid]
                     );
 
-                    
                     if first_valid + 1 < data.len() {
                         let price = data[first_valid + 1];
                         short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
@@ -1990,7 +1858,6 @@ mod tests {
                         );
                     }
 
-                    
                     if first_valid + 2 < data.len() {
                         let price = data[first_valid + 2];
                         short_ema = alpha_short * price + (1.0 - alpha_short) * short_ema;
@@ -2005,14 +1872,12 @@ mod tests {
                     }
                 }
 
-                
                 let ref_output = apo_with_kernel(&input, Kernel::Scalar);
                 prop_assert!(ref_output.is_ok(), "Reference scalar computation failed");
                 let ApoOutput { values: ref_out } = ref_output.unwrap();
 
                 for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
                     if !val.is_finite() || !ref_val.is_finite() {
-                        
                         prop_assert_eq!(
                             val.is_nan(),
                             ref_val.is_nan(),
@@ -2022,7 +1887,6 @@ mod tests {
                             ref_val
                         );
                     } else {
-                        
                         let diff = (val - ref_val).abs();
                         let ulp_diff = val.to_bits().abs_diff(ref_val.to_bits());
                         prop_assert!(
@@ -2037,13 +1901,11 @@ mod tests {
                     }
                 }
 
-                
                 prop_assert!(
                     short_period < long_period,
                     "Short period must be less than long period"
                 );
 
-                
                 let mut stream = ApoStream::try_new(params).unwrap();
                 let mut stream_values = Vec::new();
                 for &price in &data {
@@ -2054,7 +1916,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in first_valid..out.len() {
                     if out[i].is_finite() && stream_values[i].is_finite() {
                         let diff = (out[i] - stream_values[i]).abs();
@@ -2152,14 +2013,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 15, 30, 5),   
-            (5, 25, 5, 30, 50, 10),  
-            (10, 20, 5, 25, 45, 10), 
-            (12, 12, 0, 26, 26, 0),  
-            (3, 9, 3, 10, 20, 5),    
+            (2, 10, 2, 15, 30, 5),
+            (5, 25, 5, 30, 50, 10),
+            (10, 20, 5, 25, 45, 10),
+            (12, 12, 0, 26, 26, 0),
+            (3, 9, 3, 10, 20, 5),
         ];
 
         for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step)) in
@@ -2181,7 +2040,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2278,12 +2136,10 @@ mod tests {
         };
         let input = ApoInput::from_slice(&data, params);
 
-        
         let scalar_output = apo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-        
         let mut pure_scalar_output = vec![f64::NAN; data.len()];
-        let first = 0; 
+        let first = 0;
         unsafe {
             apo_scalar(
                 &data,
@@ -2294,7 +2150,6 @@ mod tests {
             );
         }
 
-        
         assert_eq!(scalar_output.values.len(), pure_scalar_output.len());
         for (i, (simd_val, scalar_val)) in scalar_output
             .values
@@ -2317,10 +2172,6 @@ mod tests {
     }
 }
 
-
-
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "apo")]
 #[pyo3(signature = (data, short_period=10, long_period=20, kernel=None))]
@@ -2342,7 +2193,6 @@ pub fn apo_py<'py>(
     };
     let apo_in = ApoInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| apo_with_kernel(&apo_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2370,8 +2220,6 @@ impl ApoStreamPy {
         Ok(ApoStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated APO value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2403,16 +2251,14 @@ pub fn apo_batch_py<'py>(
     }
     let rows = combos.len();
     let cols = slice_in.len();
-    
+
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
@@ -2423,7 +2269,6 @@ pub fn apo_batch_py<'py>(
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let combos = py
         .allow_threads(|| {
             let k = match kern {
@@ -2460,11 +2305,10 @@ pub fn apo_batch_py<'py>(
     Ok(dict)
 }
 
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context as CudaContext;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context as CudaContext;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
@@ -2482,7 +2326,9 @@ pub struct DeviceArrayF32ApoPy {
 impl DeviceArrayF32ApoPy {
     #[new]
     fn py_new() -> PyResult<Self> {
-        Err(pyo3::exceptions::PyTypeError::new_err("use factory methods from CUDA functions"))
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory methods from CUDA functions",
+        ))
     }
 
     #[getter]
@@ -2497,8 +2343,11 @@ impl DeviceArrayF32ApoPy {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         let size = inner.rows.saturating_mul(inner.cols);
-        let ptr_val: usize =
-            if size == 0 { 0 } else { inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         Ok(d)
@@ -2517,7 +2366,6 @@ impl DeviceArrayF32ApoPy {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2538,13 +2386,13 @@ impl DeviceArrayF32ApoPy {
         }
         let _ = stream;
 
-        // Move ownership of the underlying CUDA buffer into the shared DLPack helper.
         let inner = self
             .inner
             .take()
             .ok_or_else(|| PyValueError::new_err("__dlpack__ may only be called once"))?;
-        let crate::cuda::moving_averages::apo_wrapper::DeviceArrayF32 { buf, rows, cols, .. } =
-            inner;
+        let crate::cuda::moving_averages::apo_wrapper::DeviceArrayF32 {
+            buf, rows, cols, ..
+        } = inner;
 
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
@@ -2579,7 +2427,12 @@ pub fn apo_cuda_batch_dev_py(
     })?;
     let ctx = inner.ctx();
     let dev_id = inner.device_id();
-    Ok(DeviceArrayF32ApoPy { inner: Some(inner), stream_handle: 0, _ctx_guard: ctx, _device_id: dev_id })
+    Ok(DeviceArrayF32ApoPy {
+        inner: Some(inner),
+        stream_handle: 0,
+        _ctx_guard: ctx,
+        _device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2615,14 +2468,15 @@ pub fn apo_cuda_many_series_one_param_dev_py(
     })?;
     let ctx = inner.ctx();
     let dev_id = inner.device_id();
-    Ok(DeviceArrayF32ApoPy { inner: Some(inner), stream_handle: 0, _ctx_guard: ctx, _device_id: dev_id })
+    Ok(DeviceArrayF32ApoPy {
+        inner: Some(inner),
+        stream_handle: 0,
+        _ctx_guard: ctx,
+        _device_id: dev_id,
+    })
 }
 
-// ================================================================================================
-// WASM Bindings
-// ================================================================================================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_js(data: &[f64], short_period: usize, long_period: usize) -> Result<Vec<f64>, JsValue> {
     let params = ApoParams {
@@ -2631,7 +2485,6 @@ pub fn apo_js(data: &[f64], short_period: usize, long_period: usize) -> Result<V
     };
     let input = ApoInput::from_slice(data, params);
 
-    // Single allocation following WASM guide pattern
     let mut output = vec![0.0; data.len()];
 
     apo_into_slice(&mut output, &input, Kernel::Auto)
@@ -2640,7 +2493,7 @@ pub fn apo_js(data: &[f64], short_period: usize, long_period: usize) -> Result<V
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2649,7 +2502,7 @@ pub fn apo_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2657,7 +2510,7 @@ pub fn apo_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_into(
     in_ptr: *const f64,
@@ -2692,7 +2545,7 @@ pub fn apo_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_batch_js(
     data: &[f64],
@@ -2708,13 +2561,12 @@ pub fn apo_batch_js(
         long: (long_period_start, long_period_end, long_period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     apo_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_batch_metadata_js(
     short_period_start: usize,
@@ -2740,7 +2592,7 @@ pub fn apo_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn apo_batch_into(
     in_ptr: *const f64,
@@ -2773,14 +2625,14 @@ pub fn apo_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ApoBatchConfig {
     pub short_period_range: (usize, usize, usize),
     pub long_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ApoBatchJsOutput {
     pub values: Vec<f64>,
@@ -2789,7 +2641,7 @@ pub struct ApoBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = apo_batch)]
 pub fn apo_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: ApoBatchConfig = serde_wasm_bindgen::from_value(config)

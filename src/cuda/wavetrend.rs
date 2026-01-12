@@ -1,6 +1,3 @@
-
-
-
 #[path = "wavetrend_wrapper.rs"]
 pub mod wavetrend_wrapper;
 

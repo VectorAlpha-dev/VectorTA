@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::mom::{mom_with_kernel, MomBatchRange, MomInput, MomParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -40,10 +38,8 @@ fn mom_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = MomBatchRange { period: (2, 64, 3) };
 
-    
     let cpu = vector_ta::indicators::mom::mom_batch_slice(&data, &sweep, Kernel::ScalarBatch)?;
 
-    
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaMom::new(0).expect("CudaMom::new");
     let dev = cuda
@@ -74,19 +70,17 @@ fn mom_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 11usize; 
-    let rows = 2048usize; 
+    let cols = 11usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            
             let x = (t as f64) + (s as f64) * 0.2;
             tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -103,7 +97,6 @@ fn mom_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaMom::new(0).expect("CudaMom::new");
     let dev = cuda

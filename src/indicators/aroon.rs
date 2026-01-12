@@ -1,23 +1,3 @@
-//! # Aroon Indicator
-//!
-//! A trend-following indicator that measures the strength and potential direction of a market trend
-//! based on the recent highs and lows over a specified window. Provides two outputs:
-//! - **aroon_up**: How close the most recent highest high is to the current bar (percentage).
-//! - **aroon_down**: How close the most recent lowest low is to the current bar (percentage).
-//!
-//! ## Parameters
-//! - **length**: Lookback window (default: 14)
-//!
-//! ## Returns
-//! - **`Ok(AroonOutput)`** on success, containing vectors for aroon_up and aroon_down.
-//! - **`Err(AroonError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD status: AVX2/AVX512 implementations exist but are **disabled by default** (Auto selects scalar) because the current SIMD kernels rescan each window and are slower than the Tulip-style scalar rolling-extrema path. Revisit SIMD only with a true O(1) rolling extrema SIMD strategy.
-//! - Scalar path: single-pass per window (combined finiteness + argmin/argmax), safe and allocation-free.
-//! - Batch row-specific: not implemented; little cross-row reuse for Aroon windows. Current batch dispatches per-row to best kernel.
-//! - Memory: zero-copy helpers for outputs; warmup masked to preserve leading-NaN semantics.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -29,18 +9,18 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use js_sys;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaAroon};
+use crate::utilities::data_loader::{source_type, Candles};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -64,7 +44,10 @@ pub enum AroonData<'a> {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AroonParams {
     pub length: Option<usize>,
 }
@@ -190,7 +173,11 @@ pub enum AroonError {
     #[error("aroon: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("aroon: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("aroon: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -244,7 +231,6 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         other => other,
     };
 
-    
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
     let warmup_period = first + length;
     let mut up = alloc_with_nan_prefix(len, warmup_period);
@@ -265,7 +251,6 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
         }
     }
 
-    
     let warm = warmup_period.min(len);
     for v in &mut up[..warm] {
         *v = f64::NAN;
@@ -280,12 +265,7 @@ pub fn aroon_with_kernel(input: &AroonInput, kernel: Kernel) -> Result<AroonOutp
     })
 }
 
-/// Write Aroon outputs directly into caller-provided buffers without allocations.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (`aroon`/`aroon_with_kernel`).
-/// - Both `out_up` and `out_down` must have length equal to the input length.
-/// - Uses `Kernel::Auto` for runtime selection, mirroring the default API.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn aroon_into(
     input: &AroonInput,
@@ -309,7 +289,6 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         "Slice lengths must match"
     );
 
-    
     let scale_100 = 100.0 / (length as f64);
 
     #[inline(always)]
@@ -320,16 +299,10 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
 
     #[inline(always)]
     fn aroon_percent(dist: usize, scale_100: f64) -> f64 {
-        
         let v = 100.0 - (dist as f64) * scale_100;
         v.max(0.0)
     }
 
-    
-    
-    
-    
-    
     let mut all_finite = true;
     unsafe {
         let hp = high.as_ptr();
@@ -351,9 +324,7 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
             let up_ptr = up.as_mut_ptr();
             let dn_ptr = down.as_mut_ptr();
 
-            
             if length < len {
-                
                 let i0 = length;
                 let mut maxi = 0usize;
                 let mut mini = 0usize;
@@ -378,14 +349,12 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 *up_ptr.add(i0) = aroon_percent(i0 - maxi, scale_100);
                 *dn_ptr.add(i0) = aroon_percent(i0 - mini, scale_100);
 
-                
                 let mut i = i0 + 1;
                 while i < len {
                     let start = i - length;
                     let h = *hp.add(i);
                     let l = *lp.add(i);
 
-                    
                     if maxi < start {
                         maxi = start;
                         max = *hp.add(maxi);
@@ -403,7 +372,6 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                         max = h;
                     }
 
-                    
                     if mini < start {
                         mini = start;
                         min = *lp.add(mini);
@@ -432,12 +400,6 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
         return;
     }
 
-    
-    
-    
-    
-    
-    
     let window = length + 1;
     let mut invalid_count: usize = 0;
 
@@ -492,7 +454,6 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
             }
             have_extremes = true;
         } else {
-            
             if maxi < start {
                 maxi = start;
                 max = high[maxi];
@@ -508,7 +469,6 @@ pub fn aroon_scalar(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 max = h;
             }
 
-            
             if mini < start {
                 mini = start;
                 min = low[mini];
@@ -667,7 +627,6 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
             }
 
             if !invalid {
-                
                 while j < window {
                     let h = *base_h.add(j);
                     let l = *base_l.add(j);
@@ -694,7 +653,6 @@ pub fn aroon_avx512(high: &[f64], low: &[f64], length: usize, up: &mut [f64], do
                 *up_ptr.add(i) = f64::NAN;
                 *dn_ptr.add(i) = f64::NAN;
             } else {
-                
                 let dist_hi = length - best_h_off;
                 let dist_lo = length - best_l_off;
                 let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
@@ -847,7 +805,6 @@ pub fn aroon_avx2(high: &[f64], low: &[f64], length: usize, up: &mut [f64], down
                 *up_ptr.add(i) = f64::NAN;
                 *dn_ptr.add(i) = f64::NAN;
             } else {
-                
                 let dist_hi = length - best_h_off;
                 let dist_lo = length - best_l_off;
                 let up_val = (-(dist_hi as f64)).mul_add(scale, 100.0);
@@ -893,30 +850,23 @@ pub unsafe fn aroon_avx512_long(
     aroon_avx512(high, low, length, up, down)
 }
 
-/// Streaming: O(1) amortized via monotonic deques; strict >/< tie rules (earlier extreme wins).
 #[derive(Debug)]
 pub struct AroonStream {
-    length: usize,   
-    buf_size: usize, 
-    head: usize,     
-    count: usize,    
-    t: usize,        
-    scale_100: f64,  
+    length: usize,
+    buf_size: usize,
+    head: usize,
+    count: usize,
+    t: usize,
+    scale_100: f64,
 
-    
-    
     flags: Vec<u8>,
     invalid_count: usize,
 
-    
-    
-    
     maxq: VecDeque<(f64, usize)>,
     minq: VecDeque<(f64, usize)>,
 }
 
 impl AroonStream {
-    /// Create a new streaming Aroon. Returns error if length == 0.
     #[inline]
     pub fn try_new(params: AroonParams) -> Result<Self, AroonError> {
         let length = params.length.unwrap_or(14);
@@ -941,7 +891,6 @@ impl AroonStream {
         })
     }
 
-    /// Compute 100 * (length - dist)/length with exact edges and FMA when available.
     #[inline(always)]
     fn pct_from_distance(&self, dist: usize) -> f64 {
         if dist == 0 {
@@ -953,12 +902,10 @@ impl AroonStream {
         }
     }
 
-    /// O(1) amortized update. Returns None until we have N+1 bars or if any NaN/Inf is in-window.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
         let i = self.t;
 
-        
         if self.count == self.buf_size {
             let old = self.flags[self.head] as usize;
             self.invalid_count -= old;
@@ -966,11 +913,9 @@ impl AroonStream {
             self.count += 1;
         }
 
-        
         let invalid = !(high.is_finite() && low.is_finite());
         let new_flag = invalid as u8;
 
-        
         self.flags[self.head] = new_flag;
         self.invalid_count += new_flag as usize;
         self.head += 1;
@@ -978,8 +923,6 @@ impl AroonStream {
             self.head = 0;
         }
 
-        
-        
         let earliest = i.saturating_sub(self.length);
         while let Some(&(_, idx)) = self.maxq.front() {
             if idx < earliest {
@@ -996,9 +939,7 @@ impl AroonStream {
             }
         }
 
-        
         if !invalid {
-            
             while let Some(&(v, _)) = self.maxq.back() {
                 if high > v {
                     self.maxq.pop_back();
@@ -1008,7 +949,6 @@ impl AroonStream {
             }
             self.maxq.push_back((high, i));
 
-            
             while let Some(&(v, _)) = self.minq.back() {
                 if low < v {
                     self.minq.pop_back();
@@ -1019,7 +959,6 @@ impl AroonStream {
             self.minq.push_back((low, i));
         }
 
-        
         let out = if self.count == self.buf_size && self.invalid_count == 0 {
             debug_assert!(self.maxq.front().is_some() && self.minq.front().is_some());
             let max_idx = self.maxq.front().unwrap().1;
@@ -1035,7 +974,6 @@ impl AroonStream {
             None
         };
 
-        
         self.t = i + 1;
         out
     }
@@ -1065,7 +1003,12 @@ fn expand_grid_aroon(r: &AroonBatchRange) -> Result<Vec<AroonParams>, AroonError
             while v <= end {
                 vals.push(v);
                 match v.checked_add(step) {
-                    Some(next) => { if next == v { break; } v = next; }
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
                     None => break,
                 }
             }
@@ -1073,14 +1016,22 @@ fn expand_grid_aroon(r: &AroonBatchRange) -> Result<Vec<AroonParams>, AroonError
             let mut v = start;
             loop {
                 vals.push(v);
-                if v == end { break; }
+                if v == end {
+                    break;
+                }
                 let next = v.saturating_sub(step);
-                if next == v { break; }
+                if next == v {
+                    break;
+                }
                 v = next;
-                if v < end { break; }
+                if v < end {
+                    break;
+                }
             }
         }
-        if vals.is_empty() { return Err(AroonError::InvalidRange { start, end, step }); }
+        if vals.is_empty() {
+            return Err(AroonError::InvalidRange { start, end, step });
+        }
         Ok(vals)
     }
     let lengths = axis_usize(r.length)?;
@@ -1234,25 +1185,25 @@ fn aroon_batch_inner(
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
     let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
     if len.saturating_sub(first) < max_l {
-        return Err(AroonError::NotEnoughValidData { needed: max_l, valid: len.saturating_sub(first) });
+        return Err(AroonError::NotEnoughValidData {
+            needed: max_l,
+            valid: len.saturating_sub(first),
+        });
     }
     let rows = combos.len();
     let cols = len;
 
-    
     let mut buf_up_mu = make_uninit_matrix(rows, cols);
     let mut buf_down_mu = make_uninit_matrix(rows, cols);
 
-    
+    let warmup_periods: Vec<usize> = combos
+        .iter()
+        .map(|c| first.saturating_add(c.length.unwrap()))
+        .collect();
 
-    
-    let warmup_periods: Vec<usize> = combos.iter().map(|c| first.saturating_add(c.length.unwrap())).collect();
-
-    
     init_matrix_prefixes(&mut buf_up_mu, cols, &warmup_periods);
     init_matrix_prefixes(&mut buf_down_mu, cols, &warmup_periods);
 
-    
     let mut buf_up_guard = ManuallyDrop::new(buf_up_mu);
     let mut buf_down_guard = ManuallyDrop::new(buf_down_mu);
     let up: &mut [f64] = unsafe {
@@ -1265,10 +1216,8 @@ fn aroon_batch_inner(
         )
     };
 
-    
     aroon_batch_inner_into(high, low, sweep, kern, parallel, up, down)?;
 
-    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         let warm_end = (row_start + warmup).min(row_start + cols);
@@ -1278,7 +1227,6 @@ fn aroon_batch_inner(
         }
     }
 
-    
     let up_values = unsafe {
         Vec::from_raw_parts(
             buf_up_guard.as_mut_ptr() as *mut f64,
@@ -1303,7 +1251,6 @@ fn aroon_batch_inner(
     })
 }
 
-/// Zero-copy batch computation that writes directly into provided output slices
 #[inline(always)]
 fn aroon_batch_inner_into(
     high: &[f64],
@@ -1325,19 +1272,20 @@ fn aroon_batch_inner_into(
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
     let max_l = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
     if len.saturating_sub(first) < max_l {
-        return Err(AroonError::NotEnoughValidData { needed: max_l, valid: len.saturating_sub(first) });
+        return Err(AroonError::NotEnoughValidData {
+            needed: max_l,
+            valid: len.saturating_sub(first),
+        });
     }
 
     let rows = combos.len();
     let cols = len;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(AroonError::InvalidRange {
-            start: sweep.length.0,
-            end: sweep.length.1,
-            step: sweep.length.2,
-        })?;
-    
+    let expected = rows.checked_mul(cols).ok_or(AroonError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
+
     if out_up.len() != expected || out_down.len() != expected {
         return Err(AroonError::OutputLengthMismatch {
             expected,
@@ -1345,13 +1293,10 @@ fn aroon_batch_inner_into(
         });
     }
 
-    
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
 
-    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.length.unwrap()).collect();
 
-    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
@@ -1401,7 +1346,6 @@ fn aroon_batch_inner_into(
         }
     }
 
-    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         let warm_end = (row_start + warmup).min(row_start + cols);
@@ -1413,7 +1357,6 @@ fn aroon_batch_inner_into(
 
     Ok(combos)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "aroon_cuda_batch_dev")]
@@ -1438,11 +1381,24 @@ pub fn aroon_cuda_batch_dev_py<'py>(
         let res = cuda
             .aroon_batch_dev(h, l, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((res.outputs.first, res.outputs.second, cuda.context_arc_clone(), cuda.device_id()))
+        Ok::<_, PyErr>((
+            res.outputs.first,
+            res.outputs.second,
+            cuda.context_arc_clone(),
+            cuda.device_id(),
+        ))
     })?;
     Ok((
-        AroonDeviceArrayF32Py { inner: up_dev, _ctx: ctx_arc.clone(), device_id: dev_id },
-        AroonDeviceArrayF32Py { inner: dn_dev, _ctx: ctx_arc, device_id: dev_id },
+        AroonDeviceArrayF32Py {
+            inner: up_dev,
+            _ctx: ctx_arc.clone(),
+            device_id: dev_id,
+        },
+        AroonDeviceArrayF32Py {
+            inner: dn_dev,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+        },
     ))
 }
 
@@ -1472,16 +1428,33 @@ pub fn aroon_cuda_many_series_one_param_dev_py<'py>(
         let pair = cuda
             .aroon_many_series_one_param_time_major_dev(h, l, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok::<_, PyErr>((pair.first, pair.second, cuda.context_arc_clone(), cuda.device_id()))
+        Ok::<_, PyErr>((
+            pair.first,
+            pair.second,
+            cuda.context_arc_clone(),
+            cuda.device_id(),
+        ))
     })?;
     Ok((
-        AroonDeviceArrayF32Py { inner: up_dev, _ctx: ctx_arc.clone(), device_id: dev_id },
-        AroonDeviceArrayF32Py { inner: dn_dev, _ctx: ctx_arc, device_id: dev_id },
+        AroonDeviceArrayF32Py {
+            inner: up_dev,
+            _ctx: ctx_arc.clone(),
+            device_id: dev_id,
+        },
+        AroonDeviceArrayF32Py {
+            inner: dn_dev,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+        },
     ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "AroonDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "AroonDeviceArrayF32",
+    unsendable
+)]
 pub struct AroonDeviceArrayF32Py {
     pub(crate) inner: crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32,
     pub(crate) _ctx: std::sync::Arc<cust::context::Context>,
@@ -1504,12 +1477,14 @@ impl AroonDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producer streams synchronize before returning VRAM handles.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1521,10 +1496,9 @@ impl AroonDeviceArrayF32Py {
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
-        use pyo3::Bound;
         use pyo3::types::PyAny;
+        use pyo3::Bound;
 
-        // Validate dl_device (if provided) against the allocation device.
         let (dev_ty, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((want_ty, want_dev)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1545,10 +1519,8 @@ impl AroonDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle into the shared DLPack manager; this instance
-        // retains only an empty placeholder afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32 {
@@ -1561,7 +1533,6 @@ impl AroonDeviceArrayF32Py {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Pass max_version through as a bound Python object for the shared helper.
         let max_version_bound: Option<Bound<'py, PyAny>> =
             max_version.map(|obj| obj.into_bound(py));
 
@@ -1888,32 +1859,29 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            AroonParams::default(),            
-            AroonParams { length: Some(1) },   
-            AroonParams { length: Some(2) },   
-            AroonParams { length: Some(5) },   
-            AroonParams { length: Some(10) },  
-            AroonParams { length: Some(20) },  
-            AroonParams { length: Some(50) },  
-            AroonParams { length: Some(100) }, 
-            AroonParams { length: Some(200) }, 
+            AroonParams::default(),
+            AroonParams { length: Some(1) },
+            AroonParams { length: Some(2) },
+            AroonParams { length: Some(5) },
+            AroonParams { length: Some(10) },
+            AroonParams { length: Some(20) },
+            AroonParams { length: Some(50) },
+            AroonParams { length: Some(100) },
+            AroonParams { length: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = AroonInput::from_candles(&candles, params.clone());
             let output = aroon_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.aroon_up.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1954,15 +1922,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.aroon_down.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2012,7 +1978,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2024,11 +1990,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=100).prop_flat_map(|length| {
             (
                 prop::collection::vec(
-                    
                     (-1e6f64..1e6f64)
                         .prop_filter("finite", |x| x.is_finite())
                         .prop_flat_map(|base| {
@@ -2064,23 +2028,19 @@ mod tests {
                     aroon_down: ref_down,
                 } = aroon_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out_up.len(), highs.len());
                 prop_assert_eq!(out_down.len(), lows.len());
 
-                
                 for i in 0..length.min(out_up.len()) {
                     prop_assert!(out_up[i].is_nan());
                     prop_assert!(out_down[i].is_nan());
                 }
 
-                
                 for i in length..out_up.len() {
                     prop_assert!(!out_up[i].is_nan());
                     prop_assert!(!out_down[i].is_nan());
                 }
 
-                
                 for i in length..out_up.len() {
                     prop_assert!(
                         out_up[i] >= 0.0 && out_up[i] <= 100.0,
@@ -2096,10 +2056,7 @@ mod tests {
                     );
                 }
 
-                
-                
                 for i in length..out_up.len().min(length + 5) {
-                    
                     let window_start = i - length;
                     let mut max_val = highs[window_start];
                     let mut max_idx = window_start;
@@ -2140,13 +2097,8 @@ mod tests {
                     );
                 }
 
-                
                 if length == 1 {
-                    
-                    
-                    
                     for i in 1..out_up.len().min(10) {
-                        
                         prop_assert!(
                             out_up[i] == 0.0 || out_up[i] == 100.0,
                             "With length=1, aroon_up must be exactly 0 or 100, got {} at {}",
@@ -2160,9 +2112,7 @@ mod tests {
                             i
                         );
 
-                        
                         if i > 0 && i < highs.len() {
-                            
                             if highs[i] > highs[i - 1] {
                                 prop_assert_eq!(
                                     out_up[i],
@@ -2174,7 +2124,7 @@ mod tests {
                                     highs[i - 1]
                                 );
                             }
-                            
+
                             if lows[i] < lows[i - 1] {
                                 prop_assert_eq!(
                                     out_down[i],
@@ -2190,13 +2140,10 @@ mod tests {
                     }
                 }
 
-                
                 let is_constant = highs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && lows.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                 if is_constant && length > 1 {
-                    
-                    
                     for i in (length * 2).min(out_up.len())..(length * 3).min(out_up.len()) {
                         prop_assert!(
                             out_up[i] <= 100.0 / length as f64 + 1e-9,
@@ -2213,7 +2160,6 @@ mod tests {
                     }
                 }
 
-                
                 prop_assert_eq!(out_up.len(), ref_up.len());
                 prop_assert_eq!(out_down.len(), ref_down.len());
 
@@ -2223,7 +2169,6 @@ mod tests {
                     let y_down = out_down[i];
                     let r_down = ref_down[i];
 
-                    
                     if !y_up.is_finite() || !r_up.is_finite() {
                         prop_assert_eq!(y_up.to_bits(), r_up.to_bits());
                     } else {
@@ -2253,12 +2198,9 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in (length + 10)..(out_up.len().min(length + 15)) {
                     let window_start = i - length;
 
-                    
                     let mut max_idx = window_start;
                     for j in (window_start + 1)..=i {
                         if highs[j] > highs[max_idx] {
@@ -2266,9 +2208,7 @@ mod tests {
                         }
                     }
 
-                    
                     if i + 1 < out_up.len() && max_idx < i {
-                        
                         let next_window_start = i + 1 - length;
                         let mut next_max_idx = next_window_start;
                         for j in (next_window_start + 1)..=i + 1 {
@@ -2277,7 +2217,6 @@ mod tests {
                             }
                         }
 
-                        
                         if next_max_idx == max_idx {
                             prop_assert!(
                                 out_up[i + 1] <= out_up[i] + 1e-9,
@@ -2289,7 +2228,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..highs.len() {
                     prop_assert!(
                         highs[i] >= lows[i],
@@ -2300,7 +2238,6 @@ mod tests {
                     );
                 }
 
-                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out_up.iter().enumerate() {
@@ -2384,7 +2321,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_aroon_tests!(check_aroon_property);
 
-    
     fn check_aroon_all_nan_error(
         test_name: &str,
         kernel: Kernel,
@@ -2406,7 +2342,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_aroon_leading_nan_warmup(
         test_name: &str,
         kernel: Kernel,
@@ -2426,7 +2361,6 @@ mod tests {
         let input = AroonInput::from_slices_hl(&high, &low, params);
         let result = aroon_with_kernel(&input, kernel)?;
 
-        
         for i in 0..8 {
             assert!(
                 result.aroon_up[i].is_nan(),
@@ -2442,7 +2376,6 @@ mod tests {
             );
         }
 
-        
         for i in 8..high.len() {
             assert!(
                 !result.aroon_up[i].is_nan(),
@@ -2459,7 +2392,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_aroon_nan_in_window(
         test_name: &str,
         kernel: Kernel,
@@ -2486,9 +2418,6 @@ mod tests {
         let input = AroonInput::from_slices_hl(&high, &low, params);
         let result = aroon_with_kernel(&input, kernel)?;
 
-        
-        
-        
         for i in 5..=8 {
             if i < result.aroon_up.len() {
                 assert!(
@@ -2506,7 +2435,6 @@ mod tests {
             }
         }
 
-        
         if result.aroon_up.len() > 9 {
             assert!(
                 !result.aroon_up[9].is_nan(),
@@ -2521,7 +2449,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_aroon_streaming_nan_window(
         test_name: &str,
         kernel: Kernel,
@@ -2530,25 +2457,20 @@ mod tests {
 
         let mut stream = AroonStream::try_new(AroonParams { length: Some(3) })?;
 
-        
-        assert_eq!(stream.update(100.0, 90.0), None); 
-        assert_eq!(stream.update(110.0, 95.0), None); 
-        assert_eq!(stream.update(105.0, 92.0), None); 
+        assert_eq!(stream.update(100.0, 90.0), None);
+        assert_eq!(stream.update(110.0, 95.0), None);
+        assert_eq!(stream.update(105.0, 92.0), None);
 
-        
         let result = stream.update(115.0, 98.0);
         assert!(result.is_some(), "Expected Some result after 4 values");
 
-        
         let result_with_nan = stream.update(f64::NAN, 100.0);
         assert_eq!(result_with_nan, None, "Expected None when NaN is in window");
 
-        
         assert_eq!(stream.update(120.0, 105.0), None);
         assert_eq!(stream.update(125.0, 108.0), None);
         assert_eq!(stream.update(130.0, 110.0), None);
 
-        
         let result_after_nan = stream.update(135.0, 112.0);
         assert!(
             result_after_nan.is_some(),
@@ -2589,18 +2511,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (1, 10, 1),     
-            (2, 20, 2),     
-            (5, 50, 5),     
-            (10, 100, 10),  
-            (14, 14, 0),    
-            (50, 200, 50),  
-            (1, 5, 1),      
-            (100, 200, 50), 
-            (3, 30, 3),     
+            (1, 10, 1),
+            (2, 20, 2),
+            (5, 50, 5),
+            (10, 100, 10),
+            (14, 14, 0),
+            (50, 200, 50),
+            (1, 5, 1),
+            (100, 200, 50),
+            (3, 30, 3),
         ];
 
         for (cfg_idx, &(l_start, l_end, l_step)) in test_configs.iter().enumerate() {
@@ -2609,7 +2529,6 @@ mod tests {
                 .length_range(l_start, l_end, l_step)
                 .apply_candles(&c)?;
 
-            
             for (idx, &val) in output.up.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2620,7 +2539,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2667,7 +2585,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.down.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2678,7 +2595,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2734,7 +2650,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2760,17 +2676,18 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_aroon_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 256usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
-        
-        for _ in 0..8 { high.push(f64::NAN); low.push(f64::NAN); }
-        
+
+        for _ in 0..8 {
+            high.push(f64::NAN);
+            low.push(f64::NAN);
+        }
+
         for i in 8..len {
             let base = 100.0 + (i as f64) * 0.017;
             high.push(base + 0.75 + (i as f64).sin() * 0.01);
@@ -2779,10 +2696,8 @@ mod tests {
 
         let input = AroonInput::from_slices_hl(&high, &low, AroonParams::default());
 
-        
         let baseline = aroon(&input)?;
 
-        
         let mut up = vec![0.0; len];
         let mut down = vec![0.0; len];
         aroon_into(&input, &mut up, &mut down)?;
@@ -2816,7 +2731,6 @@ mod tests {
     }
 }
 
-/// Write directly to output slices - no allocations
 #[inline]
 pub fn aroon_into_slice(
     dst_up: &mut [f64],
@@ -2848,7 +2762,10 @@ pub fn aroon_into_slice(
         });
     }
     if dst_up.len() != len || dst_down.len() != len {
-        return Err(AroonError::OutputLengthMismatch { expected: len, got: dst_up.len().max(dst_down.len()) });
+        return Err(AroonError::OutputLengthMismatch {
+            expected: len,
+            got: dst_up.len().max(dst_down.len()),
+        });
     }
 
     let first = first_valid_pair(high, low).ok_or(AroonError::AllValuesNaN)?;
@@ -2909,7 +2826,6 @@ pub fn aroon_py<'py>(
     };
     let input = AroonInput::from_slices_hl(h, l, params);
 
-    
     let out = py
         .allow_threads(|| aroon_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2939,8 +2855,6 @@ impl AroonStreamPy {
         Ok(AroonStreamPy { stream })
     }
 
-    /// Updates the stream with new high and low values and returns the calculated Aroon values.
-    /// Returns `None` if the buffer is not yet full, otherwise returns a tuple of (aroon_up, aroon_down).
     fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
         self.stream.update(high, low)
     }
@@ -3016,15 +2930,15 @@ pub fn aroon_batch_py<'py>(
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AroonJsOutput {
-    pub values: Vec<f64>, // [up..., down...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "aroon_js")]
 pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<JsValue, JsValue> {
     let params = AroonParams {
@@ -3038,7 +2952,6 @@ pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<JsValue, JsV
     aroon_into_slice(&mut up, &mut down, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return as object with up and down arrays
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(
         &obj,
@@ -3054,16 +2967,16 @@ pub fn aroon_js(high: &[f64], low: &[f64], length: usize) -> Result<JsValue, JsV
     Ok(obj.into())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AroonBatchJsOutput {
-    pub values: Vec<f64>, // [all up rows..., all down rows...]
-    pub rows: usize,      // 2*combos
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
     pub combos: Vec<AroonParams>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "aroon_batch_js")]
 pub fn aroon_batch_unified_js(
     high: &[f64],
@@ -3082,7 +2995,6 @@ pub fn aroon_batch_unified_js(
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
 
-    // compute into two separate flat buffers
     let mut up = vec![0.0; total];
     let mut down = vec![0.0; total];
 
@@ -3097,7 +3009,6 @@ pub fn aroon_batch_unified_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return as separate up and down arrays
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(
         &obj,
@@ -3128,7 +3039,7 @@ pub fn aroon_batch_unified_js(
     Ok(obj.into())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "aroon_batch_metadata_js")]
 pub fn aroon_batch_metadata_js(
     length_start: usize,
@@ -3148,13 +3059,13 @@ pub fn aroon_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AroonBatchConfig {
-    pub length_range: Vec<usize>, // [start, end, step]
+    pub length_range: Vec<usize>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "aroon_batch")]
 pub fn aroon_batch_config_js(
     high: &[f64],
@@ -3185,7 +3096,6 @@ pub fn aroon_batch_config_js(
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows * cols overflow"))?;
 
-    // compute into two separate flat buffers
     let mut up = vec![0.0; total];
     let mut down = vec![0.0; total];
 
@@ -3200,7 +3110,6 @@ pub fn aroon_batch_config_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return as separate up and down arrays with combos
     let obj = js_sys::Object::new();
     js_sys::Reflect::set(
         &obj,
@@ -3231,7 +3140,7 @@ pub fn aroon_batch_config_js(
     Ok(obj.into())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroon_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(2 * len);
@@ -3240,7 +3149,7 @@ pub fn aroon_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroon_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -3248,12 +3157,12 @@ pub fn aroon_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroon_into(
     high_ptr: *const f64,
     low_ptr: *const f64,
-    out_ptr: *mut f64, // expects length 2*len
+    out_ptr: *mut f64,
     len: usize,
     length: usize,
 ) -> Result<(), JsValue> {

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::wto::{
     wto_batch_all_outputs_with_kernel, WtoBatchRange, WtoBuilder, WtoParams,
 };
@@ -20,7 +18,11 @@ fn approx_ratio(a: f64, b: f64, tol: f64) -> f64 {
     let scale = a.abs().max(b.abs());
     let allowed = tol + scale * (5.0 * tol);
     if allowed == 0.0 {
-        if diff == 0.0 { 0.0 } else { f64::INFINITY }
+        if diff == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        }
     } else {
         diff / allowed
     }
@@ -54,7 +56,6 @@ fn wto_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::erro
         average: (18, 30, 4),
     };
 
-    
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let data_cpu: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
 

@@ -1,46 +1,3 @@
-//! # Relative Volatility Index (RVI)
-//!
-//! Measures direction of volatility by splitting a deviation measure (standard/mean/median deviation)
-//! into "up" and "down" buckets and applying a moving average for smoothing.
-//!
-//! ## Parameters
-//! - **period**: Window size for volatility calculation (default: 10)
-//! - **ma_len**: Smoothing window for up/down components (default: 14)
-//! - **matype**: Smoothing type - 0=SMA, 1=EMA (default: 1)
-//! - **devtype**: Volatility measure - 0=StdDev, 1=MeanAbsDev, 2=MedianAbsDev (default: 0)
-//!
-//! ## Inputs
-//! - Data series as slice or candles with source
-//!
-//! ## Returns
-//! - **values**: RVI oscillator values as `Vec<f64>` (length matches input, range 0-100)
-//!
-//! ## Developer Notes / Decision Log
-//! - **AVX2/AVX512 kernels**: Currently stubs that call scalar implementation.
-//!   Decision: SIMD disabled for now — hot path is branchy (NaN-aware rolling
-//!   stddev/MAD/MEDAD + SMA/EMA smoothing), and initial attempts do not show
-//!   clear wins over the optimized scalar path. Runtime selection short-circuits
-//!   to scalar via stubs; revisit with stddev-only SIMD specialization if profiling
-//!   shows consistent >5% gains.
-//! - **CUDA wrapper**: Enabled for batch and many-series paths; kernels are FP32 with
-//!   CPU fallback for small problems. Streams are synchronized before returning VRAM
-//!   handles so Python CAI v3 + DLPack v1.x interop can omit explicit stream waits.
-//! - **Row-specific batch**: Not attempted; differing periods and NaN-aware windows
-//!   limit cross-row reuse. Batch uses scalar per row via selector; treat batch
-//!   benches as advisory.
-//! - **Streaming update**: Implemented. O(1) per update for StdDev (devtype=0),
-//!   O(n) exact for mean-abs-dev (devtype=1), and O(log n) for median-abs-dev
-//!   (devtype=2) using two-heaps with lazy deletion and running sums. Smoothers
-//!   (SMA/EMA with SMA seed) mirror batch behavior; returns None until both the
-//!   deviation window and the smoother(s) are warm. NaN input resets state.
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **TODO**: Implement actual SIMD kernels for AVX2/AVX512
-//! - **TODO**: Implement proper streaming with state tracking for deviation arrays and differences
-//!
-//! ## Test Status (bindings)
-//! - 2025-10-29: WASM and Python binding unit tests pass for RVI.
-//!   Fixed WASM test harness issues (double-free in zero-copy test; JS glue memory view caching avoided by using zero-copy APIs in specific tests). No kernel changes.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -50,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -98,7 +55,10 @@ pub struct RviOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RviParams {
     pub period: Option<usize>,
     pub ma_len: Option<usize>,
@@ -284,7 +244,7 @@ pub fn rvi_with_kernel(input: &RviInput, kernel: Kernel) -> Result<RviOutput, Rv
     if data.is_empty() {
         return Err(RviError::EmptyInputData);
     }
-    
+
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -340,7 +300,6 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
         return Err(RviError::EmptyInputData);
     }
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -351,7 +310,6 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
     let matype = input.get_matype();
     let devtype = input.get_devtype();
 
-    
     if period == 0 || ma_len == 0 {
         return Err(RviError::InvalidPeriod {
             period,
@@ -367,11 +325,9 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
         });
     }
 
-    
     let max_needed = period.saturating_sub(1) + ma_len.saturating_sub(1);
     let valid_len = data.len() - first;
 
-    
     if period > data.len() || ma_len > data.len() {
         return Err(RviError::InvalidPeriod {
             period,
@@ -380,7 +336,6 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
         });
     }
 
-    
     if valid_len <= max_needed {
         return Err(RviError::NotEnoughValidData {
             needed: max_needed + 1,
@@ -390,7 +345,6 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
 
     let warmup_period = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
 
-    
     for v in &mut dst[..warmup_period] {
         *v = f64::NAN;
     }
@@ -420,15 +374,9 @@ pub fn rvi_into_slice(dst: &mut [f64], input: &RviInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Writes RVI results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmup semantics exactly as `rvi()` (prefix length =
-///   `first_valid + (period-1) + (ma_len-1)`).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn rvi_into(input: &RviInput, out: &mut [f64]) -> Result<(), RviError> {
-    
     rvi_into_slice(out, input, Kernel::Auto)
 }
 
@@ -448,33 +396,26 @@ pub fn rvi_scalar(
         return;
     }
 
-    
     let warmup = first + period.saturating_sub(1) + ma_len.saturating_sub(1);
 
-    
-    
     let inv_p = 1.0f64 / period as f64;
     let inv_m = 1.0f64 / ma_len as f64;
-    
+
     let mut sum = 0.0f64;
     let mut sumsq = 0.0f64;
 
-    
     let mut ring = vec![f64::NAN; period];
     let mut r_head = 0usize;
     let mut r_filled = false;
 
-    
     let mut scratch = if devtype == 2 {
         vec![0.0f64; period]
     } else {
         Vec::new()
     };
 
-    
-    
     let use_sma = matype == 0;
-    
+
     let mut up_sum = 0.0f64;
     let mut dn_sum = 0.0f64;
     let mut up_ring = if use_sma {
@@ -492,7 +433,6 @@ pub fn rvi_scalar(
     let mut up_cnt = 0usize;
     let mut dn_cnt = 0usize;
 
-    
     let alpha = if !use_sma {
         2.0 / (ma_len as f64 + 1.0)
     } else {
@@ -503,15 +443,13 @@ pub fn rvi_scalar(
     let mut dn_prev = 0.0f64;
     let mut up_started = false;
     let mut dn_started = false;
-    let mut up_seed_sum = 0.0f64; 
+    let mut up_seed_sum = 0.0f64;
     let mut dn_seed_sum = 0.0f64;
     let mut up_seed_cnt = 0usize;
     let mut dn_seed_cnt = 0usize;
 
-    
     let mut prev = data[0];
 
-    
     for i in 0..period.min(n) {
         let x = data[i];
         if x.is_nan() {
@@ -530,12 +468,9 @@ pub fn rvi_scalar(
         }
     }
 
-    
     if devtype == 0 {
-        
         let mut prev = data[0];
         if use_sma {
-            
             for i in 0..n {
                 let x = data[i];
                 let d = if i == 0 || x.is_nan() || prev.is_nan() {
@@ -558,7 +493,6 @@ pub fn rvi_scalar(
                 } else {
                     let leaving = data[i - period];
                     if leaving.is_nan() || x.is_nan() || sum.is_nan() || sumsq.is_nan() {
-                        
                         sum = 0.0;
                         sumsq = 0.0;
                         let start = i + 1 - period;
@@ -600,7 +534,6 @@ pub fn rvi_scalar(
                     (0.0, 0.0)
                 };
 
-                
                 let up_s = if up_i.is_nan() {
                     up_sum = 0.0;
                     up_cnt = 0;
@@ -669,7 +602,6 @@ pub fn rvi_scalar(
                 }
             }
         } else {
-            
             for i in 0..n {
                 let x = data[i];
                 let d = if i == 0 || x.is_nan() || prev.is_nan() {
@@ -793,7 +725,6 @@ pub fn rvi_scalar(
     for i in 0..n {
         let x = data[i];
 
-        
         let d = if i == 0 || x.is_nan() || prev.is_nan() {
             f64::NAN
         } else {
@@ -801,13 +732,11 @@ pub fn rvi_scalar(
         };
         prev = x;
 
-        
         let dev = if i + 1 < period {
             f64::NAN
         } else {
             match devtype {
                 0 => {
-                    
                     if i == period - 1 {
                         if sum.is_nan() {
                             f64::NAN
@@ -820,7 +749,6 @@ pub fn rvi_scalar(
                         let leaving = data[i - period];
                         let incoming = x;
                         if leaving.is_nan() || incoming.is_nan() || sum.is_nan() || sumsq.is_nan() {
-                            
                             sum = 0.0;
                             sumsq = 0.0;
                             let start = i + 1 - period;
@@ -853,7 +781,6 @@ pub fn rvi_scalar(
                     }
                 }
                 1 => {
-                    
                     let incoming = x;
                     if i < period {
                         if !incoming.is_nan() {
@@ -866,7 +793,6 @@ pub fn rvi_scalar(
                         if i + 1 < period {
                             f64::NAN
                         } else {
-                            
                             let mut s = 0.0;
                             unsafe {
                                 for k in 0..period {
@@ -885,20 +811,18 @@ pub fn rvi_scalar(
                     } else {
                         let leaving = data[i - period];
                         if incoming.is_nan() || leaving.is_nan() {
-                            
                             r_filled = false;
                             for j in 0..period {
                                 ring[j] = f64::NAN;
                             }
                             f64::NAN
                         } else {
-                            
                             unsafe {
                                 *ring.get_unchecked_mut(r_head) = incoming;
                             }
                             r_head = (r_head + 1) % period;
                             r_filled = true;
-                            
+
                             let mut s = 0.0;
                             unsafe {
                                 for k in 0..period {
@@ -917,7 +841,6 @@ pub fn rvi_scalar(
                     }
                 }
                 _ => {
-                    
                     let incoming = x;
                     if i < period {
                         if !incoming.is_nan() {
@@ -930,7 +853,6 @@ pub fn rvi_scalar(
                         if i + 1 < period {
                             f64::NAN
                         } else {
-                            
                             unsafe {
                                 for k in 0..period {
                                     *scratch.get_unchecked_mut(k) = *ring.get_unchecked(k);
@@ -967,7 +889,6 @@ pub fn rvi_scalar(
                             r_head = (r_head + 1) % period;
                             r_filled = true;
 
-                            
                             unsafe {
                                 for k in 0..period {
                                     *scratch.get_unchecked_mut(k) =
@@ -983,7 +904,7 @@ pub fn rvi_scalar(
                                 (scratch[period / 2 - 1] + scratch[period / 2]) * 0.5
                             };
                             let mut abs_sum = 0.0;
-                            
+
                             unsafe {
                                 for k in 0..period {
                                     abs_sum +=
@@ -997,7 +918,6 @@ pub fn rvi_scalar(
             }
         };
 
-        
         let (up_i, dn_i) = if d.is_nan() || dev.is_nan() {
             (f64::NAN, f64::NAN)
         } else if d > 0.0 {
@@ -1008,11 +928,8 @@ pub fn rvi_scalar(
             (0.0, 0.0)
         };
 
-        
         let (up_s, dn_s) = if use_sma {
-            
             let up_smooth = if up_i.is_nan() {
-                
                 up_sum = 0.0;
                 up_cnt = 0;
                 up_h = 0;
@@ -1040,7 +957,7 @@ pub fn rvi_scalar(
                     up_sum * inv_m
                 }
             };
-            
+
             let dn_smooth = if dn_i.is_nan() {
                 dn_sum = 0.0;
                 dn_cnt = 0;
@@ -1071,7 +988,6 @@ pub fn rvi_scalar(
             };
             (up_smooth, dn_smooth)
         } else {
-            
             let up_smooth = if up_i.is_nan() {
                 up_started = false;
                 up_seed_sum = 0.0;
@@ -1113,7 +1029,6 @@ pub fn rvi_scalar(
             (up_smooth, dn_smooth)
         };
 
-        
         if i >= warmup {
             if up_s.is_nan() || dn_s.is_nan() {
                 out[i] = f64::NAN;
@@ -1161,7 +1076,6 @@ pub unsafe fn rvi_avx2(
     rvi_scalar(data, period, ma_len, matype, devtype, first, out)
 }
 
-/// Optimized scalar kernel
 #[inline]
 pub fn rvi_scalar_opt(
     data: &[f64],
@@ -1183,7 +1097,6 @@ pub fn rvi_scalar_opt(
     let inv_m = 1.0 / (ma_len as f64);
     let use_sma = matype == 0;
 
-    
     let mut up_sum = 0.0f64;
     let mut dn_sum = 0.0f64;
     let mut up_ring = if use_sma {
@@ -1223,7 +1136,6 @@ pub fn rvi_scalar_opt(
         }
     }
 
-    
     if devtype == 0 {
         let mut prev = data[0];
         let mut sum = 0.0f64;
@@ -1405,7 +1317,6 @@ pub fn rvi_scalar_opt(
         return;
     }
 
-    
     let mut prev = data[0];
     let mut ring = vec![0.0f64; period];
     let mut head: usize = 0;
@@ -1690,10 +1601,6 @@ pub unsafe fn rvi_avx512_long(
     rvi_scalar(data, period, ma_len, matype, devtype, first, out)
 }
 
-
-
-
-/// Item kept in heaps for the median structure (store unique id = ring slot)
 #[derive(Copy, Clone, Debug)]
 struct HeapItem {
     val: f64,
@@ -1709,7 +1616,6 @@ impl Eq for HeapItem {}
 impl Ord for HeapItem {
     #[inline(always)]
     fn cmp(&self, other: &Self) -> Ordering {
-        
         match self.val.partial_cmp(&other.val).unwrap() {
             Ordering::Equal => self.id.cmp(&other.id),
             ord => ord,
@@ -1725,49 +1631,38 @@ impl PartialOrd for HeapItem {
 
 #[derive(Clone, Debug)]
 pub struct RviStream {
-    
     period: usize,
     ma_len: usize,
-    matype: usize,  
-    devtype: usize, 
+    matype: usize,
+    devtype: usize,
 
-    
     inv_p: f64,
     inv_m: f64,
     use_sma: bool,
     alpha: f64,
     one_m_alpha: f64,
 
-    
     prev_x: f64,
     have_prev: bool,
 
-    
-    win: Vec<f64>, 
-    head: usize,   
-    filled: usize, 
+    win: Vec<f64>,
+    head: usize,
+    filled: usize,
 
-    
     sum: f64,
     sumsq: f64,
 
-    
-    
     mad_sum: f64,
 
-    
-    
-    left: BinaryHeap<HeapItem>,           
-    right: BinaryHeap<Reverse<HeapItem>>, 
-    side_of_id: Vec<u8>,                  
-    deleted: Vec<u8>,                     
+    left: BinaryHeap<HeapItem>,
+    right: BinaryHeap<Reverse<HeapItem>>,
+    side_of_id: Vec<u8>,
+    deleted: Vec<u8>,
     n_left: usize,
     n_right: usize,
     s_left: f64,
     s_right: f64,
 
-    
-    
     up_ring: Vec<f64>,
     dn_ring: Vec<f64>,
     up_sum: f64,
@@ -1777,7 +1672,6 @@ pub struct RviStream {
     up_cnt: usize,
     dn_cnt: usize,
 
-    
     up_prev: f64,
     dn_prev: f64,
     up_started: bool,
@@ -1813,39 +1707,38 @@ impl RviStream {
         let one_m_alpha = 1.0 - alpha;
 
         Ok(Self {
-            
             period,
             ma_len,
             matype,
             devtype,
-            
+
             inv_p,
             inv_m,
             use_sma,
             alpha,
             one_m_alpha,
-            
+
             prev_x: f64::NAN,
             have_prev: false,
-            
+
             win: vec![f64::NAN; period],
             head: 0,
             filled: 0,
-            
+
             sum: 0.0,
             sumsq: 0.0,
-            
+
             mad_sum: 0.0,
-            
+
             left: BinaryHeap::new(),
             right: BinaryHeap::new(),
             side_of_id: vec![0; period],
-            deleted: vec![1; period], 
+            deleted: vec![1; period],
             n_left: 0,
             n_right: 0,
             s_left: 0.0,
             s_right: 0.0,
-            
+
             up_ring: if use_sma {
                 vec![0.0; ma_len]
             } else {
@@ -1915,7 +1808,6 @@ impl RviStream {
         self.reset_smoothing();
     }
 
-    
     #[inline(always)]
     fn prune_left(&mut self) {
         while let Some(top) = self.left.peek() {
@@ -2016,7 +1908,6 @@ impl RviStream {
         (mean_sq - mean * mean).sqrt()
     }
 
-    
     #[inline(always)]
     fn push_sma(
         sum: &mut f64,
@@ -2106,7 +1997,6 @@ impl RviStream {
             return None;
         }
 
-        
         let d = if self.have_prev {
             value - self.prev_x
         } else {
@@ -2115,7 +2005,6 @@ impl RviStream {
         self.prev_x = value;
         self.have_prev = true;
 
-        
         let id = self.head;
         if self.filled < self.period {
             self.win[id] = value;
@@ -2165,7 +2054,6 @@ impl RviStream {
             return None;
         }
 
-        
         let dev = match self.devtype {
             0 => {
                 let sd = self.stddev_current();
@@ -2206,7 +2094,6 @@ impl RviStream {
             (0.0, 0.0)
         };
 
-        
         let (up_s, dn_s) = if self.use_sma {
             let up_s = Self::push_sma(
                 &mut self.up_sum,
@@ -2527,10 +2414,8 @@ fn rvi_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| RviError::InvalidInput("rows * cols overflow".into()))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap().saturating_sub(1) + c.ma_len.unwrap().saturating_sub(1))
@@ -2542,7 +2427,6 @@ fn rvi_batch_inner(
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let chosen_kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         other => other,
@@ -2556,7 +2440,7 @@ fn rvi_batch_inner(
             Kernel::Avx2 | Kernel::Avx2Batch => rvi_row_avx2(data, first, prm, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => rvi_row_avx512(data, first, prm, out_row),
-            _ => rvi_row_scalar(data, first, prm, out_row), 
+            _ => rvi_row_scalar(data, first, prm, out_row),
         }
     };
     if parallel {
@@ -2579,7 +2463,6 @@ fn rvi_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -2640,13 +2523,11 @@ fn rvi_batch_inner_into(
         });
     }
 
-    
     let chosen_kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         other => other,
     };
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first
             + combo.period.unwrap().saturating_sub(1)
@@ -2664,7 +2545,7 @@ fn rvi_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch => rvi_row_avx2(data, first, prm, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => rvi_row_avx512(data, first, prm, out_row),
-            _ => rvi_row_scalar(data, first, prm, out_row), 
+            _ => rvi_row_scalar(data, first, prm, out_row),
         }
     };
     if parallel {
@@ -2758,8 +2639,6 @@ unsafe fn rvi_row_avx512_long(data: &[f64], first: usize, params: &RviParams, ou
         out,
     )
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2938,50 +2817,49 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            RviParams::default(), 
+            RviParams::default(),
             RviParams {
-                period: Some(2),  
-                ma_len: Some(2),  
-                matype: Some(0),  
-                devtype: Some(0), 
+                period: Some(2),
+                ma_len: Some(2),
+                matype: Some(0),
+                devtype: Some(0),
             },
             RviParams {
                 period: Some(5),
                 ma_len: Some(5),
-                matype: Some(1),  
-                devtype: Some(1), 
+                matype: Some(1),
+                devtype: Some(1),
             },
             RviParams {
                 period: Some(10),
                 ma_len: Some(20),
-                matype: Some(0),  
-                devtype: Some(2), 
+                matype: Some(0),
+                devtype: Some(2),
             },
             RviParams {
                 period: Some(20),
                 ma_len: Some(30),
-                matype: Some(1),  
-                devtype: Some(0), 
+                matype: Some(1),
+                devtype: Some(0),
             },
             RviParams {
                 period: Some(50),
                 ma_len: Some(50),
-                matype: Some(0),  
-                devtype: Some(1), 
+                matype: Some(0),
+                devtype: Some(1),
             },
             RviParams {
-                period: Some(100), 
+                period: Some(100),
                 ma_len: Some(20),
-                matype: Some(1),  
-                devtype: Some(2), 
+                matype: Some(1),
+                devtype: Some(2),
             },
             RviParams {
                 period: Some(14),
-                ma_len: Some(100), 
-                matype: Some(0),   
-                devtype: Some(0),  
+                ma_len: Some(100),
+                matype: Some(0),
+                devtype: Some(0),
             },
         ];
 
@@ -2991,12 +2869,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -3031,7 +2908,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -3043,8 +2920,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=30, 2usize..=30, 0usize..=1, 0usize..=2).prop_flat_map(
             |(period, ma_len, matype, devtype)| {
                 (
@@ -3071,17 +2946,13 @@ mod tests {
                 };
                 let input = RviInput::from_slice(&data, params.clone());
 
-                
                 let RviOutput { values: out } = rvi_with_kernel(&input, kernel).unwrap();
 
-                
                 let RviOutput { values: ref_out } =
                     rvi_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let warmup = period.saturating_sub(1) + ma_len.saturating_sub(1);
 
-                
                 for i in 0..warmup.min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -3091,12 +2962,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_finite() {
                         prop_assert!(
                             y >= -1e-9 && y <= 100.0 + 1e-9,
@@ -3106,7 +2975,6 @@ mod tests {
                         );
                     }
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -3116,7 +2984,6 @@ mod tests {
                             r
                         );
                     } else {
-                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -3132,8 +2999,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0] - f64::EPSILON);
 
                 if is_monotonic_increasing && out.len() > warmup + 10 {
@@ -3148,15 +3013,13 @@ mod tests {
                         let avg_rvi =
                             finite_values.iter().sum::<f64>() / finite_values.len() as f64;
                         prop_assert!(
-                            avg_rvi >= 90.0, 
+                            avg_rvi >= 90.0,
                             "RVI should be high for monotonic increasing data, got avg {}",
                             avg_rvi
                         );
                     }
                 }
 
-                
-                
                 let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0] + f64::EPSILON);
 
                 if is_monotonic_decreasing && out.len() > warmup + 10 {
@@ -3171,15 +3034,13 @@ mod tests {
                         let avg_rvi =
                             finite_values.iter().sum::<f64>() / finite_values.len() as f64;
                         prop_assert!(
-                            avg_rvi <= 10.0, 
+                            avg_rvi <= 10.0,
                             "RVI should be low for monotonic decreasing data, got avg {}",
                             avg_rvi
                         );
                     }
                 }
 
-                
-                
                 let is_constant = data
                     .windows(2)
                     .all(|w| (w[0] - w[1]).abs() <= f64::EPSILON * w[0].abs().max(1.0));
@@ -3195,14 +3056,12 @@ mod tests {
                     }
                 }
 
-                
-                
                 let mut is_alternating = data.len() >= 4;
                 if is_alternating {
                     for i in 1..data.len().saturating_sub(1) {
                         let diff1 = data[i] - data[i - 1];
                         let diff2 = data[i + 1] - data[i];
-                        
+
                         if diff1 * diff2 >= 0.0 && diff1.abs() > f64::EPSILON {
                             is_alternating = false;
                             break;
@@ -3298,21 +3157,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 2, 10, 2),      
-            (5, 25, 5, 10, 30, 5),     
-            (30, 60, 15, 20, 40, 10),  
-            (2, 5, 1, 2, 5, 1),        
-            (10, 20, 5, 50, 100, 25),  
-            (50, 100, 50, 10, 20, 10), 
+            (2, 10, 2, 2, 10, 2),
+            (5, 25, 5, 10, 30, 5),
+            (30, 60, 15, 20, 40, 10),
+            (2, 5, 1, 2, 5, 1),
+            (10, 20, 5, 50, 100, 25),
+            (50, 100, 50, 10, 20, 10),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step)) in
             test_configs.iter().enumerate()
         {
-            
             for matype in [0, 1].iter() {
                 for devtype in [0, 1, 2].iter() {
                     let output = RviBatchBuilder::new()
@@ -3333,7 +3189,6 @@ mod tests {
                         let col = idx % output.cols;
                         let combo = &output.combos[row];
 
-                        
                         if bits == 0x11111111_11111111 {
                             panic!(
 								"[{}] Config {} (matype={}, devtype={}): Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3370,7 +3225,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -3398,23 +3253,19 @@ mod tests {
 
     #[test]
     fn test_rvi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
         let input = RviInput::with_default_candles(&candles);
 
-        
         let baseline = rvi(&input)?.values;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             rvi_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             rvi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -3439,7 +3290,7 @@ mod tests {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rvi_js(
     data: &[f64],
@@ -3448,28 +3299,22 @@ pub fn rvi_js(
     matype: usize,
     devtype: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    
     if data.is_empty() {
         return Err(JsValue::from_str("rvi: Empty data provided."));
     }
 
-    
     if data.iter().all(|&x| x.is_nan()) {
         return Err(JsValue::from_str("rvi: All values are NaN."));
     }
 
-    
     if period == 0 || ma_len == 0 {
         return Err(JsValue::from_str("rvi: Invalid period"));
     }
 
-    
     let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
     let needed = period.saturating_sub(1) + ma_len.saturating_sub(1) + 1;
     let valid_len = data.len() - first;
 
-    
-    
     if period > data.len() || ma_len > data.len() {
         return Err(JsValue::from_str("rvi: Invalid period"));
     } else if valid_len < needed {
@@ -3489,7 +3334,7 @@ pub fn rvi_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rvi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3498,7 +3343,7 @@ pub fn rvi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rvi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3508,7 +3353,7 @@ pub fn rvi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rvi_into(
     in_ptr: *const f64,
@@ -3522,9 +3367,6 @@ pub fn rvi_into(
     if len == 0 {
         return Err(JsValue::from_str("rvi_into: len cannot be 0"));
     }
-
-    
-    
 
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
@@ -3550,7 +3392,7 @@ pub fn rvi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RviBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -3559,7 +3401,7 @@ pub struct RviBatchConfig {
     pub devtype_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RviBatchJsOutput {
     pub values: Vec<f64>,
@@ -3571,7 +3413,7 @@ pub struct RviBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = rvi_batch)]
 pub fn rvi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: RviBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -3600,7 +3442,7 @@ pub fn rvi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rvi_batch_into(
     in_ptr: *const f64,
@@ -3630,8 +3472,7 @@ pub fn rvi_batch_into(
             matype: (t_start, t_end, t_step),
             devtype: (d_start, d_end, d_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -3667,7 +3508,6 @@ pub fn rvi_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -3806,7 +3646,6 @@ pub fn register_rvi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaRvi;
 #[cfg(all(feature = "python", feature = "cuda"))]

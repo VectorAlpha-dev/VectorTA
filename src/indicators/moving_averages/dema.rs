@@ -1,34 +1,3 @@
-//! # Double Exponential Moving Average (DEMA)
-//!
-//! A moving average technique that seeks to reduce lag by combining two
-//! exponential moving averages (EMA). First, an EMA is calculated on the input
-//! data. Then, a second EMA is computed on the first EMA. Finally, the DEMA is
-//! determined by subtracting the second EMA from twice the first EMA.
-//!
-//! ## Parameters
-//! - **period**: Lookback period for the EMA calculations (must be ≥ 1).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: DEMA: All input data values are `NaN`.
-//! - **InvalidPeriod**: DEMA: `period` is less than 1 or exceeds the data length.
-//! - **NotEnoughData**: DEMA: Not enough data points (needs `2 * (period - 1)`).
-//!
-//! ## Returns
-//! - **`Ok(DemaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(DemaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD selection: AVX512 enabled by default (faster by >5% at 100k on supported CPUs).
-//!   AVX2 underperforms on typical targets, so Auto skips it and falls back to `Scalar`.
-//!   Users can still explicitly request `Avx2`/`Avx512` via the `kernel` parameter.
-//! - Streaming update: O(1) EMA updates; warmup handled by caller via NaN prefix.
-//! - Memory: uses allocation helpers with warmup prefixes (see ALMA pattern).
-//! - Future: Revisit SIMD if layout or math changes improve throughput.
-//!
-//! Decision: Streaming kernel uses fused multiply-add on x86/x86_64 via `mul_add` for
-//! parity with scalar/batch paths and improved stability; non-x86 uses `a*b + c`.
-//! Warmup semantics unchanged; counters use saturating add to avoid wrap.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::{CudaDema, DeviceArrayF32};
 use crate::utilities::data_loader::{source_type, Candles};
@@ -47,13 +16,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -76,7 +45,10 @@ impl<'a> AsRef<[f64]> for DemaInput<'a> {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct DemaParams {
     pub period: Option<usize>,
 }
@@ -197,7 +169,11 @@ pub enum DemaError {
     #[error("dema: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("dema: invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("dema: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("dema: size overflow when computing {context}")]
@@ -246,8 +222,6 @@ fn dema_prepare<'a>(
         return Err(DemaError::NotEnoughValidData { needed, valid });
     }
 
-    
-    
     let chosen = match kernel {
         Kernel::Auto => match detect_best_kernel() {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -280,31 +254,21 @@ pub fn dema_with_kernel(input: &DemaInput, kernel: Kernel) -> Result<DemaOutput,
     let len = data.len();
     let mut out = alloc_with_nan_prefix(len, warm);
     dema_compute_into(data, period, first, chosen, &mut out);
-    
+
     out[..warm].fill(f64::NAN);
     Ok(DemaOutput { values: out })
 }
 
-/// Writes DEMA values into a caller-provided output buffer without allocating.
-///
-/// - Preserves the same NaN warmup prefix as `dema()` (up to `first + period - 1`).
-/// - The output slice length must equal the input length; returns the module's
-///   existing error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dema_into(input: &DemaInput, out: &mut [f64]) -> Result<(), DemaError> {
-    // Delegate to the internal zero-copy helper with Kernel::Auto
     dema_into_slice(out, input, Kernel::Auto)
 }
 
-/// Write DEMA values directly to output slice - no allocations.
-/// This is the core helper for WASM optimizations.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn dema_into_slice(dst: &mut [f64], input: &DemaInput, kern: Kernel) -> Result<(), DemaError> {
     let (data, period, first, warmup, chosen) = dema_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
     if dst.len() != data.len() {
         return Err(DemaError::OutputLengthMismatch {
             expected: data.len(),
@@ -312,10 +276,8 @@ pub fn dema_into_slice(dst: &mut [f64], input: &DemaInput, kern: Kernel) -> Resu
         });
     }
 
-    // Compute DEMA values directly into dst
     dema_compute_into(data, period, first, chosen, dst);
 
-    // Fill warmup period with NaN (dema_compute_into might not handle this)
     for v in &mut dst[..warmup] {
         *v = f64::NAN;
     }
@@ -333,25 +295,19 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
         return;
     }
 
-    // α and (1-α)
     let alpha = 2.0 / (period as f64 + 1.0);
     let a = 1.0 - alpha;
 
-    // Seed at the first non-NaN
     let mut ema1 = *data.get_unchecked(first);
     let mut ema2 = ema1;
     *out.get_unchecked_mut(first) = ema1;
 
-    // Start one past the seed
     let mut i = first + 1;
     let mut p = data.as_ptr().add(i);
     let mut q = out.as_mut_ptr().add(i);
 
-    // Unroll by 4 for better ILP; prefetch ahead to hide memory latency.
-    // We only enter the unrolled loop when we have at least 4 samples left.
     let limit = n.saturating_sub(4);
     while i <= limit {
-        // Prefetch upcoming cachelines (guarded)
         if i + 32 < n {
             core::arch::x86_64::_mm_prefetch(
                 p.add(32) as *const i8,
@@ -359,25 +315,21 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
             );
         }
 
-        // step 0
         let x0 = *p;
         ema1 = ema1.mul_add(a, x0 * alpha);
         ema2 = ema2.mul_add(a, ema1 * alpha);
         *q = ema1.mul_add(2.0, -ema2);
 
-        // step 1
         let x1 = *p.add(1);
         ema1 = ema1.mul_add(a, x1 * alpha);
         ema2 = ema2.mul_add(a, ema1 * alpha);
         *q.add(1) = ema1.mul_add(2.0, -ema2);
 
-        // step 2
         let x2 = *p.add(2);
         ema1 = ema1.mul_add(a, x2 * alpha);
         ema2 = ema2.mul_add(a, ema1 * alpha);
         *q.add(2) = ema1.mul_add(2.0, -ema2);
 
-        // step 3
         let x3 = *p.add(3);
         ema1 = ema1.mul_add(a, x3 * alpha);
         ema2 = ema2.mul_add(a, ema1 * alpha);
@@ -388,7 +340,6 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
         i += 4;
     }
 
-    // Tail
     while i < n {
         let x = *p;
         ema1 = ema1.mul_add(a, x * alpha);
@@ -421,7 +372,6 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
     let mut p = data.as_ptr().add(i);
     let mut q = out.as_mut_ptr().add(i);
 
-    // Unrolled by 4 (portable path uses plain mul/add)
     let limit = n.saturating_sub(4);
     while i <= limit {
         let x0 = *p;
@@ -461,44 +411,35 @@ pub unsafe fn dema_scalar(data: &[f64], period: usize, first: usize, out: &mut [
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// DEMA AVX2 / AVX512 kernels (drop‑in)
-// ─────────────────────────────────────────────────────────────────────────────
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn last_lane_256(v: __m256d) -> f64 {
-    let hi: __m128d = _mm256_extractf128_pd(v, 1); // lanes [2,3]
-    let dup_hi: __m128d = _mm_unpackhi_pd(hi, hi); // [lane3, lane3]
+    let hi: __m128d = _mm256_extractf128_pd(v, 1);
+    let dup_hi: __m128d = _mm_unpackhi_pd(hi, hi);
     _mm_cvtsd_f64(dup_hi)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn last_lane_512(v: __m512d) -> f64 {
-    let hi2: __m128d = _mm512_extractf64x2_pd(v, 3); // lanes [6,7]
-    let dup_hi: __m128d = _mm_unpackhi_pd(hi2, hi2); // [lane7, lane7]
+    let hi2: __m128d = _mm512_extractf64x2_pd(v, 3);
+    let dup_hi: __m128d = _mm_unpackhi_pd(hi2, hi2);
     _mm_cvtsd_f64(dup_hi)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn shl1_256(x: __m256d) -> __m256d {
-    // [0, x0, x1, x2]
-    let lo: __m128d = _mm256_castpd256_pd128(x); // [x0,x1]
-    let hi: __m128d = _mm256_extractf128_pd(x, 1); // [x2,x3]
-    let lo_res = _mm_unpacklo_pd(_mm_setzero_pd(), lo); // [0,x0]
-    let hi_res = _mm_shuffle_pd(
-        _mm_unpackhi_pd(lo, lo), // [x1,x1]
-        _mm_unpacklo_pd(hi, hi),
-        0x0,
-    ); // [x1,x2]
+    let lo: __m128d = _mm256_castpd256_pd128(x);
+    let hi: __m128d = _mm256_extractf128_pd(x, 1);
+    let lo_res = _mm_unpacklo_pd(_mm_setzero_pd(), lo);
+    let hi_res = _mm_shuffle_pd(_mm_unpackhi_pd(lo, lo), _mm_unpacklo_pd(hi, hi), 0x0);
     _mm256_insertf128_pd(_mm256_castpd128_pd256(lo_res), hi_res, 1)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn shl2_256(x: __m256d) -> __m256d {
-    // [0, 0, x0, x1]
     let lo: __m128d = _mm256_castpd256_pd128(x);
     _mm256_insertf128_pd(_mm256_castpd128_pd256(_mm_setzero_pd()), lo, 1)
 }
@@ -506,7 +447,6 @@ unsafe fn shl2_256(x: __m256d) -> __m256d {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn scan4(v: __m256d, a1: __m256d, a2: __m256d) -> __m256d {
-    // t = v; t += a1*shl1(t); t += a2*shl2(t);
     let t1 = _mm256_fmadd_pd(a1, shl1_256(v), v);
     let t2 = _mm256_fmadd_pd(a2, shl2_256(t1), t1);
     t2
@@ -515,7 +455,6 @@ unsafe fn scan4(v: __m256d, a1: __m256d, a2: __m256d) -> __m256d {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn shl1_512(x: __m512d) -> __m512d {
-    // [0, x0, x1, x2, x3, x4, x5, x6]
     let idx: __m512i = _mm512_set_epi64(6, 5, 4, 3, 2, 1, 0, 0);
     let mask: __mmask8 = 0b1111_1110;
     _mm512_maskz_permutexvar_pd(mask, idx, x)
@@ -523,7 +462,6 @@ unsafe fn shl1_512(x: __m512d) -> __m512d {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn shl2_512(x: __m512d) -> __m512d {
-    // [0, 0, x0, x1, x2, x3, x4, x5]
     let idx: __m512i = _mm512_set_epi64(5, 4, 3, 2, 1, 0, 0, 0);
     let mask: __mmask8 = 0b1111_1100;
     _mm512_maskz_permutexvar_pd(mask, idx, x)
@@ -531,7 +469,6 @@ unsafe fn shl2_512(x: __m512d) -> __m512d {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn shl4_512(x: __m512d) -> __m512d {
-    // [0, 0, 0, 0, x0, x1, x2, x3]
     let idx: __m512i = _mm512_set_epi64(3, 2, 1, 0, 0, 0, 0, 0);
     let mask: __mmask8 = 0b1111_0000;
     _mm512_maskz_permutexvar_pd(mask, idx, x)
@@ -539,7 +476,6 @@ unsafe fn shl4_512(x: __m512d) -> __m512d {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn scan8(v: __m512d, a1: __m512d, a2: __m512d, a4: __m512d) -> __m512d {
-    // t = v; t += a1*shl1(t); t += a2*shl2(t); t += a4*shl4(t);
     let t1 = _mm512_fmadd_pd(a1, shl1_512(v), v);
     let t2 = _mm512_fmadd_pd(a2, shl2_512(t1), t1);
     let t3 = _mm512_fmadd_pd(a4, shl4_512(t2), t2);
@@ -559,7 +495,6 @@ pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f6
     let alpha = 2.0 / (period as f64 + 1.0);
     let a = 1.0 - alpha;
 
-    // initial state at first finite sample
     let mut i = first;
     let mut ema1 = *data.get_unchecked(i);
     let mut ema2 = ema1;
@@ -569,7 +504,6 @@ pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f6
         return;
     }
 
-    // precompute constants
     let alpha_v = _mm256_set1_pd(alpha);
     let a1_s = a;
     let a2_s = a1_s * a1_s;
@@ -579,34 +513,28 @@ pub unsafe fn dema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f6
     let a1_v = _mm256_set1_pd(a1_s);
     let a2_v = _mm256_set1_pd(a2_s);
 
-    // main blocks of 4
     while i + 4 <= n {
-        // load inputs
         let x = _mm256_loadu_pd(data.as_ptr().add(i));
-        // EMA1 block
+
         let v1 = _mm256_mul_pd(alpha_v, x);
         let t1 = scan4(v1, a1_v, a2_v);
         let prev1 = _mm256_set1_pd(ema1);
         let ema1_vec = _mm256_fmadd_pd(pow_vec, prev1, t1);
 
-        // EMA2 block
         let v2 = _mm256_mul_pd(alpha_v, ema1_vec);
         let t2 = scan4(v2, a1_v, a2_v);
         let prev2 = _mm256_set1_pd(ema2);
         let ema2_vec = _mm256_fmadd_pd(pow_vec, prev2, t2);
 
-        // DEMA = 2*EMA1 - EMA2
         let two_ema1 = _mm256_add_pd(ema1_vec, ema1_vec);
         let dema_v = _mm256_sub_pd(two_ema1, ema2_vec);
         _mm256_storeu_pd(out.as_mut_ptr().add(i), dema_v);
 
-        // carry state to next block (last lane)
         ema1 = last_lane_256(ema1_vec);
         ema2 = last_lane_256(ema2_vec);
         i += 4;
     }
 
-    // scalar tail
     while i < n {
         let price = *data.get_unchecked(i);
         ema1 = ema1.mul_add(a, price * alpha);
@@ -629,7 +557,6 @@ pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [
     let alpha = 2.0 / (period as f64 + 1.0);
     let a = 1.0 - alpha;
 
-    // initial state
     let mut i = first;
     let mut ema1 = *data.get_unchecked(i);
     let mut ema2 = ema1;
@@ -639,16 +566,15 @@ pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [
         return;
     }
 
-    // constants
     let alpha_v = _mm512_set1_pd(alpha);
     let a1_s = a;
     let a2_s = a1_s * a1_s;
     let a3_s = a2_s * a1_s;
     let a4_s = a2_s * a2_s;
     let a5_s = a4_s * a1_s;
-    let a6_s = a3_s * a3_s; // a^6
-    let a7_s = a6_s * a1_s; // a^7
-    let a8_s = a4_s * a4_s; // a^8
+    let a6_s = a3_s * a3_s;
+    let a7_s = a6_s * a1_s;
+    let a8_s = a4_s * a4_s;
     let pow_vec = _mm512_set_pd(a8_s, a7_s, a6_s, a5_s, a4_s, a3_s, a2_s, a1_s);
     let a1_v = _mm512_set1_pd(a1_s);
     let a2_v = _mm512_set1_pd(a2_s);
@@ -657,30 +583,25 @@ pub unsafe fn dema_avx512(data: &[f64], period: usize, first: usize, out: &mut [
     while i + 8 <= n {
         let x = _mm512_loadu_pd(data.as_ptr().add(i));
 
-        // EMA1 block
         let v1 = _mm512_mul_pd(alpha_v, x);
         let t1 = scan8(v1, a1_v, a2_v, a4_v);
         let prev1 = _mm512_set1_pd(ema1);
         let ema1_vec = _mm512_fmadd_pd(pow_vec, prev1, t1);
 
-        // EMA2 block
         let v2 = _mm512_mul_pd(alpha_v, ema1_vec);
         let t2 = scan8(v2, a1_v, a2_v, a4_v);
         let prev2 = _mm512_set1_pd(ema2);
         let ema2_vec = _mm512_fmadd_pd(pow_vec, prev2, t2);
 
-        // DEMA
         let two_ema1 = _mm512_add_pd(ema1_vec, ema1_vec);
         let dema_v = _mm512_sub_pd(two_ema1, ema2_vec);
         _mm512_storeu_pd(out.as_mut_ptr().add(i), dema_v);
 
-        // carry
         ema1 = last_lane_512(ema1_vec);
         ema2 = last_lane_512(ema2_vec);
         i += 8;
     }
 
-    // scalar tail
     while i < n {
         let price = *data.get_unchecked(i);
         ema1 = ema1.mul_add(a, price * alpha);
@@ -735,12 +656,11 @@ impl DemaStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Fast seed: identical semantics to original.
         if self.filled == 0 {
             self.ema = value;
             self.ema2 = value;
             self.filled = 1;
-            // For period==1, return immediately; otherwise warmup with None.
+
             return if self.nan_fill == 0 {
                 Some(value)
             } else {
@@ -748,23 +668,17 @@ impl DemaStream {
             };
         }
 
-        // Lift constants into registers
-        let a = self.alpha; // α
-        let a1 = self.alpha_1; // 1−α
+        let a = self.alpha;
+        let a1 = self.alpha_1;
 
-        // EMA1: ema = ema*(1-α) + value*α
         self.ema = Self::fmadd(self.ema, a1, value * a);
 
-        // EMA2: ema2 = ema2*(1-α) + ema*α
         self.ema2 = Self::fmadd(self.ema2, a1, self.ema * a);
 
-        // DEMA = 2*EMA1 - EMA2; encourage fused MAD on x86
         let y = Self::fmadd(self.ema, 2.0, -self.ema2);
 
-        // Advance with saturating add to avoid wrap on extremely long runs
         self.filled = self.filled.saturating_add(1);
 
-        // Warm‑up policy unchanged: emit only after period−1
         if self.filled > self.nan_fill {
             Some(y)
         } else {
@@ -781,13 +695,10 @@ impl DemaStream {
     }
 }
 
-// Optional fast-math helper for reciprocal if many alphas must be computed.
-// Not used by default to preserve exactness; keep available for future tuning.
 #[inline(always)]
 fn fast_recip_nr1(d: f64) -> f64 {
-    // Precondition: d > 0
-    let x0 = (d as f32).recip() as f64; // fast initial approx
-    x0 * (2.0 - d * x0) // one NR step
+    let x0 = (d as f32).recip() as f64;
+    x0 * (2.0 - d * x0)
 }
 
 #[derive(Clone, Debug)]
@@ -868,7 +779,6 @@ impl DemaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &DemaBatchRange) -> Vec<DemaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Zero step or equal bounds -> singleton
         if step == 0 || start == end {
             return vec![start];
         }
@@ -883,11 +793,12 @@ fn expand_grid(r: &DemaBatchRange) -> Vec<DemaParams> {
                 }
             }
         } else {
-            // Support reversed bounds: descend using checked_sub
             let mut v = start;
             loop {
                 vals.push(v);
-                if v <= end { break; }
+                if v <= end {
+                    break;
+                }
                 match v.checked_sub(step) {
                     Some(n) if n != v => v = n,
                     _ => break,
@@ -928,16 +839,12 @@ pub(crate) fn dema_batch_with_kernel(
     sweep: &DemaBatchRange,
     k: Kernel,
 ) -> Result<DemaBatchOutput, DemaError> {
-    // Row-specific batch kernels not implemented for DEMA: little shared precompute across rows.
-    // Auto short-circuits to ScalarBatch.
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(DemaError::InvalidKernelForBatch(other)),
     };
-    // Keep parity and performance policy consistent with single-path:
-    // - AVX512: use AVX512 (wins consistently)
-    // - AVX2: prefer Scalar (AVX2 underperforms on typical targets and single Auto uses Scalar)
+
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -969,19 +876,17 @@ fn dema_batch_inner(
     };
     let cols = data.len();
     let rows = combos.len();
-    // Checked arithmetic to avoid overflow before allocation
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(DemaError::SizeOverflow { context: "rows*cols for batch buffer" })?;
+
+    let _total = rows.checked_mul(cols).ok_or(DemaError::SizeOverflow {
+        context: "rows*cols for batch buffer",
+    })?;
 
     if cols == 0 {
         return Err(DemaError::EmptyInputData);
     }
 
-    // Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -992,19 +897,15 @@ fn dema_batch_inner(
         })
         .collect();
 
-    // Initialize NaN prefixes efficiently
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Convert to mutable slice using ManuallyDrop pattern
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Perform computation
     dema_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Reclaim as Vec<f64>
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1029,7 +930,6 @@ fn dema_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<DemaParams>, DemaError> {
-    // ── 1. validation ──────────────────────────────────────────────────────
     let combos = {
         let v = expand_grid(sweep);
         if v.is_empty() {
@@ -1067,15 +967,16 @@ fn dema_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Verify output buffer size
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(DemaError::SizeOverflow { context: "rows*cols when validating output buffer" })?;
+    let expected = rows.checked_mul(cols).ok_or(DemaError::SizeOverflow {
+        context: "rows*cols when validating output buffer",
+    })?;
     if out.len() != expected {
-        return Err(DemaError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(DemaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    // ── 3. per-row kernel closure; dst is &mut [f64] ─────
     let do_row = |row: usize, dst: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
 
@@ -1086,12 +987,11 @@ fn dema_batch_inner_into(
             Kernel::Avx2 => dema_row_avx2(data, first, p, dst),
             _ => dema_row_scalar(data, first, p, dst),
         }
-        // Enforce warmup NaNs for this row
+
         let warm = first + p - 1;
         dst[..warm].fill(f64::NAN);
     };
 
-    // ── 4. run every row kernel, parallel or sequential ────────────────────
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1128,7 +1028,6 @@ unsafe fn dema_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [
     dema_avx512(data, period, first, out)
 }
 
-// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Dema", unsendable)]
 pub struct DeviceArrayF32DemaPy {
@@ -1148,20 +1047,29 @@ impl DeviceArrayF32DemaPy {
     }
 
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
         let itemsize = std::mem::size_of::<f32>();
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let size = self.inner.rows.saturating_mul(self.inner.cols);
-        let ptr_val: usize = if size == 0 { 0 } else { self.inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            self.inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
-        d.set_item("version", 3)?; 
+        d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1174,8 +1082,7 @@ impl DeviceArrayF32DemaPy {
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1194,10 +1101,8 @@ impl DeviceArrayF32DemaPy {
             }
         }
 
-        
         let _ = stream;
 
-        
         let dummy = cust::memory::DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
@@ -1221,8 +1126,16 @@ impl DeviceArrayF32DemaPy {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32DemaPy {
-    pub fn new(inner: DeviceArrayF32, ctx_guard: std::sync::Arc<cust::context::Context>, device_id: u32) -> Self {
-        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+    pub fn new(
+        inner: DeviceArrayF32,
+        ctx_guard: std::sync::Arc<cust::context::Context>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
     }
 }
 
@@ -1402,10 +1315,8 @@ mod tests {
 
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (1usize..=32).prop_flat_map(|period| {
-            let min_len = 2 * period.max(2); 
+            let min_len = 2 * period.max(2);
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
@@ -1413,7 +1324,7 @@ mod tests {
                 ),
                 Just(period),
                 (-1e3f64..1e3f64).prop_filter("non-zero scale", |a| a.is_finite() && *a != 0.0),
-                -1e3f64..1e3f64, 
+                -1e3f64..1e3f64,
             )
         });
 
@@ -1424,22 +1335,20 @@ mod tests {
                 };
                 let input = DemaInput::from_slice(&data, params.clone());
 
-                
                 let fast = dema_with_kernel(&input, kernel);
                 let slow = dema_with_kernel(&input, Kernel::Scalar);
 
                 match (fast, slow) {
-                    
                     (Err(e1), Err(e2))
                         if std::mem::discriminant(&e1) == std::mem::discriminant(&e2) =>
                     {
                         return Ok(())
                     }
-                    
+
                     (Err(e1), Err(e2)) => {
                         prop_assert!(false, "different errors: fast={:?} slow={:?}", e1, e2)
                     }
-                    
+
                     (Err(e1), Ok(_)) => {
                         prop_assert!(false, "fast errored {e1:?} but scalar succeeded")
                     }
@@ -1447,58 +1356,45 @@ mod tests {
                         prop_assert!(false, "scalar errored {e2:?} but fast succeeded")
                     }
 
-                    
                     (Ok(fast), Ok(reference)) => {
                         let DemaOutput { values: out } = fast;
                         let DemaOutput { values: rref } = reference;
 
-                        
-                        
                         let mut stream = DemaStream::try_new(params.clone()).unwrap();
                         let mut s_out = Vec::with_capacity(data.len());
                         for &v in &data {
                             s_out.push(stream.update(v).unwrap_or(f64::NAN));
                         }
 
-                        
                         let transformed: Vec<f64> = data.iter().map(|x| a * *x + b).collect();
                         let t_out =
                             dema(&DemaInput::from_slice(&transformed, params.clone()))?.values;
 
-                        
-                        let nan_fill = period - 1; 
+                        let nan_fill = period - 1;
                         for i in 0..data.len() {
                             let y = out[i];
                             let yr = rref[i];
                             let ys = s_out[i];
                             let yt = t_out[i];
 
-                            
                             if period == 1 && y.is_finite() {
                                 prop_assert!(approx_eq!(f64, y, data[i], ulps = 2));
                             }
 
-                            
-                            
                             if i >= period - 1 {
                                 let window = &data[i.saturating_sub(period - 1)..=i];
                                 if window.iter().all(|v| *v == window[0]) {
                                     prop_assert!(approx_eq!(f64, y, window[0], epsilon = 1e-9));
                                 }
                             } else {
-                                
                                 prop_assert!(y.is_nan(), "Expected NaN during warmup at index {i}");
                             }
 
-                            
                             if i >= nan_fill {
-                                
                                 if y.is_finite() {
                                     let expected = a * y + b;
                                     let diff = (yt - expected).abs();
-                                    
-                                    
-                                    
+
                                     let tol = 1e-7_f64.max(expected.abs() * 1e-9);
                                     let ulp = yt.to_bits().abs_diff(expected.to_bits());
                                     prop_assert!(
@@ -1515,31 +1411,23 @@ mod tests {
                                 }
                             }
 
-                            
                             let ulp = y.to_bits().abs_diff(yr.to_bits());
                             prop_assert!(
                                 (y - yr).abs() <= 1e-9 || ulp <= 4,
                                 "idx {i}: fast={y} ref={yr} ULP={ulp}"
                             );
 
-                            
-                            
-                            
-                            
                             if period == 1 {
-                                
                                 prop_assert!(
 									(y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
 									"idx {i}: stream mismatch for period=1 - batch={y}, stream={ys}"
 								);
                             } else if i < period - 1 {
-                                
                                 prop_assert!(
                                     ys.is_nan(),
                                     "idx {i}: stream should return NaN during warmup, got {ys}"
                                 );
                             } else {
-                                
                                 prop_assert!(
                                     (y - ys).abs() <= 1e-9 || (y.is_nan() && ys.is_nan()),
                                     "idx {i}: stream mismatch - batch={y}, stream={ys}"
@@ -1553,7 +1441,6 @@ mod tests {
             })
             .unwrap();
 
-        
         assert!(dema(&DemaInput::from_slice(&[], DemaParams::default())).is_err());
         assert!(dema(&DemaInput::from_slice(
             &[f64::NAN; 12],
@@ -1624,7 +1511,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_dema_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1632,25 +1518,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             DemaParams::default(),
-            
             DemaParams { period: Some(2) },
             DemaParams { period: Some(3) },
             DemaParams { period: Some(5) },
-            
             DemaParams { period: Some(7) },
             DemaParams { period: Some(10) },
             DemaParams { period: Some(12) },
             DemaParams { period: Some(20) },
             DemaParams { period: Some(30) },
-            
             DemaParams { period: Some(50) },
             DemaParams { period: Some(100) },
             DemaParams { period: Some(200) },
-            
             DemaParams { period: Some(1) },
             DemaParams { period: Some(250) },
         ];
@@ -1659,16 +1539,13 @@ mod tests {
             let input = DemaInput::from_candles(&candles, "close", params.clone());
             let output = dema_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1681,7 +1558,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1694,7 +1570,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1712,7 +1587,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_dema_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1749,7 +1623,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_periods = vec![10, 20, 30, 50];
 
         for period in test_periods {
@@ -1759,7 +1632,6 @@ mod tests {
             let input = DemaInput::from_candles(&candles, "close", params);
             let result = dema_with_kernel(&input, kernel)?;
 
-            
             let warmup = period - 1;
             for i in 0..warmup {
                 assert!(
@@ -1773,7 +1645,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup..warmup + 10 {
                 assert!(
                     !result.values[i].is_nan(),
@@ -1815,12 +1686,11 @@ mod tests {
 
         let mut out = vec![0.0; candles.close.len()];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             dema_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
             dema_into_slice(&mut out, &input, Kernel::Auto)?;
         }
@@ -1870,7 +1740,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1878,24 +1747,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 5, 1), 
-            
-            (5, 25, 5), 
-            
-            (10, 50, 10), 
-            
-            (1, 3, 1), 
-            
-            (50, 150, 25), 
-            
-            (10, 30, 2), 
-            
-            (10, 30, 10), 
-            
-            (100, 300, 50), 
+            (2, 5, 1),
+            (5, 25, 5),
+            (10, 50, 10),
+            (1, 3, 1),
+            (50, 150, 25),
+            (10, 30, 2),
+            (10, 30, 10),
+            (100, 300, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1904,9 +1764,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1916,7 +1774,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1932,7 +1789,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
@@ -1948,7 +1804,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
@@ -1969,7 +1824,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2008,19 +1862,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = DemaBatchBuilder::new()
             .kernel(kernel)
             .period_range(10, 30, 10)
             .apply_candles(&c, "close")?;
 
-        
         for (row_idx, combo) in output.combos.iter().enumerate() {
             let period = combo.period.unwrap_or(30);
             let warmup = period - 1;
             let row_start = row_idx * output.cols;
 
-            
             for i in 0..warmup {
                 let val = output.values[row_start + i];
                 assert!(
@@ -2034,7 +1885,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup..warmup.min(output.cols).min(warmup + 10) {
                 let val = output.values[row_start + i];
                 assert!(
@@ -2124,15 +1974,15 @@ pub fn dema_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
-        return Err(PyValueError::new_err("invalid period range: empty expansion"));
+        return Err(PyValueError::new_err(
+            "invalid period range: empty expansion",
+        ));
     }
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let warm: Vec<usize> = combos
@@ -2141,12 +1991,10 @@ pub fn dema_batch_py<'py>(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let simd = match match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2159,12 +2007,10 @@ pub fn dema_batch_py<'py>(
         _ => unreachable!(),
     };
 
-    
     let combos = py
         .allow_threads(|| dema_batch_inner_into(slice_in, &sweep, simd, true, out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let values: Vec<f64> = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -2256,76 +2102,7 @@ pub fn dema_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32DemaPy::new(inner, ctx, dev_id))
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = DemaParams {
@@ -2333,23 +2110,21 @@ pub fn dema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = DemaInput::from_slice(data, params);
 
-    
     let mut output = vec![0.0; data.len()];
 
-    
     dema_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DemaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DemaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2358,7 +2133,7 @@ pub struct DemaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dema_batch)]
 pub fn dema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: DemaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2382,7 +2157,7 @@ pub fn dema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Failed to serialize output: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(since = "1.0.0", note = "Use dema_batch instead")]
 pub fn dema_batch_metadata_js(
@@ -2403,26 +2178,24 @@ pub fn dema_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dema_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dema_free(ptr: *mut f64, len: usize) {
-    
     unsafe {
         let _ = Vec::from_raw_parts(ptr, len, len);
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dema_into(
     in_ptr: *const f64,
@@ -2430,38 +2203,30 @@ pub fn dema_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to dema_into"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        
         let params = DemaParams {
             period: Some(period),
         };
         let input = DemaInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             dema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             dema_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2471,7 +2236,7 @@ pub fn dema_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dema_batch_into(
     in_ptr: *const f64,
@@ -2498,7 +2263,6 @@ pub fn dema_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         dema_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

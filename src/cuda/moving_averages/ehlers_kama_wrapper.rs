@@ -1,11 +1,3 @@
-//! CUDA wrapper for Ehlers KAMA kernels.
-//!
-//! Aligns with the ALMA "gold standard" control plane: selection policies,
-//! introspection, optional debug logging via BENCH_DEBUG=1, VRAM checks using
-//! mem_get_info, deterministic synchronization after launches, and a 2D tiled
-//! many-series kernel in addition to the plain 1D variant. For this IIR MA,
-//! time is sequential per-thread; we parallelize across (series, params).
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -21,10 +13,8 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use thiserror::Error;
 use std::sync::Arc;
-
-
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -78,9 +68,20 @@ pub enum CudaEhlersKamaError {
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("insufficient device memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("arithmetic overflow computing sizes/bytes")]
     SizeOverflow,
     #[error("not implemented")]
@@ -88,14 +89,13 @@ pub enum CudaEhlersKamaError {
     #[error("device mismatch: buf on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
 
-/// CUDA Ehlers KAMA launcher and VRAM handle utilities.
-///
-/// Fields and methods mirror the ALMA wrapper: policy selection, kernel
-/// introspection, BENCH_DEBUG logging, VRAM checks, and deterministic
-/// stream synchronization after launches.
 pub struct CudaEhlersKama {
     module: Module,
     stream: Stream,
@@ -109,14 +109,13 @@ pub struct CudaEhlersKama {
 }
 
 impl CudaEhlersKama {
-    /// Create a new `CudaEhlersKama` on `device_id` and load the PTX module.
     pub fn new(device_id: usize) -> Result<Self, CudaEhlersKamaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_kama_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -124,7 +123,8 @@ impl CudaEhlersKama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -146,7 +146,6 @@ impl CudaEhlersKama {
         })
     }
 
-    /// Create using an explicit selection policy.
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaEhlersKamaPolicy,
@@ -169,11 +168,14 @@ impl CudaEhlersKama {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    pub fn context_arc(&self) -> Arc<Context> {
+        Arc::clone(&self.ctx)
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
-    /// Synchronize the stream for deterministic timing.
     pub fn synchronize(&self) -> Result<(), CudaEhlersKamaError> {
         self.stream.synchronize()?;
         Ok(())
@@ -217,7 +219,6 @@ impl CudaEhlersKama {
         }
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -230,7 +231,10 @@ impl CudaEhlersKama {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEhlersKamaError> {
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaEhlersKamaError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -262,28 +266,35 @@ impl CudaEhlersKama {
     fn expand_grid(range: &EhlersKamaBatchRange) -> Vec<EhlersKamaParams> {
         let (start, end, step) = range.period;
         if step == 0 || start == end {
-            return vec![EhlersKamaParams { period: Some(start) }];
+            return vec![EhlersKamaParams {
+                period: Some(start),
+            }];
         }
         let mut params = Vec::new();
         if start < end {
             let mut value = start;
             let step_sz = step.max(1);
             while value <= end {
-                params.push(EhlersKamaParams { period: Some(value) });
+                params.push(EhlersKamaParams {
+                    period: Some(value),
+                });
                 match value.checked_add(step_sz) {
                     Some(next) => value = next,
                     None => break,
                 }
             }
         } else {
-            
             let mut value = start;
             let step_sz = step.max(1);
             loop {
-                params.push(EhlersKamaParams { period: Some(value) });
+                params.push(EhlersKamaParams {
+                    period: Some(value),
+                });
                 match value.checked_sub(step_sz) {
                     Some(next) => {
-                        if next < end { break; }
+                        if next < end {
+                            break;
+                        }
                         value = next;
                     }
                     None => break,
@@ -308,7 +319,11 @@ impl CudaEhlersKama {
         let combos = Self::expand_grid(sweep);
         if combos.is_empty() {
             let (s, e, st) = sweep.period;
-            return Err(CudaEhlersKamaError::InvalidRange { start: s, end: e, step: st });
+            return Err(CudaEhlersKamaError::InvalidRange {
+                start: s,
+                end: e,
+                step: st,
+            });
         }
 
         let len = data_f32.len();
@@ -362,11 +377,12 @@ impl CudaEhlersKama {
             ));
         }
 
-        
         let func = self
             .module
             .get_function("ehlers_kama_batch_f32")
-            .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol { name: "ehlers_kama_batch_f32" })?;
+            .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol {
+                name: "ehlers_kama_batch_f32",
+            })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -422,13 +438,16 @@ impl CudaEhlersKama {
             periods_i32.push(period as i32);
         }
 
-        
-        let required =
-            Self::bytes_for::<f32>(data_f32.len())?
-                .checked_add(Self::bytes_for::<i32>(combos.len())?)
-                .ok_or(CudaEhlersKamaError::SizeOverflow)?
-                .checked_add(Self::bytes_for::<f32>(combos.len().checked_mul(series_len).ok_or(CudaEhlersKamaError::SizeOverflow)?)?)
-                .ok_or(CudaEhlersKamaError::SizeOverflow)?;
+        let required = Self::bytes_for::<f32>(data_f32.len())?
+            .checked_add(Self::bytes_for::<i32>(combos.len())?)
+            .ok_or(CudaEhlersKamaError::SizeOverflow)?
+            .checked_add(Self::bytes_for::<f32>(
+                combos
+                    .len()
+                    .checked_mul(series_len)
+                    .ok_or(CudaEhlersKamaError::SizeOverflow)?,
+            )?)
+            .ok_or(CudaEhlersKamaError::SizeOverflow)?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
@@ -453,10 +472,6 @@ impl CudaEhlersKama {
         })
     }
 
-    /// Batch variant with pre-uploaded prices/periods buffers.
-    ///
-    /// - `first_valid`: index of first non-NaN input; warm-up = first_valid + period - 1
-    /// - outputs for t < warm-up are NaN in all kernels
     pub fn ehlers_kama_batch_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -476,8 +491,6 @@ impl CudaEhlersKama {
         )
     }
 
-    /// Launch batch using pre-uploaded prices; allocates results and returns handle.
-    /// Convenience: batch launch using a device-resident prices buffer.
     pub fn ehlers_kama_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -629,11 +642,8 @@ impl CudaEhlersKama {
             ));
         }
 
-        
         let (selected, launch) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
-                
-                
                 let has_2d = self
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_2d_f32")
@@ -687,12 +697,12 @@ impl CudaEhlersKama {
 
         match launch {
             ManySeriesKernelPolicy::OneD { block_x } => {
-                
-                
                 let func = self
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_f32")
-                    .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol { name: "ehlers_kama_multi_series_one_param_f32" })?;
+                    .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol {
+                        name: "ehlers_kama_multi_series_one_param_f32",
+                    })?;
                 let tx = block_x.max(1);
                 let blocks = (num_series as u32).max(1);
                 let grid: GridSize = (blocks, 1, 1).into();
@@ -719,22 +729,24 @@ impl CudaEhlersKama {
                 let mut func = self
                     .module
                     .get_function("ehlers_kama_multi_series_one_param_2d_f32")
-                    .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol { name: "ehlers_kama_multi_series_one_param_2d_f32" })?;
-                
+                    .map_err(|_| CudaEhlersKamaError::MissingKernelSymbol {
+                        name: "ehlers_kama_multi_series_one_param_2d_f32",
+                    })?;
+
                 let _ = func.set_cache_config(CacheConfig::PreferShared);
 
                 let tile = (tx * ty).max(1);
                 let blocks = ((num_series as u32 + tile - 1) / tile).max(1);
                 let grid: GridSize = (blocks, 1, 1).into();
                 let block: BlockSize = (tx, ty, 1).into();
-                
+
                 let mut shmem_bytes: u32 = ((period.saturating_sub(1) * tile as usize)
                     .saturating_mul(std::mem::size_of::<f32>()))
                 .try_into()
                 .map_err(|_| {
                     CudaEhlersKamaError::InvalidInput("shared memory bytes overflow".into())
                 })?;
-                
+
                 if let Ok(dev) = Device::get_device(self.device_id) {
                     let max_dyn = dev
                         .get_attribute(cust::device::DeviceAttribute::MaxSharedMemoryPerBlock)
@@ -804,9 +816,6 @@ impl CudaEhlersKama {
         )
     }
 
-    /// Many-series × one-parameter, time-major layout (rows=time, cols=series).
-    /// Returns a VRAM handle; call `device_ptr()` via `DeviceArrayF32` on the ALMA
-    /// handle if you need a raw pointer in Python or other FFI layers.
     pub fn ehlers_kama_multi_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -817,20 +826,23 @@ impl CudaEhlersKama {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
-        let required =
-            Self::bytes_for::<f32>(cols.checked_mul(rows).ok_or(CudaEhlersKamaError::SizeOverflow)?)?
-                .checked_add(Self::bytes_for::<i32>(cols)?)
-                .ok_or(CudaEhlersKamaError::SizeOverflow)?
-                .checked_add(Self::bytes_for::<f32>(cols.checked_mul(rows).ok_or(CudaEhlersKamaError::SizeOverflow)?)?)
-                .ok_or(CudaEhlersKamaError::SizeOverflow)?;
+        let required = Self::bytes_for::<f32>(
+            cols.checked_mul(rows)
+                .ok_or(CudaEhlersKamaError::SizeOverflow)?,
+        )?
+        .checked_add(Self::bytes_for::<i32>(cols)?)
+        .ok_or(CudaEhlersKamaError::SizeOverflow)?
+        .checked_add(Self::bytes_for::<f32>(
+            cols.checked_mul(rows)
+                .ok_or(CudaEhlersKamaError::SizeOverflow)?,
+        )?)
+        .ok_or(CudaEhlersKamaError::SizeOverflow)?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }?;
 
-        
         if let Ok(func) = self.module.get_function("ehlers_kama_fill_nan_vec_f32") {
             let total = (cols * rows) as u32;
             let block_x: u32 = 256;
@@ -842,7 +854,8 @@ impl CudaEhlersKama {
                     &mut out_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+                self.stream
+                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
         }
 
@@ -855,7 +868,6 @@ impl CudaEhlersKama {
             &mut d_out_tm,
         )?;
 
-        
         if let Ok(func) = self
             .module
             .get_function("ehlers_kama_enforce_warm_nan_tm_f32")
@@ -875,11 +887,11 @@ impl CudaEhlersKama {
                     &mut first_valids_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+                self.stream
+                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
         }
 
-        
         if let Ok(func) = self
             .module
             .get_function("ehlers_kama_fix_first_row_nan_tm_f32")
@@ -897,12 +909,10 @@ impl CudaEhlersKama {
                     &mut first_valids_ptr as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+                self.stream
+                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
         }
-        
-        
-        
 
         self.stream.synchronize()?;
 
@@ -957,7 +967,8 @@ impl CudaEhlersKama {
                     &mut out_ptr as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
+                self.stream
+                    .launch(&func, (grid_x, 1, 1), (block_x, 1, 1), 0, args)?;
             }
         }
 
@@ -971,7 +982,6 @@ impl CudaEhlersKama {
         )?;
         self.stream.synchronize()?;
 
-        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows)? };
         unsafe {
             d_out_tm.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
@@ -981,8 +991,6 @@ impl CudaEhlersKama {
         Ok(())
     }
 }
-
-
 
 pub mod benches {
     use super::*;

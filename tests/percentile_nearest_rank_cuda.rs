@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::percentile_nearest_rank as pnr;
 use vector_ta::utilities::enums::Kernel;
 
@@ -82,8 +80,8 @@ fn percentile_nearest_rank_cuda_many_series_one_param_matches_cpu(
         eprintln!("[pnr_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 2)..rows {
@@ -95,7 +93,6 @@ fn percentile_nearest_rank_cuda_many_series_one_param_matches_cpu(
     let length = 15usize;
     let percentage = 50.0f64;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::mwdx::{
     mwdx_batch_with_kernel, mwdx_with_kernel, MwdxBatchRange, MwdxInput, MwdxParams,
 };

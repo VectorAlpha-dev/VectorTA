@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::ad::{ad_with_kernel, AdData, AdInput, AdParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -67,7 +65,7 @@ fn ad_cuda_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = vec![0f32; n];
     dev.buf.copy_to(&mut gpu)?;
 
-    let (atol, rtol) = (2e-2, 2e-3); 
+    let (atol, rtol) = (2e-2, 2e-3);
     for i in 0..n {
         assert!(
             approx_eq(cpu.values[i], gpu[i] as f64, atol, rtol),
@@ -86,8 +84,8 @@ fn ad_cuda_many_series_time_major_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 7usize; 
-    let rows = 1024usize; 
+    let cols = 7usize;
+    let rows = 1024usize;
     let mut high_tm = vec![0.0f64; cols * rows];
     let mut low_tm = vec![0.0f64; cols * rows];
     let mut close_tm = vec![0.0f64; cols * rows];
@@ -105,7 +103,6 @@ fn ad_cuda_many_series_time_major_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let mut cpu_tm = vec![0.0f64; cols * rows];
     for s in 0..cols {
         let mut h = vec![0.0f64; rows];

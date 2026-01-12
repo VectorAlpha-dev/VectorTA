@@ -1,25 +1,3 @@
-//! # Mesa Sine Wave (MSW)
-//!
-//! The Mesa Sine Wave indicator attempts to detect turning points in price data
-//! by fitting a sine wave function. It outputs two series: the `sine` wave
-//! and a leading version of the wave (`lead`).
-//!
-//! ## Parameters
-//! - **period**: The window size (number of data points). Defaults to 5.
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **sine**: Vector of sine wave values with NaN prefix during warmup period
-//! - **lead**: Vector of leading sine wave values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - SIMD enabled: AVX2/AVX512 vectorize across time (4/8 lanes) and use FMA; selected at runtime via detect_best_kernel(). Benchmarked >5% faster than scalar at 100k.
-//! - Streaming: Kept as O(N) per-tick dot product to match batch numerics exactly under strict 1e-9 tests. A Sliding DFT O(1) variant was evaluated but disabled due to last-bit drift; revisit with a guaranteed-stable SDFT if parity can be ensured.
-//! - Zero-copy Memory: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations.
-//! - Decision log: SIMD enabled (AVX2/AVX512), CUDA wrapper present for batch and many-series paths, Python interop reuses ALMA DeviceArrayF32Py for CUDA Array Interface v3 + DLPack v1.x; scalar remains the numerical reference.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -29,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -79,14 +57,20 @@ pub enum MswData<'a> {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MswOutput {
     pub sine: Vec<f64>,
     pub lead: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MswParams {
     pub period: Option<usize>,
 }
@@ -199,10 +183,14 @@ pub enum MswError {
     #[error("msw: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("msw: Invalid range expansion: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("msw: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
-    
+
     #[error("msw: Empty data provided for MSW.")]
     EmptyData,
 }
@@ -242,8 +230,7 @@ pub fn msw_with_kernel(input: &MswInput, kernel: Kernel) -> Result<MswOutput, Ms
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    
-    
+
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(kernel, Kernel::Auto) && matches!(chosen, Kernel::Avx512 | Kernel::Avx512Batch) {
         chosen = Kernel::Avx2;
@@ -267,12 +254,10 @@ pub unsafe fn msw_scalar(
     first: usize,
     len: usize,
 ) -> Result<MswOutput, MswError> {
-    
     let warm = first + period - 1;
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
 
-    
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -283,8 +268,6 @@ pub unsafe fn msw_scalar(
         cos_table.push(c);
         ang += step;
     }
-
-    
 
     for i in warm..len {
         let mut rp = 0.0f64;
@@ -332,7 +315,6 @@ pub unsafe fn msw_avx2(
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
 
-    
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -346,7 +328,6 @@ pub unsafe fn msw_avx2(
     let dptr = data.as_ptr();
 
     const LANES: usize = 4;
-    
 
     let mut i = warm;
     while i + (LANES - 1) < len {
@@ -395,7 +376,6 @@ pub unsafe fn msw_avx2(
         i += LANES;
     }
 
-    
     while i < len {
         let mut rp = 0.0f64;
         let mut ip = 0.0f64;
@@ -442,7 +422,6 @@ pub unsafe fn msw_avx512(
     let mut sine = alloc_with_nan_prefix(len, warm);
     let mut lead = alloc_with_nan_prefix(len, warm);
 
-    
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -456,7 +435,6 @@ pub unsafe fn msw_avx512(
     let dptr = data.as_ptr();
 
     const LANES: usize = 8;
-    
 
     let mut i = warm;
     while i + (LANES - 1) < len {
@@ -614,10 +592,7 @@ impl MswStream {
     fn dot_ring(&self) -> (f64, f64) {
         let mut rp = 0.0;
         let mut ip = 0.0;
-        
-        
-        
-        
+
         let mut idx = (self.head + self.period - 1) % self.period;
         for j in 0..self.period {
             rp += self.cos_table[j] * self.buffer[idx];
@@ -640,7 +615,7 @@ impl MswStream {
             phase -= TULIP_TPI;
         }
         let (s, c) = phase.sin_cos();
-        
+
         let lead = (s + c) * 0.707106781186547524400844362104849039_f64;
         (s, lead)
     }
@@ -653,7 +628,9 @@ pub struct MswBatchRange {
 
 impl Default for MswBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -761,7 +738,7 @@ fn expand_grid(r: &MswBatchRange) -> Result<Vec<MswParams>, MswError> {
                 Ok(v)
             };
         }
-        
+
         let mut v = Vec::new();
         let mut cur = start;
         loop {
@@ -840,11 +817,9 @@ fn msw_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let mut sine_buf = make_uninit_matrix(rows, cols);
     let mut lead_buf = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -855,7 +830,6 @@ fn msw_batch_inner(
     init_matrix_prefixes(&mut sine_buf, cols, &warmup_periods);
     init_matrix_prefixes(&mut lead_buf, cols, &warmup_periods);
 
-    
     let mut sine_guard = core::mem::ManuallyDrop::new(sine_buf);
     let mut lead_guard = core::mem::ManuallyDrop::new(lead_buf);
     let sine: &mut [f64] = unsafe {
@@ -900,7 +874,6 @@ fn msw_batch_inner(
         }
     }
 
-    
     let sine_vec = unsafe {
         Vec::from_raw_parts(
             sine_guard.as_mut_ptr() as *mut f64,
@@ -953,13 +926,11 @@ fn msw_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(MswError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(MswError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if sine_out.len() != expected || lead_out.len() != expected {
         return Err(MswError::OutputLengthMismatch {
             expected,
@@ -967,7 +938,6 @@ fn msw_batch_inner_into(
         });
     }
 
-    
     let sine_mu = unsafe {
         std::slice::from_raw_parts_mut(
             sine_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -988,7 +958,6 @@ fn msw_batch_inner_into(
     init_matrix_prefixes(sine_mu, cols, &warm);
     init_matrix_prefixes(lead_mu, cols, &warm);
 
-    
     let do_row = |row: usize,
                   sine_row_mu: &mut [MaybeUninit<f64>],
                   lead_row_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -1062,8 +1031,6 @@ unsafe fn msw_row_scalar(
         ang += step;
     }
 
-    
-
     let warm = first + period - 1;
     for i in warm..data.len() {
         let mut rp = 0.0f64;
@@ -1120,7 +1087,6 @@ unsafe fn msw_row_avx2(
     let dptr = data.as_ptr();
 
     const LANES: usize = 4;
-    
 
     let mut i = warm;
     while i + (LANES - 1) < data.len() {
@@ -1239,7 +1205,6 @@ unsafe fn msw_row_avx512_short(
     let dptr = data.as_ptr();
 
     const LANES: usize = 8;
-    
 
     let mut i = warm;
     while i + (LANES - 1) < data.len() {
@@ -1326,8 +1291,6 @@ unsafe fn msw_row_avx512_long(
     sine: &mut [f64],
     lead: &mut [f64],
 ) {
-    
-    
     msw_row_avx512_short(data, first, period, sine, lead)
 }
 
@@ -1375,8 +1338,6 @@ impl MswStreamPy {
         Ok(MswStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated MSW values.
-    /// Returns `None` if the buffer is not yet full, otherwise returns a tuple of (sine, lead).
     fn update(&mut self, value: f64) -> Option<(f64, f64)> {
         self.stream.update(value)
     }
@@ -1400,12 +1361,10 @@ pub fn msw_batch_py<'py>(
         period: period_range,
     };
 
-    // Calculate dimensions
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    // Pre-allocate output arrays (OK for batch operations)
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("msw_batch_py: rows*cols overflow"))?;
@@ -1414,7 +1373,6 @@ pub fn msw_batch_py<'py>(
     let slice_out_sine = unsafe { out_sine.as_slice_mut()? };
     let slice_out_lead = unsafe { out_lead.as_slice_mut()? };
 
-    // Compute without GIL
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -1428,12 +1386,10 @@ pub fn msw_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            // Write directly to pre-allocated arrays
             msw_batch_inner_into(slice_in, &sweep, simd, true, slice_out_sine, slice_out_lead)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build dict with zero-copy transfers
     let dict = PyDict::new(py);
     dict.set_item("sine", out_sine.reshape((rows, cols))?)?;
     dict.set_item("lead", out_lead.reshape((rows, cols))?)?;
@@ -1449,7 +1405,6 @@ pub fn msw_batch_py<'py>(
     Ok(dict)
 }
 
-/// Write directly to output slices - no allocations
 #[inline]
 pub fn msw_into_slice(
     sine_dst: &mut [f64],
@@ -1500,7 +1455,6 @@ pub fn msw_into_slice(
         other => other,
     };
 
-    // Compute directly into destination slices
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1508,19 +1462,16 @@ pub fn msw_into_slice(
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                // AVX2 is currently a stub, use scalar
                 msw_scalar_into(data, period, first, len, sine_dst, lead_dst)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                // AVX512 is currently a stub, use scalar
                 msw_scalar_into(data, period, first, len, sine_dst, lead_dst)
             }
             _ => unreachable!(),
         }
     }?;
 
-    // Fill warmup period with NaN
     let warmup = first + period - 1;
     for v in &mut sine_dst[..warmup] {
         *v = f64::NAN;
@@ -1532,7 +1483,6 @@ pub fn msw_into_slice(
     Ok(())
 }
 
-/// Scalar implementation that writes directly to output slices
 #[inline]
 unsafe fn msw_scalar_into(
     data: &[f64],
@@ -1542,7 +1492,6 @@ unsafe fn msw_scalar_into(
     sine: &mut [f64],
     lead: &mut [f64],
 ) -> Result<(), MswError> {
-    // Precompute weights with one sin_cos per tap
     let step = TULIP_TPI / period as f64;
     let mut cos_table = Vec::with_capacity(period);
     let mut sin_table = Vec::with_capacity(period);
@@ -1588,22 +1537,22 @@ unsafe fn msw_scalar_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MswJsOutput {
     pub sine: Vec<f64>,
     pub lead: Vec<f64>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MswResult {
-    pub values: Vec<f64>, // [sine rows first … then lead rows]
-    pub rows: usize,      // 2
-    pub cols: usize,      // data length
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_js(data: &[f64], period: usize) -> Result<JsValue, JsValue> {
     let params = MswParams {
@@ -1627,15 +1576,14 @@ pub fn msw_js(data: &[f64], period: usize) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Keep msw_wasm as deprecated alias for backward compatibility
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(since = "1.0.0", note = "Use msw_js instead")]
 pub fn msw_wasm(data: &[f64], period: usize) -> Result<JsValue, JsValue> {
     msw_js(data, period)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_into_flat(
     in_ptr: *const f64,
@@ -1663,7 +1611,7 @@ pub fn msw_into_flat(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_into(
     in_ptr: *const f64,
@@ -1688,25 +1636,21 @@ pub fn msw_into(
         };
         let input = MswInput::from_slice(data, params);
 
-        // Check for aliasing - any output pointer matches input or each other
         let aliasing = in_ptr as *const _ == sine_ptr as *const _
             || in_ptr as *const _ == lead_ptr as *const _
             || sine_ptr == lead_ptr;
 
         if aliasing {
-            // Use temporary buffers when aliasing detected
             let mut temp_sine = vec![0.0; len];
             let mut temp_lead = vec![0.0; len];
             msw_into_slice(&mut temp_sine, &mut temp_lead, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy to output pointers
             let sine_out = std::slice::from_raw_parts_mut(sine_ptr, len);
             let lead_out = std::slice::from_raw_parts_mut(lead_ptr, len);
             sine_out.copy_from_slice(&temp_sine);
             lead_out.copy_from_slice(&temp_lead);
         } else {
-            // Direct computation into output slices
             let sine_out = std::slice::from_raw_parts_mut(sine_ptr, len);
             let lead_out = std::slice::from_raw_parts_mut(lead_ptr, len);
             msw_into_slice(sine_out, lead_out, &input, Kernel::Auto)
@@ -1717,7 +1661,7 @@ pub fn msw_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1726,7 +1670,7 @@ pub fn msw_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1736,13 +1680,13 @@ pub fn msw_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MswBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MswBatchJsOutput {
     pub sine: Vec<f64>,
@@ -1752,16 +1696,16 @@ pub struct MswBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MswBatchFlatJsOutput {
     pub values: Vec<f64>,
     pub combos: Vec<MswParams>,
-    pub rows: usize, // 2 * combos.len()
+    pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = msw_batch)]
 pub fn msw_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MswBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1770,9 +1714,7 @@ pub fn msw_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         period: config.period_range,
     };
 
-    // Plan buffers: first half for sine rows, second half for lead rows
-    let combos = expand_grid(&sweep)
-        .map_err(|_| JsValue::from_str("No parameter combinations"))?;
+    let combos = expand_grid(&sweep).map_err(|_| JsValue::from_str("No parameter combinations"))?;
     let rows = combos.len();
     let cols = data.len();
 
@@ -1796,7 +1738,7 @@ pub fn msw_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_batch_js(
     data: &[f64],
@@ -1808,11 +1750,9 @@ pub fn msw_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     let output = msw_batch_inner(data, &sweep, Kernel::Auto, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Create the structured output
     let js_output = MswBatchJsOutput {
         sine: output.sine,
         lead: output.lead,
@@ -1821,12 +1761,11 @@ pub fn msw_batch_js(
         cols: output.cols,
     };
 
-    // Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_batch_metadata_js(
     period_start: usize,
@@ -1837,8 +1776,7 @@ pub fn msw_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|_| JsValue::from_str("No parameter combinations"))?;
+    let combos = expand_grid(&sweep).map_err(|_| JsValue::from_str("No parameter combinations"))?;
     let metadata = combos
         .iter()
         .map(|combo| combo.period.unwrap() as f64)
@@ -1847,7 +1785,7 @@ pub fn msw_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_batch_into_flat(
     in_ptr: *const f64,
@@ -1865,8 +1803,8 @@ pub fn msw_batch_into_flat(
         let sweep = MswBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|_| JsValue::from_str("No parameter combinations"))?;
+        let combos =
+            expand_grid(&sweep).map_err(|_| JsValue::from_str("No parameter combinations"))?;
         let rows = combos.len();
         let cols = len;
 
@@ -1876,11 +1814,11 @@ pub fn msw_batch_into_flat(
         msw_batch_inner_into(data, &sweep, Kernel::Auto, false, sine_out, lead_out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(2 * rows) // number of rows written
+        Ok(2 * rows)
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn msw_batch_into(
     in_ptr: *const f64,
@@ -1914,7 +1852,6 @@ pub fn msw_batch_into(
         let sine_out = std::slice::from_raw_parts_mut(sine_ptr, total_len);
         let lead_out = std::slice::from_raw_parts_mut(lead_ptr, total_len);
 
-        // Process each parameter combination
         for (idx, params) in combos.iter().enumerate() {
             let row_start = idx * cols;
             let row_end = row_start + cols;
@@ -2139,31 +2076,28 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            MswParams::default(),            // period: 5 (default)
-            MswParams { period: Some(2) },   // minimum viable period
-            MswParams { period: Some(3) },   // small period
-            MswParams { period: Some(7) },   // medium-small period
-            MswParams { period: Some(10) },  // medium period
-            MswParams { period: Some(20) },  // large period
-            MswParams { period: Some(50) },  // very large period
-            MswParams { period: Some(100) }, // maximum reasonable period
+            MswParams::default(),
+            MswParams { period: Some(2) },
+            MswParams { period: Some(3) },
+            MswParams { period: Some(7) },
+            MswParams { period: Some(10) },
+            MswParams { period: Some(20) },
+            MswParams { period: Some(50) },
+            MswParams { period: Some(100) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = MswInput::from_candles(&candles, "close", params.clone());
             let output = msw_with_kernel(&input, kernel)?;
 
-            // Check sine values
             for (i, &val) in output.sine.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2204,15 +2138,13 @@ mod tests {
                 }
             }
 
-            // Check lead values
             for (i, &val) in output.lead.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2259,7 +2191,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_msw_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! generate_all_msw_tests {
@@ -2305,36 +2237,34 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic test data
-        let strat = (2usize..=50) // Period range for MSW
-            .prop_flat_map(|period| {
-                (period..=400).prop_flat_map(move |data_len| {
-                    prop_oneof![
-                        // 60% normal trading data
-                        6 => prop::collection::vec(
-                            (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                            data_len
-                        ).prop_map(move |v| (v, period)),
-                        // 15% constant prices
-                        3 => prop::collection::vec(
-                            Just(100.0f64),
-                            data_len
-                        ).prop_map(move |v| (v, period)),
-                        // 15% trending data (monotonic)
-                        3 => (0.0f64..100.0f64, 0.01f64..1.0f64).prop_map(move |(start, step)| {
-                            let data: Vec<f64> = (0..data_len)
-                                .map(|i| start + (i as f64) * step)
-                                .collect();
-                            (data, period)
-                        }),
-                        // 10% edge cases (zeros, small values)
-                        2 => prop_oneof![
-                            prop::collection::vec(Just(0.0f64), data_len),
-                            prop::collection::vec((0.0001f64..0.01f64), data_len),
-                        ].prop_map(move |v| (v, period))
-                    ]
-                })
-            });
+        let strat = (2usize..=50).prop_flat_map(|period| {
+            (period..=400).prop_flat_map(move |data_len| {
+                prop_oneof![
+
+                    6 => prop::collection::vec(
+                        (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+                        data_len
+                    ).prop_map(move |v| (v, period)),
+
+                    3 => prop::collection::vec(
+                        Just(100.0f64),
+                        data_len
+                    ).prop_map(move |v| (v, period)),
+
+                    3 => (0.0f64..100.0f64, 0.01f64..1.0f64).prop_map(move |(start, step)| {
+                        let data: Vec<f64> = (0..data_len)
+                            .map(|i| start + (i as f64) * step)
+                            .collect();
+                        (data, period)
+                    }),
+
+                    2 => prop_oneof![
+                        prop::collection::vec(Just(0.0f64), data_len),
+                        prop::collection::vec((0.0001f64..0.01f64), data_len),
+                    ].prop_map(move |v| (v, period))
+                ]
+            })
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period)| {
@@ -2343,19 +2273,15 @@ mod tests {
                 };
                 let input = MswInput::from_slice(&data, params.clone());
 
-                // Get outputs from the specified kernel and scalar reference
                 let output = msw_with_kernel(&input, kernel).unwrap();
                 let ref_output = msw_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length matches input
                 prop_assert_eq!(output.sine.len(), data.len(), "Sine output length mismatch");
                 prop_assert_eq!(output.lead.len(), data.len(), "Lead output length mismatch");
 
-                // Find first valid index
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_end = first_valid + period - 1;
 
-                // Property 2: Warmup period verification
                 for i in 0..warmup_end.min(data.len()) {
                     prop_assert!(
                         output.sine[i].is_nan(),
@@ -2373,7 +2299,6 @@ mod tests {
                     );
                 }
 
-                // Property 3: First valid output at correct index
                 if warmup_end < data.len() {
                     prop_assert!(
                         !output.sine[warmup_end].is_nan(),
@@ -2387,7 +2312,6 @@ mod tests {
                     );
                 }
 
-                // Property 4: Value bounds - sine and lead are bounded [-1, 1]
                 for i in warmup_end..data.len() {
                     let sine_val = output.sine[i];
                     let lead_val = output.lead[i];
@@ -2411,12 +2335,9 @@ mod tests {
                     }
                 }
 
-                // Property 5: Constant data produces consistent phase values
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && warmup_end + 5 < data.len()
                 {
-                    // For constant data, all outputs should have the same phase
-                    // since the weighted sum is constant * sum_of_weights
                     let first_sine = output.sine[warmup_end];
                     let first_lead = output.lead[warmup_end];
 
@@ -2445,23 +2366,16 @@ mod tests {
                     }
                 }
 
-                // Property 6: Mathematical phase relationship verification
-                // Lead = sin(phase + π/4) where Sine = sin(phase)
-                // We can verify: lead ≈ sine * cos(π/4) + cos(asin(sine)) * sin(π/4)
-                // Simplified: lead ≈ sine * 0.707 + sqrt(1 - sine²) * 0.707
                 if warmup_end + 10 < data.len() {
-                    const COS_PI4: f64 = 0.7071067811865476; // cos(π/4) = sin(π/4)
+                    const COS_PI4: f64 = 0.7071067811865476;
 
                     for i in (warmup_end + 5)..(warmup_end + 10).min(data.len()) {
                         let sine_val = output.sine[i];
                         let lead_val = output.lead[i];
 
                         if !sine_val.is_nan() && !lead_val.is_nan() && sine_val.abs() < 0.999 {
-                            // Calculate expected lead from sine using trigonometric identity
-                            // sin(θ + π/4) = sin(θ)cos(π/4) + cos(θ)sin(π/4)
-                            // cos(θ) = ±sqrt(1 - sin²(θ))
                             let cos_phase = (1.0 - sine_val * sine_val).sqrt();
-                            // Try both positive and negative cosine (we don't know the quadrant)
+
                             let expected_lead_pos = sine_val * COS_PI4 + cos_phase * COS_PI4;
                             let expected_lead_neg = sine_val * COS_PI4 - cos_phase * COS_PI4;
 
@@ -2478,20 +2392,9 @@ mod tests {
                     }
                 }
 
-                
                 if data.iter().all(|&x| x.abs() < 1e-10) && warmup_end < data.len() {
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-                    
-
                     const EXPECTED_SINE: f64 = -1.0;
-                    const EXPECTED_LEAD: f64 = -0.7071067811865476; 
+                    const EXPECTED_LEAD: f64 = -0.7071067811865476;
 
                     for i in warmup_end..(warmup_end + 3).min(data.len()) {
                         let sine_val = output.sine[i];
@@ -2514,20 +2417,11 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if period == 2 && warmup_end < data.len() {
-                    
-                    
-                    
-                    
-
                     for i in warmup_end..(warmup_end + 3).min(data.len()) {
                         let sine_val = output.sine[i];
                         let lead_val = output.lead[i];
 
-                        
                         prop_assert!(
                             !sine_val.is_nan(),
                             "Period=2: Sine[{}] should not be NaN",
@@ -2539,7 +2433,6 @@ mod tests {
                             i
                         );
 
-                        
                         prop_assert!(
                             sine_val >= -1.0 - 1e-9 && sine_val <= 1.0 + 1e-9,
                             "Period=2: Sine[{}] = {} out of bounds",
@@ -2553,7 +2446,6 @@ mod tests {
                             lead_val
                         );
 
-                        
                         if i >= 3
                             && i >= warmup_end + 2
                             && (data[i] - data[i - 2]).abs() < 1e-10
@@ -2568,16 +2460,14 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..data.len() {
                     let sine_val = output.sine[i];
                     let ref_sine = ref_output.sine[i];
                     let lead_val = output.lead[i];
                     let ref_lead = ref_output.lead[i];
 
-                    
                     if sine_val.is_nan() && ref_sine.is_nan() {
-                        continue; 
+                        continue;
                     }
 
                     if sine_val.is_finite() && ref_sine.is_finite() {
@@ -2602,9 +2492,8 @@ mod tests {
                         );
                     }
 
-                    
                     if lead_val.is_nan() && ref_lead.is_nan() {
-                        continue; 
+                        continue;
                     }
 
                     if lead_val.is_finite() && ref_lead.is_finite() {
@@ -2660,15 +2549,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (30, 60, 15),  
-            (2, 5, 1),     
-            (10, 20, 2),   
-            (15, 30, 3),   
-            (50, 100, 10), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (15, 30, 3),
+            (50, 100, 10),
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -2677,7 +2565,6 @@ mod tests {
                 .period_range(period_start, period_end, period_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.sine.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2688,7 +2575,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2735,7 +2621,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.lead.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2746,7 +2631,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2825,7 +2709,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "msw_cuda_batch_dev")]

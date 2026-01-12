@@ -1,6 +1,5 @@
 #![cfg(feature = "cuda")]
 
-/// Expand a `(start, end, step)` triple into a `Vec<usize>` inclusive range.
 pub fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
     let (start, end, step) = axis;
     if step == 0 || start == end {
@@ -12,7 +11,6 @@ pub fn axis_usize(axis: (usize, usize, usize)) -> Vec<usize> {
     (start..=end).step_by(step).collect()
 }
 
-/// Expand a `(start, end, step)` triple into a `Vec<f64>` inclusive range.
 pub fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
     let (start, end, step) = axis;
     if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
@@ -31,7 +29,6 @@ pub fn axis_f64(axis: (f64, f64, f64)) -> Vec<f64> {
     out
 }
 
-/// Normalize a vector of `f32` weights in-place, returning the normalized data.
 pub fn normalize_vec_f32(mut weights: Vec<f32>) -> Vec<f32> {
     let sum: f32 = weights.iter().copied().sum();
     if sum > 0.0 {
@@ -43,7 +40,6 @@ pub fn normalize_vec_f32(mut weights: Vec<f32>) -> Vec<f32> {
     weights
 }
 
-/// Generate a single-series price vector used by many CUDA benchmarks.
 pub fn gen_series(len: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; len];
     for i in 3..len {
@@ -53,7 +49,6 @@ pub fn gen_series(len: usize) -> Vec<f32> {
     out
 }
 
-/// Generate a single-series volume vector used by volume-aware CUDA benches.
 pub fn gen_volume(len: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; len];
     for i in 5..len {
@@ -63,8 +58,6 @@ pub fn gen_volume(len: usize) -> Vec<f32> {
     out
 }
 
-/// Generate a positive single-series vector for indicators that require strictly
-/// positive inputs.
 pub fn gen_positive_series(len: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; len];
     for i in 10..len {
@@ -74,8 +67,6 @@ pub fn gen_positive_series(len: usize) -> Vec<f32> {
     out
 }
 
-/// Generate time-major price data (series laid out by column) with non-trivial
-/// oscillator dynamics.
 pub fn gen_time_major_prices(num_series: usize, series_len: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; num_series * series_len];
     for j in 0..num_series {
@@ -88,7 +79,6 @@ pub fn gen_time_major_prices(num_series: usize, series_len: usize) -> Vec<f32> {
     out
 }
 
-/// Generate time-major volume data used in VWAP-style CUDA benchmarks.
 pub fn gen_time_major_volumes(num_series: usize, series_len: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; num_series * series_len];
     for j in 0..num_series {
@@ -101,8 +91,6 @@ pub fn gen_time_major_volumes(num_series: usize, series_len: usize) -> Vec<f32> 
     out
 }
 
-/// Generate positive time-major data sets, skipping the first few observations
-/// to mimic warm-up behaviour.
 pub fn gen_positive_time_major(num_series: usize, series_len: usize) -> Vec<f32> {
     let mut out = vec![f32::NAN; num_series * series_len];
     for j in 0..num_series {

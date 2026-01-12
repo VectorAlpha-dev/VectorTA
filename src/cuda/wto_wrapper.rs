@@ -1,10 +1,3 @@
-//! CUDA support for the WaveTrend Oscillator (WTO).
-//!
-//! This module mirrors the CUDA integration style used by the ALMA and CWMA
-//! indicators: kernels execute in single precision, results remain on the
-//! device until staged out by the caller, and memory safety checks are kept
-//! conservative to avoid VRAM over-commitment.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -18,22 +11,42 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum CudaWtoError {
     Cuda(CudaError),
     InvalidInput(String),
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    MissingKernelSymbol { name: &'static str },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
     InvalidPolicy(&'static str),
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
-    DeviceMismatch { buf: u32, current: u32 },
-    InvalidRange { start: String, end: String, step: String },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     NotImplemented,
 }
 
@@ -42,7 +55,11 @@ impl fmt::Display for CudaWtoError {
         match self {
             CudaWtoError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaWtoError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-            CudaWtoError::OutOfMemory { required, free, headroom } => write!(
+            CudaWtoError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "out of memory: required={} free={} headroom={}",
                 required, free, headroom
@@ -51,15 +68,20 @@ impl fmt::Display for CudaWtoError {
                 write!(f, "missing kernel symbol: {}", name)
             }
             CudaWtoError::InvalidPolicy(p) => write!(f, "invalid policy: {}", p),
-            CudaWtoError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaWtoError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
             ),
-            CudaWtoError::DeviceMismatch { buf, current } => write!(
-                f,
-                "device mismatch: buf={} current={}",
-                buf, current
-            ),
+            CudaWtoError::DeviceMismatch { buf, current } => {
+                write!(f, "device mismatch: buf={} current={}", buf, current)
+            }
             CudaWtoError::InvalidRange { start, end, step } => write!(
                 f,
                 "invalid range: start={} end={} step={}",
@@ -141,7 +163,7 @@ impl CudaWto {
         let device = Device::get_device(device_id as u32).map_err(CudaWtoError::Cuda)?;
         let context = Arc::new(Context::new(device).map_err(CudaWtoError::Cuda)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/wto_kernel.ptx"));
-        // Prefer context-targeted JIT with highest opt level, fallback to simpler modes
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -156,16 +178,23 @@ impl CudaWto {
             stream,
             context,
             device_id: device_id as u32,
-            policy: CudaWtoPolicy { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto },
+            policy: CudaWtoPolicy {
+                batch: BatchKernelPolicy::Auto,
+                many_series: ManySeriesKernelPolicy::Auto,
+            },
             debug_batch_logged: AtomicBool::new(false),
             debug_many_logged: AtomicBool::new(false),
         })
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -175,9 +204,10 @@ impl CudaWto {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
-    // Prefill outputs with canonical qNaN via driver memset (async, ordered on the stream)
     #[inline]
     fn prefill_nan_triplet(
         &self,
@@ -262,9 +292,7 @@ impl CudaWto {
             .get_attribute(cust::device::DeviceAttribute::MaxGridDimZ)
             .map_err(CudaWtoError::Cuda)? as u32;
 
-        let threads = bx
-            .saturating_mul(by)
-            .saturating_mul(bz);
+        let threads = bx.saturating_mul(by).saturating_mul(bz);
         if threads > max_threads
             || bx > max_bx
             || by > max_by
@@ -336,7 +364,6 @@ impl CudaWto {
         let mut d_hist: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaWtoError::Cuda)?;
 
-        // Prefill outputs with NaN (async)
         self.prefill_nan_triplet(&mut d_wt1, &mut d_wt2, &mut d_hist)?;
 
         self.launch_batch_kernel(
@@ -383,10 +410,9 @@ impl CudaWto {
         hist_host: &mut [f32],
     ) -> Result<(usize, usize, Vec<WtoParams>), CudaWtoError> {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos
-            .len()
-            .checked_mul(series_len)
-            .ok_or_else(|| CudaWtoError::InvalidInput("combos.len() * series_len overflow".into()))?;
+        let expected = combos.len().checked_mul(series_len).ok_or_else(|| {
+            CudaWtoError::InvalidInput("combos.len() * series_len overflow".into())
+        })?;
         if wt1_host.len() != expected || wt2_host.len() != expected || hist_host.len() != expected {
             return Err(CudaWtoError::InvalidInput(format!(
                 "output slices must be len {}",
@@ -440,7 +466,6 @@ impl CudaWto {
         let mut d_hist: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems_matrix) }.map_err(CudaWtoError::Cuda)?;
 
-        // Prefill outputs with NaN (async)
         self.prefill_nan_triplet(&mut d_wt1, &mut d_wt2, &mut d_hist)?;
 
         self.launch_many_series_kernel(
@@ -520,7 +545,7 @@ impl CudaWto {
                 "series_len and n_combos must be positive".into(),
             ));
         }
-        // Ensure outputs are prefilled in device-only path as well
+
         self.prefill_nan_triplet(d_wt1, d_wt2, d_hist)?;
         self.launch_batch_kernel(
             d_prices,
@@ -557,7 +582,7 @@ impl CudaWto {
                 "channel_length and average_length must be positive".into(),
             ));
         }
-        // Ensure outputs are prefilled in device-only path as well
+
         self.prefill_nan_triplet(d_wt1, d_wt2, d_hist)?;
         self.launch_many_series_kernel(
             d_prices_tm,
@@ -687,7 +712,6 @@ impl CudaWto {
         d_wt2: &mut DeviceBuffer<f32>,
         d_hist: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWtoError> {
-        // Kernel block policy (parity with ALMA’s explicit selection knob)
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
@@ -705,10 +729,11 @@ impl CudaWto {
             );
         }
 
-        let func = self
-            .module
-            .get_function("wto_batch_f32")
-            .map_err(|_| CudaWtoError::MissingKernelSymbol { name: "wto_batch_f32" })?;
+        let func = self.module.get_function("wto_batch_f32").map_err(|_| {
+            CudaWtoError::MissingKernelSymbol {
+                name: "wto_batch_f32",
+            }
+        })?;
 
         self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
         unsafe {
@@ -817,8 +842,6 @@ impl CudaWto {
     }
 }
 
-// ---------- Bench profiles ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -831,7 +854,7 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        // 3 outputs
+
         let out_bytes = 3 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
@@ -1021,11 +1044,13 @@ fn expand_grid(r: &WtoBatchRange) -> Result<Vec<WtoParams>, CudaWtoError> {
                     break;
                 }
                 out.push(v);
-                let next = v.checked_add(step).ok_or_else(|| CudaWtoError::InvalidRange {
-                    start: start.to_string(),
-                    end: end.to_string(),
-                    step: step.to_string(),
-                })?;
+                let next = v
+                    .checked_add(step)
+                    .ok_or_else(|| CudaWtoError::InvalidRange {
+                        start: start.to_string(),
+                        end: end.to_string(),
+                        step: step.to_string(),
+                    })?;
                 if next == v {
                     break;
                 }

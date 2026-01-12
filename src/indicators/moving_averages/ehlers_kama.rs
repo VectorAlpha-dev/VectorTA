@@ -1,36 +1,3 @@
-//! # Ehlers Kaufman Adaptive Moving Average (EKAMA)
-//!
-//! Variation of Kaufman's Adaptive Moving Average with Ehlers' modifications for
-//! improved responsiveness. Dynamically adjusts smoothing factor based on price
-//! efficiency ratio to adapt between trending and ranging markets.
-//!
-//! ## Parameters
-//! - **period**: Lookback period for efficiency calculation (default: 20)
-//!
-//! ## Returns
-//! - **values**: Adaptive moving average that adjusts to market conditions
-//!
-//! ## Developer Status
-//! - **AVX2/AVX512**: Enabled for initial ER denominator (vector abs-diff sum);
-//!   main recurrence remains scalar (recursive filter). Auto selection falls back
-//!   to scalar (recurrence-bound; AVX512 downclock often outweighs benefits).
-//!   Explicit AVX kernels remain available via `Kernel::Avx2` / `Kernel::Avx512`.
-//! - **Scalar path**: Minor optimizations (branch hoist, mul_add, no powi).
-//! - **Batch (row-specific)**: Uses shared prefix sums of abs-diffs to seed ER
-//!   denominators in O(1) per row; reduces overhead for wide sweeps. Outputs
-//!   unchanged; warmup handling remains identical.
-//! - **Streaming update**: O(1) per update using fixed-size rings for abs-diff
-//!   sum and (period−1) lag. Matches batch/scalar semantics exactly.
-//! - **CUDA**: Wrapper uses typed errors, RAII primary context, pre‑launch
-//!   VRAM checks, and explicit symbol resolution; Python handle keeps
-//!   `Arc<Context>` and `device_id`.
-//! - **Interop**: CUDA Array Interface v3 (byte strides) and DLPack v1.x with
-//!   version negotiation ("dltensor_versioned" vs legacy "dltensor"). Producer
-//!   synchronizes before return; no stream exposed.
-//!
-//! Decision: Streaming enabled (ring buffers) — identical outputs vs batch; O(1)
-//! updates by maintaining rolling |Δ| and (period−1) lagged price.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -44,13 +11,13 @@ use pyo3::types::{PyDict, PyList};
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "cuda")]
-use crate::cuda::moving_averages::{CudaEhlersKama, ehlers_kama_wrapper::CudaEhlersKamaError};
+use crate::cuda::moving_averages::{ehlers_kama_wrapper::CudaEhlersKamaError, CudaEhlersKama};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -61,16 +28,16 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
-use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for EhlersKamaInput<'a> {
     #[inline(always)]
@@ -97,7 +64,10 @@ pub struct EhlersKamaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct EhlersKamaParams {
     pub period: Option<usize>,
 }
@@ -221,7 +191,11 @@ pub enum EhlersKamaError {
     #[error("ehlers_kama: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("ehlers_kama: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("ehlers_kama: Invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("ehlers_kama: arithmetic overflow computing sizes/bytes")]
@@ -257,7 +231,7 @@ fn ehlers_kama_compute_into(
             Kernel::Avx2 | Kernel::Avx2Batch => ehlers_kama_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => ehlers_kama_avx512(data, period, first, out),
-            _ => ehlers_kama_scalar(data, period, first, out), 
+            _ => ehlers_kama_scalar(data, period, first, out),
         }
     }
 }
@@ -270,25 +244,19 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         return;
     }
 
-    
     let start = first_valid + period - 1;
     if start >= len {
         return;
     }
 
-    
-    
     let mut delta_sum = 0.0;
     let delta_start = first_valid + 1;
     for k in delta_start..=start {
         delta_sum += (data[k] - data[k - 1]).abs();
     }
 
-    
-    let mut prev_kama = data[start - 1]; 
+    let mut prev_kama = data[start - 1];
 
-    
-    
     let a0 = data[start];
     let direction = (a0 - data[start - (period - 1)]).abs();
     let ef = if delta_sum == 0.0 {
@@ -296,15 +264,13 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
     } else {
         (direction / delta_sum).min(1.0)
     };
-    
+
     let s_term = 0.6667f64.mul_add(ef, 0.0645);
     let mut s = s_term * s_term;
     prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
     out[start] = prev_kama;
 
-    
     for i in (start + 1)..len {
-        
         let drop_idx = i - period;
         if drop_idx > first_valid {
             delta_sum -= (data[drop_idx] - data[drop_idx - 1]).abs();
@@ -312,7 +278,6 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
         let a = data[i];
         delta_sum += (a - data[i - 1]).abs();
 
-        
         let direction = (a - data[i - (period - 1)]).abs();
         let ef = if delta_sum == 0.0 {
             0.0
@@ -320,7 +285,6 @@ pub fn ehlers_kama_scalar(data: &[f64], period: usize, first_valid: usize, out: 
             (direction / delta_sum).min(1.0)
         };
 
-        
         let s_term = 0.6667f64.mul_add(ef, 0.0645);
         s = s_term * s_term;
 
@@ -357,14 +321,11 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
         _mm_cvtsd_f64(sum1)
     }
 
-    
-    
     let mut k = core::cmp::max(first_valid + 1, start + 1 - period);
     let end = start;
     let mut acc_v = _mm256_setzero_pd();
     let mut delta_sum = 0.0f64;
 
-    
     while ((end + 1).wrapping_sub(k)) & 3 != 0 {
         let a = *d.add(k);
         let b = *d.add(k - 1);
@@ -374,7 +335,7 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
             break;
         }
     }
-    
+
     while k + 3 <= end {
         let curr = _mm256_loadu_pd(d.add(k));
         let prev = _mm256_loadu_pd(d.add(k - 1));
@@ -385,7 +346,6 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
     }
     delta_sum += hsum256_pd(acc_v);
 
-    
     while k <= end {
         let a = *d.add(k);
         let b = *d.add(k - 1);
@@ -393,7 +353,6 @@ pub unsafe fn ehlers_kama_avx2(data: &[f64], period: usize, first_valid: usize, 
         k += 1;
     }
 
-    
     let o = out.as_mut_ptr();
     let mut prev_kama = *d.add(start - 1);
     let a0 = *d.add(start);
@@ -470,13 +429,11 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
         hsum256_pd(lo) + hsum256_pd(hi)
     }
 
-    
     let mut k = core::cmp::max(first_valid + 1, start + 1 - period);
     let end = start;
     let mut acc_v = _mm512_setzero_pd();
     let mut delta_sum = 0.0f64;
 
-    
     while ((end + 1).wrapping_sub(k)) & 7 != 0 {
         let a = *d.add(k);
         let b = *d.add(k - 1);
@@ -486,7 +443,7 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
             break;
         }
     }
-    
+
     while k + 7 <= end {
         let curr = _mm512_loadu_pd(d.add(k));
         let prev = _mm512_loadu_pd(d.add(k - 1));
@@ -497,7 +454,6 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
     }
     delta_sum += hsum512_pd(acc_v);
 
-    
     while k <= end {
         let a = *d.add(k);
         let b = *d.add(k - 1);
@@ -505,7 +461,6 @@ pub unsafe fn ehlers_kama_avx512(data: &[f64], period: usize, first_valid: usize
         k += 1;
     }
 
-    
     let o = out.as_mut_ptr();
     let mut prev_kama = *d.add(start - 1);
     let a0 = *d.add(start);
@@ -593,20 +548,12 @@ pub fn ehlers_kama_with_kernel(
     Ok(EhlersKamaOutput { values: out })
 }
 
-/// Compute Ehlers KAMA into a caller-provided buffer without allocating.
-/// Preserves NaN warmups exactly as the Vec-returning API; the output slice
-/// length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
-pub fn ehlers_kama_into(
-    input: &EhlersKamaInput,
-    out: &mut [f64],
-) -> Result<(), EhlersKamaError> {
+pub fn ehlers_kama_into(input: &EhlersKamaInput, out: &mut [f64]) -> Result<(), EhlersKamaError> {
     ehlers_kama_into_slice(out, input, Kernel::Auto)
 }
 
-/// Compute Ehlers KAMA directly into the provided output slice.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn ehlers_kama_into_slice(
     dst: &mut [f64],
@@ -622,10 +569,8 @@ pub fn ehlers_kama_into_slice(
         });
     }
 
-    // single compute
     ehlers_kama_compute_into(data, period, first, chosen, dst);
 
-    // apply NaN warmup prefix without extra copies
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -636,24 +581,21 @@ pub fn ehlers_kama_into_slice(
 #[derive(Debug, Clone)]
 pub struct EhlersKamaStream {
     period: usize,
-    // --- for compatibility with existing tests (debug printing) ---
+
     buffer: Vec<f64>,
 
-    // --- O(1) state ---
-    // Rolling sum of absolute differences over the last `period` diffs.
-    diffs: Vec<f64>, // capacity = period
-    d_head: usize,   // next write index
-    d_len: usize,    // <= period
-    delta_sum: f64,  // Σ |Δ|
+    diffs: Vec<f64>,
+    d_head: usize,
+    d_len: usize,
+    delta_sum: f64,
 
-    // Last (period-1) prior prices to fetch price_{t-(period-1)} in O(1).
-    lag: Vec<f64>, // capacity = period.saturating_sub(1)
-    l_head: usize, // next write index
-    l_len: usize,  // <= period-1
+    lag: Vec<f64>,
+    l_head: usize,
+    l_len: usize,
 
-    prev_price: f64, // last observed price
-    have_prev: bool, // have we seen at least one sample?
-    prev_kama: f64,  // Pine-style seed; set to previous price at first compute
+    prev_price: f64,
+    have_prev: bool,
+    prev_kama: f64,
 }
 
 impl EhlersKamaStream {
@@ -693,15 +635,12 @@ impl EhlersKamaStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Keep the debug history (does not affect O(1) math state)
         self.buffer.push(value);
 
-        // First sample: just prime state
         if !self.have_prev {
             self.prev_price = value;
             self.have_prev = true;
 
-            // push current value into (period-1) lag so the next tick sees it as a prior
             if !self.lag.is_empty() {
                 self.lag[self.l_head] = value;
                 self.l_head = (self.l_head + 1) % self.lag.len();
@@ -712,22 +651,18 @@ impl EhlersKamaStream {
             return None;
         }
 
-        // 1) Update rolling sum of diffs (|value - prev|) in O(1).
         let new_diff = (value - self.prev_price).abs();
         if self.d_len == self.period {
-            // overwrite oldest at d_head
             let old = self.diffs[self.d_head];
             self.delta_sum -= old;
         } else {
-            self.d_len += 1; // grow until full
+            self.d_len += 1;
         }
         self.diffs[self.d_head] = new_diff;
         self.delta_sum += new_diff;
         self.d_head = (self.d_head + 1) % self.period;
 
-        // 2) Can we compute yet? Need lag of length (period-1)
         if self.l_len < self.period.saturating_sub(1) {
-            // Not enough history. Push current value for future steps and exit.
             if !self.lag.is_empty() {
                 self.lag[self.l_head] = value;
                 self.l_head = (self.l_head + 1) % self.lag.len();
@@ -739,36 +674,28 @@ impl EhlersKamaStream {
             return None;
         }
 
-        // 3) Compute ER components in O(1).
-        // Oldest prior price is at l_head when the lag ring is full (head = next write).
         let direction_ref = if self.lag.is_empty() {
-            // period == 1 (degenerate); direction becomes |price - price|
             value
         } else {
-            self.lag[self.l_head] // oldest of the last (period-1) prices
+            self.lag[self.l_head]
         };
         let direction = (value - direction_ref).abs();
 
-        // Handle zero volatility carefully to avoid NaN/Inf (match batch semantics).
         let ef = if self.delta_sum == 0.0 {
             0.0
         } else {
             clamp01(direction / self.delta_sum)
         };
 
-        // Ehlers/Kaufman smoothing constant: s = (0.6667*ef + 0.0645)^2 (use mul_add, avoid powi)
         let s = smooth_const_from_ef(ef);
 
-        // Pine-style first seed equals previous price
         if self.prev_kama.is_nan() {
             self.prev_kama = self.prev_price;
         }
 
-        // Recurrence: KAMA_t = s*(price - prev_kama) + prev_kama (via FMA)
         let kama = s.mul_add(value - self.prev_kama, self.prev_kama);
         self.prev_kama = kama;
 
-        // 4) Advance lag ring with *current* value for the next call
         if !self.lag.is_empty() {
             self.lag[self.l_head] = value;
             self.l_head = (self.l_head + 1) % self.lag.len();
@@ -777,7 +704,6 @@ impl EhlersKamaStream {
             }
         }
 
-        // 5) Advance prev price
         self.prev_price = value;
 
         Some(kama)
@@ -786,7 +712,6 @@ impl EhlersKamaStream {
 
 #[inline(always)]
 fn smooth_const_from_ef(ef: f64) -> f64 {
-    // s = (0.6667*ef + 0.0645)^2
     let t = 0.6667f64.mul_add(ef.min(1.0), 0.0645);
     t * t
 }
@@ -796,7 +721,6 @@ fn clamp01(x: f64) -> f64 {
     x.max(0.0).min(1.0)
 }
 
-// Batch processing support
 #[derive(Clone, Debug)]
 pub struct EhlersKamaBatchRange {
     pub period: (usize, usize, usize),
@@ -890,21 +814,21 @@ impl EhlersKamaBatchOutput {
 
 #[inline(always)]
 fn expand_periods((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-    // Zero step => static singleton; reversed bounds supported.
     if step == 0 || start == end {
         return vec![start];
     }
     if start < end {
         (start..=end).step_by(step).collect()
     } else {
-        // descending with positive step
         let mut v = Vec::new();
         let mut cur = start;
         while cur >= end {
             v.push(cur);
             match cur.checked_sub(step) {
                 Some(next) => {
-                    if next < end { break; }
+                    if next < end {
+                        break;
+                    }
                     cur = next;
                 }
                 None => break,
@@ -942,7 +866,7 @@ pub fn ehlers_kama_batch_with_kernel(
         other if other.is_batch() => other,
         other => return Err(EhlersKamaError::InvalidKernelForBatch(other)),
     };
-    // Map batch to compute kernel
+
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -971,10 +895,13 @@ fn ehlers_kama_batch_inner(
     let periods = expand_periods(r.period);
     if periods.is_empty() {
         let (s, e, st) = r.period;
-        return Err(EhlersKamaError::InvalidRange { start: s, end: e, step: st });
+        return Err(EhlersKamaError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
+        });
     }
 
-    // Validate longest period
     let max_p = *periods.iter().max().unwrap();
     if len - first < max_p {
         return Err(EhlersKamaError::NotEnoughValidData {
@@ -989,12 +916,10 @@ fn ehlers_kama_batch_inner(
         .checked_mul(cols)
         .ok_or(EhlersKamaError::ArithmeticOverflow)?;
 
-    // allocate matrix uninitialized then prefix NaNs per-row
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = periods.iter().map(|&p| first + p - 1).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Prepare slice to f64
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -1036,12 +961,11 @@ fn ehlers_kama_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(EhlersKamaError::AllValuesNaN)?;
 
-    // resolve once
     let actual = match kern {
         Kernel::Auto => Kernel::ScalarBatch,
         other => other,
     };
-    // map batch → compute kernel (same as alma.rs)
+
     let compute_kernel = match actual {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1049,8 +973,6 @@ fn ehlers_kama_batch_inner_into(
         k => k,
     };
 
-    // Shared precompute across rows: prefix sums of absolute diffs to seed ER denominator in O(1)
-    // ps[k] = sum_{t=1..k} |data[t]-data[t-1]|, with diffs only when t > first
     let mut ps = vec![0.0f64; len];
     for k in 1..len {
         let ad = if k > first {
@@ -1068,10 +990,9 @@ fn ehlers_kama_batch_inner_into(
             return;
         }
 
-        // Seed using ps in O(1)
         let mut prev_kama = data[start - 1];
         let a0 = data[start];
-        // Initial denominator over PERIOD consecutive diffs: ps[start] - ps[first]
+
         let mut delta_sum = ps[start] - ps[first];
         let dir0 = (a0 - data[start - (p - 1)]).abs();
         let ef0 = if delta_sum == 0.0 {
@@ -1084,7 +1005,6 @@ fn ehlers_kama_batch_inner_into(
         prev_kama = s.mul_add(a0 - prev_kama, prev_kama);
         dst_row[start] = prev_kama;
 
-        // Main loop: denominator via prefix sums (O(1)); recurrence identical
         for i in (start + 1)..len {
             delta_sum = ps[i] - ps[i - p];
             let a = data[i];
@@ -1162,14 +1082,12 @@ pub fn ehlers_kama_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("arithmetic overflow"))?;
 
-    // Create an uninitialized NumPy buffer (flat) and compute directly into it.
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    // Warm prefixes: initialize directly in the NumPy memory without extra buffers.
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     let warm: Vec<usize> = periods.iter().map(|&p| first + p - 1).collect();
-    // Reinterpret NumPy memory as MaybeUninit to use init_matrix_prefixes safely.
+
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             out_slice.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1178,7 +1096,6 @@ pub fn ehlers_kama_batch_py<'py>(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Resolve kernel exactly like ALMA batch.
     let kern = validate_kernel(kernel, true)?;
     py.allow_threads(|| {
         let resolved = match kern {
@@ -1292,8 +1209,7 @@ impl EhlersKamaStreamPy {
     }
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_kama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = EhlersKamaParams {
@@ -1309,13 +1225,13 @@ pub fn ehlers_kama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EhlersKamaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EhlersKamaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1324,7 +1240,7 @@ pub struct EhlersKamaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ehlers_kama_batch)]
 pub fn ehlers_kama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: EhlersKamaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1347,7 +1263,7 @@ pub fn ehlers_kama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsV
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_kama_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1356,7 +1272,7 @@ pub fn ehlers_kama_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_kama_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1364,7 +1280,7 @@ pub fn ehlers_kama_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_kama_into(
     in_ptr: *const f64,
@@ -1400,7 +1316,7 @@ pub fn ehlers_kama_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_kama_batch_into(
     in_ptr: *const f64,
@@ -1424,18 +1340,13 @@ pub fn ehlers_kama_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("arithmetic overflow"))?;
 
-        // treat caller memory as uninit for prefix init
-        let out_mu = std::slice::from_raw_parts_mut(
-            out_ptr as *mut std::mem::MaybeUninit<f64>,
-            total,
-        );
+        let out_mu =
+            std::slice::from_raw_parts_mut(out_ptr as *mut std::mem::MaybeUninit<f64>, total);
 
-        // compute per-row warm prefixes once
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
         let warm: Vec<usize> = periods.iter().map(|&p| first + p - 1).collect();
         init_matrix_prefixes(out_mu, cols, &warm);
 
-        // compute directly into caller memory
         let out_f64 = std::slice::from_raw_parts_mut(out_ptr, total);
         ehlers_kama_batch_inner_into(data, &periods, detect_best_kernel(), false, out_f64)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1444,7 +1355,6 @@ pub fn ehlers_kama_batch_into(
     }
 }
 
-// ==================== PYTHON MODULE REGISTRATION ====================
 #[cfg(feature = "python")]
 pub fn register_ehlers_kama_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ehlers_kama_py, m)?)?;
@@ -1456,7 +1366,6 @@ pub fn register_ehlers_kama_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyRe
     }
     Ok(())
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Kama", unsendable)]
@@ -1485,12 +1394,14 @@ impl DeviceArrayF32KamaPy {
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let ptr_val: usize = self.inner.buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr_val, false))?;
-        // Producer synchronizes stream before returning the handle; omit stream per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1504,7 +1415,6 @@ impl DeviceArrayF32KamaPy {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(d) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = d.extract::<(i32, i32)>(py) {
@@ -1526,15 +1436,17 @@ impl DeviceArrayF32KamaPy {
             }
         }
 
-        // Producer synchronizes internally; ignore stream per Array API semantics.
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -1550,7 +1462,11 @@ impl DeviceArrayF32KamaPy {
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32KamaPy {
     pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
     }
 }
 
@@ -1562,10 +1478,9 @@ mod tests {
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_ehlers_kama_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input (with a NaN prefix to exercise warmup)
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 3..256 {
@@ -1575,10 +1490,8 @@ mod tests {
 
         let input = EhlersKamaInput::from_slice(&data, EhlersKamaParams::default());
 
-        // Baseline via Vec-returning API
         let baseline = ehlers_kama(&input)?;
 
-        // Preallocate output and use no-alloc API
         let mut out = vec![0.0; data.len()];
         ehlers_kama_into(&input, &mut out)?;
 
@@ -1625,7 +1538,6 @@ mod tests {
 
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Check last 5 values match expected (with period=20)
         let expected_last_5 = [
             59721.60663208,
             59717.43599957,
@@ -1634,7 +1546,6 @@ mod tests {
             59701.81308504,
         ];
 
-        // Get last 6 values and check first 5 (due to Pine non-repainting mode alignment)
         let start = result.values.len() - 6;
         for (i, &expected) in expected_last_5.iter().enumerate() {
             let actual = result.values[start + i];
@@ -1773,12 +1684,10 @@ mod tests {
         let input = EhlersKamaInput::from_slice(&data_with_nan, params);
         let result = ehlers_kama_with_kernel(&input, kernel)?;
 
-        // First values should be NaN due to NaN prefix and warmup
         assert!(result.values[0].is_nan());
         assert!(result.values[1].is_nan());
 
-        // After warmup, should have valid values
-        let warmup_end = 2 + 5 - 1; // NaN prefix + period - 1
+        let warmup_end = 2 + 5 - 1;
         assert!(
             !result.values[warmup_end + 5].is_nan(),
             "[{}] EKAMA should produce valid values after warmup",
@@ -1830,8 +1739,7 @@ mod tests {
 
         assert_eq!(second_result.values.len(), first_result.values.len());
 
-        // Check that we get valid values after double application
-        let warmup = 40; // double warmup
+        let warmup = 40;
         let has_valid = second_result.values[warmup..].iter().any(|&v| !v.is_nan());
         assert!(
             has_valid,
@@ -1852,14 +1760,11 @@ mod tests {
         let params = EhlersKamaParams { period: Some(5) };
         let input = EhlersKamaInput::from_slice(&data, params);
 
-        // Calculate using normal method
         let normal_result = ehlers_kama_with_kernel(&input, kernel)?;
 
-        // Calculate using into_slice method
         let mut into_result = vec![0.0; data.len()];
         ehlers_kama_into_slice(&mut into_result, &input, kernel)?;
 
-        // Compare results
         for i in 0..data.len() {
             if normal_result.values[i].is_nan() {
                 assert!(
@@ -1896,7 +1801,6 @@ mod tests {
 
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Test with slice
         let data = vec![
             10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0, 130.0,
             140.0, 150.0, 160.0, 170.0, 180.0, 190.0, 200.0,
@@ -1911,7 +1815,6 @@ mod tests {
         Ok(())
     }
 
-    // Generate all test variants using macros
     macro_rules! generate_all_ehlers_kama_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1950,7 +1853,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test various parameter combinations
         let test_params = vec![
             EhlersKamaParams { period: Some(5) },
             EhlersKamaParams { period: Some(10) },
@@ -2037,7 +1939,6 @@ mod tests {
     #[cfg(debug_assertions)]
     generate_all_ehlers_kama_tests!(check_ehlers_kama_no_poison);
 
-    // Batch processing tests
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -2053,8 +1954,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        // Validate some expected values for default params (period=20)
-        // These are example values - actual values will depend on the data
         let expected_last_5 = [
             59721.60663208,
             59717.43599957,
@@ -2062,7 +1961,7 @@ mod tests {
             59704.78675836,
             59701.81308504,
         ];
-        // Get last 6 values and check first 5 (due to Pine non-repainting mode alignment)
+
         let start = row.len() - 6;
         for (i, &v) in row[start..start + 5].iter().enumerate() {
             assert!(
@@ -2085,7 +1984,7 @@ mod tests {
             .period_range(10, 30, 5)
             .apply_candles(&c, "close")?;
 
-        assert_eq!(output.rows, 5); // (30-10)/5 + 1
+        assert_eq!(output.rows, 5);
         assert_eq!(output.cols, c.close.len());
 
         Ok(())
@@ -2119,13 +2018,7 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        let test_configs = vec![
-            (5, 25, 5),   // period range
-            (10, 10, 0),  // single period
-            (2, 5, 1),    // small range
-            (30, 60, 15), // large range
-            (8, 12, 1),   // dense range
-        ];
+        let test_configs = vec![(5, 25, 5), (10, 10, 0), (2, 5, 1), (30, 60, 15), (8, 12, 1)];
 
         for (cfg_idx, (p_start, p_end, p_step)) in test_configs.iter().enumerate() {
             let output = EhlersKamaBatchBuilder::new()
@@ -2233,28 +2126,20 @@ mod tests {
                 let EhlersKamaOutput { values: ref_out } =
                     ehlers_kama_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property: output length equals input length
                 prop_assert_eq!(out.len(), data.len());
 
-                // Property: first period-1 values are NaN
                 for i in 0..(period - 1) {
                     prop_assert!(out[i].is_nan());
                 }
 
-                // For valid outputs, check range and kernel consistency
                 for i in (period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // KAMA is an adaptive average, so it doesn't strictly need to be
-                    
-
-                    
                     if period == 1 {
                         prop_assert!((y - data[i]).abs() <= f64::EPSILON);
                     }
 
-                    
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
                         prop_assert!((y - data[0]).abs() <= 1e-6);
                     }
@@ -2272,7 +2157,6 @@ mod tests {
 
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    
                     prop_assert!(
                         (y - r).abs() <= 1e-9 || ulp_diff <= 4,
                         "mismatch idx {i}: {y} vs {r} (ULP={ulp_diff})"
@@ -2291,25 +2175,19 @@ mod tests {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[test]
     fn test_ehlers_kama_simd128_correctness() {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("Failed to read test data");
 
-        
         let params = EhlersKamaParams::default();
         let input = EhlersKamaInput::from_candles(&candles, "close", params);
 
-        
         let scalar_output = ehlers_kama_with_kernel(&input, Kernel::Scalar).unwrap();
 
-        
         let simd128_output = ehlers_kama_with_kernel(&input, Kernel::Scalar).unwrap();
 
-        
         assert_eq!(scalar_output.values.len(), simd128_output.values.len());
         assert_eq!(scalar_output.values.len(), candles.close.len());
 
-        
         for (i, (scalar_val, simd_val)) in scalar_output
             .values
             .iter()
@@ -2340,14 +2218,12 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let period = 5;
 
-        
         let params = EhlersKamaParams {
             period: Some(period),
         };
         let input = EhlersKamaInput::from_slice(&data, params.clone());
         let batch_output = ehlers_kama(&input).unwrap();
 
-        
         let mut stream = EhlersKamaStream::try_new(params).unwrap();
         let mut stream_results = vec![];
 
@@ -2358,7 +2234,6 @@ mod tests {
             if let Some(kama) = result {
                 println!("Stream update at index {}: value={}, kama={}", i, val, kama);
 
-                
                 if i == 4 {
                     println!("  buffer: {:?}", stream.buffer);
                     println!("  prev_kama: {}", stream.prev_kama);
@@ -2369,7 +2244,6 @@ mod tests {
         println!("Batch result: {:?}", batch_output.values);
         println!("Stream results: {:?}", stream_results);
 
-        
         for i in 0..data.len() {
             if batch_output.values[i].is_nan() {
                 assert!(stream_results[i].is_none());
@@ -2390,34 +2264,29 @@ mod tests {
 
     #[test]
     fn test_stream_first_output() {
-        
         let data = vec![
             2761.7, 2740.0, 2763.0, 2772.4, 2779.7, 2769.7, 2759.0, 2663.3, 2570.0, 2572.2, 2484.2,
             2560.9, 2508.6, 2481.9, 2538.1, 2432.9, 2469.0, 2527.738, 2545.1, 2536.9,
         ];
         let period = 20;
 
-        
         let params = EhlersKamaParams {
             period: Some(period),
         };
         let input = EhlersKamaInput::from_slice(&data, params.clone());
         let batch_output = ehlers_kama(&input).unwrap();
 
-        
         let mut stream = EhlersKamaStream::try_new(params).unwrap();
         let mut stream_result = None;
 
         for (i, &val) in data.iter().enumerate() {
             stream_result = stream.update(val);
             if i == 19 {
-                
                 println!("Stream at index 19:");
                 println!("  buffer len: {}", stream.buffer.len());
                 println!("  current value: {}", val);
                 println!("  prev_kama: {}", stream.prev_kama);
 
-                
                 let mut delta_sum = 0.0;
                 for k in 1..20 {
                     delta_sum += (stream.buffer[k] - stream.buffer[k - 1]).abs();
@@ -2448,7 +2317,6 @@ mod tests {
 
         println!("Batch at index 19: {}", batch_output.values[19]);
 
-        
         assert!(stream_result.is_some());
         let diff = (batch_output.values[19] - stream_result.unwrap()).abs();
         assert!(

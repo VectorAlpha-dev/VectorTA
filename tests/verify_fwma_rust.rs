@@ -1,10 +1,8 @@
-
 use vector_ta::indicators::moving_averages::fwma::{fwma, FwmaInput, FwmaParams};
 
 fn main() {
     println!("Verifying FWMA calculations in Rust\n");
 
-    
     println!("Test 1: Period=5, Data=[1,2,3,4,5]");
     let data1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
     let params1 = FwmaParams { period: Some(5) };
@@ -17,7 +15,6 @@ fn main() {
     println!("Rust result: {:?}", result1.values);
     println!("Last value: {:.10}", result1.values[4]);
 
-    
     println!("\nTest 2: Period=4, Data=[10,20,30,40,50,60,70,80,90,100]");
     let data2 = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
     let params2 = FwmaParams { period: Some(4) };
@@ -33,18 +30,15 @@ fn main() {
         println!("  [{}]: {:.10}", i, result2.values[i]);
     }
 
-    
     println!("\nManual calculation verification:");
     let fib = vec![1.0, 1.0, 2.0, 3.0];
     let fib_sum = 7.0;
     let weights: Vec<f64> = fib.iter().map(|&f| f / fib_sum).collect();
     println!("Weights: {:?}", weights);
 
-    
     let calc3 = 10.0 * weights[0] + 20.0 * weights[1] + 30.0 * weights[2] + 40.0 * weights[3];
     println!("Manual calc for index 3: {:.10}", calc3);
 
-    
     let calc4 = 20.0 * weights[0] + 30.0 * weights[1] + 40.0 * weights[2] + 50.0 * weights[3];
     println!("Manual calc for index 4: {:.10}", calc4);
 }

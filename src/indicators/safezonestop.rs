@@ -1,31 +1,3 @@
-//! # SafeZoneStop
-//!
-//! The SafeZoneStop indicator places dynamic stop-loss levels based on directional movement
-//! and volatility, utilizing Wilder's smoothed directional movement calculations.
-//!
-//! ## Parameters
-//! - **period**: Time period for calculating DM (Wilder's smoothing). Defaults to 22.
-//! - **mult**: Multiplier for the DM measure. Defaults to 2.5.
-//! - **max_lookback**: Window for final max/min. Defaults to 3.
-//! - **direction**: Trading direction - "long" or "short".
-//!
-//! ## Returns
-//! - **`Ok(SafeZoneStopOutput)`** containing a `Vec<f64>` of stop levels matching input length.
-//! - **`Err(SafeZoneStopError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - **SIMD Status**: AVX2 and AVX512 kernels are stubs (delegate to scalar).
-//!   Decision: DM smoothing is a scalar recurrence and the rolling extremum is branchy;
-//!   no consistent wins observed across CPUs, so runtime selection short-circuits to scalar.
-//! - **CUDA Status**: CUDA batch and many-series kernels are enabled with typed errors, VRAM checks,
-//!   and zero-copy Python interop via CUDA Array Interface v3 + DLPack v1.x; producing streams
-//!   synchronize before returning device buffers.
-//! - **Streaming Performance**: O(1) streaming via a fixed-size ring buffer + FMA for the
-//!   Wilder recurrence and candidate formation. Replaces VecDeque to avoid allocator churn
-//!   and matches scalar warmup/emission semantics exactly.
-//! - **Memory Optimization**: ✓ Uses alloc_with_nan_prefix and zero-copy batch operations
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **TODO**: Implement actual AVX2/AVX512 SIMD kernels for DM calculations and rolling operations
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -34,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -52,7 +24,6 @@ use rayon::prelude::*;
 use std::error::Error;
 use thiserror::Error;
 
-
 #[inline(always)]
 fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
     let n = high.len().min(low.len());
@@ -66,8 +37,6 @@ fn first_valid_pair(high: &[f64], low: &[f64]) -> Option<usize> {
 
 #[inline(always)]
 fn warm_len(first: usize, period: usize, max_lookback: usize) -> usize {
-    
-    
     first + period.max(max_lookback.saturating_sub(1))
 }
 
@@ -90,7 +59,10 @@ pub struct SafeZoneStopOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SafeZoneStopParams {
     pub period: Option<usize>,
     pub mult: Option<f64>,
@@ -312,12 +284,10 @@ pub fn safezonestop_with_kernel(
     }
 
     let chosen = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    
     let warm = warm_len(first, period, max_lookback);
     let mut out = alloc_with_nan_prefix(len, warm);
 
@@ -362,7 +332,6 @@ pub fn safezonestop_with_kernel(
     Ok(SafeZoneStopOutput { values: out })
 }
 
-/// Write SafeZoneStop directly to output slice - no allocations
 #[inline]
 pub fn safezonestop_into_slice(
     dst: &mut [f64],
@@ -416,7 +385,6 @@ pub fn safezonestop_into_slice(
     }
 
     let chosen = match kern {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -438,7 +406,6 @@ pub fn safezonestop_into_slice(
         }
     }
 
-    
     let warm_end = warm_len(first, period, max_lookback).min(dst.len());
     for v in &mut dst[..warm_end] {
         *v = f64::NAN;
@@ -447,26 +414,23 @@ pub fn safezonestop_into_slice(
     Ok(())
 }
 
-/// Compute SafeZoneStop into a caller-provided buffer (no allocations).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - Output slice length must equal input length.
-/// - Writes results into `out` and returns `Ok(())` on success.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn safezonestop_into(
     input: &SafeZoneStopInput,
     out: &mut [f64],
-
 ) -> Result<(), SafeZoneStopError> {
-    
     let (high, low, direction) = match &input.data {
         SafeZoneStopData::Candles { candles, direction } => (
             source_type(candles, "high"),
             source_type(candles, "low"),
             *direction,
         ),
-        SafeZoneStopData::Slices { high, low, direction } => (*high, *low, *direction),
+        SafeZoneStopData::Slices {
+            high,
+            low,
+            direction,
+        } => (*high, *low, *direction),
     };
 
     if high.len() != low.len() {
@@ -486,7 +450,10 @@ pub fn safezonestop_into(
     let period = input.get_period();
     let max_lookback = input.get_max_lookback();
     if period == 0 || period > len {
-        return Err(SafeZoneStopError::InvalidPeriod { period, data_len: len });
+        return Err(SafeZoneStopError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if direction != "long" && direction != "short" {
         return Err(SafeZoneStopError::InvalidDirection);
@@ -495,17 +462,18 @@ pub fn safezonestop_into(
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
     let needed = (period + 1).max(max_lookback);
     if len - first < needed {
-        return Err(SafeZoneStopError::NotEnoughValidData { needed, valid: len - first });
+        return Err(SafeZoneStopError::NotEnoughValidData {
+            needed,
+            valid: len - first,
+        });
     }
 
-    
     let warm = warm_len(first, period, max_lookback).min(out.len());
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warm] {
         *v = qnan;
     }
 
-    
     safezonestop_into_slice(out, input, Kernel::Auto)
 }
 
@@ -524,7 +492,6 @@ pub unsafe fn safezonestop_scalar(
         return;
     }
 
-    
     let warm = first + period.max(max_lookback) - 1;
     let warm_end = warm.min(len);
     for k in 0..warm_end {
@@ -534,20 +501,16 @@ pub unsafe fn safezonestop_scalar(
         return;
     }
 
-    
     let dir_long = direction
         .as_bytes()
         .get(0)
         .map(|&b| b == b'l')
         .unwrap_or(true);
 
-    
-    
     const LB_DEQUE_THRESHOLD: usize = 32;
     let end0 = first + period;
 
     if max_lookback > LB_DEQUE_THRESHOLD {
-        
         #[inline(always)]
         fn ring_dec(x: usize, cap: usize) -> usize {
             if x == 0 {
@@ -663,10 +626,8 @@ pub unsafe fn safezonestop_scalar(
             prev_low = l;
         }
     } else if end0 < len {
-        
         let mut dm_smooth = vec![0.0f64; len];
 
-        
         let mut prev_h = *high.get_unchecked(first);
         let mut prev_l = *low.get_unchecked(first);
         let mut sum = 0.0;
@@ -696,7 +657,6 @@ pub unsafe fn safezonestop_scalar(
         }
         *dm_smooth.get_unchecked_mut(end0) = sum;
 
-        
         let alpha = 1.0 - 1.0 / (period as f64);
         for i in (end0 + 1)..len {
             let h = *high.get_unchecked(i);
@@ -724,7 +684,6 @@ pub unsafe fn safezonestop_scalar(
             prev_l = l;
         }
 
-        
         if dir_long {
             for i in warm..len {
                 let start_idx = i + 1 - max_lookback;
@@ -830,38 +789,32 @@ pub unsafe fn safezonestop_avx2(
 
 #[derive(Debug, Clone)]
 pub struct SafeZoneStopStream {
-    
     period: usize,
     mult: f64,
     max_lookback: usize,
     dir_long: bool,
 
-    
-    inv_p: f64,    
-    alpha: f64,    
-    warm_i: usize, 
+    inv_p: f64,
+    alpha: f64,
+    warm_i: usize,
 
-    
     i: usize,
 
-    
     have_prev: bool,
     prev_high: f64,
     prev_low: f64,
 
-    
-    boot_n: usize,  
-    boot_sum: f64,  
-    dm_prev: f64,   
-    dm_ready: bool, 
+    boot_n: usize,
+    boot_sum: f64,
+    dm_prev: f64,
+    dm_ready: bool,
 
-    
-    cap: usize,        
-    q_idx: Vec<usize>, 
-    q_val: Vec<f64>,   
-    q_head: usize,     
-    q_tail: usize,     
-    q_len: usize,      
+    cap: usize,
+    q_idx: Vec<usize>,
+    q_val: Vec<f64>,
+    q_head: usize,
+    q_tail: usize,
+    q_len: usize,
 }
 
 impl SafeZoneStopStream {
@@ -900,10 +853,8 @@ impl SafeZoneStopStream {
         let inv_p = 1.0 / (period as f64);
         let alpha = 1.0 - inv_p;
 
-        
         let warm_i = period.max(max_lookback).saturating_sub(1);
 
-        
         let cap = max_lookback.max(1) + 1;
         let q_idx = vec![0usize; cap];
         let q_val = vec![0.0f64; cap];
@@ -947,7 +898,6 @@ impl SafeZoneStopStream {
 
     #[inline]
     fn push_candidate(&mut self, j: usize, cand: f64) {
-        
         let start = j.saturating_add(1).saturating_sub(self.max_lookback);
         while self.q_len > 0 {
             let idx_front = self.q_idx[self.q_head];
@@ -958,7 +908,7 @@ impl SafeZoneStopStream {
                 break;
             }
         }
-        
+
         if self.dir_long {
             while self.q_len > 0 {
                 let last = self.ring_dec(self.q_tail);
@@ -980,14 +930,13 @@ impl SafeZoneStopStream {
                 }
             }
         }
-        
+
         self.q_idx[self.q_tail] = j;
         self.q_val[self.q_tail] = cand;
         self.q_tail = self.ring_inc(self.q_tail);
         self.q_len += 1;
     }
 
-    /// Push one (high, low). Returns stop when available, else None.
     #[inline]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         if !high.is_finite() || !low.is_finite() {
@@ -999,10 +948,9 @@ impl SafeZoneStopStream {
             self.prev_low = low;
             self.have_prev = true;
             self.i = 0;
-            return None; 
+            return None;
         }
 
-        
         let up = high - self.prev_high;
         let dn = self.prev_low - low;
         let up_pos = if up > 0.0 { up } else { 0.0 };
@@ -1021,10 +969,8 @@ impl SafeZoneStopStream {
             }
         };
 
-        
         let j = self.i + 1;
 
-        
         if !self.dm_ready {
             self.boot_n += 1;
             self.boot_sum += dm_raw;
@@ -1033,26 +979,22 @@ impl SafeZoneStopStream {
                 self.dm_ready = true;
             }
         } else {
-            
             self.dm_prev = self.alpha.mul_add(self.dm_prev, dm_raw);
         }
 
-        
         if self.dm_ready {
             let cand = if self.dir_long {
-                (-self.mult).mul_add(self.dm_prev, self.prev_low) 
+                (-self.mult).mul_add(self.dm_prev, self.prev_low)
             } else {
-                self.mult.mul_add(self.dm_prev, self.prev_high) 
+                self.mult.mul_add(self.dm_prev, self.prev_high)
             };
             self.push_candidate(j, cand);
         }
 
-        
         self.prev_high = high;
         self.prev_low = low;
         self.i = j;
 
-        
         if self.dm_ready && self.i >= self.warm_i && self.q_len > 0 {
             Some(self.q_val[self.q_head])
         } else {
@@ -1151,7 +1093,6 @@ pub fn safezonestop_batch_with_kernel(
     k: Kernel,
 ) -> Result<SafeZoneStopBatchOutput, SafeZoneStopError> {
     let kernel = match k {
-        // Batch AVX kernels are stubs/delegating; keep Auto on the scalar batch path.
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(SafeZoneStopError::InvalidKernelForBatch(other)),
@@ -1190,7 +1131,9 @@ impl SafeZoneStopBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &SafeZoneStopBatchRange) -> Result<Vec<SafeZoneStopParams>, SafeZoneStopError> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SafeZoneStopError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, SafeZoneStopError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1199,13 +1142,11 @@ fn expand_grid(r: &SafeZoneStopBatchRange) -> Result<Vec<SafeZoneStopParams>, Sa
             let mut x = start;
             while x <= end {
                 vals.push(x);
-                x = x
-                    .checked_add(step)
-                    .ok_or(SafeZoneStopError::InvalidRange {
-                        start: start as f64,
-                        end: end as f64,
-                        step: step as f64,
-                    })?;
+                x = x.checked_add(step).ok_or(SafeZoneStopError::InvalidRange {
+                    start: start as f64,
+                    end: end as f64,
+                    step: step as f64,
+                })?;
             }
         } else {
             let mut x = start;
@@ -1214,13 +1155,11 @@ fn expand_grid(r: &SafeZoneStopBatchRange) -> Result<Vec<SafeZoneStopParams>, Sa
                 if x == end {
                     break;
                 }
-                x = x
-                    .checked_sub(step)
-                    .ok_or(SafeZoneStopError::InvalidRange {
-                        start: start as f64,
-                        end: end as f64,
-                        step: step as f64,
-                    })?;
+                x = x.checked_sub(step).ok_or(SafeZoneStopError::InvalidRange {
+                    start: start as f64,
+                    end: end as f64,
+                    step: step as f64,
+                })?;
             }
         }
         if vals.is_empty() {
@@ -1326,7 +1265,10 @@ fn safezonestop_batch_inner(
     for c in combos.iter() {
         let p = c.period.unwrap();
         if p == 0 || p > len {
-            return Err(SafeZoneStopError::InvalidPeriod { period: p, data_len: len });
+            return Err(SafeZoneStopError::InvalidPeriod {
+                period: p,
+                data_len: len,
+            });
         }
     }
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
@@ -1344,7 +1286,6 @@ fn safezonestop_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    // allocate rows×cols uninit, then write NaN only in warm prefixes
     let mut buf_uninit = make_uninit_matrix(rows, cols);
     let warm_prefixes: Vec<usize> = combos
         .iter()
@@ -1352,14 +1293,10 @@ fn safezonestop_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_uninit, cols, &warm_prefixes);
 
-    // make a &mut [f64] view without copy
     let mut guard = core::mem::ManuallyDrop::new(buf_uninit);
     let values_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // no "fill remaining with NaN" here
-
-    // Row-specific batch speedup: precompute dm_raw once per direction
     let dir_long = direction
         .as_bytes()
         .get(0)
@@ -1434,7 +1371,6 @@ fn safezonestop_batch_inner(
         }
     }
 
-    // Convert back to Vec without copying - zero-copy pattern from ALMA
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1475,7 +1411,10 @@ pub fn safezonestop_batch_inner_into(
     for c in combos.iter() {
         let p = c.period.unwrap();
         if p == 0 || p > len {
-            return Err(SafeZoneStopError::InvalidPeriod { period: p, data_len: len });
+            return Err(SafeZoneStopError::InvalidPeriod {
+                period: p,
+                data_len: len,
+            });
         }
     }
     let first = first_valid_pair(high, low).ok_or(SafeZoneStopError::AllValuesNaN)?;
@@ -1507,7 +1446,10 @@ pub fn safezonestop_batch_inner_into(
     }
 
     let out_uninit = unsafe {
-        core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>, out.len())
+        core::slice::from_raw_parts_mut(
+            out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
+            out.len(),
+        )
     };
     let warm_prefixes: Vec<usize> = combos
         .iter()
@@ -1515,7 +1457,6 @@ pub fn safezonestop_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_uninit, cols, &warm_prefixes);
 
-    // Precompute dm_raw once per direction
     let dir_long = direction
         .as_bytes()
         .get(0)
@@ -1552,10 +1493,8 @@ pub fn safezonestop_batch_inner_into(
     }
 
     let do_row = |row: usize, out_row_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
-        let out_row = core::slice::from_raw_parts_mut(
-            out_row_mu.as_mut_ptr() as *mut f64,
-            out_row_mu.len(),
-        );
+        let out_row =
+            core::slice::from_raw_parts_mut(out_row_mu.as_mut_ptr() as *mut f64, out_row_mu.len());
         let p = combos[row].period.unwrap();
         let m = combos[row].mult.unwrap();
         let lb = combos[row].max_lookback.unwrap();
@@ -1640,7 +1579,6 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
     if end0 < len {
         const LB_DEQUE_THRESHOLD: usize = 32;
         if max_lookback > LB_DEQUE_THRESHOLD {
-            // One-pass jam with deque over cand values (using dm_raw recurrence)
             #[inline(always)]
             fn ring_dec(x: usize, cap: usize) -> usize {
                 if x == 0 {
@@ -1665,7 +1603,6 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
             let mut q_tail: usize = 0;
             let mut q_len: usize = 0;
 
-            // bootstrap
             let mut boot_sum = 0.0;
             for i in (first + 1)..=end0 {
                 boot_sum += *dm_raw.get_unchecked(i);
@@ -1673,8 +1610,6 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
             let mut dm_prev = boot_sum;
             let alpha = 1.0 - 1.0 / (period as f64);
 
-            // Seed the deque with the first candidate at j=end0 so the first
-            // non-warm output index (which can be end0) is always initialized.
             let cand0 = if dir_long {
                 (-mult).mul_add(dm_prev, *low.get_unchecked(end0 - 1))
             } else {
@@ -1689,7 +1624,6 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
             }
 
             for i in (end0 + 1)..len {
-                // j == i here
                 dm_prev = alpha.mul_add(dm_prev, *dm_raw.get_unchecked(i));
 
                 let cand = if dir_long {
@@ -1737,7 +1671,6 @@ unsafe fn safezonestop_row_scalar_with_dmraw(
                 }
             }
         } else {
-            // Two-pass per row using shared dm_raw
             let mut dm_smooth = vec![0.0f64; len];
             let mut sum = 0.0;
             for i in (first + 1)..=end0 {
@@ -1854,9 +1787,7 @@ pub unsafe fn safezonestop_row_avx512_long(
     safezonestop_scalar(high, low, period, mult, max_lookback, direction, first, out)
 }
 
-// ====== WASM BINDINGS ======
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn safezonestop_js(
     high: &[f64],
@@ -1873,7 +1804,7 @@ pub fn safezonestop_js(
     };
     let input = SafeZoneStopInput::from_slices(high, low, direction, params);
 
-    let mut output = vec![0.0; high.len()]; // Single allocation
+    let mut output = vec![0.0; high.len()];
 
     safezonestop_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1881,7 +1812,7 @@ pub fn safezonestop_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn safezonestop_into(
     high_ptr: *const f64,
@@ -1908,9 +1839,7 @@ pub fn safezonestop_into(
         };
         let input = SafeZoneStopInput::from_slices(high, low, direction, params);
 
-        // CRITICAL: Check aliasing with BOTH input pointers
         if high_ptr == out_ptr || low_ptr == out_ptr {
-            // Need temp buffer if output aliases with either input
             let mut temp = vec![0.0; len];
             safezonestop_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1925,7 +1854,7 @@ pub fn safezonestop_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn safezonestop_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1934,7 +1863,7 @@ pub fn safezonestop_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn safezonestop_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1944,7 +1873,7 @@ pub fn safezonestop_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SafeZoneStopBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -1953,7 +1882,7 @@ pub struct SafeZoneStopBatchConfig {
     pub direction: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SafeZoneStopBatchJsOutput {
     pub values: Vec<f64>,
@@ -1962,7 +1891,7 @@ pub struct SafeZoneStopBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = safezonestop_batch)]
 pub fn safezonestop_batch_unified_js(
     high: &[f64],
@@ -1978,7 +1907,6 @@ pub fn safezonestop_batch_unified_js(
         max_lookback: config.max_lookback_range,
     };
 
-    // FIX: choose batch kernel, then map to row kernel
     let row_kernel = match detect_best_batch_kernel() {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1999,7 +1927,7 @@ pub fn safezonestop_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn safezonestop_batch_into(
     high_ptr: *const f64,
@@ -2033,15 +1961,13 @@ pub fn safezonestop_batch_into(
             max_lookback: (max_lookback_start, max_lookback_end, max_lookback_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let total_size = combos
             .len()
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("safezonestop_batch_into: rows * cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // FIX: choose batch kernel, then map to row kernel
         let row_kernel = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2196,12 +2122,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test diverse parameter combinations with both directions
         let test_params = vec![
-            // Default parameters
             (SafeZoneStopParams::default(), "long"),
             (SafeZoneStopParams::default(), "short"),
-            // Minimum viable period
             (
                 SafeZoneStopParams {
                     period: Some(2),
@@ -2210,7 +2133,6 @@ mod tests {
                 },
                 "long",
             ),
-            // Small period variations
             (
                 SafeZoneStopParams {
                     period: Some(5),
@@ -2227,7 +2149,6 @@ mod tests {
                 },
                 "short",
             ),
-            // Medium period variations
             (
                 SafeZoneStopParams {
                     period: Some(10),
@@ -2244,7 +2165,6 @@ mod tests {
                 },
                 "short",
             ),
-            // Default period with different mult/lookback
             (
                 SafeZoneStopParams {
                     period: Some(22),
@@ -2261,7 +2181,6 @@ mod tests {
                 },
                 "short",
             ),
-            // Large periods
             (
                 SafeZoneStopParams {
                     period: Some(50),
@@ -2278,7 +2197,6 @@ mod tests {
                 },
                 "short",
             ),
-            // Edge cases
             (
                 SafeZoneStopParams {
                     period: Some(2),
@@ -2303,12 +2221,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2367,7 +2284,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2379,38 +2296,30 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // SafeZoneStop requires high/low price data and direction
-        // Generate realistic price series with controlled volatility
         let strat = (1usize..=64)
             .prop_flat_map(|period| {
                 let len = (period + 1).max(10)..400;
                 (
-                    // Starting price
                     100.0f64..1000.0f64,
-                    // Generate price changes for random walk
                     prop::collection::vec(-0.05f64..0.05f64, len.clone()),
-                    // Generate spread percentages
                     prop::collection::vec(0.001f64..0.02f64, len),
                     Just(period),
-                    0.5f64..5.0f64,  // mult range
-                    1usize..10,      // max_lookback range
-                    prop::bool::ANY, // direction: true = "long", false = "short"
+                    0.5f64..5.0f64,
+                    1usize..10,
+                    prop::bool::ANY,
                 )
             })
             .prop_map(
                 |(start_price, returns, spreads, period, mult, max_lookback, is_long)| {
-                    // Generate realistic price series using random walk
                     let len = returns.len().min(spreads.len());
                     let mut low = Vec::with_capacity(len);
                     let mut high = Vec::with_capacity(len);
                     let mut price = start_price;
 
                     for i in 0..len {
-                        // Random walk with bounded returns
                         price *= 1.0 + returns[i];
-                        price = price.max(1.0); // Keep prices positive and reasonable
+                        price = price.max(1.0);
 
-                        // Generate high/low based on spread
                         let spread = price * spreads[i];
                         low.push(price - spread / 2.0);
                         high.push(price + spread / 2.0);
@@ -2438,11 +2347,9 @@ mod tests {
                     let output = safezonestop_with_kernel(&input, kernel).unwrap();
                     let ref_output = safezonestop_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Calculate expected warmup period
                     let warmup_period =
                         period.saturating_sub(1).max(max_lookback.saturating_sub(1));
 
-                    // Property 1: Warmup period - first values should be NaN
                     for i in 0..warmup_period.min(len) {
                         prop_assert!(
                             output.values[i].is_nan(),
@@ -2452,10 +2359,7 @@ mod tests {
                         );
                     }
 
-                    // Property 2: Direction-specific validation
-                    // Long stops should be protective (below prices), short stops should be protective (above prices)
                     if len > warmup_period + max_lookback {
-                        // Check direction produces different results
                         let opposite_dir = if is_long { "short" } else { "long" };
                         let opposite_input = SafeZoneStopInput::from_slices(
                             &high,
@@ -2466,7 +2370,6 @@ mod tests {
                         let opposite_output =
                             safezonestop_with_kernel(&opposite_input, kernel).unwrap();
 
-                        // Verify that long and short produce different values (after warmup)
                         let mut found_difference = false;
                         for i in (warmup_period + max_lookback)..len {
                             if !output.values[i].is_nan() && !opposite_output.values[i].is_nan() {
@@ -2482,7 +2385,6 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Mathematical bounds based on recent prices
                     for i in warmup_period..len {
                         let val = output.values[i];
                         if !val.is_nan() {
@@ -2493,7 +2395,6 @@ mod tests {
                                 val
                             );
 
-                            // Find recent price range (look back up to period + max_lookback)
                             let lookback_start = i.saturating_sub(period + max_lookback);
                             let recent_high = high[lookback_start..=i]
                                 .iter()
@@ -2505,8 +2406,6 @@ mod tests {
                                 .fold(f64::INFINITY, f64::min);
                             let recent_range = recent_high - recent_low;
 
-                            // SafeZone values should be within reasonable bounds relative to recent prices
-                            // Allow for multiplier effect and DM smoothing which can create larger deviations
                             let max_deviation = recent_range * mult * 5.0 + recent_high * 0.5;
 
                             prop_assert!(
@@ -2515,10 +2414,8 @@ mod tests {
 							val, i, -max_deviation, recent_high + max_deviation
 						);
 
-                            // For very stable recent prices, check tighter bounds
                             if recent_range < 1.0 {
                                 if is_long {
-                                    // Long stops shouldn't be way above recent highs
                                     prop_assert!(
                                         val <= recent_high + recent_range * mult * 3.0,
                                         "Long stop {} at idx {} too far above recent high {}",
@@ -2527,7 +2424,6 @@ mod tests {
                                         recent_high
                                     );
                                 } else {
-                                    
                                     prop_assert!(
                                         val >= recent_low - recent_range * mult * 3.0,
                                         "Short stop {} at idx {} too far below recent low {}",
@@ -2540,12 +2436,9 @@ mod tests {
                         }
                     }
 
-                    
                     if len > warmup_period + period * 2 {
-                        
                         let mid_point = len / 2;
                         if mid_point > warmup_period + period {
-                            
                             let first_half_spread: f64 = (warmup_period..mid_point)
                                 .map(|i| high[i] - low[i])
                                 .sum::<f64>()
@@ -2555,12 +2448,9 @@ mod tests {
                                 (mid_point..len).map(|i| high[i] - low[i]).sum::<f64>()
                                     / (len - mid_point) as f64;
 
-                            
                             if first_half_spread > 0.0 && second_half_spread > 0.0 {
                                 let volatility_ratio = first_half_spread / second_half_spread;
                                 if volatility_ratio > 2.0 || volatility_ratio < 0.5 {
-                                    
-                                    
                                     let first_half_stops: Vec<f64> = output.values
                                         [warmup_period + period..mid_point]
                                         .iter()
@@ -2576,8 +2466,6 @@ mod tests {
 
                                     if !first_half_stops.is_empty() && !second_half_stops.is_empty()
                                     {
-                                        
-                                        
                                         prop_assert!(
 										first_half_stops.len() > 0 && second_half_stops.len() > 0,
 										"Should have valid stops in both halves for volatility test"
@@ -2588,12 +2476,10 @@ mod tests {
                         }
                     }
 
-                    
                     for i in 0..len {
                         let y = output.values[i];
                         let r = ref_output.values[i];
 
-                        
                         if !y.is_finite() || !r.is_finite() {
                             prop_assert!(
                                 y.to_bits() == r.to_bits(),
@@ -2605,7 +2491,6 @@ mod tests {
                             continue;
                         }
 
-                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
@@ -2620,24 +2505,16 @@ mod tests {
                         );
                     }
 
-                    
                     if period == 1 && max_lookback == 1 {
-                        
-                        
-                        
                         prop_assert!(
                             output.values[0].is_nan(),
                             "First value should be NaN with period=1, max_lookback=1"
                         );
                     }
 
-                    
                     if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12)
                         && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12)
                     {
-                        
-                        
-                        
                         let stable_start = (warmup_period + period * 2).min(len - 1);
                         if stable_start < len - 1 {
                             let stable_values: Vec<f64> = output.values[stable_start..]
@@ -2704,23 +2581,19 @@ mod tests {
 
     #[test]
     fn test_safezonestop_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = SafeZoneStopInput::with_default_candles(&candles);
 
-        
         let baseline = safezonestop(&input)?.values;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             safezonestop_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             return Ok(());
         }
 
@@ -2789,9 +2662,7 @@ mod tests {
         let high = source_type(&c, "high");
         let low = source_type(&c, "low");
 
-        
         let test_configs = vec![
-            
             (2, 10, 2, 1.0, 3.0, 0.5, 1, 5, 1, "long"),
             (5, 25, 5, 2.5, 2.5, 0.0, 3, 3, 0, "short"),
             (10, 10, 0, 1.5, 5.0, 0.5, 2, 8, 2, "long"),
@@ -2951,8 +2822,6 @@ impl SafeZoneStopStreamPy {
     fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         self.stream.update(high, low)
     }
-
-    
 }
 
 #[cfg(feature = "python")]
@@ -2980,22 +2849,19 @@ pub fn safezonestop_batch_py<'py>(
         max_lookback: max_lookback_range,
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| {
-            PyValueError::new_err(
-                SafeZoneStopError::InvalidRange {
-                    start: period_range.0 as f64,
-                    end: period_range.1 as f64,
-                    step: period_range.2 as f64,
-                }
-                .to_string(),
-            )
-        })?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err(
+            SafeZoneStopError::InvalidRange {
+                start: period_range.0 as f64,
+                end: period_range.1 as f64,
+                step: period_range.2 as f64,
+            }
+            .to_string(),
+        )
+    })?;
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
@@ -3014,7 +2880,7 @@ pub fn safezonestop_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => unreachable!(),
             };
-            
+
             safezonestop_batch_inner_into(
                 high_slice, low_slice, &sweep, direction, simd, true, slice_out,
             )
@@ -3050,7 +2916,6 @@ pub fn safezonestop_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;

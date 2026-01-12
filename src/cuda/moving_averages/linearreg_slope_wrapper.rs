@@ -1,9 +1,3 @@
-//! CUDA scaffolding for Linear Regression Slope (outputs the slope `b`).
-//!
-//! Mirrors the LINREG wrapper structure and ALMA policies: PTX load with
-//! DetermineTargetFromContext + OptLevel, NON_BLOCKING stream, VRAM checks,
-//! and one-series×many-params + many-series×one-param device entrypoints.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -20,8 +14,6 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -66,7 +58,11 @@ pub enum CudaLinearregSlopeError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -74,7 +70,14 @@ pub enum CudaLinearregSlopeError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -194,7 +197,6 @@ impl CudaLinearregSlope {
         }
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -207,7 +209,10 @@ impl CudaLinearregSlope {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaLinearregSlopeError> {
+    fn will_fit(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaLinearregSlopeError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -251,10 +256,10 @@ impl CudaLinearregSlope {
         Ok(())
     }
 
-    
-
     #[inline]
-    fn expand_periods(sweep: &LinearRegSlopeBatchRange) -> Result<Vec<usize>, CudaLinearregSlopeError> {
+    fn expand_periods(
+        sweep: &LinearRegSlopeBatchRange,
+    ) -> Result<Vec<usize>, CudaLinearregSlopeError> {
         let (start, end, step) = sweep.period;
         if step == 0 || start == end {
             return Ok(vec![start]);
@@ -277,7 +282,7 @@ impl CudaLinearregSlope {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -355,7 +360,7 @@ impl CudaLinearregSlope {
             }
 
             let pf = period as f64;
-            let x_sum = pf * (pf + 1.0) * 0.5; 
+            let x_sum = pf * (pf + 1.0) * 0.5;
             let x2_sum = pf * (pf + 1.0) * (2.0 * pf + 1.0) / 6.0;
             let denom = pf * x2_sum - x_sum * x_sum;
             let denom_inv = 1.0 / denom;
@@ -556,45 +561,57 @@ impl CudaLinearregSlope {
         first_valid: usize,
     ) -> Result<DeviceArrayF32, CudaLinearregSlopeError> {
         let nrows = periods_i32.len();
-        let elems = nrows
-            .checked_mul(len)
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into()))?;
-        let prices_bytes = len
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (prices_bytes)".into()))?;
+        let elems = nrows.checked_mul(len).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into())
+        })?;
+        let prices_bytes = len.checked_mul(std::mem::size_of::<f32>()).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (prices_bytes)".into())
+        })?;
         let periods_bytes = nrows
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (periods_bytes)".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (periods_bytes)".into())
+            })?;
         let consts_bytes = nrows
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes)".into()))?;
-        let consts2_bytes = consts_bytes
-            .checked_mul(2)
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes*2)".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes)".into())
+            })?;
+        let consts2_bytes = consts_bytes.checked_mul(2).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (consts_bytes*2)".into())
+        })?;
         let out_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into())
+            })?;
 
         let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
             prices_bytes
                 .checked_add(periods_bytes)
                 .and_then(|v| v.checked_add(consts2_bytes))
                 .and_then(|v| v.checked_add(out_bytes))
-                .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into()))?
+                .ok_or_else(|| {
+                    CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into())
+                })?
         } else {
-            let prefix_elems = len
-                .checked_add(1)
-                .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (len+1)".into()))?;
+            let prefix_elems = len.checked_add(1).ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (len+1)".into())
+            })?;
             let prefix_bytes = prefix_elems
                 .checked_mul(std::mem::size_of::<f64>())
                 .and_then(|v| v.checked_mul(2))
-                .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (prefix_bytes)".into()))?;
+                .ok_or_else(|| {
+                    CudaLinearregSlopeError::InvalidInput("size overflow (prefix_bytes)".into())
+                })?;
             prices_bytes
                 .checked_add(periods_bytes)
                 .and_then(|v| v.checked_add(consts2_bytes))
                 .and_then(|v| v.checked_add(prefix_bytes))
                 .and_then(|v| v.checked_add(out_bytes))
-                .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into()))?
+                .ok_or_else(|| {
+                    CudaLinearregSlopeError::InvalidInput("size overflow (bytes)".into())
+                })?
         };
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
@@ -621,7 +638,13 @@ impl CudaLinearregSlope {
             BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
                 let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
                 let mut d_prefix_yi = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
-                self.launch_prefix_kernel(&d_prices, len, first_valid, &mut d_prefix_y, &mut d_prefix_yi)?;
+                self.launch_prefix_kernel(
+                    &d_prices,
+                    len,
+                    first_valid,
+                    &mut d_prefix_y,
+                    &mut d_prefix_yi,
+                )?;
                 self.launch_batch_from_prefix_kernel(
                     &d_prefix_y,
                     &d_prefix_yi,
@@ -670,9 +693,9 @@ impl CudaLinearregSlope {
         let (combos, first_valid, len, periods_i32, x_sums, denom_invs) =
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let nrows = combos.len();
-        let expected = nrows
-            .checked_mul(len)
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into()))?;
+        let expected = nrows.checked_mul(len).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (rows*len)".into())
+        })?;
         if out.len() != expected {
             return Err(CudaLinearregSlopeError::InvalidInput(format!(
                 "output length mismatch: expected {}, got {}",
@@ -693,7 +716,6 @@ impl CudaLinearregSlope {
         Ok((nrows, len, combos))
     }
 
-    
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,
@@ -701,15 +723,11 @@ impl CudaLinearregSlope {
         params: &LinearRegSlopeParams,
     ) -> Result<(Vec<i32>, usize, f32, f32), CudaLinearregSlopeError> {
         if cols == 0 || rows == 0 {
-            return Err(CudaLinearregSlopeError::InvalidInput(
-                "empty matrix".into(),
-            ));
+            return Err(CudaLinearregSlopeError::InvalidInput("empty matrix".into()));
         }
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| {
-                CudaLinearregSlopeError::InvalidInput("size overflow (cols*rows)".into())
-            })?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (cols*rows)".into())
+        })?;
         if data_tm_f32.len() != elems {
             return Err(CudaLinearregSlopeError::InvalidInput(
                 "invalid time-major shape".into(),
@@ -817,18 +835,24 @@ impl CudaLinearregSlope {
         x_sum: f32,
         denom_inv: f32,
     ) -> Result<DeviceArrayF32, CudaLinearregSlopeError> {
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (cols*rows)".into()))?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| {
+            CudaLinearregSlopeError::InvalidInput("size overflow (cols*rows)".into())
+        })?;
         let prices_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (prices_bytes)".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (prices_bytes)".into())
+            })?;
         let first_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (first_bytes)".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (first_bytes)".into())
+            })?;
         let out_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregSlopeError::InvalidInput("size overflow (out_bytes)".into())
+            })?;
         let required = prices_bytes
             .checked_add(first_bytes)
             .and_then(|v| v.checked_add(out_bytes))
@@ -872,7 +896,6 @@ impl CudaLinearregSlope {
         Ok(dev)
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -922,7 +945,10 @@ pub mod benches {
                     &mut self.d_out,
                 )
                 .expect("linearreg_slope batch kernel");
-            self.cuda.stream.synchronize().expect("linearreg_slope sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("linearreg_slope sync");
         }
     }
 
@@ -941,9 +967,10 @@ pub mod benches {
         let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
         let d_x_sums = DeviceBuffer::from_slice(&x_sums).expect("d_x_sums");
         let d_denom_invs = DeviceBuffer::from_slice(&denom_invs).expect("d_denom_invs");
-        let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size")) }
-                .expect("d_out");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(BatchDevState {
@@ -984,7 +1011,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("linearreg_slope many-series kernel");
-            self.cuda.stream.synchronize().expect("linearreg_slope sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("linearreg_slope sync");
         }
     }
 

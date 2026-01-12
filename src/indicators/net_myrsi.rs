@@ -1,24 +1,3 @@
-//! # NET MyRSI
-//!
-//! Combines Ehlers' MyRSI with Noise Elimination Technique for smoother RSI calculation.
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//! - **period**: MyRSI calculation period (default: 14)
-//!
-//! ## Returns
-//! - `Vec<f64>` - NET MyRSI values matching input length
-//!
-//! ## Developer Status
-//! - SIMD: AVX2 and AVX512 kernels implemented (ordered compares + popcount).
-//! - Scalar: Fused one-pass kernel (MyRSI + NET), no O(N) temporaries.
-//! - Streaming: O(n) with O(1) MyRSI update, O(period) NET update.
-//! - Batch: Row-specific optimized variant not implemented (future work).
-//! - Memory: Uses `alloc_with_nan_prefix` and `make_uninit_matrix` patterns.
-//! - Decision log: SIMD enabled; CUDA wrapper returns VRAM handles; Python interop uses CAI v3 + DLPack v1.x with stable scalar reference outputs.
-
-// ==================== IMPORTS SECTION ====================
-// Feature-gated imports for Python bindings
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
@@ -30,13 +9,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// Feature-gated imports for WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-// Core imports
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -46,21 +23,17 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// SIMD imports for AVX optimizations
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
 impl<'a> AsRef<[f64]> for NetMyrsiInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -71,8 +44,6 @@ impl<'a> AsRef<[f64]> for NetMyrsiInput<'a> {
     }
 }
 
-// ==================== DATA STRUCTURES ====================
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum NetMyrsiData<'a> {
     Candles {
@@ -82,15 +53,16 @@ pub enum NetMyrsiData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct NetMyrsiOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct NetMyrsiParams {
     pub period: Option<usize>,
 }
@@ -101,7 +73,6 @@ impl Default for NetMyrsiParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct NetMyrsiInput<'a> {
     pub data: NetMyrsiData<'a>,
@@ -139,8 +110,6 @@ impl<'a> NetMyrsiInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
-/// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct NetMyrsiBuilder {
     period: Option<usize>,
@@ -201,7 +170,6 @@ impl NetMyrsiBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
 #[derive(Debug, Error)]
 pub enum NetMyrsiError {
     #[error("net_myrsi: Input data slice is empty.")]
@@ -220,19 +188,16 @@ pub enum NetMyrsiError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("net_myrsi: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("net_myrsi: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
 
-// ==================== CORE COMPUTATION ====================
-/// Helper function to compute NET MyRSI into a slice
-///
-/// Notes (developer):
-/// - Scalar path is fully fused (MyRSI + NET in one pass) and avoids O(N) temporaries.
-/// - AVX2/AVX512 variants accelerate the pairwise “lt-gt” counting used by NET updates.
-/// - Warmup parity: out[first + period - 1] is set to 0.0 for period > 1 (NaN for period == 1).
 #[inline(always)]
 fn net_myrsi_compute_into(
     data: &[f64],
@@ -241,7 +206,6 @@ fn net_myrsi_compute_into(
     out: &mut [f64],
     kernel: Kernel,
 ) {
-    // Normalize batch kernels to single-series variants for this helper
     let k = match kernel {
         Kernel::Scalar | Kernel::ScalarBatch => Kernel::Scalar,
         Kernel::Avx2 | Kernel::Avx2Batch => Kernel::Avx2,
@@ -249,7 +213,6 @@ fn net_myrsi_compute_into(
         Kernel::Auto => Kernel::Scalar,
     };
 
-    // Dispatch to best available implementation (cover all Kernel variants)
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -281,10 +244,9 @@ fn net_myrsi_compute_into(
     }
 }
 
-/// MyRSI calculation based on John F. Ehlers' formula
 #[inline(always)]
 fn compute_myrsi_from(data: &[f64], period: usize, first: usize, out_myrsi: &mut [f64]) {
-    let start = first + period; 
+    let start = first + period;
     let len = data.len();
 
     for i in start..len {
@@ -305,7 +267,6 @@ fn compute_myrsi_from(data: &[f64], period: usize, first: usize, out_myrsi: &mut
     }
 }
 
-/// NET (Noise Elimination Technique) calculation
 #[inline(always)]
 fn compute_net_from(myrsi: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let start = first + period - 1;
@@ -330,7 +291,6 @@ fn compute_net_from(myrsi: &[f64], period: usize, first: usize, out: &mut [f64])
     }
 }
 
-
 #[inline(always)]
 fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
@@ -338,28 +298,23 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
         return;
     }
 
-    
     let mut cu = 0.0f64;
     let mut cd = 0.0f64;
     let mut diffs = vec![0.0f64; period];
     let mut d_head = 0usize;
     let mut d_count = 0usize;
 
-    
     let mut myr = vec![0.0f64; period];
     let mut m_head = 0usize;
     let mut m_count = 0usize;
     let mut num: i32 = 0;
     let denom = (period * (period - 1)) as f64 * 0.5;
 
-    
     let warm = first + period - 1;
     if warm < out.len() {
-        
         out[warm] = if period > 1 { 0.0 } else { f64::NAN };
     }
 
-    
     #[inline(always)]
     fn lt_minus_gt_scalar(slice: &[f64], s: f64) -> i32 {
         let mut lt: i32 = 0;
@@ -371,14 +326,12 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
         lt - gt
     }
 
-    
     let mut i = first + 1;
     while i < len {
         let newer = data[i];
         let older = data[i - 1];
         let diff = newer - older;
 
-        
         cu += ((diff > 0.0) as i32 as f64) * diff;
         cd += ((diff < 0.0) as i32 as f64) * (-diff);
 
@@ -405,7 +358,6 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
             let r = if sum != 0.0 { (cu - cd) / sum } else { 0.0 };
 
             if m_count < period {
-                
                 let add = lt_minus_gt_scalar(&myr[..m_head], r);
                 num += add;
                 myr[m_head] = r;
@@ -415,7 +367,6 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
                 }
                 m_count += 1;
             } else {
-                
                 let z = myr[m_head];
                 let rm1 = if m_head + 1 < period {
                     lt_minus_gt_scalar(&myr[m_head + 1..period], z)
@@ -429,7 +380,6 @@ fn net_myrsi_kernel_scalar(data: &[f64], period: usize, first: usize, out: &mut 
                 };
                 num += rm1 + rm2;
 
-                
                 let ad1 = if m_head + 1 < period {
                     lt_minus_gt_scalar(&myr[m_head + 1..period], r)
                 } else {
@@ -730,7 +680,6 @@ unsafe fn net_myrsi_kernel_avx512(data: &[f64], period: usize, first: usize, out
     }
 }
 
-/// Preparation function to validate inputs and parameters
 #[inline(always)]
 fn net_myrsi_prepare<'a>(
     input: &'a NetMyrsiInput,
@@ -756,7 +705,6 @@ fn net_myrsi_prepare<'a>(
         });
     }
 
-    // Need period+1 values for MyRSI (to compare consecutive pairs)
     if len - first < period + 1 {
         return Err(NetMyrsiError::NotEnoughValidData {
             needed: period + 1,
@@ -773,14 +721,11 @@ fn net_myrsi_prepare<'a>(
     Ok((data, period, first, chosen))
 }
 
-// ==================== MAIN ENTRY POINTS ====================
-/// Main entry point with automatic kernel selection
 #[inline]
 pub fn net_myrsi(input: &NetMyrsiInput) -> Result<NetMyrsiOutput, NetMyrsiError> {
     net_myrsi_with_kernel(input, Kernel::Auto)
 }
 
-/// Entry point with explicit kernel selection
 pub fn net_myrsi_with_kernel(
     input: &NetMyrsiInput,
     kernel: Kernel,
@@ -791,7 +736,6 @@ pub fn net_myrsi_with_kernel(
     Ok(NetMyrsiOutput { values: out })
 }
 
-/// Zero-allocation version for WASM and performance-critical paths
 #[inline]
 pub fn net_myrsi_into_slice(
     dst: &mut [f64],
@@ -809,7 +753,6 @@ pub fn net_myrsi_into_slice(
 
     net_myrsi_compute_into(data, period, first, dst, chosen);
 
-    // enforce warmup NaNs like alma_into_slice
     let warm = first + period - 1;
     for v in &mut dst[..warm] {
         *v = f64::NAN;
@@ -818,12 +761,7 @@ pub fn net_myrsi_into_slice(
     Ok(())
 }
 
-/// Write NET-MyRSI values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup prefix exactly as the Vec-returning API.
-/// - `out.len()` must equal the input length; otherwise returns the module's length/period error.
-/// - Uses `Kernel::Auto` for runtime selection and writes results in-place.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn net_myrsi_into(input: &NetMyrsiInput, out: &mut [f64]) -> Result<(), NetMyrsiError> {
     let (data, period, first, chosen) = net_myrsi_prepare(input, Kernel::Auto)?;
@@ -835,24 +773,21 @@ pub fn net_myrsi_into(input: &NetMyrsiInput, out: &mut [f64]) -> Result<(), NetM
         });
     }
 
-    
     let warm = first + period - 1;
     let warm = warm.min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     net_myrsi_compute_into(data, period, first, out, chosen);
     Ok(())
 }
 
-
 #[derive(Debug, Clone)]
 pub struct NetMyrsiStream {
     period: usize,
-    price: Vec<f64>, 
-    myrsi: Vec<f64>, 
+    price: Vec<f64>,
+    myrsi: Vec<f64>,
     head: usize,
     filled_prices: bool,
     filled_myrsi: bool,
@@ -880,13 +815,11 @@ impl NetMyrsiStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         self.price[self.head % (self.period + 1)] = value;
         if !self.filled_prices && self.head + 1 >= self.period + 1 {
             self.filled_prices = true;
         }
 
-        
         if self.filled_prices {
             let mut cu = 0.0;
             let mut cd = 0.0;
@@ -909,7 +842,6 @@ impl NetMyrsiStream {
             }
         }
 
-        
         let out = if self.filled_myrsi {
             let denom = (self.period * (self.period - 1)) as f64 / 2.0;
             let mut num = 0.0;
@@ -934,7 +866,6 @@ impl NetMyrsiStream {
         out
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct NetMyrsiBatchRange {
@@ -996,7 +927,7 @@ impl NetMyrsiBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct NetMyrsiBatchOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<NetMyrsiParams>,
     pub rows: usize,
     pub cols: usize,
@@ -1019,13 +950,13 @@ impl NetMyrsiBatchOutput {
 }
 
 #[inline(always)]
-fn expand_grid_period((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, NetMyrsiError> {
-    
+fn expand_grid_period(
+    (start, end, step): (usize, usize, usize),
+) -> Result<Vec<usize>, NetMyrsiError> {
     if step == 0 || start == end {
         return Ok(vec![start]);
     }
 
-    
     if start < end {
         let mut v = Vec::new();
         let mut x = start;
@@ -1050,7 +981,6 @@ fn expand_grid_period((start, end, step): (usize, usize, usize)) -> Result<Vec<u
         return Ok(v);
     }
 
-    
     let mut v = Vec::new();
     let mut x = start as isize;
     let end_i = end as isize;
@@ -1106,14 +1036,14 @@ fn net_myrsi_batch_inner(
     let cols = data.len();
     let rows = combos.len();
 
-    
-    let _ = rows.checked_mul(cols).ok_or_else(|| NetMyrsiError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| NetMyrsiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
-    
     let max_needed = combos
         .iter()
         .map(|c| c.period.unwrap_or(14) + 1)
@@ -1126,25 +1056,21 @@ fn net_myrsi_batch_inner(
         });
     }
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warms: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap_or(14) - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     for (row, slice) in out.chunks_mut(cols).enumerate() {
         let p = combos[row].period.unwrap_or(14);
-        
+
         net_myrsi_compute_into(data, p, first, slice, kern);
     }
 
@@ -1181,7 +1107,6 @@ fn net_myrsi_batch_inner_into(
     let cols = data.len();
     let rows = combos.len();
 
-    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| NetMyrsiError::InvalidRange {
@@ -1196,7 +1121,6 @@ fn net_myrsi_batch_inner_into(
         });
     }
 
-    
     let max_needed = combos
         .iter()
         .map(|c| c.period.unwrap_or(14) + 1)
@@ -1209,13 +1133,12 @@ fn net_myrsi_batch_inner_into(
         });
     }
 
-    
     let mut tmp_mu = make_uninit_matrix(1, cols);
 
     for (row, dst) in out.chunks_mut(cols).enumerate() {
         let p = combos[row].period.unwrap_or(14);
         let warm = first + p - 1;
-        
+
         for i in 0..warm {
             dst[i] = f64::NAN;
         }
@@ -1226,10 +1149,9 @@ fn net_myrsi_batch_inner_into(
         compute_net_from(tmp, p, first, dst);
     }
 
-    let _ = tmp_mu; 
+    let _ = tmp_mu;
     Ok(())
 }
-
 
 #[cfg(not(target_arch = "wasm32"))]
 pub fn net_myrsi_batch(
@@ -1249,7 +1171,6 @@ pub fn net_myrsi_batch(
 
     results
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -1286,8 +1207,8 @@ pub fn net_myrsi_batch_py<'py>(
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     let slice_in = data.as_slice()?;
 
-    let periods = expand_grid_period(period_range)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let periods =
+        expand_grid_period(period_range).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let combos: Vec<NetMyrsiParams> = periods
         .into_iter()
         .map(|p| NetMyrsiParams { period: Some(p) })
@@ -1307,7 +1228,7 @@ pub fn net_myrsi_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        
+
         net_myrsi_batch_inner_into(slice_in, &combos, actual, out_slice)
     })
     .map_err(|e: NetMyrsiError| PyValueError::new_err(e.to_string()))?;
@@ -1324,7 +1245,6 @@ pub fn net_myrsi_batch_py<'py>(
     )?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "net_myrsi_cuda_batch_dev")]
@@ -1353,7 +1273,11 @@ pub fn net_myrsi_cuda_batch_dev_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1385,7 +1309,11 @@ pub fn net_myrsi_cuda_many_series_one_param_dev_py(
             .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(feature = "python")]
@@ -1412,8 +1340,7 @@ impl NetMyrsiStreamPy {
     }
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn net_myrsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let input = NetMyrsiInput::from_slice(
@@ -1428,7 +1355,7 @@ pub fn net_myrsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn net_myrsi_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1437,7 +1364,7 @@ pub fn net_myrsi_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn net_myrsi_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1445,7 +1372,7 @@ pub fn net_myrsi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn net_myrsi_into(
     in_ptr: *const f64,
@@ -1479,13 +1406,13 @@ pub fn net_myrsi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NetMyrsiBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NetMyrsiBatchJsOutput {
     pub values: Vec<f64>,
@@ -1494,7 +1421,7 @@ pub struct NetMyrsiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = net_myrsi_batch)]
 pub fn net_myrsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: NetMyrsiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1513,7 +1440,7 @@ pub fn net_myrsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn net_myrsi_batch_into(
     in_ptr: *const f64,
@@ -1546,7 +1473,6 @@ pub fn net_myrsi_batch_into(
     }
 }
 
-// ==================== TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1580,7 +1506,6 @@ mod tests {
         let input = NetMyrsiInput::from_candles(&candles, "close", NetMyrsiParams::default());
         let result = net_myrsi_with_kernel(&input, kernel)?;
 
-        // Reference values from PineScript
         let expected_last_five = [0.64835165, 0.49450549, 0.29670330, 0.07692308, -0.07692308];
 
         let start = result.values.len().saturating_sub(5);
@@ -1705,7 +1630,6 @@ mod tests {
 
         assert_eq!(second_result.values.len(), first_result.values.len());
 
-        // Check that second pass produces valid output
         let non_nan_count = second_result.values.iter().filter(|v| !v.is_nan()).count();
         assert!(
             non_nan_count > 0,
@@ -1743,7 +1667,6 @@ mod tests {
             data.push(data[data.len() - 1] + 1.0);
         }
 
-        // Insert NaN in the middle
         data[15] = f64::NAN;
 
         let params = NetMyrsiParams { period: Some(14) };
@@ -1752,9 +1675,6 @@ mod tests {
 
         assert_eq!(result.values.len(), data.len());
 
-        // For NET MyRSI, NaN in middle doesn't necessarily propagate to same index
-        
-        
         let non_nan_count = result.values.iter().filter(|v| !v.is_nan()).count();
         assert!(
             non_nan_count > 0,
@@ -1875,18 +1795,15 @@ mod tests {
                 assert_eq!(out.len(), ref_out.len());
                 assert_eq!(out.len(), data.len());
 
-                
                 let first_valid = ref_out
                     .iter()
                     .position(|v| !v.is_nan())
                     .unwrap_or(ref_out.len());
 
-                
                 for i in 0..first_valid {
                     assert!(out[i].is_nan(), "Expected NaN at index {}", i);
                 }
 
-                
                 for i in first_valid..out.len() {
                     if ref_out[i].is_nan() {
                         assert!(out[i].is_nan(), "Expected NaN at index {}", i);
@@ -1961,7 +1878,6 @@ mod tests {
         check_net_myrsi_property
     );
 
-    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -2019,11 +1935,10 @@ mod tests {
             .kernel(kernel)
             .period_range(10, 20, 5)
             .apply_candles(&c, "close")?;
-        assert_eq!(out.rows, 3); 
+        assert_eq!(out.rows, 3);
         assert_eq!(out.cols, c.close.len());
         assert_eq!(out.values.len(), out.rows * out.cols);
 
-        
         assert_eq!(out.combos.len(), 3);
         assert_eq!(out.combos[0].period, Some(10));
         assert_eq!(out.combos[1].period, Some(15));
@@ -2059,7 +1974,6 @@ mod tests {
 
     #[test]
     fn test_net_myrsi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..(256 - 3) {
@@ -2069,18 +1983,15 @@ mod tests {
 
         let input = NetMyrsiInput::from_slice(&data, NetMyrsiParams::default());
 
-        
         let baseline = net_myrsi(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             net_myrsi_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
             net_myrsi_into_slice(&mut out, &input, Kernel::Auto)?;
         }

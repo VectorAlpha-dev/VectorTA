@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::alphatrend::{
     alphatrend_batch_slice, AlphaTrendBatchRange, AlphaTrendParams,
 };
@@ -117,15 +115,14 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
     let mut vol_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 3)..rows {
-            
             let idx = t * cols + s;
             let x = (t as f64) + (s as f64) * 0.3;
             high_tm[idx] = (x * 0.0009).sin() + 0.03;
@@ -138,7 +135,6 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     let period = 14usize;
     let no_volume = true;
 
-    
     let mut k1_cpu_tm = vec![f64::NAN; cols * rows];
     let mut k2_cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -176,7 +172,6 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
         }
     }
 
-    
     let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cf: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
@@ -196,7 +191,6 @@ fn alphatrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     k1_dev.buf.copy_to(&mut k1_gpu_tm)?;
     k2_dev.buf.copy_to(&mut k2_gpu_tm)?;
 
-    
     let tol = 2e-3;
     for idx in 0..(cols * rows) {
         let c1 = k1_cpu_tm[idx];

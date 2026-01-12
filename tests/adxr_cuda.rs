@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::adxr::{
     adxr_batch_slice, adxr_with_kernel, AdxrBatchRange, AdxrInput, AdxrParams,
 };
@@ -50,10 +48,8 @@ fn adxr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = AdxrBatchRange { period: (5, 40, 5) };
 
-    
     let cpu = adxr_batch_slice(&high, &low, &close, &sweep, Kernel::Scalar)?;
 
-    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
@@ -68,7 +64,7 @@ fn adxr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-1; 
+    let tol = 2e-1;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -92,7 +88,6 @@ fn adxr_cuda_batch_opt_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    
     let len = 4096usize;
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
@@ -106,13 +101,13 @@ fn adxr_cuda_batch_opt_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         low[i] = lo;
         close[i] = (hi + lo) * 0.5;
     }
-    
-    let sweep = AdxrBatchRange { period: (5, 320, 5) };
 
-    
+    let sweep = AdxrBatchRange {
+        period: (5, 320, 5),
+    };
+
     let cpu = adxr_batch_slice(&high, &low, &close, &sweep, Kernel::Scalar)?;
 
-    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
@@ -153,7 +148,7 @@ fn adxr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let cols = 8usize;
     let rows = 4096usize;
-    
+
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
@@ -171,7 +166,6 @@ fn adxr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -192,7 +186,6 @@ fn adxr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

@@ -1,40 +1,9 @@
-//! # Tilson T3 Moving Average (T3)
-//!
-//! A specialized moving average that applies multiple iterations of an
-//! exponential smoothing algorithm, enhanced by a volume factor (`v_factor`)
-//! parameter. API matches alma.rs. SIMD/AVX variants forward to scalar logic by default.
-//!
-//! ## Parameters
-//! - **period**: The look-back period for smoothing (defaults to 5).
-//! - **volume_factor**: Controls the depth of the T3 smoothing. Higher values = more smoothing (default 0.0).
-//!   The implementation validates that volume_factor is not NaN or infinite.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: tilson: All input data values are `NaN`.
-//! - **InvalidPeriod**: tilson: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: tilson: Not enough valid data points for the requested `period`.
-//! - **InvalidVolumeFactor**: tilson: `volume_factor` is `NaN` or infinite.
-//!
-//! ## Returns
-//! - **`Ok(TilsonOutput)`** on success, containing a `Vec<f64>` matching the input.
-//! - **`Err(TilsonError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD status: Implemented micro-vectorized AVX2/AVX512 dot for the 4-term combine, but disabled by default.
-//!   Sequential EMA cascade limits SIMD wins; benches showed slower than scalar on 100k. Runtime short-circuits to scalar.
-//! - Streaming update: O(1) cascade, matches batch numerics exactly.
-//! - Memory: Uses `alloc_with_nan_prefix` and writes outputs in-place; no O(N) temporaries for outputs.
-//! - Decision: Streaming uses an O(1) warmup state-machine (no buffer), preserving scalar arithmetic order; fast-math disabled to keep exact matching.
-//! - Row-specific batch: Not attempted; limited cross-row sharing and high complexity for marginal gains.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::{CudaTilson, CudaTilsonError};
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::tilson_wrapper::DeviceArrayF32Tilson;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use crate::cuda::moving_averages::{CudaTilson, CudaTilsonError};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -43,6 +12,8 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -61,9 +32,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for TilsonInput<'a> {
@@ -91,7 +62,10 @@ pub struct TilsonOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct TilsonParams {
     pub period: Option<usize>,
     pub volume_factor: Option<f64>,
@@ -236,7 +210,11 @@ pub enum TilsonError {
     InvalidKernelForBatch(Kernel),
 
     #[error("tilson: Invalid integer range expansion: start={start}, end={end}, step={step}")]
-    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    InvalidRangeUsize {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("tilson: Invalid float range expansion: start={start}, end={end}, step={step}")]
     InvalidRangeF64 { start: f64, end: f64, step: f64 },
@@ -263,14 +241,7 @@ pub fn tilson_with_kernel(
     Ok(TilsonOutput { values: out })
 }
 
-/// Write Tilson T3 results directly into a caller-provided buffer without allocations.
-///
-/// - Preserves the indicator's NaN warmup semantics: fills the warmup prefix with the
-///   same quiet-NaN bit pattern used by `alloc_with_nan_prefix`.
-/// - Uses `Kernel::Auto` for runtime dispatch (same as the Vec-returning API).
-/// - `out.len()` must equal the input length; returns the module's existing
-///   `InvalidPeriod { period: out.len(), data_len }` on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn tilson_into(input: &TilsonInput, out: &mut [f64]) -> Result<(), TilsonError> {
     let (data, period, v_factor, first, len, chosen) = tilson_prepare(input, Kernel::Auto)?;
 
@@ -281,13 +252,11 @@ pub fn tilson_into(input: &TilsonInput, out: &mut [f64]) -> Result<(), TilsonErr
         });
     }
 
-    // Prefill warmup prefix with the exact quiet-NaN pattern used by Vec API
     let warm = (first + 6 * (period - 1)).min(len);
     for i in 0..warm {
         out[i] = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute values into the provided buffer
     tilson_compute_into(data, period, v_factor, first, chosen, out)?;
     Ok(())
 }
@@ -322,13 +291,10 @@ pub fn tilson_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), TilsonError> {
-    // Optimized scalar implementation: preserves arithmetic order and warm-up,
-    // but removes bounds checks from hot loops and reduces divisions.
     let len = data.len();
     let lookback_total = 6 * (period.saturating_sub(1));
     debug_assert_eq!(len, out.len());
 
-    // Validation
     if len == 0 {
         return Err(TilsonError::EmptyInputData);
     }
@@ -348,28 +314,23 @@ pub fn tilson_scalar(
         });
     }
 
-    // Constants
     let k = 2.0 / (period as f64 + 1.0);
     let omk = 1.0 - k;
     let inv_p = 1.0 / (period as f64);
 
-    // T3 coefficients
     let t = v_factor * v_factor;
     let c1 = -(t * v_factor);
     let c2 = 3.0 * (t - c1);
     let c3 = -6.0 * t - 3.0 * (v_factor - c1);
     let c4 = 1.0 + 3.0 * v_factor - c1 + 3.0 * t;
 
-    // Raw pointers to avoid bounds checks in hot loops
     let dp = unsafe { data.as_ptr().add(first_valid) };
     let outp = out.as_mut_ptr();
 
-    // EMA cascade states
     let (mut e1, mut e2, mut e3, mut e4, mut e5, mut e6);
 
-    // Warm-up
     let mut today = 0usize;
-    // e1 seeded by SMA of first `period` values (unrolled)
+
     let mut sum = 0.0;
     unsafe {
         let mut i = 0usize;
@@ -386,7 +347,6 @@ pub fn tilson_scalar(
     e1 = sum * inv_p;
     today += period;
 
-    // e2 initialization
     let mut acc = e1;
     unsafe {
         let mut j = 1usize;
@@ -400,7 +360,6 @@ pub fn tilson_scalar(
     }
     e2 = acc * inv_p;
 
-    // e3 initialization
     acc = e2;
     unsafe {
         let mut j = 1usize;
@@ -415,7 +374,6 @@ pub fn tilson_scalar(
     }
     e3 = acc * inv_p;
 
-    // e4 initialization
     acc = e3;
     unsafe {
         let mut j = 1usize;
@@ -431,7 +389,6 @@ pub fn tilson_scalar(
     }
     e4 = acc * inv_p;
 
-    // e5 initialization
     acc = e4;
     unsafe {
         let mut j = 1usize;
@@ -448,7 +405,6 @@ pub fn tilson_scalar(
     }
     e5 = acc * inv_p;
 
-    // e6 initialization
     acc = e5;
     unsafe {
         let mut j = 1usize;
@@ -466,14 +422,11 @@ pub fn tilson_scalar(
     }
     e6 = acc * inv_p;
 
-    // Output
     let start_idx = first_valid + lookback_total;
 
     unsafe {
-        // first output value
         *outp.add(start_idx) = c1 * e6 + c2 * e5 + c3 * e4 + c4 * e3;
 
-        // remaining values (pointer walk; idx == first_valid + today always holds here)
         let mut dp_cur = dp.add(today);
         let dp_end = dp.add(len - first_valid);
         let mut out_cur = outp.add(start_idx + 1);
@@ -507,8 +460,6 @@ unsafe fn tilson_simd128(
 ) -> Result<(), TilsonError> {
     use core::arch::wasm32::*;
 
-    // For now, fall back to scalar implementation
-    // TODO: Implement optimized SIMD128 version
     tilson_scalar(data, period, v_factor, first_valid, out)
 }
 
@@ -541,7 +492,6 @@ pub unsafe fn tilson_avx512(
         _mm512_reduce_add_pd(prod)
     }
 
-    // reuse scalar logic for warmup/update, but compute the 4-term combine with AVX512
     let len = data.len();
     let lookback_total = 6 * (period.saturating_sub(1));
     if len == 0 {
@@ -579,7 +529,6 @@ pub unsafe fn tilson_avx512(
     let mut today = 0usize;
     let (mut e1, mut e2, mut e3, mut e4, mut e5, mut e6);
 
-    // e1: SMA of first period (unrolled)
     let mut sum = 0.0;
     {
         let mut i = 0usize;
@@ -596,7 +545,6 @@ pub unsafe fn tilson_avx512(
     e1 = sum * inv_p;
     today += period;
 
-    // e2
     let mut acc = e1;
     {
         let mut j = 1usize;
@@ -610,7 +558,6 @@ pub unsafe fn tilson_avx512(
     }
     e2 = acc * inv_p;
 
-    // e3
     acc = e2;
     {
         let mut j = 1usize;
@@ -625,7 +572,6 @@ pub unsafe fn tilson_avx512(
     }
     e3 = acc * inv_p;
 
-    // e4
     acc = e3;
     {
         let mut j = 1usize;
@@ -641,7 +587,6 @@ pub unsafe fn tilson_avx512(
     }
     e4 = acc * inv_p;
 
-    // e5
     acc = e4;
     {
         let mut j = 1usize;
@@ -658,7 +603,6 @@ pub unsafe fn tilson_avx512(
     }
     e5 = acc * inv_p;
 
-    // e6
     acc = e5;
     {
         let mut j = 1usize;
@@ -734,7 +678,6 @@ pub unsafe fn tilson_avx2(
         _mm_cvtsd_f64(sum)
     }
 
-    // reuse scalar logic for warmup/update, but compute the 4-term combine with AVX2
     let len = data.len();
     let lookback_total = 6 * (period.saturating_sub(1));
     if len == 0 {
@@ -772,7 +715,6 @@ pub unsafe fn tilson_avx2(
     let mut today = 0usize;
     let (mut e1, mut e2, mut e3, mut e4, mut e5, mut e6);
 
-    // e1: SMA of first period (unrolled)
     let mut sum = 0.0;
     {
         let mut i = 0usize;
@@ -789,7 +731,6 @@ pub unsafe fn tilson_avx2(
     e1 = sum * inv_p;
     today += period;
 
-    // e2
     let mut acc = e1;
     {
         let mut j = 1usize;
@@ -803,7 +744,6 @@ pub unsafe fn tilson_avx2(
     }
     e2 = acc * inv_p;
 
-    // e3
     acc = e2;
     {
         let mut j = 1usize;
@@ -818,7 +758,6 @@ pub unsafe fn tilson_avx2(
     }
     e3 = acc * inv_p;
 
-    // e4
     acc = e3;
     {
         let mut j = 1usize;
@@ -834,7 +773,6 @@ pub unsafe fn tilson_avx2(
     }
     e4 = acc * inv_p;
 
-    // e5
     acc = e4;
     {
         let mut j = 1usize;
@@ -851,7 +789,6 @@ pub unsafe fn tilson_avx2(
     }
     e5 = acc * inv_p;
 
-    // e6
     acc = e5;
     {
         let mut j = 1usize;
@@ -1040,7 +977,7 @@ fn expand_grid(r: &TilsonBatchRange) -> Result<Vec<TilsonParams>, TilsonError> {
         if start < end {
             return Ok((start..=end).step_by(step).collect());
         }
-        // reversed bounds supported by stepping down
+
         let mut v = Vec::new();
         let mut cur = start;
         loop {
@@ -1072,7 +1009,7 @@ fn expand_grid(r: &TilsonBatchRange) -> Result<Vec<TilsonParams>, TilsonError> {
         } else {
             while x >= end - 1e-12 {
                 v.push(x);
-                x += step; // negative step
+                x += step;
             }
         }
         if v.is_empty() {
@@ -1149,22 +1086,18 @@ fn tilson_batch_inner(
         .map(|c| first + 6 * (c.period.unwrap() - 1))
         .collect();
 
-    // ------------- 1. allocate uninitialised & stamp NaN prefixes
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    // ------------- 2. worker that fills ONE row -------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let v_factor = combos[row].volume_factor.unwrap();
 
-        // cast this row to &mut [f64]
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         tilson_row_scalar(data, first, period, v_factor, out_row);
     };
 
-    // ------------- 3. run every row in (parallel) iterator ---
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1185,7 +1118,6 @@ fn tilson_batch_inner(
         }
     }
 
-    // ------------- 4. convert to Vec<f64> like alma.rs ----------
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let total_cells = rows
         .checked_mul(cols)
@@ -1267,11 +1199,9 @@ pub unsafe fn tilson_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct TilsonStream {
-    // Params
     period: usize,
     v_factor: f64,
 
-    // EMA cascade state
     e1: f64,
     e2: f64,
     e3: f64,
@@ -1279,7 +1209,6 @@ pub struct TilsonStream {
     e5: f64,
     e6: f64,
 
-    // Precomputed constants
     k: f64,
     one_minus_k: f64,
     inv_p: f64,
@@ -1288,21 +1217,12 @@ pub struct TilsonStream {
     c3: f64,
     c4: f64,
 
-    // Warmup bookkeeping: state machine instead of a warmup buffer
-    // phase = 0 -> build SMA(e1)
-    // phase = 1 -> init e2 by averaging e1 over (period-1) updates
-    // phase = 2 -> init e3 by averaging e2 over (period-1) updates
-    // phase = 3 -> init e4 by averaging e3 over (period-1) updates
-    // phase = 4 -> init e5 by averaging e4 over (period-1) updates
-    // phase = 5 -> init e6 by averaging e5 over (period-1) updates; first output is produced here
-    // phase = 6 -> steady RUN: update e1..e6 each tick and output
     phase: u8,
     in_phase_count: usize,
-    sum_e1: f64, // accumulates SMA for e1 during phase 0
-    acc: f64,    // generic accumulator used in phases 1..5
+    sum_e1: f64,
+    acc: f64,
 
-    // Exposed/diagnostic (kept for parity with your tests & metrics)
-    lookback_total: usize, // = 6 * (period - 1)
+    lookback_total: usize,
     values_seen: usize,
 }
 
@@ -1321,12 +1241,10 @@ impl TilsonStream {
             return Err(TilsonError::InvalidVolumeFactor { v_factor });
         }
 
-        // smoothing constants
         let k = 2.0 / (period as f64 + 1.0);
         let one_minus_k = 1.0 - k;
         let inv_p = 1.0 / (period as f64);
 
-        // T3 coefficients (standard)
         let t = v_factor * v_factor;
         let c1 = -(t * v_factor);
         let c2 = 3.0 * (t - c1);
@@ -1358,16 +1276,11 @@ impl TilsonStream {
         })
     }
 
-    /// O(1) streaming update.
-    /// Returns:
-    /// - None  for the first `lookback_total` values,
-    /// - Some(t3) starting at index `lookback_total`, matching batch scalar numerics.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.values_seen = self.values_seen.wrapping_add(1);
 
         match self.phase {
-            // -------- Phase 0: build SMA(e1) from the first `period` samples
             0 => {
                 self.sum_e1 += value;
                 self.in_phase_count += 1;
@@ -1375,26 +1288,22 @@ impl TilsonStream {
                     self.e1 = self.sum_e1 * self.inv_p;
                     self.in_phase_count = 0;
 
-                    // Fast path for period == 1: all remaining warmup stages are zero-length.
                     if self.period == 1 {
-                        // e2..e6 become equal to e1 immediately
                         self.e2 = self.e1;
                         self.e3 = self.e2;
                         self.e4 = self.e3;
                         self.e5 = self.e4;
                         self.e6 = self.e5;
-                        self.phase = 6; // RUN
+                        self.phase = 6;
                         return Some(self.combine_exact());
                     }
 
-                    // Otherwise move to phase 1 (init e2)
-                    self.acc = self.e1; // accumulator starts with current EMA level per batch warmup
+                    self.acc = self.e1;
                     self.phase = 1;
                 }
                 None
             }
 
-            // -------- Phase 1: init e2 (average of e1 over next period-1 updates)
             1 => {
                 self.cascade_update_upto(value, 1);
                 self.acc += self.e1;
@@ -1408,7 +1317,6 @@ impl TilsonStream {
                 None
             }
 
-            // -------- Phase 2: init e3 (average of e2)
             2 => {
                 self.cascade_update_upto(value, 2);
                 self.acc += self.e2;
@@ -1422,7 +1330,6 @@ impl TilsonStream {
                 None
             }
 
-            // -------- Phase 3: init e4 (average of e3)
             3 => {
                 self.cascade_update_upto(value, 3);
                 self.acc += self.e3;
@@ -1436,7 +1343,6 @@ impl TilsonStream {
                 None
             }
 
-            // -------- Phase 4: init e5 (average of e4)
             4 => {
                 self.cascade_update_upto(value, 4);
                 self.acc += self.e4;
@@ -1450,22 +1356,20 @@ impl TilsonStream {
                 None
             }
 
-            // -------- Phase 5: init e6 (average of e5). First output is produced here.
             5 => {
                 self.cascade_update_upto(value, 5);
                 self.acc += self.e5;
                 self.in_phase_count += 1;
                 if self.in_phase_count == self.period - 1 {
                     self.e6 = self.acc * self.inv_p;
-                    self.phase = 6; // RUN
+                    self.phase = 6;
                     self.in_phase_count = 0;
-                    // IMPORTANT: batch scalar writes the first output *right after* finishing e6 init
+
                     return Some(self.combine_exact());
                 }
                 None
             }
 
-            // -------- Phase 6: RUN (steady state)
             _ => {
                 self.cascade_update_upto(value, 6);
                 Some(self.combine_exact())
@@ -1473,51 +1377,39 @@ impl TilsonStream {
         }
     }
 
-    // --- helpers -------------------------------------------------------------
-
-    /// Update e1..e{upto} once with new sample `x` (sequential cascade).
-    /// Upto is in [1..6]. Uses exact arithmetic order compatible with scalar kernel.
     #[inline(always)]
     fn cascade_update_upto(&mut self, x: f64, upto: u8) {
         let k = self.k;
         let omk = self.one_minus_k;
 
-        // e1
         self.e1 = k * x + omk * self.e1;
         if upto == 1 {
             return;
         }
 
-        // e2
         self.e2 = k * self.e1 + omk * self.e2;
         if upto == 2 {
             return;
         }
 
-        // e3
         self.e3 = k * self.e2 + omk * self.e3;
         if upto == 3 {
             return;
         }
 
-        // e4
         self.e4 = k * self.e3 + omk * self.e4;
         if upto == 4 {
             return;
         }
 
-        // e5
         self.e5 = k * self.e4 + omk * self.e5;
         if upto == 5 {
             return;
         }
 
-        // e6
         self.e6 = k * self.e5 + omk * self.e6;
     }
 
-    /// Exact-order 4-term combination: ((c1*e6 + c2*e5) + c3*e4) + c4*e3
-    /// This preserves scalar batch arithmetic to keep tests bit/tightly equal.
     #[inline(always)]
     fn combine_exact(&self) -> f64 {
         let s0 = self.c1 * self.e6 + self.c2 * self.e5;
@@ -1801,7 +1693,6 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_tilson_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1809,7 +1700,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to better catch uninitialized memory bugs
         let test_periods = vec![3, 5, 8, 10, 15, 20, 30, 50];
         let test_v_factors = vec![0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0];
 
@@ -1821,26 +1711,22 @@ mod tests {
                 };
                 let input = TilsonInput::from_candles(&candles, "close", params);
 
-                // Skip if we don't have enough data for this period
                 if candles.close.len() < 6 * (period - 1) + 1 {
                     continue;
                 }
 
                 let output = match tilson_with_kernel(&input, kernel) {
                     Ok(o) => o,
-                    Err(_) => continue, 
+                    Err(_) => continue,
                 };
 
-                
                 for (i, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {} and v_factor {}",
@@ -1848,7 +1734,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {} and v_factor {}",
@@ -1856,7 +1741,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {} and v_factor {}",
@@ -1870,7 +1754,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_tilson_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1885,12 +1768,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
-        
-        
         let strat = (1usize..=30).prop_flat_map(|period| {
-            
             let min_len = (6 * period.saturating_sub(1) + 1).max(period);
             (
                 prop::collection::vec(
@@ -1898,7 +1776,7 @@ mod tests {
                     min_len..400,
                 ),
                 Just(period),
-                0.0f64..=1.0f64, 
+                0.0f64..=1.0f64,
             )
         });
 
@@ -1910,19 +1788,15 @@ mod tests {
                 };
                 let input = TilsonInput::from_slice(&data, params);
 
-                
                 let TilsonOutput { values: out } = tilson_with_kernel(&input, kernel).unwrap();
-                
+
                 let TilsonOutput { values: ref_out } =
                     tilson_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 let warmup_end = 6 * (period - 1);
 
-                
                 for i in 0..warmup_end.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1932,22 +1806,19 @@ mod tests {
                     );
                 }
 
-                
                 let is_constant_data = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
 
-                
                 for i in warmup_end..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_finite() && r.is_finite() {
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
 
                         prop_assert!(
-                            (y - r).abs() <= 1e-9 || ulp_diff <= 8, 
+                            (y - r).abs() <= 1e-9 || ulp_diff <= 8,
                             "SIMD mismatch at idx {}: {} vs {} (ULP={})",
                             i,
                             y,
@@ -1955,7 +1826,6 @@ mod tests {
                             ulp_diff
                         );
                     } else {
-                        
                         prop_assert_eq!(
                             y.to_bits(),
                             r.to_bits(),
@@ -1964,7 +1834,6 @@ mod tests {
                         );
                     }
 
-                    
                     if is_constant_data && i >= warmup_end + period {
                         let const_val = data[0];
                         prop_assert!(
@@ -1977,13 +1846,9 @@ mod tests {
                     }
                 }
 
-                
                 if period == 1 {
-                    
-                    
                     for i in 0..data.len() {
                         if out[i].is_finite() && data[i].is_finite() {
-                            
                             let tol = (data[i].abs() * 1e-10).max(1e-9);
                             prop_assert!(
                                 (out[i] - data[i]).abs() <= tol,
@@ -1997,11 +1862,7 @@ mod tests {
                     }
                 }
 
-                
                 if volume_factor == 0.0 && warmup_end < data.len() {
-                    
-                    
-                    
                     for i in warmup_end..data.len() {
                         prop_assert!(
                             out[i].is_finite(),
@@ -2010,8 +1871,6 @@ mod tests {
                         );
                     }
                 }
-
-                
 
                 Ok(())
             })
@@ -2043,12 +1902,10 @@ mod tests {
 
     #[test]
     fn test_volume_factor_validation() {
-        
         let data = vec![
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
         ];
 
-        
         let params1 = TilsonParams {
             period: Some(3),
             volume_factor: Some(1.5),
@@ -2059,7 +1916,6 @@ mod tests {
             "volume_factor=1.5 should be accepted"
         );
 
-        
         let params2 = TilsonParams {
             period: Some(3),
             volume_factor: Some(-0.5),
@@ -2070,7 +1926,6 @@ mod tests {
             "volume_factor=-0.5 should be accepted"
         );
 
-        
         let params3 = TilsonParams {
             period: Some(3),
             volume_factor: Some(f64::NAN),
@@ -2081,7 +1936,6 @@ mod tests {
             "volume_factor=NaN should be rejected"
         );
 
-        
         let params4 = TilsonParams {
             period: Some(3),
             volume_factor: Some(f64::INFINITY),
@@ -2145,7 +1999,7 @@ mod tests {
             }
         };
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2153,15 +2007,13 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (3, 10, 2, 0.0, 0.5, 0.25),  
-            (5, 20, 5, 0.0, 1.0, 0.2),   
-            (10, 50, 10, 0.3, 0.7, 0.2), 
-            (20, 40, 10, 0.0, 1.0, 0.5), 
-            (5, 5, 1, 0.0, 1.0, 0.1),    
-            (15, 15, 1, 0.5, 0.5, 0.1),  
+            (3, 10, 2, 0.0, 0.5, 0.25),
+            (5, 20, 5, 0.0, 1.0, 0.2),
+            (10, 50, 10, 0.3, 0.7, 0.2),
+            (20, 40, 10, 0.0, 1.0, 0.5),
+            (5, 5, 1, 0.0, 1.0, 0.1),
+            (15, 15, 1, 0.5, 0.5, 0.1),
         ];
 
         for (p_start, p_end, p_step, v_start, v_end, v_step) in test_configs {
@@ -2171,9 +2023,7 @@ mod tests {
                 .volume_factor_range(v_start, v_end, v_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2187,7 +2037,6 @@ mod tests {
                     .map(|p| p.volume_factor.unwrap_or(0.0))
                     .unwrap_or(0.0);
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (period {}, v_factor {}, flat index {})",
@@ -2195,7 +2044,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (period {}, v_factor {}, flat index {})",
@@ -2203,7 +2051,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (period {}, v_factor {}, flat index {})",
@@ -2216,7 +2063,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2227,7 +2073,6 @@ mod tests {
 
     #[test]
     fn test_tilson_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..252u32 {
@@ -2236,14 +2081,11 @@ mod tests {
 
         let input = TilsonInput::from_slice(&data, TilsonParams::default());
 
-        
         let baseline = tilson(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             tilson_into(&input, &mut out)?;
 
@@ -2258,9 +2100,6 @@ mod tests {
     }
 }
 
-
-
-/// Centralized validation and preparation for Tilson calculation
 #[inline]
 fn tilson_prepare<'a>(
     input: &'a TilsonInput,
@@ -2312,7 +2151,6 @@ fn tilson_prepare<'a>(
     Ok((data, period, v_factor, first, len, chosen))
 }
 
-/// Compute Tilson directly into pre-allocated output buffer
 #[inline]
 fn tilson_compute_into(
     data: &[f64],
@@ -2335,8 +2173,7 @@ fn tilson_compute_into(
             Kernel::Scalar | Kernel::ScalarBatch => {
                 tilson_scalar(data, period, v_factor, first, out)?
             }
-            // SIMD underperformed vs scalar on common CPUs for Tilson (cascade is sequential).
-            // Keep SIMD implementations for future but short-circuit to scalar for now.
+
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => tilson_scalar(data, period, v_factor, first, out)?,
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -2345,7 +2182,6 @@ fn tilson_compute_into(
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX is not available
                 tilson_scalar(data, period, v_factor, first, out)?
             }
             Kernel::Auto => unreachable!(),
@@ -2354,7 +2190,6 @@ fn tilson_compute_into(
     Ok(())
 }
 
-/// Optimized batch calculation that writes directly to pre-allocated buffer
 #[inline(always)]
 fn tilson_batch_inner_into(
     data: &[f64],
@@ -2363,7 +2198,6 @@ fn tilson_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<TilsonParams>, TilsonError> {
-    // ---------- 0. parameter checks ----------
     let combos = expand_grid(sweep)?;
 
     if data.is_empty() {
@@ -2383,11 +2217,9 @@ fn tilson_batch_inner_into(
         });
     }
 
-    // ---------- 1. matrix dimensions ----------
     let rows = combos.len();
     let cols = data.len();
 
-    // Verify output slice length to avoid UB
     let expected = rows
         .checked_mul(cols)
         .ok_or(TilsonError::InvalidInput("rows*cols overflow"))?;
@@ -2398,25 +2230,21 @@ fn tilson_batch_inner_into(
         });
     }
 
-    // ---------- 2. build per-row warm-up lengths ----------
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| (6 * (c.period.unwrap() - 1) + first).min(cols))
         .collect();
 
-    // ---------- 3. reinterpret output slice as MaybeUninit for efficient initialization ----------
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    // ---------- 4. closure that fills ONE row ----------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let v_factor = combos[row].volume_factor.unwrap();
 
-        // cast this row to &mut [f64] so the row-kernel can write normally
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -2440,7 +2268,6 @@ fn tilson_batch_inner_into(
         }
     };
 
-    // ---------- 5. run all rows (optionally in parallel) ----------
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2464,38 +2291,10 @@ fn tilson_batch_inner_into(
     Ok(combos)
 }
 
-// ========== Python Bindings ==========
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "tilson")]
 #[pyo3(signature = (data, period, volume_factor=None, kernel=None))]
-/// Compute the Tilson T3 Moving Average of the input data.
-///
-/// The Tilson T3 is a moving average with reduced lag achieved through multiple
-/// iterations of exponential smoothing.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Number of data points in the moving average window (must be >= 1).
-/// volume_factor : float, optional
-///     Controls the depth of T3 smoothing. Range [0.0, 1.0].
-///     Default is 0.0. Higher values = more smoothing.
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of Tilson T3 values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period is zero, exceeds data length, etc).
+
 pub fn tilson_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2541,8 +2340,6 @@ impl TilsonStreamPy {
         Ok(TilsonStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated Tilson value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2551,24 +2348,7 @@ impl TilsonStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "tilson_batch")]
 #[pyo3(signature = (data, period_range, volume_factor_range=None, kernel=None))]
-/// Compute Tilson T3 for multiple parameter combinations in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// volume_factor_range : tuple, optional
-///     (start, end, step) for volume_factor values. Default is (0.0, 0.0, 0.0).
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array), 'periods', and 'volume_factors' arrays.
+
 pub fn tilson_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2580,36 +2360,30 @@ pub fn tilson_batch_py<'py>(
     use pyo3::types::PyDict;
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, true)?; // true for batch operations
+    let kern = validate_kernel(kernel, true)?;
 
     let sweep = TilsonBatchRange {
         period: period_range,
         volume_factor: volume_factor_range.unwrap_or((0.0, 0.0, 0.0)),
     };
 
-    // Calculate dimensions
-    let combos_dim = expand_grid(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos_dim = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_dim.len();
     let cols = slice_in.len();
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("dimensions too large to allocate"))?;
 
-    // Pre-allocate output array (OK for batch operations)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL
     let combos = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            // Map batch kernels to regular kernels
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2621,7 +2395,6 @@ pub fn tilson_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2705,7 +2478,6 @@ pub fn tilson_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32TilsonPy { inner })
 }
 
-// -------------------- Python: CUDA Array Interface v3 + DLPack (Tilson) ----------------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32TilsonPy {
@@ -2728,14 +2500,15 @@ impl DeviceArrayF32TilsonPy {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
 
-    
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -2747,7 +2520,6 @@ impl DeviceArrayF32TilsonPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2768,9 +2540,8 @@ impl DeviceArrayF32TilsonPy {
         }
         let _ = stream;
 
-        
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = self.inner.ctx.clone();
         let device_id = self.inner.device_id;
         let inner = std::mem::replace(
@@ -2821,16 +2592,14 @@ pub fn tilson_into_py<'py>(
     Ok(out)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TilsonBatchConfig {
     pub period_range: (usize, usize, usize),
     pub volume_factor_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TilsonBatchJsOutput {
     pub values: Vec<f64>,
@@ -2839,17 +2608,9 @@ pub struct TilsonBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = tilson_js)]
-/// Compute the Tilson T3 Moving Average.
-///
-/// # Arguments
-/// * `data` - Input data array
-/// * `period` - Period (must be >= 1)
-/// * `volume_factor` - Volume factor (0.0 to 1.0), defaults to 0.0
-///
-/// # Returns
-/// Array of Tilson values, same length as input
+
 pub fn tilson_js(data: &[f64], period: usize, volume_factor: f64) -> Result<Vec<f64>, JsValue> {
     let params = TilsonParams {
         period: Some(period),
@@ -2862,17 +2623,9 @@ pub fn tilson_js(data: &[f64], period: usize, volume_factor: f64) -> Result<Vec<
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = tilson_batch_js)]
-/// Compute Tilson for multiple parameter combinations in a single pass.
-///
-/// # Arguments
-/// * `data` - Input data array
-/// * `period_start`, `period_end`, `period_step` - Period range parameters
-/// * `v_factor_start`, `v_factor_end`, `v_factor_step` - Volume factor range parameters
-///
-/// # Returns
-/// Flattened array of values (row-major order)
+
 pub fn tilson_batch_js(
     data: &[f64],
     period_start: usize,
@@ -2887,22 +2640,15 @@ pub fn tilson_batch_js(
         volume_factor: (v_factor_start, v_factor_end, v_factor_step),
     };
 
-    
     let output = tilson_batch_with_kernel(data, &sweep, Kernel::ScalarBatch)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output.values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = tilson_batch_metadata_js)]
-/// Get metadata about batch computation.
-///
-/// # Arguments
-/// * Period and volume factor range parameters (same as tilson_batch_js)
-///
-/// # Returns
-/// Array containing [periods array, volume_factors array] flattened
+
 pub fn tilson_batch_metadata_js(
     period_start: usize,
     period_end: usize,
@@ -2922,12 +2668,10 @@ pub fn tilson_batch_metadata_js(
     };
     let mut result = Vec::with_capacity(combos.len() * 2);
 
-    
     for combo in &combos {
         result.push(combo.period.unwrap() as f64);
     }
 
-    
     for combo in &combos {
         result.push(combo.volume_factor.unwrap());
     }
@@ -2935,7 +2679,7 @@ pub fn tilson_batch_metadata_js(
     result
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = tilson_batch)]
 pub fn tilson_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: TilsonBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2946,7 +2690,6 @@ pub fn tilson_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         volume_factor: config.volume_factor_range,
     };
 
-    
     let output = tilson_batch_with_kernel(data, &sweep, Kernel::ScalarBatch)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2961,7 +2704,7 @@ pub fn tilson_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tilson_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2970,7 +2713,7 @@ pub fn tilson_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tilson_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2978,7 +2721,7 @@ pub fn tilson_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tilson_into(
     in_ptr: *const f64,
@@ -3004,13 +2747,11 @@ pub fn tilson_into(
         };
         let input = TilsonInput::from_slice(data, params);
 
-        
         let first = data
             .iter()
             .position(|&x| !x.is_nan())
             .ok_or_else(|| JsValue::from_str("All values are NaN"))?;
 
-        
         let warmup = first + 6 * (period - 1);
 
         if in_ptr == out_ptr {
@@ -3027,7 +2768,7 @@ pub fn tilson_into(
             std::ptr::copy_nonoverlapping(temp.as_ptr(), out_ptr, len);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            
+
             for i in 0..warmup.min(len) {
                 out[i] = f64::NAN;
             }
@@ -3039,7 +2780,7 @@ pub fn tilson_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tilson_batch_into(
     in_ptr: *const f64,
@@ -3084,7 +2825,7 @@ pub fn tilson_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -3097,7 +2838,7 @@ pub struct TilsonContext {
     c3: f64,
     c4: f64,
     kernel: Kernel,
-    
+
     ema1: f64,
     ema2: f64,
     ema3: f64,
@@ -3108,7 +2849,7 @@ pub struct TilsonContext {
     warmup_count: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl TilsonContext {
@@ -3139,7 +2880,7 @@ impl TilsonContext {
             c2,
             c3,
             c4,
-            kernel: Kernel::Scalar, 
+            kernel: Kernel::Scalar,
             ema1: 0.0,
             ema2: 0.0,
             ema3: 0.0,
@@ -3178,7 +2919,6 @@ impl TilsonContext {
 
         self.warmup_count += 1;
 
-        
         if self.warmup_count <= 6 * (self.period - 1) {
             None
         } else {

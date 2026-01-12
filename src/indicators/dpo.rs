@@ -1,46 +1,3 @@
-//! # Detrended Price Oscillator (DPO)
-//!
-//! The Detrended Price Oscillator (DPO) removes trend to highlight cycles by subtracting a
-//! centered moving average from a shifted price. It helps identify cycles in price movements
-//! by eliminating the underlying trend.
-//!
-//! ## Parameters
-//! - **period**: Window size for the moving average calculation (default: 5)
-//!
-//! ## Returns
-//! - **`Ok(DpoOutput)`** containing a `Vec<f64>` of detrended price values
-//!
-//! ## Developer Notes
-//! ### Implementation Status
-//! - **SIMD (AVX2/AVX512)**: Implemented; Auto uses runtime selection (like alma.rs).
-//!   Note: AVX512 delegates to AVX2 stub; AVX2 path hosts the fast unsafe loop. Scalar
-//!   remains the reference-safe implementation.
-//! - **WASM SIMD128**: Implemented with optimized vector operations
-//! - **Streaming Update**: O(1) - efficient circular buffer implementation
-//! - **Memory Optimization**: Fully optimized with `alloc_with_nan_prefix` for output vectors
-//! - **Batch Operations**: Row-specific optimization via shared prefix sums across rows;
-//!   uses `make_uninit_matrix` + `init_matrix_prefixes` for warmup handling
-//!
-//! ### Binding Test Status (2025-10-28)
-//! - Python bindings: all unit tests pass after aligning batch-vs-single tolerance to
-//!   a strict FP tolerance (`rtol=5e-8`, `atol=1e-10`), which is still far tighter than
-//!   the Rust reference tolerance for accuracy checks (1e-1 on the last-5 values).
-//! - WASM bindings: failing tests in `tests/wasm/test_dpo.js` — specifically:
-//!   "DPO accuracy" (last 5 values), "DPO batch single parameter", and
-//!   "DPO batch multiple periods". Observed behavior: the single-series WASM path
-//!   (`dpo_js`) diverges significantly from Rust references, while the WASM batch
-//!   path matches Rust. This points to a potential issue in the `wasm32+simd128`
-//!   single-series kernel selection or the `dpo_simd128` implementation. Kernels have
-//!   not been modified; investigation needed.
-//!
-//! ### TODO - Performance Improvements
-//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
-//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
-//! - [ ] Optimize batch operations with SIMD processing
-//! - [ ] Consider unrolling main calculation loop for better ILP
-//!
-//! Decision note: Streaming kernel uses branch-wrapped ring indices (no modulo),
-//! precomputed reciprocal, and mul_add for precision parity with batch.
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -80,7 +37,10 @@ pub struct DpoOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct DpoParams {
     pub period: Option<usize>,
 }
@@ -197,7 +157,7 @@ pub enum DpoError {
     NotEnoughValidData { needed: usize, valid: usize },
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<DpoError> for JsValue {
     fn from(err: DpoError) -> Self {
         JsValue::from_str(&err.to_string())
@@ -242,7 +202,6 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
         });
     }
 
-    
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -276,10 +235,9 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
         }
     }
 
-    
     let back = period / 2 + 1;
     let warm = (first + period - 1).max(back);
-    
+
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warm] {
         *v = qnan;
@@ -288,12 +246,7 @@ pub fn dpo_into_slice(dst: &mut [f64], input: &DpoInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Writes DPO values into a caller-provided output slice without allocating.
-///
-/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
-/// - The output slice length must match the input length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dpo_into(input: &DpoInput, out: &mut [f64]) -> Result<(), DpoError> {
     dpo_into_slice(out, input, Kernel::Auto)
@@ -328,7 +281,6 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
     let back = period / 2 + 1;
     let warm = (first + period - 1).max(back);
 
-    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -350,8 +302,6 @@ pub fn dpo_with_kernel(input: &DpoInput, kernel: Kernel) -> Result<DpoOutput, Dp
 
 #[inline(always)]
 pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    
-    
     let len = data.len();
     if len == 0 {
         return;
@@ -365,7 +315,6 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
         let ptr_d = data.as_ptr();
         let ptr_o = out.as_mut_ptr();
 
-        
         let mut sum = 0.0f64;
         let mut k = 0usize;
         while k < period {
@@ -373,10 +322,8 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
             k += 1;
         }
 
-        
         let mut i = base + period - 1;
 
-        
         if i < back {
             let stop = back.min(len.saturating_sub(1));
             while i < stop {
@@ -387,34 +334,28 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
             }
         }
 
-        
         while i + 3 < len {
-            
             let p0 = *ptr_d.add(i - back);
             *ptr_o.add(i) = sum.mul_add(-scale, p0);
 
-            
             let a1 = *ptr_d.add(i + 1);
             let r1 = *ptr_d.add(i + 1 - period);
             let s1 = (sum + a1) - r1;
             let p1 = *ptr_d.add(i + 1 - back);
             *ptr_o.add(i + 1) = s1.mul_add(-scale, p1);
 
-            
             let a2 = *ptr_d.add(i + 2);
             let r2 = *ptr_d.add(i + 2 - period);
             let s2 = (s1 + a2) - r2;
             let p2 = *ptr_d.add(i + 2 - back);
             *ptr_o.add(i + 2) = s2.mul_add(-scale, p2);
 
-            
             let a3 = *ptr_d.add(i + 3);
             let r3 = *ptr_d.add(i + 3 - period);
             let s3 = (s2 + a3) - r3;
             let p3 = *ptr_d.add(i + 3 - back);
             *ptr_o.add(i + 3) = s3.mul_add(-scale, p3);
 
-            
             i += 4;
             if i >= len {
                 return;
@@ -423,7 +364,6 @@ pub fn dpo_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]
             sum -= *ptr_d.add(i - period);
         }
 
-        
         while i < len {
             if i >= back {
                 let p = *ptr_d.add(i - back);
@@ -456,13 +396,11 @@ unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [
         return;
     }
 
-    
     let mut sum = 0.0f64;
     for j in 0..period {
         sum += data[first_val + j];
     }
 
-    
     let mut cur = start_idx;
     while cur < warm {
         let next = cur + 1;
@@ -475,10 +413,8 @@ unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [
 
     let mut i = warm;
     while i + 1 < len {
-        
         let price_vec = v128_load(&data[i - back] as *const f64 as *const v128);
 
-        
         let sum0 = sum;
         let sum1 = sum0 + data[i + 1] - data[i + 1 - period];
         let sum_vec = f64x2(sum0, sum1);
@@ -486,14 +422,12 @@ unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [
         let result = f64x2_sub(price_vec, f64x2_mul(sum_vec, scale_vec));
         v128_store(&mut out[i] as *mut f64 as *mut v128, result);
 
-        
         if i + 2 < len {
             sum = sum1 + data[i + 2] - data[i + 2 - period];
         }
         i += 2;
     }
 
-    
     if i < len {
         out[i] = data[i - back] - (sum * scale);
     }
@@ -502,7 +436,6 @@ unsafe fn dpo_simd128(data: &[f64], period: usize, first_val: usize, out: &mut [
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    
     let len = data.len();
     if len == 0 {
         return;
@@ -510,7 +443,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
     let back = period / 2 + 1;
     let scale = 1.0f64 / (period as f64);
     unsafe {
-        
         let mut sum = 0.0f64;
         let base = first_val;
         let mut k = 0usize;
@@ -521,7 +453,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
         }
         let mut i = base + period - 1;
 
-        
         if i < back {
             let stop = back.min(len.saturating_sub(1));
             while i < stop {
@@ -535,11 +466,9 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
 
         let ptr_o = out.as_mut_ptr();
         while i + 3 < len {
-            
             let p0 = *ptr_d.add(i - back);
             *ptr_o.add(i) = sum.mul_add(-scale, p0);
 
-            
             let a1 = *ptr_d.add(i + 1);
             let r1 = *ptr_d.add(i + 1 - period);
             let s1 = sum + (a1 - r1);
@@ -548,7 +477,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
                 *ptr_o.add(i + 1) = s1.mul_add(-scale, p1);
             }
 
-            
             let a2 = *ptr_d.add(i + 2);
             let r2 = *ptr_d.add(i + 2 - period);
             let s2 = s1 + (a2 - r2);
@@ -557,7 +485,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
                 *ptr_o.add(i + 2) = s2.mul_add(-scale, p2);
             }
 
-            
             let a3 = *ptr_d.add(i + 3);
             let r3 = *ptr_d.add(i + 3 - period);
             let s3 = s2 + (a3 - r3);
@@ -566,7 +493,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
                 *ptr_o.add(i + 3) = s3.mul_add(-scale, p3);
             }
 
-            
             i += 4;
             if i >= len {
                 return;
@@ -576,7 +502,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
             sum = s3 + (a4 - r4);
         }
 
-        
         while i < len {
             if i >= back {
                 let p = *ptr_d.add(i - back);
@@ -593,7 +518,6 @@ pub fn dpo_avx2(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn dpo_avx512(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    
     dpo_avx2(data, period, first_val, out)
 }
 
@@ -641,7 +565,9 @@ pub struct DpoBatchRange {
 
 impl Default for DpoBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -781,7 +707,6 @@ pub fn dpo_batch_inner_into(
     let cols = len;
     debug_assert_eq!(out.len(), rows * cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -799,7 +724,6 @@ pub fn dpo_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let mut pfx = vec![0.0f64; cols];
     if cols > 0 {
         let mut acc = 0.0f64;
@@ -885,7 +809,6 @@ fn dpo_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -898,7 +821,6 @@ fn dpo_batch_inner(
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut values = unsafe {
         let ptr = buf_mu.as_mut_ptr() as *mut f64;
         let len = buf_mu.len();
@@ -906,7 +828,6 @@ fn dpo_batch_inner(
         Vec::from_raw_parts(ptr, len, len)
     };
 
-    
     let mut pfx = vec![0.0f64; cols];
     if cols > 0 {
         let mut acc = 0.0f64;
@@ -1001,14 +922,12 @@ unsafe fn dpo_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
 
 #[derive(Debug, Clone)]
 pub struct DpoStream {
-    
     period: usize,
     back: usize,
     inv_period: f64,
 
-    
-    sma_buf: Vec<f64>, 
-    lag_buf: Vec<f64>, 
+    sma_buf: Vec<f64>,
+    lag_buf: Vec<f64>,
     sum: f64,
 
     sma_head: usize,
@@ -1034,9 +953,8 @@ impl DpoStream {
             back,
             inv_period,
 
-            
             sma_buf: vec![f64::NAN; period],
-            
+
             lag_buf: vec![f64::NAN; back + 1],
             sum: 0.0,
 
@@ -1046,20 +964,14 @@ impl DpoStream {
         })
     }
 
-    /// O(1) update:
-    ///   - push `value` into lag ring (size back+1)
-    ///   - push into SMA ring (size period) and update rolling sum
-    ///   - once both rings are filled, emit DPO = price[i-back] - mean
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         self.lag_buf[self.lag_head] = value;
         self.lag_head += 1;
         if self.lag_head == self.lag_buf.len() {
             self.lag_head = 0;
         }
 
-        
         let old = self.sma_buf[self.sma_head];
         self.sma_buf[self.sma_head] = value;
         self.sma_head += 1;
@@ -1068,26 +980,19 @@ impl DpoStream {
         }
 
         if old.is_nan() {
-            
             self.sum += value;
         } else {
-            
             self.sum += value - old;
         }
 
-        
         self.count += 1;
 
-        
         if self.count < self.period || self.count <= self.back {
             return None;
         }
 
-        
         let lagged_value = self.lag_buf[self.lag_head];
 
-        
-        
         let dpo = (-self.inv_period).mul_add(self.sum, lagged_value);
 
         Some(dpo)
@@ -1388,7 +1293,6 @@ mod tests {
             let DpoOutput { values: out } = dpo_with_kernel(&input, kernel).unwrap();
             let DpoOutput { values: ref_out } = dpo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            
             for i in 0..period.min(data.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1399,7 +1303,6 @@ mod tests {
                 );
             }
 
-            
             for i in period..data.len() {
                 prop_assert!(
                     out[i].is_finite(),
@@ -1410,7 +1313,6 @@ mod tests {
                 );
             }
 
-            
             for i in 0..data.len() {
                 if out[i].is_nan() && ref_out[i].is_nan() {
                     continue;
@@ -1435,18 +1337,13 @@ mod tests {
                 );
             }
 
-            
-            
-            
             let back = period / 2 + 1;
             for i in period..data.len() {
                 if i >= back {
-                    
                     let sum: f64 = data[i + 1 - period..=i].iter().sum();
                     let avg = sum / period as f64;
                     let expected_dpo = data[i - back] - avg;
 
-                    
                     prop_assert!(
                         (out[i] - expected_dpo).abs() < 1e-9,
                         "[{}] DPO formula mismatch at idx {}: got {}, expected {}",
@@ -1458,15 +1355,12 @@ mod tests {
                 }
             }
 
-            
-            
             if data.len() > period {
                 let min_val = data.iter().cloned().fold(f64::INFINITY, f64::min);
                 let max_val = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let range = max_val - min_val;
 
                 for i in period..data.len() {
-                    
                     prop_assert!(
                         out[i].abs() <= 2.0 * range,
                         "[{}] DPO exceeds reasonable bounds at idx {}: {} (data range: {})",
@@ -1478,9 +1372,7 @@ mod tests {
                 }
             }
 
-            
             if period == 1 {
-                
                 for i in 1..data.len() {
                     let expected = data[i - 1] - data[i];
                     prop_assert!(
@@ -1494,9 +1386,7 @@ mod tests {
                 }
             }
 
-            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
-                
                 for i in period..data.len() {
                     prop_assert!(
                         out[i].abs() < 1e-9,
@@ -1508,7 +1398,6 @@ mod tests {
                 }
             }
 
-            
             for i in 0..data.len() {
                 if !out[i].is_nan() {
                     let bits = out[i].to_bits();
@@ -1725,9 +1614,10 @@ mod tests {
 
     #[test]
     fn test_dpo_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(512);
-        for _ in 0..4 { data.push(f64::NAN); }
+        for _ in 0..4 {
+            data.push(f64::NAN);
+        }
         for i in 0..508 {
             let x = i as f64;
             data.push((0.1 * x).sin() * 50.0 + 0.01 * x);
@@ -1736,14 +1626,11 @@ mod tests {
         let params = DpoParams { period: Some(5) };
         let input = DpoInput::from_slice(&data, params);
 
-        
         let baseline = dpo(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             dpo_into(&input, &mut out)?;
             assert_eq!(out.len(), baseline.len());
@@ -1752,9 +1639,7 @@ mod tests {
                 assert!(
                     equal,
                     "dpo_into parity mismatch at idx {}: got {}, expected {}",
-                    idx,
-                    a,
-                    b
+                    idx, a, b
                 );
             }
         }
@@ -1778,9 +1663,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1892,7 +1777,6 @@ pub fn dpo_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dpo_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1912,7 +1796,6 @@ pub fn dpo_cuda_batch_dev_py<'py>(
         period: period_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     let inner = py.allow_threads(|| {
         let cuda = crate::cuda::oscillators::dpo_wrapper::CudaDpo::new(device_id)
@@ -1967,11 +1850,7 @@ pub fn dpo_cuda_many_series_one_param_dev_py<'py>(
     make_device_array_py(device_id, inner)
 }
 
-// ============================================================================
-// WASM Bindings
-// ============================================================================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dpo_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = DpoParams {
@@ -1979,7 +1858,7 @@ pub fn dpo_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = DpoInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation is OK for safe API
+    let mut output = vec![0.0; data.len()];
 
     dpo_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1987,7 +1866,7 @@ pub fn dpo_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dpo_into(
     in_ptr: *const f64,
@@ -2007,14 +1886,12 @@ pub fn dpo_into(
         let input = DpoInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing - use temporary buffer
             let mut temp = vec![0.0; len];
             dpo_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct write to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             dpo_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2023,7 +1900,7 @@ pub fn dpo_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dpo_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2032,7 +1909,7 @@ pub fn dpo_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dpo_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2042,13 +1919,13 @@ pub fn dpo_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DpoBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DpoBatchJsOutput {
     pub values: Vec<f64>,
@@ -2057,7 +1934,7 @@ pub struct DpoBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dpo_batch)]
 pub fn dpo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: DpoBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2081,7 +1958,7 @@ pub fn dpo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dpo_batch_into(
     in_ptr: *const f64,

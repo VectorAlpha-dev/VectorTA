@@ -1,8 +1,4 @@
-
-
-use vector_ta::indicators::kst::{
-    KstBatchBuilder, KstBatchRange, KstBuilder, KstInput, KstParams,
-};
+use vector_ta::indicators::kst::{KstBatchBuilder, KstBatchRange, KstBuilder, KstInput, KstParams};
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -117,7 +113,6 @@ fn kst_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.line.buf.copy_to(&mut g_line)?;
     pair.signal.buf.copy_to(&mut g_sig)?;
 
-    
     let tol = 2.0e-2;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c_l = cpu.lines[idx];
@@ -151,8 +146,8 @@ fn kst_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 4096usize; 
+    let cols = 8usize;
+    let rows = 4096usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in 5..rows {
@@ -173,7 +168,6 @@ fn kst_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         signal_period: Some(9),
     };
 
-    
     let mut cpu_line_tm = vec![f64::NAN; cols * rows];
     let mut cpu_sig_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -182,7 +176,7 @@ fn kst_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             series[t] = price_tm[t * cols + s];
         }
         let input = KstInput::from_slice(&series, params);
-        let out = KstBuilder::new().apply_slice(&series)?; 
+        let out = KstBuilder::new().apply_slice(&series)?;
         for t in 0..rows {
             cpu_line_tm[t * cols + s] = out.line[t];
             cpu_sig_tm[t * cols + s] = out.signal[t];
@@ -203,7 +197,6 @@ fn kst_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     pair_tm.line.buf.copy_to(&mut g_line_tm)?;
     pair_tm.signal.buf.copy_to(&mut g_sig_tm)?;
 
-    
     let tol = 3.0e-2;
     for idx in 0..g_line_tm.len() {
         assert!(

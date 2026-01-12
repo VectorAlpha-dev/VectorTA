@@ -1,24 +1,3 @@
-//! # Square Root Weighted Moving Average (SRWMA)
-//!
-//! A moving average variant that assigns weights proportional to the square root
-//! of the distance from the current bar. This approach provides a moderate
-//! emphasis on more recent data while still accounting for older points, thereby
-//! reducing noise without excessively lagging.
-//!
-//! ## Parameters
-//! - **period**: The look-back window size used for weighting (defaults to 14).
-//!
-//! ## Returns
-//! - **`Ok(SrwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(SrwmaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **SIMD status**: Implemented AVX2 and AVX512 single-series + batch-row kernels.
-//!   - Runtime selection short-circuits to Scalar for `period <= 32` where SIMD underperforms.
-//!   - For longer periods, AVX512 engages via `Kernel::Auto` (subject to CPU support).
-//! - **Streaming update**: Exact O(p) ring-buffer dot (fast scalar) with optional O(1) SOE approx; tests use the exact path.
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for outputs.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -59,7 +38,10 @@ pub struct SrwmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SrwmaParams {
     pub period: Option<usize>,
 }
@@ -175,7 +157,11 @@ pub enum SrwmaError {
     #[error("srwma: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("srwma: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("srwma: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -234,9 +220,6 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
         other => other,
     };
 
-    
-    
-    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -265,11 +248,7 @@ pub fn srwma_with_kernel(input: &SrwmaInput, kernel: Kernel) -> Result<SrwmaOutp
     Ok(SrwmaOutput { values: out })
 }
 
-/// Compute SRWMA into a caller-provided output buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (`srwma`/`srwma_with_kernel`).
-/// - The `out` slice length must equal the input length; returns an error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn srwma_into(input: &SrwmaInput, out: &mut [f64]) -> Result<(), SrwmaError> {
     srwma_into_slice(out, input, Kernel::Auto)
@@ -315,8 +294,6 @@ pub fn srwma_scalar(
     let start_idx = first_val + period + 1;
     let len = data.len();
 
-    
-    
     unsafe {
         let w_ptr = weights.as_ptr();
         for i in start_idx..len {
@@ -333,7 +310,6 @@ pub fn srwma_scalar(
 
             let mut k = 0usize;
 
-            
             while k + 8 <= wlen {
                 let x0 = *dp.sub(k + 0);
                 let w0 = *w_ptr.add(k + 0);
@@ -370,7 +346,6 @@ pub fn srwma_scalar(
                 k += 8;
             }
 
-            
             while k + 4 <= wlen {
                 let x0 = *dp.sub(k + 0);
                 let w0 = *w_ptr.add(k + 0);
@@ -391,7 +366,6 @@ pub fn srwma_scalar(
                 k += 4;
             }
 
-            
             while k < wlen {
                 let x = *dp.sub(k);
                 let w = *w_ptr.add(k);
@@ -601,7 +575,9 @@ fn expand_grid(r: &SrwmaBatchRange) -> Vec<SrwmaParams> {
                     Some(nx) if nx < x => x = nx,
                     _ => break,
                 }
-                if x == 0 { break; }
+                if x == 0 {
+                    break;
+                }
             }
         }
         v
@@ -647,7 +623,11 @@ fn srwma_batch_inner(
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
-        return Err(SrwmaError::InvalidRange { start: s, end: e, step: st });
+        return Err(SrwmaError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
+        });
     }
 
     let len = data.len();
@@ -676,9 +656,11 @@ fn srwma_batch_inner(
     }
 
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows
-        .checked_mul(max_wlen)
-        .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let cap = rows.checked_mul(max_wlen).ok_or(SrwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let flat_slice = flat_w.as_mut_slice();
@@ -698,19 +680,17 @@ fn srwma_batch_inner(
 
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first + c.period.unwrap() + 1) 
+        .map(|c| first + c.period.unwrap() + 1)
         .collect();
 
     let mut raw = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut raw, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
         let inv_n = *inv_norms.get_unchecked(row);
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -728,7 +708,6 @@ fn srwma_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -749,9 +728,14 @@ fn srwma_batch_inner(
         }
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(raw);
-    let values = unsafe { Vec::from_raw_parts(guard.as_mut_ptr() as *mut f64, guard.len(), guard.capacity()) };
+    let values = unsafe {
+        Vec::from_raw_parts(
+            guard.as_mut_ptr() as *mut f64,
+            guard.len(),
+            guard.capacity(),
+        )
+    };
 
     Ok(SrwmaBatchOutput {
         values,
@@ -772,7 +756,11 @@ pub fn srwma_batch_inner_into(
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
-        return Err(SrwmaError::InvalidRange { start: s, end: e, step: st });
+        return Err(SrwmaError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
+        });
     }
 
     let len = data.len();
@@ -801,9 +789,11 @@ pub fn srwma_batch_inner_into(
     }
 
     let mut inv_norms = vec![0.0; rows];
-    let cap = rows
-        .checked_mul(max_wlen)
-        .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let cap = rows.checked_mul(max_wlen).ok_or(SrwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let flat_slice = flat_w.as_mut_slice();
@@ -821,32 +811,33 @@ pub fn srwma_batch_inner_into(
         inv_norms[row] = 1.0 / norm;
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() + 1)
         .collect();
 
-    
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(SrwmaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let total = rows.checked_mul(cols).ok_or(SrwmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != total {
-        return Err(SrwmaError::OutputLengthMismatch { expected: total, got: out.len() });
+        return Err(SrwmaError::OutputLengthMismatch {
+            expected: total,
+            got: out.len(),
+        });
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let w_ptr = flat_slice.as_ptr().add(row * max_wlen);
         let inv_n = *inv_norms.get_unchecked(row);
-        
+
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -992,8 +983,6 @@ unsafe fn srwma_row_avx2(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    
-    
     if period <= 32 {
         srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
         return;
@@ -1022,7 +1011,7 @@ unsafe fn srwma_row_avx2(
         let len = data.len();
         let start_idx = first + period + 1;
 
-        const REV: i32 = 0x1B; 
+        const REV: i32 = 0x1B;
         for i in start_idx..len {
             let mut vacc = _mm256_setzero_pd();
             let dp = data.as_ptr().add(i);
@@ -1058,7 +1047,6 @@ pub unsafe fn srwma_row_avx512(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    
     if period <= 32 {
         srwma_row_scalar(data, first, period, stride, w_ptr, inv_n, out);
         return;
@@ -1142,7 +1130,6 @@ unsafe fn srwma_row_avx512_long(
     inv_n: f64,
     out: &mut [f64],
 ) {
-    
     #[target_feature(enable = "avx512f,fma")]
     unsafe fn dot8_rev(dp: *const f64, w_ptr: *const f64, k: usize) -> f64 {
         let wv = _mm512_loadu_pd(w_ptr.add(k));
@@ -1194,29 +1181,28 @@ unsafe fn srwma_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SrwmaStream {
-    period: usize, 
-    wlen: usize,   
-    inv_norm: f64, 
-    
-    weights: Vec<f64>, 
-    ring: Vec<f64>,    
-    head: usize,       
-    count: usize,      
-    
+    period: usize,
+    wlen: usize,
+    inv_norm: f64,
+
+    weights: Vec<f64>,
+    ring: Vec<f64>,
+    head: usize,
+    count: usize,
+
     approx: Option<SrwmaApprox>,
 }
 
 #[derive(Debug, Clone)]
 struct SrwmaApprox {
-    
-    a: Vec<f64>,        
-    r: Vec<f64>,        
-    r_pow_p1: Vec<f64>, 
-    s: Vec<f64>,        
-    denom: f64,         
-    
-    lag_buf: Vec<f64>, 
-    lag_head: usize,   
+    a: Vec<f64>,
+    r: Vec<f64>,
+    r_pow_p1: Vec<f64>,
+    s: Vec<f64>,
+    denom: f64,
+
+    lag_buf: Vec<f64>,
+    lag_head: usize,
 }
 
 impl SrwmaStream {
@@ -1230,7 +1216,6 @@ impl SrwmaStream {
         }
         let p = period - 1;
 
-        
         let mut weights = Vec::with_capacity(p);
         let mut sumw = 0.0f64;
         for k in 0..p {
@@ -1239,7 +1224,6 @@ impl SrwmaStream {
             sumw += w;
         }
 
-        
         let ring_len = 2 * p.max(1);
 
         Ok(Self {
@@ -1254,12 +1238,10 @@ impl SrwmaStream {
         })
     }
 
-    /// Exact SRWMA update using a mirrored ring buffer. Still O(p), but faster than
-    /// a grow-only history due to contiguous reads and no modulo branches.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let p = self.wlen;
-        
+
         if p == 0 {
             self.count += 1;
             return if self.count <= self.period + 1 {
@@ -1269,30 +1251,24 @@ impl SrwmaStream {
             };
         }
 
-        
         let h = self.head;
         self.ring[h] = value;
         self.ring[h + p] = value;
         self.head = if h + 1 == p { 0 } else { h + 1 };
         self.count += 1;
 
-        
         if self.count <= self.period + 1 {
             return None;
         }
 
-        
-        
         let start = self.head + p - 1;
 
-        
         let mut s0 = 0.0f64;
         let mut s1 = 0.0f64;
         let mut s2 = 0.0f64;
         let mut s3 = 0.0f64;
         let mut k = 0usize;
 
-        
         while k + 4 <= p {
             let d0 = self.ring[start - (k + 0)];
             let d1 = self.ring[start - (k + 1)];
@@ -1320,15 +1296,12 @@ impl SrwmaStream {
         Some(sum * self.inv_norm)
     }
 
-    
-    /// Enable the SOE approximation (Q exponentials). Does not affect exact `update()`.
     pub fn enable_approx_soe(&mut self, q: usize) {
         if self.approx.is_some() || q == 0 {
             return;
         }
         let p = self.wlen;
 
-        
         let taus: Vec<f64> = match q {
             1 => vec![0.35 * p as f64],
             2 => vec![0.12, 0.5].into_iter().map(|f| f * p as f64).collect(),
@@ -1349,7 +1322,6 @@ impl SrwmaStream {
             .map(|tau| (-1.0f64 / tau.max(1.0)).exp())
             .collect();
 
-        
         let mut g = vec![0.0f64; q * q];
         let mut b = vec![0.0f64; q];
         for i in 0..q {
@@ -1373,10 +1345,8 @@ impl SrwmaStream {
             b[i] = acc;
         }
 
-        
         let a = solve_small_ge(&g, &b, q);
 
-        
         let mut r_pow_p1 = Vec::with_capacity(q);
         let mut denom = 0.0;
         for j in 0..q {
@@ -1401,13 +1371,11 @@ impl SrwmaStream {
         });
     }
 
-    /// O(1) amortized update using SOE approximation. Optional; returns None until warmup.
     #[inline(always)]
     pub fn update_approx_soe(&mut self, value: f64) -> Option<f64> {
         let some = self.approx.as_mut()?;
         let p = self.wlen;
 
-        
         let x_old = some.lag_buf[some.lag_head];
         some.lag_buf[some.lag_head] = value;
         some.lag_head = if some.lag_head + 1 == (p + 1) {
@@ -1416,12 +1384,10 @@ impl SrwmaStream {
             some.lag_head + 1
         };
 
-        
         for j in 0..some.s.len() {
             some.s[j] = some.r[j] * some.s[j] + some.r[j] * value - some.r_pow_p1[j] * x_old;
         }
 
-        
         self.count += 1;
         if self.count <= self.period + 1 {
             return None;
@@ -1435,14 +1401,12 @@ impl SrwmaStream {
     }
 }
 
-
 #[inline]
 fn solve_small_ge(g: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
     a.copy_from_slice(g);
     let mut x = b.to_vec();
     for k in 0..n {
-        
         let mut piv = k;
         let mut best = a[k * n + k].abs();
         for i in (k + 1)..n {
@@ -1716,10 +1680,9 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_srwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let mut data: Vec<f64> = vec![f64::NAN; 5];
         for i in 0..251usize {
             let x = (i as f64).sin() * 0.5 + (i as f64) * 0.01;
@@ -1728,20 +1691,16 @@ mod tests {
 
         let input = SrwmaInput::from_slice(&data, SrwmaParams::default());
 
-        
         let baseline = srwma(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             srwma_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             srwma_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1753,7 +1712,7 @@ mod tests {
 
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_srwma_no_poison(
         test_name: &str,
@@ -1764,19 +1723,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        let test_periods = vec![
-            3,   
-            5,   
-            14,  
-            30,  
-            50,  
-            100, 
-            200, 
-        ];
+        let test_periods = vec![3, 5, 14, 30, 50, 100, 200];
 
         for &period in &test_periods {
-            
             if period > candles.close.len() {
                 continue;
             }
@@ -1790,16 +1739,13 @@ mod tests {
             );
             let output = srwma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1807,7 +1753,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1815,7 +1760,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1828,7 +1772,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_srwma_no_poison(
         _test_name: &str,
@@ -1846,12 +1789,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    period + 2..400, 
+                    period + 2..400,
                 ),
                 Just(period),
             )
@@ -1864,18 +1806,14 @@ mod tests {
                 };
                 let input = SrwmaInput::from_slice(&data, params);
 
-                
                 let SrwmaOutput { values: out } = srwma_with_kernel(&input, kernel).unwrap();
                 let SrwmaOutput { values: ref_out } =
                     srwma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 let warmup_end = period + 1;
 
-                
                 for i in 0..warmup_end.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1885,7 +1823,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup_end..data.len() {
                     let window_start = i + 1 - period;
                     let window_end = i;
@@ -1896,7 +1833,6 @@ mod tests {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     prop_assert!(
                         y.is_nan() || (y >= lo - 1e-9 && y <= hi + 1e-9),
                         "idx {}: {} ∉ [{}, {}]",
@@ -1906,7 +1842,6 @@ mod tests {
                         hi
                     );
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y.to_bits(),
@@ -1928,10 +1863,8 @@ mod tests {
                     );
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_end {
-                    
-                    let const_val = data[0]; 
+                    let const_val = data[0];
                     for i in warmup_end..out.len() {
                         if out[i].is_finite() {
                             prop_assert!(
@@ -1945,10 +1878,7 @@ mod tests {
                     }
                 }
 
-                
                 if period == 2 && data.len() > warmup_end {
-                    
-                    
                     for i in warmup_end..out.len() {
                         if out[i].is_finite() {
                             let expected_range_lo = data[i - 1].min(data[i]) - 1e-9;
@@ -1965,13 +1895,10 @@ mod tests {
                     }
                 }
 
-                
-                
                 let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
                 let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
                 if (is_increasing || is_decreasing) && data.len() > warmup_end + 10 {
-                    
                     for i in (warmup_end + 5)..out.len() - 1 {
                         if out[i].is_finite() && out[i + 1].is_finite() {
                             if is_increasing {
@@ -2081,7 +2008,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2089,18 +2015,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            (3, 10, 1),    
-            (5, 25, 5),    
-            (10, 30, 10),  
-            (14, 100, 7),  
-            (50, 200, 50), 
-            (2, 8, 2),     
+            (3, 10, 1),
+            (5, 25, 5),
+            (10, 30, 10),
+            (14, 100, 7),
+            (50, 200, 50),
+            (2, 8, 2),
         ];
 
         for (start, end, step) in batch_configs {
-            
             if start > c.close.len() {
                 continue;
             }
@@ -2110,9 +2034,7 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2122,7 +2044,6 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap_or(0);
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -2130,7 +2051,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -2138,7 +2058,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -2151,7 +2070,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2167,13 +2085,13 @@ mod tests {
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaSrwma;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::srwma_wrapper::DeviceArrayF32Srwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use crate::cuda::moving_averages::CudaSrwma;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -2186,38 +2104,15 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "srwma")]
 #[pyo3(signature = (data, period, kernel=None))]
-/// Compute the Square Root Weighted Moving Average (SRWMA) of the input data.
-///
-/// SRWMA assigns weights proportional to the square root of the distance from
-/// the current bar, providing moderate emphasis on recent data while reducing noise.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     The look-back window size for weighting (must be >= 2).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of SRWMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period < 2, data too short, etc).
+
 pub fn srwma_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2241,7 +2136,6 @@ pub fn srwma_py<'py>(
     Ok(result_vec.into_pyarray(py))
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32SrwmaPy {
@@ -2264,14 +2158,15 @@ impl DeviceArrayF32SrwmaPy {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream is synchronized before returning the handle
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
 
-    // __dlpack__(self, stream=None, max_version=None, dl_device=None, copy=None)
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -2284,8 +2179,7 @@ impl DeviceArrayF32SrwmaPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2304,12 +2198,10 @@ impl DeviceArrayF32SrwmaPy {
             }
         }
 
-        // Accept Array API stream semantics but do nothing since producer is synced.
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx_guard = self.inner.ctx.clone();
         let dev_id = self.inner.device_id;
         let inner = std::mem::replace(
@@ -2352,8 +2244,6 @@ impl SrwmaStreamPy {
         Ok(SrwmaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated SRWMA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2362,22 +2252,7 @@ impl SrwmaStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "srwma_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
-/// Compute SRWMA for multiple period values in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'periods' arrays.
+
 pub fn srwma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -2394,7 +2269,6 @@ pub fn srwma_batch_py<'py>(
         period: period_range,
     };
 
-    // Expand grid to know dimensions
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
@@ -2402,14 +2276,11 @@ pub fn srwma_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("dimensions too large to allocate"))?;
 
-    // Pre-allocate NumPy array
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Heavy computation without GIL
     let combos = py
         .allow_threads(|| {
-            // Resolve kernel
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2421,12 +2292,10 @@ pub fn srwma_batch_py<'py>(
                 _ => kernel,
             };
 
-            // Process batch directly into pre-allocated buffer
             srwma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build return dictionary
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2501,7 +2370,6 @@ pub fn srwma_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32SrwmaPy { inner })
 }
 
-/// Helper function to compute SRWMA directly into output slice - zero allocations
 #[inline]
 pub fn srwma_into_slice(
     dst: &mut [f64],
@@ -2519,7 +2387,6 @@ pub fn srwma_into_slice(
 
     let period = input.params.period.unwrap_or(14);
 
-    // Validate parameters
     if period == 0 {
         return Err(SrwmaError::InvalidPeriod {
             period,
@@ -2535,19 +2402,19 @@ pub fn srwma_into_slice(
     }
 
     if dst.len() != data.len() {
-        return Err(SrwmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(SrwmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
-    // Find first valid (non-NaN) value
     let first = match data.iter().position(|&x| !x.is_nan()) {
         Some(idx) => idx,
         None => {
-            // All values are NaN
             return Err(SrwmaError::AllValuesNaN);
         }
     };
 
-    // Prepare weights
     let wlen = period - 1;
     let mut weights = Vec::with_capacity(wlen);
     let mut sumw = 0.0;
@@ -2558,13 +2425,11 @@ pub fn srwma_into_slice(
     }
     let inv_norm = 1.0 / sumw;
 
-    // Choose best kernel
     let chosen = match kern {
         Kernel::Auto => detect_best_kernel(),
         k => k,
     };
 
-    // Compute directly into dst
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -2582,7 +2447,6 @@ pub fn srwma_into_slice(
         }
     }
 
-    // Fill warmup period with NaN
     let warmup_end = first + period + 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2591,7 +2455,7 @@ pub fn srwma_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SrwmaParams {
@@ -2599,23 +2463,21 @@ pub fn srwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = SrwmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
     srwma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SrwmaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SrwmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2624,7 +2486,7 @@ pub struct SrwmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = srwma_batch)]
 pub fn srwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: SrwmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2650,8 +2512,7 @@ pub fn srwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         .map_err(|e| JsValue::from_str(&format!("Failed to serialize output: {}", e)))
 }
 
-// Keep the old API for backwards compatibility
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_batch_js(
     data: &[f64],
@@ -2663,13 +2524,12 @@ pub fn srwma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use batch function with parallel=false for WASM
     srwma_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_batch_metadata_js(
     period_start: usize,
@@ -2684,22 +2544,18 @@ pub fn srwma_batch_metadata_js(
     Ok(combos.iter().map(|p| p.period.unwrap() as u32).collect())
 }
 
-// ================== Zero-Copy WASM Functions ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2707,7 +2563,7 @@ pub fn srwma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_into(
     in_ptr: *const f64,
@@ -2715,7 +2571,6 @@ pub fn srwma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
@@ -2727,9 +2582,7 @@ pub fn srwma_into(
         };
         let input = SrwmaInput::from_slice(data, params);
 
-        // CRITICAL: Check for aliasing
         if in_ptr == out_ptr {
-            // Handle in-place operation
             let mut temp = vec![0.0; len];
             srwma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2737,7 +2590,6 @@ pub fn srwma_into(
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct computation
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             srwma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2747,9 +2599,7 @@ pub fn srwma_into(
     }
 }
 
-// ================== Optimized Batch Processing ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srwma_batch_into(
     in_ptr: *const f64,
@@ -2769,15 +2619,12 @@ pub fn srwma_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Calculate output matrix dimensions
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let total_size = rows * len;
 
-        // Get output slice
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        // Use batch_inner_into for direct computation
         srwma_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

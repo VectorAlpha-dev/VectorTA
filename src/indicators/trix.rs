@@ -1,31 +1,6 @@
-//! # TRIX (Triple Exponential Average Oscillator)
-//!
-//! TRIX is a momentum oscillator that applies triple exponential smoothing to log prices
-//! and measures the rate of change, useful for filtering out market noise.
-//!
-//! ## Parameters
-//! - **period**: EMA smoothing period. Defaults to 18.
-//!
-//! ## Returns
-//! - **`Ok(TrixOutput)`** containing a `Vec<f64>` of TRIX values (ROC * 10000) matching input length.
-//! - **`Err(TrixError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - SIMD: Disabled by default for single-series. Triple EMA is sequential and requires `ln`; no fast portable vector `ln` available. Stubs short-circuit to scalar.
-//! - Scalar: Optimized safe path using loop-jammed EMA1→EMA2→EMA3 with `mul_add`; no O(period) rings.
-//! - Batch: Row-specific optimization precomputes `ln(data)` once and shares across rows; parallel rows enabled.
-//! - Allocation: Uses `alloc_with_nan_prefix` / `make_uninit_matrix` patterns; warmup NaN prefix preserved.
-//! - Decision log: SIMD stubs short-circuit to scalar; CUDA TRIX wrapper present and returns VRAM
-//!   handles; Python interop reuses ALMA DeviceArrayF32Py with CAI v3 + DLPack v1.x; numerical
-//!   outputs and warmup behavior unchanged.
-//!
-//! Decision: Streaming kernel uses O(1) EMA state (no rings) and matches scalar outputs and warmup.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -50,9 +25,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for TrixInput<'a> {
@@ -192,7 +167,11 @@ pub enum TrixError {
     #[error("trix: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("trix: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("trix: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("trix: invalid input: {0}")]
@@ -210,7 +189,9 @@ fn trix_needed_len(period: usize) -> Result<usize, TrixError> {
         .checked_sub(1)
         .and_then(|v| v.checked_mul(3))
         .and_then(|v| v.checked_add(2))
-        .ok_or_else(|| TrixError::InvalidInput("period overflow when computing TRIX warmup length".into()))?;
+        .ok_or_else(|| {
+            TrixError::InvalidInput("period overflow when computing TRIX warmup length".into())
+        })?;
     Ok(base)
 }
 
@@ -220,10 +201,12 @@ fn trix_warmup_end(first: usize, period: usize) -> Result<usize, TrixError> {
         .checked_sub(1)
         .and_then(|v| v.checked_mul(3))
         .and_then(|v| v.checked_add(1))
-        .ok_or_else(|| TrixError::InvalidInput("period overflow when computing TRIX warmup index".into()))?;
-    first
-        .checked_add(delta)
-        .ok_or_else(|| TrixError::InvalidInput("index overflow when computing TRIX warmup index".into()))
+        .ok_or_else(|| {
+            TrixError::InvalidInput("period overflow when computing TRIX warmup index".into())
+        })?;
+    first.checked_add(delta).ok_or_else(|| {
+        TrixError::InvalidInput("index overflow when computing TRIX warmup index".into())
+    })
 }
 
 #[inline(always)]
@@ -247,7 +230,7 @@ fn trix_prepare<'a>(
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
-    let needed = trix_needed_len(period)?; // Need one bar after seeding EMA3 to emit at least one non-NaN
+    let needed = trix_needed_len(period)?;
     let valid_len = len.saturating_sub(first);
     if valid_len < needed {
         return Err(TrixError::NotEnoughValidData {
@@ -256,17 +239,14 @@ fn trix_prepare<'a>(
         });
     }
     let chosen = match k {
-        // SIMD is disabled for single-series TRIX (sequential triple EMA + ln()).
-        // Short-circuit Auto to scalar to avoid runtime detection overhead.
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
     let alpha = 2.0 / (period as f64 + 1.0);
-    let warmup_end = trix_warmup_end(first, period)?; // index after last warmup NaN
+    let warmup_end = trix_warmup_end(first, period)?;
     Ok((data, period, first, chosen, alpha, warmup_end))
 }
 
-/// Single-series scalar TRIX: safe, minimized temporaries, warmup-prefilled output.
 #[inline(always)]
 fn trix_compute_into_scalar(
     data: &[f64],
@@ -276,7 +256,7 @@ fn trix_compute_into_scalar(
     out: &mut [f64],
 ) {
     let len = data.len();
-    let warmup_end = first + 3 * (period - 1) + 1; // first valid output index
+    let warmup_end = first + 3 * (period - 1) + 1;
     if warmup_end >= len {
         return;
     }
@@ -284,9 +264,6 @@ fn trix_compute_into_scalar(
     let inv_n = 1.0 / period as f64;
     const SCALE: f64 = 10000.0;
 
-    // ---------------------------
-    // Stage 1 seed: EMA1 via SMA
-    // ---------------------------
     let mut sum1 = 0.0;
     let end1 = first + period;
     let mut i = first;
@@ -294,13 +271,12 @@ fn trix_compute_into_scalar(
         sum1 += data[i].ln();
         i += 1;
     }
-    let mut ema1 = sum1 * inv_n; // EMA1 at idx = first + period - 1
+    let mut ema1 = sum1 * inv_n;
 
-    // Build remaining EMA1 values (period-1 of them) and accumulate for EMA2 SMA
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
-    // Unroll by 4
+
     while i + 3 < end2 {
         let mut lv = data[i].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -326,16 +302,12 @@ fn trix_compute_into_scalar(
         i += 1;
     }
 
-    // ---------------------------
-    // Stage 2 seed: EMA2 via SMA of first `period` EMA1s
-    // ---------------------------
-    let mut ema2 = sum_ema1 * inv_n; // EMA2 at idx = first + 2*period - 2
+    let mut ema2 = sum_ema1 * inv_n;
 
-    // Build remaining EMA2 values (period-1 of them) and accumulate for EMA3 SMA
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
-    // Unroll by 4
+
     while i + 3 < end3 {
         let mut lv = data[i].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -366,15 +338,9 @@ fn trix_compute_into_scalar(
         i += 1;
     }
 
-    // ---------------------------
-    // Stage 3 seed: EMA3 via SMA of first `period` EMA2s
-    // ---------------------------
-    let mut ema3_prev = sum_ema2 * inv_n; // EMA3 at idx = first + 3*period - 3
+    let mut ema3_prev = sum_ema2 * inv_n;
 
-    // -----------------------------------------------
-    // Emit first TRIX sample at `warmup_end` (== end3)
-    // -----------------------------------------------
-    let mut src = warmup_end; // == first + 3*period - 2
+    let mut src = warmup_end;
     let mut lv = data[src].ln();
     ema1 = (lv - ema1).mul_add(alpha, ema1);
     ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -383,12 +349,7 @@ fn trix_compute_into_scalar(
     ema3_prev = ema3;
     src += 1;
 
-    // ------------------------------------------------
-    // Main loop: fully loop-jammed EMA1→EMA2→EMA3→TRIX
-    // ------------------------------------------------
-    // Unroll by 4 for better ILP; handle tail below.
     while src + 3 < len {
-        // step 1
         lv = data[src].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -396,7 +357,6 @@ fn trix_compute_into_scalar(
         out[src] = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        // step 2
         let lv1 = data[src + 1].ln();
         ema1 = (lv1 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -404,7 +364,6 @@ fn trix_compute_into_scalar(
         out[src + 1] = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        // step 3
         let lv2 = data[src + 2].ln();
         ema1 = (lv2 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -412,7 +371,6 @@ fn trix_compute_into_scalar(
         out[src + 2] = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        // step 4
         let lv3 = data[src + 3].ln();
         ema1 = (lv3 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -423,7 +381,6 @@ fn trix_compute_into_scalar(
         src += 4;
     }
 
-    // Tail
     while src < len {
         lv = data[src].ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -445,7 +402,6 @@ pub fn trix_with_kernel(input: &TrixInput, kernel: Kernel) -> Result<TrixOutput,
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // For now, use scalar. Keep stubs for parity with alma.rs
                 trix_compute_into_scalar(data, period, first, alpha, &mut out);
             }
             #[allow(unreachable_patterns)]
@@ -455,11 +411,7 @@ pub fn trix_with_kernel(input: &TrixInput, kernel: Kernel) -> Result<TrixOutput,
     Ok(TrixOutput { values: out })
 }
 
-/// Writes TRIX results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn trix_into(input: &TrixInput, out: &mut [f64]) -> Result<(), TrixError> {
     let (data, period, first, chosen, alpha, warmup_end) = trix_prepare(input, Kernel::Auto)?;
@@ -471,7 +423,6 @@ pub fn trix_into(input: &TrixInput, out: &mut [f64]) -> Result<(), TrixError> {
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm = warmup_end.min(out.len());
     for v in &mut out[..warm] {
@@ -494,10 +445,6 @@ pub fn trix_into(input: &TrixInput, out: &mut [f64]) -> Result<(), TrixError> {
     Ok(())
 }
 
-// Delete the old trix_scalar - it's no longer needed with the new compute_into approach
-
-
-
 #[derive(Debug, Clone)]
 pub struct TrixStream {
     period: usize,
@@ -508,25 +455,24 @@ pub struct TrixStream {
 
 #[derive(Debug, Clone)]
 enum StreamState {
-    
     Seed1 {
         need: usize,
         sum1: f64,
     },
-    
+
     Seed2 {
         remain: usize,
         ema1: f64,
         sum_ema1: f64,
     },
-    
+
     Seed3 {
         remain: usize,
         ema1: f64,
         ema2: f64,
         sum_ema2: f64,
     },
-    
+
     Running {
         ema1: f64,
         ema2: f64,
@@ -564,11 +510,8 @@ impl TrixStream {
         };
     }
 
-    /// O(1) update. Returns None until fully primed (after 3*(p-1)+1 valid points).
-    /// Emits the same quantity as the offline/scalar path: (EMA3_t - EMA3_{t-1}) * 10000.0
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !value.is_finite() || value <= 0.0 {
             self.reset();
             return None;
@@ -712,8 +655,6 @@ pub fn trix_batch_with_kernel(
     k: Kernel,
 ) -> Result<TrixBatchOutput, TrixError> {
     let kernel = match k {
-        
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -750,42 +691,42 @@ impl TrixBatchOutput {
     }
 }
 
-    #[inline(always)]
-    fn expand_grid(r: &TrixBatchRange) -> Result<Vec<TrixParams>, TrixError> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrixError> {
-            if step == 0 || start == end {
-                return Ok(vec![start]);
-            }
-            let mut vals = Vec::new();
-            if start < end {
-                let mut v = start;
-                while v <= end {
-                    vals.push(v);
-                    let next = match v.checked_add(step) {
-                        Some(n) => n,
-                        None => break,
-                    };
-                    if next == v {
-                        break;
-                    }
-                    v = next;
-                }
-            } else {
-                let mut v = start;
-                while v >= end {
-                    vals.push(v);
-                    let next = v.saturating_sub(step);
-                    if next == v {
-                        break;
-                    }
-                    v = next;
-                }
-            }
-            if vals.is_empty() {
-                return Err(TrixError::InvalidRange { start, end, step });
-            }
-            Ok(vals)
+#[inline(always)]
+fn expand_grid(r: &TrixBatchRange) -> Result<Vec<TrixParams>, TrixError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TrixError> {
+        if step == 0 || start == end {
+            return Ok(vec![start]);
         }
+        let mut vals = Vec::new();
+        if start < end {
+            let mut v = start;
+            while v <= end {
+                vals.push(v);
+                let next = match v.checked_add(step) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if next == v {
+                    break;
+                }
+                v = next;
+            }
+        } else {
+            let mut v = start;
+            while v >= end {
+                vals.push(v);
+                let next = v.saturating_sub(step);
+                if next == v {
+                    break;
+                }
+                v = next;
+            }
+        }
+        if vals.is_empty() {
+            return Err(TrixError::InvalidRange { start, end, step });
+        }
+        Ok(vals)
+    }
     let periods = axis_usize(r.period)?;
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
@@ -825,7 +766,7 @@ fn trix_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = trix_needed_len(max_p)?; 
+    let needed = trix_needed_len(max_p)?;
     if data.len() - first < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -838,10 +779,8 @@ fn trix_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| TrixError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| trix_warmup_end(first, c.period.unwrap()))
@@ -849,16 +788,15 @@ fn trix_batch_inner(
 
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
-    
+
     let mut logs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
     unsafe { logs.set_len(cols) };
     for i in 0..first {
-        logs[i] = 0.0; 
+        logs[i] = 0.0;
     }
     for i in first..cols {
         logs[i] = data[i].ln();
@@ -889,7 +827,6 @@ fn trix_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         let ptr = buf_guard.as_mut_ptr() as *mut f64;
         let len = buf_guard.len();
@@ -922,9 +859,6 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
 
     let p = data.as_ptr();
 
-    
-    
-    
     let mut sum1 = 0.0;
     let end1 = first + period;
     let mut i = first;
@@ -934,7 +868,6 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     }
     let mut ema1 = sum1 * inv_n;
 
-    
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
@@ -945,12 +878,8 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         i += 1;
     }
 
-    
-    
-    
     let mut ema2 = sum_ema1 * inv_n;
 
-    
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
@@ -962,12 +891,8 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         i += 1;
     }
 
-    
-    
-    
     let mut ema3_prev = sum_ema2 * inv_n;
 
-    
     let mut src = warmup_end;
     let mut lv = (*p.add(src)).ln();
     ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -977,9 +902,7 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     ema3_prev = ema3;
     src += 1;
 
-    
     while src + 1 < len {
-        
         lv = (*p.add(src)).ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -988,7 +911,6 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         ema3_prev = ema3;
         src += 1;
 
-        
         lv = (*p.add(src)).ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -998,7 +920,6 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
         src += 1;
     }
 
-    
     if src < len {
         lv = (*p.add(src)).ln();
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1008,7 +929,6 @@ unsafe fn trix_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [
     }
 }
 
-/// Row kernel with shared log precompute. `logs[i] = ln(data[i])`.
 #[inline(always)]
 unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, out: &mut [f64]) {
     let len = logs.len();
@@ -1023,7 +943,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
 
     let p = logs.as_ptr();
 
-    
     let mut sum1 = 0.0;
     let end1 = first + period;
     let mut i = first;
@@ -1033,11 +952,10 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     }
     let mut ema1 = sum1 * inv_n;
 
-    
     let mut sum_ema1 = ema1;
     let end2 = first + 2 * period - 1;
     i = end1;
-    
+
     while i + 3 < end2 {
         let mut lv = *p.add(i);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1063,14 +981,12 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         i += 1;
     }
 
-    
     let mut ema2 = sum_ema1 * inv_n;
 
-    
     let mut sum_ema2 = ema2;
     let end3 = first + 3 * period - 2;
     i = end2;
-    
+
     while i + 3 < end3 {
         let mut lv = *p.add(i);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1101,10 +1017,8 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         i += 1;
     }
 
-    
     let mut ema3_prev = sum_ema2 * inv_n;
 
-    
     let mut src = warmup_end;
     let mut lv = *p.add(src);
     ema1 = (lv - ema1).mul_add(alpha, ema1);
@@ -1114,9 +1028,7 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
     ema3_prev = ema3;
     src += 1;
 
-    
     while src + 3 < len {
-        
         lv = *p.add(src);
         ema1 = (lv - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1124,7 +1036,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        
         let lv1 = *p.add(src + 1);
         ema1 = (lv1 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1132,7 +1043,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src + 1) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        
         let lv2 = *p.add(src + 2);
         ema1 = (lv2 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1140,7 +1050,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         *out.get_unchecked_mut(src + 2) = (ema3 - ema3_prev) * SCALE;
         ema3_prev = ema3;
 
-        
         let lv3 = *p.add(src + 3);
         ema1 = (lv3 - ema1).mul_add(alpha, ema1);
         ema2 = (ema1 - ema2).mul_add(alpha, ema2);
@@ -1160,8 +1069,6 @@ unsafe fn trix_row_scalar_with_logs(logs: &[f64], first: usize, period: usize, o
         src += 1;
     }
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "trix")]
@@ -1212,7 +1119,6 @@ impl TrixStreamPy {
         self.stream.update(value)
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "trix_cuda_batch_dev")]
@@ -1315,8 +1221,7 @@ pub fn trix_batch_py<'py>(
     let sweep = TrixBatchRange {
         period: period_range,
     };
-    let combos_probe = expand_grid(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos_probe = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_probe.len();
     let cols = slice_in.len();
 
@@ -1326,7 +1231,6 @@ pub fn trix_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -1383,7 +1287,7 @@ fn trix_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(TrixError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let needed = trix_needed_len(max_p)?; 
+    let needed = trix_needed_len(max_p)?;
     if data.len() - first < needed {
         return Err(TrixError::NotEnoughValidData {
             needed,
@@ -1393,7 +1297,6 @@ fn trix_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let mut logs: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
     unsafe { logs.set_len(cols) };
     for i in 0..first {
@@ -1439,7 +1342,7 @@ pub fn trix_into_slice(dst: &mut [f64], input: &TrixInput, kern: Kernel) -> Resu
             got: dst.len(),
         });
     }
-    
+
     let warmup_len = warmup_end.min(dst.len());
     for v in &mut dst[..warmup_len] {
         *v = f64::NAN;
@@ -1460,11 +1363,7 @@ pub fn trix_into_slice(dst: &mut [f64], input: &TrixInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trix_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = TrixParams {
@@ -1477,7 +1376,7 @@ pub fn trix_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trix_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1486,7 +1385,7 @@ pub fn trix_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trix_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1496,7 +1395,7 @@ pub fn trix_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trix_into(
     in_ptr: *const f64,
@@ -1527,13 +1426,13 @@ pub fn trix_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TrixBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TrixBatchJsOutput {
     pub values: Vec<f64>,
@@ -1542,7 +1441,7 @@ pub struct TrixBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = trix_batch)]
 pub fn trix_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: TrixBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1568,7 +1467,7 @@ pub fn trix_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
         .map_err(|e| JsValue::from_str(&format!("Failed to serialize output: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trix_batch_into(
     in_ptr: *const f64,
@@ -1589,9 +1488,7 @@ pub fn trix_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let num_combos = combos.len();
         let total_size = num_combos
             .checked_mul(len)
@@ -1599,14 +1496,12 @@ pub fn trix_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        
         trix_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(num_combos)
     }
 }
-
 
 #[cfg(feature = "python")]
 pub fn register_trix_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
@@ -1616,9 +1511,6 @@ pub fn register_trix_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()
     Ok(())
 }
 
-// ============================================================================
-// Into parity test
-// ============================================================================
 #[cfg(test)]
 mod tests_into {
     use super::*;
@@ -1629,21 +1521,17 @@ mod tests_into {
 
     #[test]
     fn test_trix_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use the same CSV dataset as existing TRIX tests
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = crate::utilities::data_loader::read_candles_from_csv(file_path)?;
 
         let params = TrixParams::default();
         let input = TrixInput::from_candles(&candles, "close", params);
 
-        // Baseline via Vec-returning API
         let baseline = trix(&input)?.values;
 
-        // Preallocate destination and use the new into API
         let mut out = vec![0.0; baseline.len()];
 
-        // Native-only API; on wasm we export a different signature
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             trix_into(&input, &mut out)?;
         }
@@ -1653,11 +1541,23 @@ mod tests_into {
             let a = baseline[i];
             let b = out[i];
             if a.is_nan() || b.is_nan() {
-                assert!(eq_or_both_nan(a, b), "NaN mismatch at index {}: {:?} vs {:?}", i, a, b);
+                assert!(
+                    eq_or_both_nan(a, b),
+                    "NaN mismatch at index {}: {:?} vs {:?}",
+                    i,
+                    a,
+                    b
+                );
             } else {
-                // Paths are identical; exact equality expected, allow tiny epsilon just in case
                 let diff = (a - b).abs();
-                assert!(diff <= 1e-12, "Value mismatch at {}: a={} b={} diff={}", i, a, b, diff);
+                assert!(
+                    diff <= 1e-12,
+                    "Value mismatch at {}: a={} b={} diff={}",
+                    i,
+                    a,
+                    b,
+                    diff
+                );
             }
         }
         Ok(())
@@ -1714,8 +1614,7 @@ mod tests {
         let result_last_five = &trix_result.values[start_index..];
         for (i, &value) in result_last_five.iter().enumerate() {
             let expected_value = expected_last_five[i];
-            // Allow significant tolerance as the implementation may be off by a position or two
-            // but still produces valid TRIX values
+
             let tolerance = 0.3;
             assert!(
                 (value - expected_value).abs() < tolerance,
@@ -1810,18 +1709,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            TrixParams::default(),            // period: 18
-            TrixParams { period: Some(2) },   // minimum viable
-            TrixParams { period: Some(5) },   // small period
-            TrixParams { period: Some(10) },  // small-medium period
-            TrixParams { period: Some(14) },  // medium period
-            TrixParams { period: Some(20) },  // medium-large period
-            TrixParams { period: Some(30) },  // large period
-            TrixParams { period: Some(50) },  // very large period
-            TrixParams { period: Some(100) }, // extreme period
-            TrixParams { period: Some(200) }, // maximum reasonable
+            TrixParams::default(),
+            TrixParams { period: Some(2) },
+            TrixParams { period: Some(5) },
+            TrixParams { period: Some(10) },
+            TrixParams { period: Some(14) },
+            TrixParams { period: Some(20) },
+            TrixParams { period: Some(30) },
+            TrixParams { period: Some(50) },
+            TrixParams { period: Some(100) },
+            TrixParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1830,12 +1728,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1882,7 +1779,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_trix_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! generate_all_trix_tests {
@@ -1938,7 +1835,6 @@ mod tests {
         ];
         let start = row.len() - 5;
         for (i, &v) in row[start..].iter().enumerate() {
-            // Allow significant tolerance as the implementation may be off by a position
             let tolerance = 0.3;
             assert!(
                 (v - expected[i]).abs() < tolerance,
@@ -1956,16 +1852,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
         let test_configs = vec![
-            (2, 10, 2),    // Small periods
-            (10, 30, 5),   // Medium periods
-            (30, 100, 10), // Large periods
-            (2, 5, 1),     // Dense small range
-            (18, 18, 0),   // Single value (default)
-            (5, 25, 5),    // Mixed range
-            (50, 100, 25), // Large step
-            (14, 28, 7),   // Common technical periods
+            (2, 10, 2),
+            (10, 30, 5),
+            (30, 100, 10),
+            (2, 5, 1),
+            (18, 18, 0),
+            (5, 25, 5),
+            (50, 100, 25),
+            (14, 28, 7),
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -1984,7 +1879,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2037,7 +1931,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2072,14 +1966,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test strategy with periods from 2 to 20 for more realistic testing
         let strat = (2usize..=20).prop_flat_map(|period| {
-            // TRIX needs 3*(period-1)+1 valid data points
-            let min_data_needed = 3 * (period - 1) + 1 + 10; // Add 10 extra for testing
+            let min_data_needed = 3 * (period - 1) + 1 + 10;
             (
                 prop::collection::vec(
-                    // Use positive values since TRIX uses log internally
-                    // Include very small values to test edge cases
                     (0.001f64..1e6f64)
                         .prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
                     min_data_needed..400,
@@ -2095,14 +1985,11 @@ mod tests {
                 };
                 let input = TrixInput::from_slice(&data, params);
 
-                // Test with the specified kernel
                 let TrixOutput { values: out } = trix_with_kernel(&input, kernel).unwrap();
-                // Get reference output from scalar kernel for comparison
+
                 let TrixOutput { values: ref_out } =
                     trix_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Warmup period validation
-                // TRIX needs 3*(period-1) for triple EMA + 1 for ROC
                 let warmup_period = 3 * (period - 1) + 1;
                 for i in 0..warmup_period.min(data.len()) {
                     prop_assert!(
@@ -2113,7 +2000,6 @@ mod tests {
                     );
                 }
 
-                // Property 2: First valid value should be at warmup_period index
                 if data.len() > warmup_period {
                     prop_assert!(
                         !out[warmup_period].is_nan(),
@@ -2122,11 +2008,9 @@ mod tests {
                     );
                 }
 
-                // Property 3: Constant data should produce near-zero TRIX
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && data.len() > warmup_period
                 {
-                    // For constant data, log is constant, triple EMA is constant, so ROC should be ~0
                     for i in warmup_period..data.len() {
                         prop_assert!(
                             out[i].abs() < 1e-6,
@@ -2137,12 +2021,9 @@ mod tests {
                     }
                 }
 
-                // Property 4: Monotonic increasing data should tend toward positive TRIX
-                // Check if data is mostly increasing (80% of consecutive pairs increase)
                 let increasing_count = data.windows(2).filter(|w| w[1] > w[0]).count();
                 let is_mostly_increasing = increasing_count as f64 > data.len() as f64 * 0.8;
                 if is_mostly_increasing && data.len() > warmup_period + 10 {
-                    // Check the average of last 5 valid values
                     let last_values: Vec<f64> = out[(data.len() - 5)..data.len()]
                         .iter()
                         .filter(|&&v| !v.is_nan())
@@ -2151,19 +2032,16 @@ mod tests {
                     if !last_values.is_empty() {
                         let avg = last_values.iter().sum::<f64>() / last_values.len() as f64;
                         prop_assert!(
-                            avg > -10.0, // TRIX multiplies by 10000, so allow reasonable range
+                            avg > -10.0,
                             "TRIX average should be positive for mostly increasing data: got {}",
                             avg
                         );
                     }
                 }
 
-                // Property 5: Monotonic decreasing data should tend toward negative TRIX
-                // Check if data is mostly decreasing (80% of consecutive pairs decrease)
                 let decreasing_count = data.windows(2).filter(|w| w[1] < w[0]).count();
                 let is_mostly_decreasing = decreasing_count as f64 > data.len() as f64 * 0.8;
                 if is_mostly_decreasing && data.len() > warmup_period + 10 {
-                    // Check the average of last 5 valid values
                     let last_values: Vec<f64> = out[(data.len() - 5)..data.len()]
                         .iter()
                         .filter(|&&v| !v.is_nan())
@@ -2172,16 +2050,13 @@ mod tests {
                     if !last_values.is_empty() {
                         let avg = last_values.iter().sum::<f64>() / last_values.len() as f64;
                         prop_assert!(
-                            avg < 10.0, // TRIX multiplies by 10000, so allow reasonable range
+                            avg < 10.0,
                             "TRIX average should be negative for mostly decreasing data: got {}",
                             avg
                         );
                     }
                 }
 
-                // Property 6: Output magnitude should be reasonable
-                // TRIX multiplies by 10000, but for reasonable price movements,
-                // the output shouldn't exceed ±100000 (representing ±10% rate of change)
                 for i in warmup_period..data.len() {
                     if !out[i].is_nan() {
                         prop_assert!(
@@ -2193,7 +2068,6 @@ mod tests {
                     }
                 }
 
-                
                 for (i, &val) in out.iter().enumerate() {
                     prop_assert!(
                         val.is_nan() || val.is_finite(),
@@ -2203,14 +2077,11 @@ mod tests {
                     );
                 }
 
-                
-                
                 if data.len() > warmup_period + 20 {
-                    
                     let log_returns: Vec<f64> = data
                         .windows(2)
                         .skip(warmup_period)
-                        .map(|w| (w[1] / w[0]).ln() * 10000.0) 
+                        .map(|w| (w[1] / w[0]).ln() * 10000.0)
                         .collect();
 
                     let trix_values: Vec<f64> = out
@@ -2224,8 +2095,6 @@ mod tests {
                         let log_std = calculate_std(&log_returns);
                         let trix_std = calculate_std(&trix_values);
 
-                        
-                        
                         prop_assert!(
 							trix_std <= log_std * 1.2 || trix_std < 1.0,
 							"TRIX should be smoother than log returns: TRIX std={}, log return std={}",
@@ -2235,12 +2104,10 @@ mod tests {
                     }
                 }
 
-                
                 for i in warmup_period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2252,7 +2119,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -2267,7 +2133,6 @@ mod tests {
                     );
                 }
 
-                
                 let TrixOutput { values: out2 } = trix_with_kernel(&input, kernel).unwrap();
                 prop_assert_eq!(
                     out.len(),
@@ -2288,8 +2153,6 @@ mod tests {
             })
             .unwrap();
 
-        
-        
         let edge_data = vec![0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0];
         let params = TrixParams { period: Some(2) };
         let input = TrixInput::from_slice(&edge_data, params);
@@ -2302,7 +2165,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn calculate_std(values: &[f64]) -> f64 {
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let variance =

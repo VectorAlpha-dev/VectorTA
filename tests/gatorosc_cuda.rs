@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::gatorosc::{
     gatorosc_batch_with_kernel, gatorosc_with_kernel, GatorOscBatchRange, GatorOscInput,
     GatorOscParams,
@@ -104,8 +102,8 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -116,7 +114,6 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
 
     let (jl, js, tl, ts, ll, ls) = (13usize, 8usize, 8usize, 5usize, 5usize, 3usize);
 
-    
     let mut cpu_u = vec![f64::NAN; cols * rows];
     let mut cpu_l = vec![f64::NAN; cols * rows];
     let mut cpu_uc = vec![f64::NAN; cols * rows];
@@ -144,7 +141,6 @@ fn gatorosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         }
     }
 
-    
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaGatorOsc::new(0).expect("CudaGatorOsc::new");
     let dev = cuda

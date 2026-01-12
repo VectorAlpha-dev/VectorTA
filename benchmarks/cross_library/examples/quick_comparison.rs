@@ -6,7 +6,7 @@ fn main() {
     println!("Quick Performance Comparison: SMA\n");
     println!("=================================\n");
 
-    
+
     let sizes = vec![1000, 10000, 100000];
     let period = 14;
     let iterations = 100;
@@ -15,10 +15,10 @@ fn main() {
         println!("Data size: {} elements", size);
         println!("-----------------------");
 
-        
+
         let data: Vec<f64> = (0..size).map(|i| (i as f64).sin() * 100.0 + 50.0).collect();
 
-        
+
         let input = sma::SmaInput::from_slice(&data, sma::SmaParams { period: Some(period) });
         let start = Instant::now();
         for _ in 0..iterations {
@@ -32,7 +32,7 @@ fn main() {
         println!("    Time per iteration: {:.2} µs", rust_per_iter.as_micros() as f64 / 1000.0);
         println!("    Throughput: {:.2} MOPS", rust_throughput);
 
-        
+
         unsafe {
             let mut output = vec![0.0; size];
             let options = vec![period as f64];
@@ -57,7 +57,7 @@ fn main() {
             println!("    Time per iteration: {:.2} µs", tulip_per_iter.as_micros() as f64 / 1000.0);
             println!("    Throughput: {:.2} MOPS", tulip_throughput);
 
-            
+
             let speedup = rust_throughput / tulip_throughput;
             if speedup > 1.0 {
                 println!("  🚀 Rust is {:.2}x faster!", speedup);
@@ -69,7 +69,7 @@ fn main() {
         println!();
     }
 
-    
+
     #[cfg(feature = "nightly-avx")]
     {
         println!("✅ SIMD optimizations (nightly-avx) are ENABLED");

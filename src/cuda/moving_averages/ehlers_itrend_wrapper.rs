@@ -1,10 +1,3 @@
-//! CUDA support for the Ehlers Instantaneous Trend (ITrend) indicator.
-//!
-//! Provides zero-copy device handles for both batch parameter sweeps and
-//! time-major many-series execution. The wrapper mirrors key ALMA wrapper
-//! facilities (policies, introspection, VRAM checks, deterministic sync),
-//! adapted to the recursive nature of ITrend.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -23,8 +16,8 @@ use std::convert::TryFrom;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use thiserror::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaEhlersITrendError {
@@ -32,7 +25,9 @@ pub enum CudaEhlersITrendError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
     OutOfMemory {
         required: usize,
         free: usize,
@@ -54,10 +49,6 @@ pub enum CudaEhlersITrendError {
     #[error("Device mismatch: buffer bound to a different device (buf={buf}, current={current})")]
     DeviceMismatch { buf: u32, current: u32 },
 }
-
-// Display derives from `thiserror::Error` per-variant messages.
-
-// -------- Kernel policy + introspection (API parity with ALMA) --------
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -145,7 +136,6 @@ impl CudaEhlersITrend {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_itrend_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            // O4 = most optimized JIT level; make it explicit.
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
@@ -175,7 +165,9 @@ impl CudaEhlersITrend {
     }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     pub fn new_with_policy(
         device_id: usize,
@@ -202,9 +194,10 @@ impl CudaEhlersITrend {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
 
-    // VRAM helpers
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -235,7 +228,6 @@ impl CudaEhlersITrend {
                 })
             }
         } else {
-            // If mem info unavailable, be permissive (preserve previous behavior)
             Ok(())
         }
     }
@@ -288,38 +280,44 @@ impl CudaEhlersITrend {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        // VRAM check: prices + per-combo params + output
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("series_len byte size overflow".into()))?;
+            .ok_or_else(|| {
+                CudaEhlersITrendError::InvalidInput("series_len byte size overflow".into())
+            })?;
         let params_each = 2usize
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("params byte size overflow".into()))?;
-        let params_bytes = n_combos
-            .checked_mul(params_each)
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("params total byte size overflow".into()))?;
+            .ok_or_else(|| {
+                CudaEhlersITrendError::InvalidInput("params byte size overflow".into())
+            })?;
+        let params_bytes = n_combos.checked_mul(params_each).ok_or_else(|| {
+            CudaEhlersITrendError::InvalidInput("params total byte size overflow".into())
+        })?;
         let out_each = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("output row byte size overflow".into()))?;
-        let out_bytes = n_combos
-            .checked_mul(out_each)
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("output total byte size overflow".into()))?;
+            .ok_or_else(|| {
+                CudaEhlersITrendError::InvalidInput("output row byte size overflow".into())
+            })?;
+        let out_bytes = n_combos.checked_mul(out_each).ok_or_else(|| {
+            CudaEhlersITrendError::InvalidInput("output total byte size overflow".into())
+        })?;
         let required = prices_bytes
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("aggregate byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety
+            .ok_or_else(|| {
+                CudaEhlersITrendError::InvalidInput("aggregate byte size overflow".into())
+            })?;
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = Self::h2d_from_slice_auto(data_f32, &self.stream)?;
         let d_warmups = DeviceBuffer::from_slice(&prepared.warmups)?;
         let d_max_dcs = DeviceBuffer::from_slice(&prepared.max_dcs)?;
-        let total_elems = prepared
-            .series_len
-            .checked_mul(n_combos)
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("output element count overflow".into()))?;
+        let total_elems = prepared.series_len.checked_mul(n_combos).ok_or_else(|| {
+            CudaEhlersITrendError::InvalidInput("output element count overflow".into())
+        })?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems)? };
 
         self.launch_batch_kernel(
@@ -332,7 +330,7 @@ impl CudaEhlersITrend {
             prepared.max_shared_dc,
             &mut d_out,
         )?;
-        // Deterministic completion before returning a finished buffer
+
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -342,7 +340,6 @@ impl CudaEhlersITrend {
         })
     }
 
-    /// Device input → VRAM output; expands param sweep on host and launches batch kernel.
     pub fn ehlers_itrend_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -351,10 +348,14 @@ impl CudaEhlersITrend {
         sweep: &EhlersITrendBatchRange,
     ) -> Result<DeviceArrayF32, CudaEhlersITrendError> {
         if series_len == 0 {
-            return Err(CudaEhlersITrendError::InvalidInput("series_len is zero".into()));
+            return Err(CudaEhlersITrendError::InvalidInput(
+                "series_len is zero".into(),
+            ));
         }
         if first_valid >= series_len {
-            return Err(CudaEhlersITrendError::InvalidInput("first_valid out of range".into()));
+            return Err(CudaEhlersITrendError::InvalidInput(
+                "first_valid out of range".into(),
+            ));
         }
         let combos = expand_grid_cuda(sweep)?;
         if combos.is_empty() {
@@ -387,9 +388,9 @@ impl CudaEhlersITrend {
         }
         let d_warmups = DeviceBuffer::from_slice(&warmups)?;
         let d_max_dcs = DeviceBuffer::from_slice(&max_dcs)?;
-        let total_elems = n_combos
-            .checked_mul(series_len)
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("output element count overflow".into()))?;
+        let total_elems = n_combos.checked_mul(series_len).ok_or_else(|| {
+            CudaEhlersITrendError::InvalidInput("output element count overflow".into())
+        })?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems)? };
         self.launch_batch_kernel(
             d_prices,
@@ -401,7 +402,7 @@ impl CudaEhlersITrend {
             max_shared_dc,
             &mut d_out,
         )?;
-        // Single sync point at API boundary
+
         self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out,
@@ -481,28 +482,31 @@ impl CudaEhlersITrend {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM check: input + output + first_valids (small)
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let in_bytes_each = num_series
             .checked_mul(series_len)
             .and_then(|v| v.checked_mul(elem_f32))
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("matrix byte size overflow".into()))?;
+            .ok_or_else(|| {
+                CudaEhlersITrendError::InvalidInput("matrix byte size overflow".into())
+            })?;
         let out_bytes = in_bytes_each;
-        let params_bytes = num_series
-            .checked_mul(elem_i32)
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("params byte size overflow".into()))?;
+        let params_bytes = num_series.checked_mul(elem_i32).ok_or_else(|| {
+            CudaEhlersITrendError::InvalidInput("params byte size overflow".into())
+        })?;
         let required = in_bytes_each
             .checked_add(out_bytes)
             .and_then(|v| v.checked_add(params_bytes))
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("aggregate byte size overflow".into()))?;
+            .ok_or_else(|| {
+                CudaEhlersITrendError::InvalidInput("aggregate byte size overflow".into())
+            })?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = Self::h2d_from_slice_auto(data_tm_f32, &self.stream)?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
-        let total_elems = num_series
-            .checked_mul(series_len)
-            .ok_or_else(|| CudaEhlersITrendError::InvalidInput("output element count overflow".into()))?;
+        let total_elems = num_series.checked_mul(series_len).ok_or_else(|| {
+            CudaEhlersITrendError::InvalidInput("output element count overflow".into())
+        })?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems)? };
 
         self.launch_many_series_kernel(
@@ -514,7 +518,7 @@ impl CudaEhlersITrend {
             prepared.max_dc,
             &mut d_out,
         )?;
-        // Deterministic completion before returning a finished buffer
+
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -604,9 +608,10 @@ impl CudaEhlersITrend {
         let func = self
             .module
             .get_function("ehlers_itrend_batch_f32")
-            .map_err(|_| CudaEhlersITrendError::MissingKernelSymbol { name: "ehlers_itrend_batch_f32" })?;
+            .map_err(|_| CudaEhlersITrendError::MissingKernelSymbol {
+                name: "ehlers_itrend_batch_f32",
+            })?;
 
-        // Serial per block; clamp to one thread. Dynamic shared memory matches kernel ring (max_dc+1).
         let block_x: u32 = 1;
         let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = ((max_shared_dc + 1) * std::mem::size_of::<f32>()) as u32;
@@ -621,7 +626,6 @@ impl CudaEhlersITrend {
             CudaEhlersITrendError::InvalidInput("max_shared_dc exceeds i32::MAX".into())
         })?;
 
-        // Chunk grid.x to <= 65,535 by offsetting parameter/output pointers per chunk
         for (start, len) in Self::grid_x_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
 
@@ -629,7 +633,6 @@ impl CudaEhlersITrend {
                 CudaEhlersITrendError::InvalidInput("n_combos exceeds i32::MAX".into())
             })?;
 
-            // Compute raw device pointers for this chunk without creating temporary owners.
             let warm_ptr_raw = unsafe { d_warmups.as_device_ptr().offset(start as isize).as_raw() };
             let maxdc_ptr_raw =
                 unsafe { d_max_dcs.as_device_ptr().offset(start as isize).as_raw() };
@@ -655,7 +658,8 @@ impl CudaEhlersITrend {
                     &mut max_shared_dc_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, grid, block, shared_bytes, &mut args)?;
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, &mut args)?;
             }
         }
         unsafe {
@@ -683,9 +687,10 @@ impl CudaEhlersITrend {
         let func = self
             .module
             .get_function("ehlers_itrend_many_series_one_param_f32")
-            .map_err(|_| CudaEhlersITrendError::MissingKernelSymbol { name: "ehlers_itrend_many_series_one_param_f32" })?;
+            .map_err(|_| CudaEhlersITrendError::MissingKernelSymbol {
+                name: "ehlers_itrend_many_series_one_param_f32",
+            })?;
 
-        // Serial per block; clamp to one thread. Dynamic shared memory matches kernel ring (max_dc+1).
         let block_x: u32 = 1;
         let block: BlockSize = (block_x, 1, 1).into();
         let shared_bytes = ((max_dc + 1) * std::mem::size_of::<f32>()) as u32;
@@ -701,7 +706,6 @@ impl CudaEhlersITrend {
         let mut max_dc_i = i32::try_from(max_dc)
             .map_err(|_| CudaEhlersITrendError::InvalidInput("max_dc exceeds i32::MAX".into()))?;
 
-        // Chunk grid.x to <= 65,535 by offsetting series pointers per chunk
         for (start, len) in Self::grid_x_chunks(num_series) {
             let grid: GridSize = (len as u32, 1, 1).into();
 
@@ -716,7 +720,6 @@ impl CudaEhlersITrend {
                 unsafe { d_prices_tm.as_device_ptr().offset(start as isize).as_raw() };
 
             unsafe {
-                // time-major: base-pointer offset by `start` series is correct when passing full stride
                 let mut prices_ptr = prices_ptr_raw;
                 let mut first_ptr = first_ptr_raw;
                 let mut out_ptr = out_ptr_raw;
@@ -729,7 +732,8 @@ impl CudaEhlersITrend {
                     &mut max_dc_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, grid, block, shared_bytes, &mut args)?;
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, &mut args)?;
             }
         }
         unsafe {
@@ -892,10 +896,9 @@ impl CudaEhlersITrend {
         stream: &Stream,
     ) -> Result<DeviceBuffer<T>, CudaEhlersITrendError> {
         use cust::memory::DeviceBuffer;
-        const PINNED_THRESHOLD_BYTES: usize = 1 << 20; // 1 MiB
+        const PINNED_THRESHOLD_BYTES: usize = 1 << 20;
         let bytes = src.len() * core::mem::size_of::<T>();
         if bytes >= PINNED_THRESHOLD_BYTES {
-            // Use page-locked host memory + async copy for large transfers
             let pinned = LockedBuffer::from_slice(src)?;
             let mut dst = unsafe { DeviceBuffer::uninitialized_async(src.len(), stream)? };
             unsafe {
@@ -907,8 +910,6 @@ impl CudaEhlersITrend {
         }
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
@@ -1077,9 +1078,6 @@ pub mod benches {
 fn expand_grid_cuda(
     range: &EhlersITrendBatchRange,
 ) -> Result<Vec<EhlersITrendParams>, CudaEhlersITrendError> {
-    // Robust semantics to match CPU:
-    // - step == 0 → singleton if start==end, else error
-    // - support reversed bounds by descending sequence
     fn axis(tuple: (usize, usize, usize)) -> Result<Vec<usize>, CudaEhlersITrendError> {
         let (start, end, step) = tuple;
         if step == 0 {

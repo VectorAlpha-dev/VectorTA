@@ -1,27 +1,3 @@
-//! # Ehlers Error Correcting Exponential Moving Average (ECEMA)
-//!
-//! Adaptive exponential moving average that automatically adjusts its gain to minimize
-//! error between the indicator and price. Tests multiple gain values and selects the
-//! one producing the least error for optimal smoothing and responsiveness.
-//!
-//! ## Parameters
-//! - **length**: Period for EMA calculation (default: 20)
-//! - **gain_limit**: Maximum gain value to test, divided by 10 (default: 50)
-//! - **pine_compatible**: Use Pine Script compatible calculation mode
-//! - **confirmed_only**: Use confirmed (previous) values only
-//!
-//! ## Returns
-//! - **values**: Adaptive EMA values with optimized gain selection
-//!
-//! ## Developer Status
-//! - **AVX2 kernel**: STUB - Falls back to scalar implementation
-//! - **AVX512 kernel**: STUB - Falls back to scalar implementation
-//! - **Streaming update**: O(1) - Closed-form discrete gain selection with batch-parity seeding
-//! - **Memory optimization**: GOOD - Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix)
-//! - **Decision note**: Scalar kernel optimized to O(1) per bar using a closed-form minimizer on the discrete gain grid; SIMD remains stubbed due to strict loop-carried dependency across time.
-
-
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -38,9 +14,6 @@ use crate::cuda::moving_averages::CudaEhlersEcema;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray2, PyUntypedArrayMethods};
 
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 mod ecema_python_cuda_handle {
     use super::*;
@@ -54,7 +27,7 @@ mod ecema_python_cuda_handle {
 
     #[pyclass(module = "ta_indicators.cuda", unsendable, name = "DeviceArrayF32Py")]
     pub struct DeviceArrayF32Py {
-        pub(crate) buf: Option<DeviceBuffer<f32>>, 
+        pub(crate) buf: Option<DeviceBuffer<f32>>,
         pub(crate) rows: usize,
         pub(crate) cols: usize,
         pub(crate) _ctx: Arc<Context>,
@@ -66,9 +39,9 @@ mod ecema_python_cuda_handle {
         #[getter]
         fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
             let d = PyDict::new(py);
-            // Required CAI v3 keys
+
             d.set_item("shape", (self.rows, self.cols))?;
-            d.set_item("typestr", "<f4")?; // little-endian float32
+            d.set_item("typestr", "<f4")?;
             d.set_item(
                 "strides",
                 (
@@ -82,14 +55,13 @@ mod ecema_python_cuda_handle {
                 .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?
                 .as_device_ptr()
                 .as_raw() as usize;
-            d.set_item("data", (ptr, false))?; // read_only = false
-            // Omit stream because producing stream is synchronized before return
+            d.set_item("data", (ptr, false))?;
+
             d.set_item("version", 3)?;
             Ok(d)
         }
 
         fn __dlpack_device__(&self) -> (i32, i32) {
-            // Discover allocation device from pointer attributes when possible.
             let mut device_ordinal: i32 = self.device_id as i32;
             unsafe {
                 let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
@@ -124,7 +96,6 @@ mod ecema_python_cuda_handle {
         ) -> PyResult<PyObject> {
             use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-            // Compute target device id and validate `dl_device` hint if provided.
             let (kdl, alloc_dev) = self.__dlpack_device__();
             if let Some(d) = dl_device.as_ref() {
                 if let Ok((dev_type, dev_id)) = d.extract::<(i32, i32)>(py) {
@@ -146,10 +117,8 @@ mod ecema_python_cuda_handle {
                 }
             }
 
-            // Accept Array API stream semantics but do nothing since producer is synced.
             let _ = stream;
 
-            // Move ownership of the VRAM buffer into the capsule holder
             let buf = self
                 .buf
                 .take()
@@ -167,14 +136,11 @@ mod ecema_python_cuda_handle {
     pub use DeviceArrayF32Py as EcemaDeviceArrayF32Py;
 }
 
-
-// Feature-gated imports for WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-// Core imports
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -184,24 +150,19 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-// Import EMA indicator for regular EMA calculation
 use crate::indicators::moving_averages::ema::{ema, ema_into_slice, EmaInput, EmaParams};
 
-// SIMD imports for AVX optimizations
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-// Parallel processing support
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
-// Standard library imports
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-// ==================== TRAIT IMPLEMENTATIONS ====================
 impl<'a> AsRef<[f64]> for EhlersEcemaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -212,8 +173,6 @@ impl<'a> AsRef<[f64]> for EhlersEcemaInput<'a> {
     }
 }
 
-// ==================== DATA STRUCTURES ====================
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum EhlersEcemaData<'a> {
     Candles {
@@ -223,15 +182,16 @@ pub enum EhlersEcemaData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct EhlersEcemaOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct EhlersEcemaParams {
     pub length: Option<usize>,
     pub gain_limit: Option<usize>,
@@ -250,7 +210,6 @@ impl Default for EhlersEcemaParams {
     }
 }
 
-/// Input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct EhlersEcemaInput<'a> {
     pub data: EhlersEcemaData<'a>,
@@ -303,7 +262,6 @@ impl<'a> EhlersEcemaInput<'a> {
     }
 }
 
-// ==================== BUILDER PATTERN ====================
 #[derive(Copy, Clone, Debug)]
 pub struct EhlersEcemaBuilder {
     length: Option<usize>,
@@ -381,7 +339,6 @@ impl EhlersEcemaBuilder {
     }
 }
 
-// ==================== ERROR HANDLING ====================
 #[derive(Debug, Error)]
 pub enum EhlersEcemaError {
     #[error("ehlers_ecema: Input data slice is empty.")]
@@ -406,7 +363,11 @@ pub enum EhlersEcemaError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("ehlers_ecema: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("ehlers_ecema: non-batch kernel passed to batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -415,8 +376,6 @@ pub enum EhlersEcemaError {
     SizeOverflow { what: &'static str },
 }
 
-
-/// Calculate Pine EMA in-place (no extra Vec)
 #[inline]
 fn calculate_pine_ema_into(
     dst: &mut [f64],
@@ -433,7 +392,7 @@ fn calculate_pine_ema_into(
     if first >= len {
         return;
     }
-    let mut ema = 0.0; 
+    let mut ema = 0.0;
     for i in first..len {
         let src = data[i];
         if src.is_finite() {
@@ -444,7 +403,6 @@ fn calculate_pine_ema_into(
         }
     }
 }
-
 
 #[inline]
 pub fn ehlers_ecema(input: &EhlersEcemaInput) -> Result<EhlersEcemaOutput, EhlersEcemaError> {
@@ -582,7 +540,6 @@ pub fn ehlers_ecema_with_kernel(
     let pine_compatible = input.get_pine_compatible();
     let confirmed_only = input.get_confirmed_only();
 
-    // Build EMA in-place
     let mut ema_buf = alloc_with_nan_prefix(
         data.len(),
         if pine_compatible {
@@ -604,7 +561,6 @@ pub fn ehlers_ecema_with_kernel(
             .map_err(|e| EhlersEcemaError::EmaError(e.to_string()))?;
     }
 
-    // Allocate output once
     let mut out = alloc_with_nan_prefix(
         data.len(),
         if pine_compatible {
@@ -647,7 +603,6 @@ pub fn ehlers_ecema_into_slice(
     let pine_compatible = input.get_pine_compatible();
     let confirmed_only = input.get_confirmed_only();
 
-    // EMA buffer
     let mut ema_buf = alloc_with_nan_prefix(
         data.len(),
         if pine_compatible {
@@ -669,7 +624,6 @@ pub fn ehlers_ecema_into_slice(
             .map_err(|e| EhlersEcemaError::EmaError(e.to_string()))?;
     }
 
-    // Warmup prefix, ALMA-style
     let warmup_end = if pine_compatible {
         first
     } else {
@@ -696,14 +650,12 @@ pub fn ehlers_ecema_into_slice(
     Ok(())
 }
 
-/// Writes EC-EMA values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the allocating API.
-/// - The output slice length must match the input length.
-/// - Uses `Kernel::Auto` for runtime dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
-pub fn ehlers_ecema_into(input: &EhlersEcemaInput, out: &mut [f64]) -> Result<(), EhlersEcemaError> {
+pub fn ehlers_ecema_into(
+    input: &EhlersEcemaInput,
+    out: &mut [f64],
+) -> Result<(), EhlersEcemaError> {
     ehlers_ecema_into_slice(out, input, Kernel::Auto)
 }
 
@@ -720,12 +672,10 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
     confirmed_only: bool,
     out: &mut [f64],
 ) {
-    // Keep parity with prior debug assertions
     let len = data.len();
     debug_assert_eq!(out.len(), len);
     debug_assert_eq!(ema_values.len(), len);
 
-    // Determine start index by mode (prefix already NaN-initialized by caller)
     let start_idx = if pine_compatible {
         first
     } else {
@@ -735,26 +685,21 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
         return;
     }
 
-    // Constants / raw ptr aliases to enable unchecked indexing efficiently
-    let gL: i32 = gain_limit as i32; // integer gain bounds in tenths ([-gL, gL])
-    let step_s: f64 = 0.1; // gain step (tenths -> f64)
+    let gL: i32 = gain_limit as i32;
+    let step_s: f64 = 0.1;
     let data_ptr = data.as_ptr();
     let ema_ptr = ema_values.as_ptr();
     let out_ptr = out.as_mut_ptr();
 
-    // Main recurrence using closed-form minimizer on the discrete grid
     for i in start_idx..len {
-        // Source (confirmed_only uses prior candle if possible)
         let src = if confirmed_only && i > 0 {
             *data_ptr.add(i - 1)
         } else {
             *data_ptr.add(i)
         };
 
-        // EMA for this bar (precomputed outside)
         let ema_i = *ema_ptr.add(i);
 
-        // Previous EC-EMA (mode-dependent seed at the first computed index)
         let prev_ec = if i == start_idx {
             if pine_compatible {
                 0.0
@@ -765,34 +710,25 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
             *out_ptr.add(i - 1)
         };
 
-        // Algebra:
-        // test_ec = alpha*(ema_i + g*(src - prev_ec)) + beta*prev_ec
-        //         = base + s*k, where k is integer tenths and s = alpha*(src - prev_ec)/10
-        // base = alpha*ema_i + beta*prev_ec
         let delta = src - prev_ec;
         let c = alpha * delta;
         let base = alpha.mul_add(ema_i, beta * prev_ec);
-        let d = src - base; // desired residual to minimize |d - s*k|
-        let s = c * step_s; // slope per integer step
+        let d = src - base;
+        let s = c * step_s;
 
-        // Choose integer k_best matching the original scan’s tie-breaking:
-        // - If s == 0 (error independent of k), original loop picks first k (-gL).
-        // - Else, evaluate the two nearest integers around k_cont = d/s.
-        //   On exact ties pick the smaller integer (same as first encountered in the scan).
         let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
             -gL
         } else {
-            let k_cont = d / s; // ideal real-valued k
-                                // If clearly out of bounds, the constrained minimizer is at the boundary
+            let k_cont = d / s;
+
             if k_cont <= (-(gL as f64) - 1.0) {
                 -gL
             } else if k_cont >= (gL as f64 + 1.0) {
                 gL
             } else {
-                // Check the two neighbors: floor and floor+1
                 let mut k0 = k_cont.floor() as i32;
                 let mut k1 = k0 + 1;
-                // Clamp both to legal bounds
+
                 if k0 < -gL {
                     k0 = -gL;
                 } else if k0 > gL {
@@ -804,11 +740,9 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
                     k1 = gL;
                 }
 
-                // Errors at the two candidate integers
                 let e0 = (d - s * (k0 as f64)).abs();
                 let e1 = (d - s * (k1 as f64)).abs();
 
-                // Tie -> pick smaller integer (mirrors '<' update in original scan)
                 if e0 <= e1 {
                     k0
                 } else {
@@ -817,7 +751,6 @@ unsafe fn ehlers_ecema_scalar_into_with_mode(
             }
         };
 
-        // Final EC-EMA for this bar: base + s*k_best (use FMA)
         *out_ptr.add(i) = (k_best as f64).mul_add(s, base);
     }
 }
@@ -836,7 +769,6 @@ unsafe fn ehlers_ecema_avx2_into_with_mode(
     confirmed_only: bool,
     out: &mut [f64],
 ) {
-    // For now, use scalar implementation with mode
     ehlers_ecema_scalar_into_with_mode(
         data,
         ema_values,
@@ -865,7 +797,6 @@ unsafe fn ehlers_ecema_avx512_into_with_mode(
     confirmed_only: bool,
     out: &mut [f64],
 ) {
-    // For now, use scalar implementation with mode
     ehlers_ecema_scalar_into_with_mode(
         data,
         ema_values,
@@ -880,7 +811,6 @@ unsafe fn ehlers_ecema_avx512_into_with_mode(
     )
 }
 
-// ==================== BATCH PROCESSING ====================
 #[derive(Clone, Debug, Default)]
 pub struct EhlersEcemaBatchRange {
     pub length: (usize, usize, usize),
@@ -1016,15 +946,20 @@ pub fn ehlers_ecema_batch_with_kernel(
 #[inline(always)]
 fn expand_grid(r: &EhlersEcemaBatchRange) -> Vec<EhlersEcemaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         (lo..=hi).step_by(step).collect()
     }
 
     let lengths = axis_usize(r.length);
     let gain_limits = axis_usize(r.gain_limit);
 
-    // Pre-allocate with checked arithmetic
     let cap = lengths.len().checked_mul(gain_limits.len()).unwrap_or(0);
     let mut out = Vec::with_capacity(cap);
     for &l in &lengths {
@@ -1052,10 +987,9 @@ fn ehlers_ecema_batch_inner(
     let rows = combos.len();
 
     if cols == 0 {
-        // Match alma.rs behavior
         return Err(EhlersEcemaError::AllValuesNaN);
     }
-    // Guard rows * cols for buffer sizing
+
     if rows.checked_mul(cols).is_none() {
         return Err(EhlersEcemaError::SizeOverflow { what: "rows*cols" });
     }
@@ -1067,7 +1001,6 @@ fn ehlers_ecema_batch_inner(
         });
     }
 
-    // Allocate uninitialized matrix and initialize row prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
     let first = data
@@ -1086,22 +1019,18 @@ fn ehlers_ecema_batch_inner(
         });
     }
 
-    // Warmup per row mirrors ALMA: first + length - 1
     let warm: Vec<usize> = combos
         .iter()
         .map(|p| first + p.length.unwrap_or(20) - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Turn to &mut [f64] without extra init
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Fill rows directly
     ehlers_ecema_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Recreate Vec<f64> without copy
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1143,10 +1072,8 @@ fn ehlers_ecema_batch_inner_into(
         .ok_or(EhlersEcemaError::AllValuesNaN)?;
     let cols = data.len();
 
-    // Cache EMA series by length
     let mut ema_cache: HashMap<usize, Vec<f64>> = HashMap::new();
 
-    // Pre-compute all unique lengths
     let unique_lengths: std::collections::HashSet<usize> =
         combos.iter().map(|p| p.length.unwrap_or(20)).collect();
 
@@ -1196,7 +1123,6 @@ fn ehlers_ecema_batch_inner_into(
     Ok(combos)
 }
 
-// ==================== PUBLIC BATCH HELPERS FOR API PARITY ====================
 #[inline(always)]
 pub fn ehlers_ecema_batch_slice(
     data: &[f64],
@@ -1231,28 +1157,25 @@ pub fn ehlers_ecema_batch_par_slice(
     )
 }
 
-// ==================== STREAMING SUPPORT ====================
-/// Decision: Streaming uses O(1) closed-form discrete gain selection; batch-parity seeding.
 #[derive(Debug, Clone)]
 pub struct EhlersEcemaStream {
-    // Params
     length: usize,
     gain_limit: usize,
-    // Derived constants
+
     gain_limit_i32: i32,
     alpha: f64,
     beta: f64,
-    slope_scale: f64, // alpha * 0.1 (grid step of 0.1 encoded once)
-    // State
+    slope_scale: f64,
+
     count: usize,
-    ema_mean: f64,    // EMA state (or SMA during warmup in regular mode)
-    ema_filled: bool, // true after the first 'length' samples in regular mode
-    warm_sum: f64,    // running sum to seed EMA with SMA (regular mode)
-    prev_ecema: f64,  // last EC-EMA output
-    // Modes
+    ema_mean: f64,
+    ema_filled: bool,
+    warm_sum: f64,
+    prev_ecema: f64,
+
     pine_compatible: bool,
     confirmed_only: bool,
-    prev_value: Option<f64>, // prior raw input for confirmed_only
+    prev_value: Option<f64>,
 }
 
 impl EhlersEcemaStream {
@@ -1273,7 +1196,6 @@ impl EhlersEcemaStream {
             return Err(EhlersEcemaError::InvalidGainLimit { gain_limit });
         }
 
-        // Standard EMA alpha = 2/(L+1); beta = 1 - alpha.
         let alpha = 2.0 / (length as f64 + 1.0);
         let beta = 1.0 - alpha;
 
@@ -1283,7 +1205,7 @@ impl EhlersEcemaStream {
             gain_limit_i32: gain_limit as i32,
             alpha,
             beta,
-            slope_scale: alpha * 0.1, // grid is in tenths per Ehlers’ loop
+            slope_scale: alpha * 0.1,
             count: 0,
             ema_mean: 0.0,
             ema_filled: false,
@@ -1295,12 +1217,10 @@ impl EhlersEcemaStream {
         })
     }
 
-    /// Fast rounding to the nearest integer with ties toward the smaller integer.
-    /// This reproduces a discrete scan that updates on strict '<' (first/lowest k wins).
     #[inline(always)]
     fn round_nearest_tie_down(x: f64) -> i32 {
         let f = x.floor();
-        let r = x - f; // r in [0,1)
+        let r = x - f;
         if r > 0.5 {
             (f + 1.0) as i32
         } else {
@@ -1308,41 +1228,32 @@ impl EhlersEcemaStream {
         }
     }
 
-    /// One EC-EMA step using the closed-form minimizer on the discrete grid.
-    /// Prev EC is `prev_ec`, EMA at this bar is `ema_i`, input price is `src`.
     #[inline(always)]
     fn step(&self, prev_ec: f64, src: f64, ema_i: f64) -> f64 {
-        // base = alpha*ema_i + beta*prev_ec
         let base = self.alpha.mul_add(ema_i, self.beta * prev_ec);
 
-        // s = alpha*(src - prev_ec)/10  (grid step is 0.1)
         let delta = src - prev_ec;
         let s = self.slope_scale * delta;
 
-        // minimize |d - s*k| over integer k in [-gL, gL], where d = src - base
         let d = src - base;
 
         let k_best: i32 = if !s.is_finite() || !d.is_finite() || s.abs() <= f64::MIN_POSITIVE {
-            // Error independent of k -> choose first scanned k == -gL
             -self.gain_limit_i32
         } else {
-            let k_cont = d / s; // ideal real-valued minimizer
+            let k_cont = d / s;
             let k = Self::round_nearest_tie_down(k_cont);
             k.clamp(-self.gain_limit_i32, self.gain_limit_i32)
         };
 
-        // EC = base + s*k_best  (use FMA for precision/perf)
         (k_best as f64).mul_add(s, base)
     }
 
-    /// O(1) streaming update
     #[inline]
     pub fn next(&mut self, value: f64) -> f64 {
         if !value.is_finite() {
             return f64::NAN;
         }
 
-        // confirmed_only uses the previous bar as the source when available
         let src = if self.confirmed_only {
             match self.prev_value {
                 Some(prev) => {
@@ -1361,9 +1272,8 @@ impl EhlersEcemaStream {
         self.count += 1;
 
         if self.pine_compatible {
-            // Pine-style EMA is zero-seeded and updated from bar 1 onward.
             self.ema_mean = self.alpha.mul_add(src, self.beta * self.ema_mean);
-            // Seed EC with zero on the very first bar (batch parity).
+
             let prev_ec = if self.count == 1 {
                 0.0
             } else {
@@ -1374,23 +1284,21 @@ impl EhlersEcemaStream {
             return ec;
         }
 
-        // Regular mode: SMA seed, then EMA thereafter; warmup returns NaN.
         if !self.ema_filled {
             self.warm_sum += src;
             if self.count < self.length {
                 return f64::NAN;
             }
-            // First output bar: seed EMA with SMA and seed EC with EMA_i (batch parity).
+
             self.ema_mean = self.warm_sum / self.length as f64;
             self.ema_filled = true;
 
-            let prev_ec = self.ema_mean; // prev_ec = ema_i at the first output bar
+            let prev_ec = self.ema_mean;
             let ec = self.step(prev_ec, src, self.ema_mean);
             self.prev_ecema = ec;
             return ec;
         }
 
-        // After warmup, regular EMA recursion
         self.ema_mean = self.beta * self.ema_mean + self.alpha * src;
         let ec = self.step(self.prev_ecema, src, self.ema_mean);
         self.prev_ecema = ec;
@@ -1408,7 +1316,6 @@ impl EhlersEcemaStream {
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
 #[cfg(feature = "python")]
 #[pyfunction(name = "ehlers_ecema")]
 #[pyo3(signature = (data, length=20, gain_limit=50, pine_compatible=false, confirmed_only=false, kernel=None))]
@@ -1421,7 +1328,6 @@ pub fn ehlers_ecema_py<'py>(
     confirmed_only: bool,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
-    // Accept non-contiguous inputs by copying to a Vec when needed (ALMA-compatible ergonomics)
     let owned_if_needed: Option<Vec<f64>> = match data.as_slice() {
         Ok(_) => None,
         Err(_) => Some(data.as_array().to_owned().into_raw_vec()),
@@ -1464,7 +1370,6 @@ pub fn ehlers_ecema_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // Compute using inner_into to avoid extra copies; shape to (rows, cols)
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
@@ -1533,7 +1438,8 @@ pub fn ehlers_ecema_cuda_batch_dev_py(
     };
 
     let (arr, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let arr = cuda
@@ -1579,7 +1485,8 @@ pub fn ehlers_ecema_cuda_many_series_one_param_dev_py(
     };
 
     let (arr, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaEhlersEcema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let arr = cuda
@@ -1625,7 +1532,6 @@ impl EhlersEcemaStreamPy {
         Ok(Self { inner: stream })
     }
 
-    /// ALMA-compatible name - returns None during warmup
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let y = self.inner.next(value);
         if y.is_nan() {
@@ -1635,7 +1541,6 @@ impl EhlersEcemaStreamPy {
         }
     }
 
-    /// Backward-compatible alias
     pub fn next(&mut self, value: f64) -> Option<f64> {
         self.update(value)
     }
@@ -1645,15 +1550,14 @@ impl EhlersEcemaStreamPy {
     }
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EhlersEcemaBatchConfig {
     pub length_range: (usize, usize, usize),
     pub gain_limit_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EhlersEcemaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1662,7 +1566,7 @@ pub struct EhlersEcemaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_ecema_js(
     data: &[f64],
@@ -1685,7 +1589,7 @@ pub fn ehlers_ecema_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_ecema_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1694,7 +1598,7 @@ pub fn ehlers_ecema_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_ecema_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1702,7 +1606,7 @@ pub fn ehlers_ecema_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ehlers_ecema_batch)]
 pub fn ehlers_ecema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: EhlersEcemaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1726,7 +1630,7 @@ pub fn ehlers_ecema_batch_unified_js(data: &[f64], config: JsValue) -> Result<Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_ecema_batch_into(
     in_ptr: *const f64,
@@ -1744,7 +1648,7 @@ pub fn ehlers_ecema_batch_into(
     }
     unsafe {
         let data = std::slice::from_raw_parts(in_ptr, len);
-    let sweep = EhlersEcemaBatchRange {
+        let sweep = EhlersEcemaBatchRange {
             length: (length_start, length_end, length_step),
             gain_limit: (gain_start, gain_end, gain_step),
         };
@@ -1762,7 +1666,7 @@ pub fn ehlers_ecema_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_ecema_into(
     in_ptr: *const f64,
@@ -1812,7 +1716,7 @@ pub fn ehlers_ecema_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ehlers_ecema_into_ex)]
 pub fn ehlers_ecema_into_ex(
     in_ptr: *const f64,
@@ -1846,7 +1750,6 @@ pub fn ehlers_ecema_into_ex(
         let input = EhlersEcemaInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // preserve zero-copy semantics with a single temporary like ALMA
             let mut temp = vec![0.0; len];
             ehlers_ecema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1861,7 +1764,6 @@ pub fn ehlers_ecema_into_ex(
     Ok(())
 }
 
-// ==================== TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1871,7 +1773,6 @@ mod tests {
     use proptest::prelude::*;
     use std::error::Error;
 
-    // ==================== TEST HELPER FUNCTIONS ====================
     fn check_ehlers_ecema_partial_params(
         test_name: &str,
         kernel: Kernel,
@@ -1907,10 +1808,8 @@ mod tests {
         let input = EhlersEcemaInput::from_candles(&candles, "close", params);
         let result = ehlers_ecema_with_kernel(&input, kernel)?;
 
-        // Verify output length
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Check that non-NaN values start appearing after warmup
         let first_valid = result.values.iter().position(|x| !x.is_nan());
         assert!(
             first_valid.is_some(),
@@ -1918,7 +1817,6 @@ mod tests {
             test_name
         );
 
-        // Expected values from real CSV data
         let expected_last_five = [
             59368.42792078,
             59311.07435861,
@@ -1927,7 +1825,6 @@ mod tests {
             58978.72640292,
         ];
 
-        // Check last 5 values
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -1955,18 +1852,14 @@ mod tests {
         let params = EhlersEcemaParams {
             length: Some(20),
             gain_limit: Some(50),
-            pine_compatible: Some(true), // Enable Pine-compatible mode
+            pine_compatible: Some(true),
             confirmed_only: Some(false),
         };
         let input = EhlersEcemaInput::from_candles(&candles, "close", params);
         let result = ehlers_ecema_with_kernel(&input, kernel)?;
 
-        // Verify output length
         assert_eq!(result.values.len(), candles.close.len());
 
-        // Expected values from real CSV data
-        // Note: Pine mode is currently producing the same values as regular mode
-        // This may indicate the pine_compatible flag isn't being applied correctly
         let expected_last_five = [
             59368.42792078,
             59311.07435861,
@@ -1975,7 +1868,6 @@ mod tests {
             58978.72640292,
         ];
 
-        
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -1989,7 +1881,6 @@ mod tests {
             );
         }
 
-        
         assert!(
             result.values[0].is_finite(),
             "[{}] Pine mode should have valid value at index 0",
@@ -2104,7 +1995,7 @@ mod tests {
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let params = EhlersEcemaParams {
             length: Some(2),
-            gain_limit: Some(0), 
+            gain_limit: Some(0),
             pine_compatible: Some(false),
             confirmed_only: Some(false),
         };
@@ -2123,7 +2014,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let first_params = EhlersEcemaParams {
             length: Some(10),
             gain_limit: Some(30),
@@ -2144,7 +2034,6 @@ mod tests {
 
         assert_eq!(second_result.values.len(), first_result.values.len());
 
-        
         let expected_last_five = [
             59324.20351585,
             59282.79818999,
@@ -2153,7 +2042,6 @@ mod tests {
             59025.67038012,
         ];
 
-        
         let start = second_result.values.len().saturating_sub(5);
         for (i, &val) in second_result.values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
@@ -2167,11 +2055,10 @@ mod tests {
             );
         }
 
-        
         let valid_count = second_result
             .values
             .iter()
-            .skip(20) 
+            .skip(20)
             .filter(|x| x.is_finite())
             .count();
         assert!(
@@ -2204,7 +2091,6 @@ mod tests {
         let res = ehlers_ecema_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
 
-        
         if res.values.len() > 40 {
             for (i, &val) in res.values[40..].iter().enumerate() {
                 assert!(
@@ -2253,10 +2139,8 @@ mod tests {
 
         assert_eq!(batch_output.len(), stream_values.len());
 
-        
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
             if i < length - 1 {
-                
                 assert!(
                     b.is_nan() || s.is_nan(),
                     "[{}] Expected NaN during warmup at {}: batch={}, stream={}",
@@ -2266,11 +2150,10 @@ mod tests {
                     s
                 );
             } else if i >= length && b.is_finite() && s.is_finite() {
-                
                 let diff = (b - s).abs();
                 let relative_diff = diff / b.abs().max(1.0);
                 assert!(
-                    relative_diff < 0.001, 
+                    relative_diff < 0.001,
                     "[{}] Streaming mismatch at idx {}: batch={}, stream={}, diff={}, rel_diff={}",
                     test_name,
                     i,
@@ -2385,17 +2268,16 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        let strat = (5usize..=100) 
-            .prop_flat_map(|length| {
-                (
-                    prop::collection::vec(
-                        (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                        length..400,
-                    ),
-                    Just(length),
-                    10usize..=100, 
-                )
-            });
+        let strat = (5usize..=100).prop_flat_map(|length| {
+            (
+                prop::collection::vec(
+                    (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+                    length..400,
+                ),
+                Just(length),
+                10usize..=100,
+            )
+        });
 
         proptest::test_runner::TestRunner::default().run(
             &strat,
@@ -2413,7 +2295,6 @@ mod tests {
                 let EhlersEcemaOutput { values: ref_out } =
                     ehlers_ecema_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 assert_eq!(
                     out.len(),
                     data.len(),
@@ -2427,10 +2308,8 @@ mod tests {
                     test_name
                 );
 
-                
                 for i in (length - 1)..data.len() {
                     if out[i].is_finite() && ref_out[i].is_finite() {
-                        
                         let diff = (out[i] - ref_out[i]).abs();
                         let relative_diff = diff / ref_out[i].abs().max(1.0);
                         assert!(
@@ -2445,7 +2324,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..(length - 1) {
                     assert!(
                         out[i].is_nan(),
@@ -2462,7 +2340,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_ehlers_ecema_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2494,7 +2371,6 @@ mod tests {
         }
     }
 
-    
     generate_all_ehlers_ecema_tests!(
         check_ehlers_ecema_partial_params,
         check_ehlers_ecema_accuracy,
@@ -2514,7 +2390,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_ehlers_ecema_tests!(check_ehlers_ecema_property);
 
-    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2530,7 +2405,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        
         let valid_count = row.iter().skip(40).filter(|x| x.is_finite()).count();
         assert!(valid_count > 0, "[{}] No valid values in default row", test);
 
@@ -2549,7 +2423,7 @@ mod tests {
             .gain_limit_range(30, 70, 10)
             .apply_candles(&c, "close")?;
 
-        let expected_combos = 5 * 5; 
+        let expected_combos = 5 * 5;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -2674,11 +2548,12 @@ mod tests {
 
     #[test]
     fn test_ehlers_ecema_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let len = 256usize;
         let mut data = vec![0.0f64; len];
-        
-        for i in 0..3 { data[i] = f64::NAN; }
+
+        for i in 0..3 {
+            data[i] = f64::NAN;
+        }
         for i in 3..len {
             let x = i as f64;
             data[i] = 1000.0 + (x * 0.1).sin() * 5.0 + x * 0.05;
@@ -2687,25 +2562,21 @@ mod tests {
         let params = EhlersEcemaParams::default();
         let input = EhlersEcemaInput::from_slice(&data, params);
 
-        
         let baseline = ehlers_ecema(&input)?.values;
 
-        
         let mut out = vec![0.0f64; len];
-        
-        #[cfg(not(feature = "wasm"))]
+
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             ehlers_ecema_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             ehlers_ecema_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }

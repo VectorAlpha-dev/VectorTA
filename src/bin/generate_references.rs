@@ -27,8 +27,7 @@ use my_project::indicators::chop::{chop, ChopData, ChopInput, ChopParams};
 use my_project::indicators::cmo::{cmo, CmoInput, CmoParams};
 use my_project::indicators::correl_hl::{correl_hl, CorrelHlData, CorrelHlInput, CorrelHlParams};
 use my_project::indicators::cvi::{cvi, CviInput, CviParams};
-/// Binary to generate reference outputs for indicator testing
-/// This is used by Python and WASM tests to verify their outputs match Rust
+
 use my_project::indicators::damiani_volatmeter::{
     damiani_volatmeter, DamianiVolatmeterInput, DamianiVolatmeterParams,
 };
@@ -79,14 +78,6 @@ use my_project::indicators::moving_averages::jma::{jma, JmaInput, JmaParams};
 use my_project::indicators::moving_averages::jsa::{jsa, JsaInput, JsaParams};
 use my_project::indicators::moving_averages::kama::{kama, KamaInput, KamaParams};
 use my_project::indicators::moving_averages::linreg::{linreg, LinRegInput, LinRegParams};
-use my_project::indicators::moving_averages::volatility_adjusted_ma::{
-    vama, VamaInput, VamaParams,
-};
-use my_project::indicators::moving_averages::volume_adjusted_ma::{
-    VolumeAdjustedMa as volu_ma,
-    VolumeAdjustedMaInput as VoluMaInput,
-    VolumeAdjustedMaParams as VoluMaParams,
-};
 use my_project::indicators::moving_averages::maaq::{maaq, MaaqInput, MaaqParams};
 use my_project::indicators::moving_averages::mama::{mama, MamaInput, MamaParams};
 use my_project::indicators::moving_averages::mwdx::{mwdx, MwdxInput, MwdxParams};
@@ -112,6 +103,13 @@ use my_project::indicators::moving_averages::trendflex::{
     trendflex, TrendFlexInput, TrendFlexParams,
 };
 use my_project::indicators::moving_averages::trima::{trima, TrimaInput, TrimaParams};
+use my_project::indicators::moving_averages::volatility_adjusted_ma::{
+    vama, VamaInput, VamaParams,
+};
+use my_project::indicators::moving_averages::volume_adjusted_ma::{
+    VolumeAdjustedMa as volu_ma, VolumeAdjustedMaInput as VoluMaInput,
+    VolumeAdjustedMaParams as VoluMaParams,
+};
 use my_project::indicators::moving_averages::vpwma::{vpwma, VpwmaInput, VpwmaParams};
 use my_project::indicators::moving_averages::vwap::{vwap, VwapInput, VwapParams};
 use my_project::indicators::moving_averages::vwma::{vwma, VwmaInput, VwmaParams};
@@ -151,7 +149,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let indicator = &args[1];
     let source = args.get(2).map(|s| s.as_str()).unwrap_or("close");
 
-    
     let candles = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
 
     let output = match indicator.as_str() {
@@ -224,7 +221,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "emv" => {
-            
             let high = candles.select_candle_field("high")?;
             let low = candles.select_candle_field("low")?;
             let close = candles.select_candle_field("close")?;
@@ -240,7 +236,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "devstop" => {
-            
             let params = DevStopParams::default();
             let period = params.period.unwrap_or(20);
             let mult = params.mult.unwrap_or(0.0);
@@ -477,7 +472,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = fisher(&input)?;
             json!({
                 "indicator": "fisher",
-                "source": "high,low",  
+                "source": "high,low",
                 "params": {
                     "period": period
                 },
@@ -488,8 +483,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "frama" => {
             let params = FramaParams::default();
-            
-            
+
             let window = params.window.unwrap_or(10);
             let sc = params.sc.unwrap_or(300);
             let fc = params.fc.unwrap_or(1);
@@ -497,7 +491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let result = frama(&input)?;
             json!({
                 "indicator": "frama",
-                "source": "high,low,close", 
+                "source": "high,low,close",
                 "params": {
                     "window": window,
                     "sc": sc,
@@ -893,7 +887,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "mass" => {
-            
             if !source.contains(",") {
                 eprintln!("Mass Index requires 'high,low' source");
                 std::process::exit(1);
@@ -913,7 +906,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "mfi" => {
-            
             if source != "hlc3_volume" {
                 eprintln!("MFI indicator requires 'hlc3_volume' source");
                 std::process::exit(1);
@@ -921,7 +913,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let params = MfiParams::default();
             let period = params.period.unwrap_or(14);
 
-            
             let typical_price: Vec<f64> = candles
                 .high
                 .iter()
@@ -1016,8 +1007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let params = PmaParams::default();
             let input = PmaInput::from_candles(&candles, source, params);
             let result = pma(&input)?;
-            
-            
+
             json!({
                 "indicator": "pma",
                 "source": source,
@@ -1379,8 +1369,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mult_kc = params.mult_kc.unwrap_or(1.5);
             let input = SqueezeMomentumInput::from_candles(&candles, params);
             let result = squeeze_momentum(&input)?;
-            
-            
+
             json!({
                 "indicator": "squeeze_momentum",
                 "source": "hlc",
@@ -1443,7 +1432,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "vpt" => {
-            
             let volume = candles.select_candle_field("volume")?;
             let price = candles.select_candle_field(source)?;
             let input = VptInput::from_slices(price, volume);
@@ -1829,7 +1817,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "bop" => {
-            
             let input = BopInput::from_candles(&candles, BopParams::default());
             let result = bop(&input)?;
             json!({
@@ -1975,7 +1962,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "correl_hl" => {
-            
             if source != "high,low" {
                 eprintln!("CORREL_HL indicator requires 'high,low' source");
                 std::process::exit(1);
@@ -2017,7 +2003,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "vama" => {
-            
             let price = candles.select_candle_field(match source {
                 "open" | "high" | "low" | "close" | "hl2" | "hlc3" | "ohlc4" | "hlcc4" => source,
                 _ => "close",
@@ -2045,7 +2030,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         }
         "volume_adjusted_ma" => {
-            
             let price = candles.select_candle_field("close")?;
             let volume = candles.select_candle_field("volume")?;
             let params = VoluMaParams::default();
@@ -2074,7 +2058,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    
     println!("{}", serde_json::to_string_pretty(&output)?);
 
     Ok(())

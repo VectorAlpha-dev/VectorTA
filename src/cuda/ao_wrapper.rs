@@ -1,13 +1,3 @@
-//! CUDA wrapper for Awesome Oscillator (AO): AO = SMA(short) - SMA(long) over HL2.
-//!
-//! Pattern classification: Prefix-sum/rational for batch (one-series × many-params)
-//! and rolling-sum recurrence for many-series × one-param (time-major).
-//!
-//! Semantics:
-//! - Warmup/writes: NaN until `warm = first_valid + long - 1`, identical to scalar AO.
-//! - NaN inputs: we honor `first_valid` and do no mid-stream masking (matches CPU path).
-//! - Accumulation: host builds a double-single (DS) prefix in f32x2; device stays FP64-free.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::ao::{AoBatchRange, AoParams};
@@ -21,16 +11,22 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaAoError {
     #[error("CUDA: {0}")]
     Cuda(#[from] cust::error::CudaError),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -38,7 +34,14 @@ pub enum CudaAoError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -72,7 +75,6 @@ pub struct CudaAo {
     debug_many_logged: bool,
 }
 
-/// VRAM-backed array handle for AO with context guard and device id
 pub struct DeviceArrayF32Ao {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -82,20 +84,25 @@ pub struct DeviceArrayF32Ao {
 }
 impl DeviceArrayF32Ao {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
-
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default, Debug)]
-pub(crate) struct Float2 { pub x: f32, pub y: f32 }
+pub(crate) struct Float2 {
+    pub x: f32,
+    pub y: f32,
+}
 unsafe impl cust::memory::DeviceCopy for Float2 {}
 
 #[inline(always)]
 fn build_prefix_ds(hl2: &[f32], first_valid: usize) -> Vec<Float2> {
-    
     let mut out = Vec::with_capacity(hl2.len() + 1);
     out.push(Float2 { x: 0.0, y: 0.0 });
     #[inline(always)]
@@ -107,11 +114,16 @@ fn build_prefix_ds(hl2: &[f32], first_valid: usize) -> Vec<Float2> {
     }
     let (mut hi, mut lo) = (0.0f32, 0.0f32);
     for (i, &vv) in hl2.iter().enumerate() {
-        let v = if i >= first_valid && !vv.is_nan() { vv } else { 0.0 };
+        let v = if i >= first_valid && !vv.is_nan() {
+            vv
+        } else {
+            0.0
+        };
         let (s, e1) = two_sum(hi, v);
         let e2 = e1 + lo;
         let (hi2, lo2) = two_sum(s, e2);
-        hi = hi2; lo = lo2;
+        hi = hi2;
+        lo = lo2;
         out.push(Float2 { x: hi, y: lo });
     }
     out
@@ -123,7 +135,11 @@ impl CudaAo {
         match mem_get_info() {
             Ok((free, _total)) => {
                 if required.saturating_add(headroom) > free {
-                    return Err(CudaAoError::OutOfMemory { required, free, headroom });
+                    return Err(CudaAoError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    });
                 }
                 Ok(())
             }
@@ -163,14 +179,15 @@ impl CudaAo {
         self.policy = p;
     }
 
-    
     pub fn ao_batch_dev(
         &self,
         hl2: &[f32],
         sweep: &AoBatchRange,
     ) -> Result<DeviceArrayF32Ao, CudaAoError> {
         let len = hl2.len();
-        if len == 0 { return Err(CudaAoError::InvalidInput("empty series".into())); }
+        if len == 0 {
+            return Err(CudaAoError::InvalidInput("empty series".into()));
+        }
 
         let first_valid = hl2
             .iter()
@@ -179,7 +196,6 @@ impl CudaAo {
 
         let combos = expand_grid_checked_cuda(sweep)?;
 
-        
         let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
         let mut longs: Vec<i32> = Vec::with_capacity(combos.len());
         for prm in &combos {
@@ -203,10 +219,8 @@ impl CudaAo {
             longs.push(l);
         }
 
-        
         let prefix: Vec<Float2> = build_prefix_ds(hl2, first_valid);
 
-        
         let rows = combos.len();
         let len_plus_one = len
             .checked_add(1)
@@ -231,23 +245,41 @@ impl CudaAo {
         let headroom = 64usize * 1024 * 1024;
         self.will_fit(required, headroom)?;
 
-        
         let d_prefix: DeviceBuffer<Float2> = DeviceBuffer::from_slice(&prefix)?;
 
-        
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
 
         if rows <= 65_535 {
             let d_shorts_full = DeviceBuffer::from_slice(&shorts)?;
-            let d_longs_full  = DeviceBuffer::from_slice(&longs)?;
-            unsafe { (*(self as *const _ as *mut CudaAo)).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 }); }
-            self.launch_batch_into(&d_prefix, len, first_valid, &d_shorts_full, &d_longs_full, rows, &d_out, 0)?;
+            let d_longs_full = DeviceBuffer::from_slice(&longs)?;
+            unsafe {
+                (*(self as *const _ as *mut CudaAo)).last_batch =
+                    Some(BatchKernelSelected::Plain { block_x: 256 });
+            }
+            self.launch_batch_into(
+                &d_prefix,
+                len,
+                first_valid,
+                &d_shorts_full,
+                &d_longs_full,
+                rows,
+                &d_out,
+                0,
+            )?;
             self.maybe_log_batch_debug();
-            return Ok(DeviceArrayF32Ao { buf: d_out, rows, cols: len, ctx: self._context.clone(), device_id: self.device_id });
+            return Ok(DeviceArrayF32Ao {
+                buf: d_out,
+                rows,
+                cols: len,
+                ctx: self._context.clone(),
+                device_id: self.device_id,
+            });
         }
 
-        
-        unsafe { (*(self as *const _ as *mut CudaAo)).last_batch = Some(BatchKernelSelected::Plain { block_x: 256 }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaAo)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x: 256 });
+        }
         self.maybe_log_batch_debug();
         let max_grid = 65_535usize;
         let mut start = 0usize;
@@ -255,10 +287,25 @@ impl CudaAo {
             let chunk = (rows - start).min(max_grid);
             let d_shorts = DeviceBuffer::from_slice(&shorts[start..start + chunk])?;
             let d_longs = DeviceBuffer::from_slice(&longs[start..start + chunk])?;
-            self.launch_batch_into(&d_prefix, len, first_valid, &d_shorts, &d_longs, chunk, &d_out, start)?;
+            self.launch_batch_into(
+                &d_prefix,
+                len,
+                first_valid,
+                &d_shorts,
+                &d_longs,
+                chunk,
+                &d_out,
+                start,
+            )?;
             start += chunk;
         }
-        Ok(DeviceArrayF32Ao { buf: d_out, rows, cols: len, ctx: self._context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32Ao {
+            buf: d_out,
+            rows,
+            cols: len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
     }
 
     fn launch_batch_into(
@@ -272,19 +319,29 @@ impl CudaAo {
         d_out: &DeviceBuffer<f32>,
         combo_offset: usize,
     ) -> Result<(), CudaAoError> {
-        let func = self
-            .module
-            .get_function("ao_batch_f32")
-            .map_err(|_| CudaAoError::MissingKernelSymbol { name: "ao_batch_f32" })?;
+        let func = self.module.get_function("ao_batch_f32").map_err(|_| {
+            CudaAoError::MissingKernelSymbol {
+                name: "ao_batch_f32",
+            }
+        })?;
         let block_x = self.policy.batch_block_x.unwrap_or(256);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         let dev = Device::get_device(self.device_id).map_err(CudaAoError::Cuda)?;
-        let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX).map_err(CudaAoError::Cuda)? as u32;
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaAoError::Cuda)? as u32;
         if block_x > max_bx || n_combos as u32 > 65_535 {
-            return Err(CudaAoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: n_combos as u32, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaAoError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: n_combos as u32,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         unsafe {
             let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
@@ -316,7 +373,6 @@ impl CudaAo {
         Ok(())
     }
 
-    
     pub fn ao_many_series_one_param_time_major_dev(
         &self,
         hl2_tm: &[f32],
@@ -342,7 +398,6 @@ impl CudaAo {
             return Err(CudaAoError::InvalidInput("invalid short/long".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -390,7 +445,13 @@ impl CudaAo {
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems_out) }?;
         self.launch_many_series(&d_prices, &d_first, cols, rows, short, long, &mut d_out)?;
-        Ok(DeviceArrayF32Ao { buf: d_out, rows, cols, ctx: self._context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32Ao {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
     }
 
     fn launch_many_series(
@@ -403,14 +464,30 @@ impl CudaAo {
         long: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAoError> {
-        let func = self.module.get_function("ao_many_series_one_param_f32").map_err(|_| CudaAoError::MissingKernelSymbol { name: "ao_many_series_one_param_f32" })?;
+        let func = self
+            .module
+            .get_function("ao_many_series_one_param_f32")
+            .map_err(|_| CudaAoError::MissingKernelSymbol {
+                name: "ao_many_series_one_param_f32",
+            })?;
         let block_x = self.policy.many_block_x.unwrap_or(256);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let dev = Device::get_device(self.device_id).map_err(CudaAoError::Cuda)?;
-        let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX).map_err(CudaAoError::Cuda)? as u32;
-        if block_x > max_bx { return Err(CudaAoError::LaunchConfigTooLarge { gx: grid_x.max(1), gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 }); }
+        let max_bx = dev
+            .get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaAoError::Cuda)? as u32;
+        if block_x > max_bx {
+            return Err(CudaAoError::LaunchConfigTooLarge {
+                gx: grid_x.max(1),
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         unsafe {
             let mut prices_ptr = d_prices_tm.as_device_ptr().as_raw();
             let mut first_ptr = d_first_valids.as_device_ptr().as_raw();
@@ -472,17 +549,23 @@ impl CudaAo {
     }
 }
 
-
 fn expand_grid_checked_cuda(r: &AoBatchRange) -> Result<Vec<AoParams>, CudaAoError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaAoError> {
-        if step == 0 || start == end { return Ok(vec![start]); }
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
         let mut out = Vec::new();
         if start < end {
             let mut v = start;
             while v <= end {
                 out.push(v);
                 match v.checked_add(step) {
-                    Some(next) => { if next == v { break; } v = next; }
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
                     None => break,
                 }
             }
@@ -490,26 +573,37 @@ fn expand_grid_checked_cuda(r: &AoBatchRange) -> Result<Vec<AoParams>, CudaAoErr
             let mut v = start;
             while v >= end {
                 out.push(v);
-                if v < end + step { break; }
+                if v < end + step {
+                    break;
+                }
                 v -= step;
-                if v == 0 { break; }
+                if v == 0 {
+                    break;
+                }
             }
         }
         if out.is_empty() {
             return Err(CudaAoError::InvalidInput(format!(
-                "invalid range: start={}, end={}, step={}", start, end, step
+                "invalid range: start={}, end={}, step={}",
+                start, end, step
             )));
         }
         Ok(out)
     }
     let shorts = axis_usize(r.short_period)?;
     let longs = axis_usize(r.long_period)?;
-    let cap = shorts.len().checked_mul(longs.len()).ok_or_else(|| CudaAoError::InvalidInput("rows*cols overflow".into()))?;
+    let cap = shorts
+        .len()
+        .checked_mul(longs.len())
+        .ok_or_else(|| CudaAoError::InvalidInput("rows*cols overflow".into()))?;
     let mut out = Vec::with_capacity(cap);
     for &s in &shorts {
         for &l in &longs {
             if s > 0 && l > 0 && s < l {
-                out.push(AoParams { short_period: Some(s), long_period: Some(l) });
+                out.push(AoParams {
+                    short_period: Some(s),
+                    long_period: Some(l),
+                });
             }
         }
     }
@@ -519,14 +613,13 @@ fn expand_grid_checked_cuda(r: &AoBatchRange) -> Result<Vec<AoParams>, CudaAoErr
     Ok(out)
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; 
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let prefix_bytes = (ONE_SERIES_LEN + 1) * std::mem::size_of::<super::Float2>();
@@ -566,17 +659,12 @@ pub mod benches {
         let cuda = CudaAo::new(0).expect("cuda ao");
         let hl2 = gen_series(ONE_SERIES_LEN);
         let sweep = AoBatchRange {
-            
-            
             short_period: (5, 5, 0),
             long_period: (20, 20 + PARAM_SWEEP - 1, 1),
         };
 
         let len = hl2.len();
-        let first_valid = hl2
-            .iter()
-            .position(|v| !v.is_nan())
-            .unwrap_or(len);
+        let first_valid = hl2.iter().position(|v| !v.is_nan()).unwrap_or(len);
         let combos = expand_grid_checked_cuda(&sweep).expect("expand_grid");
         let mut shorts: Vec<i32> = Vec::with_capacity(combos.len());
         let mut longs: Vec<i32> = Vec::with_capacity(combos.len());

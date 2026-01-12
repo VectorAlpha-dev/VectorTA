@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::roc::{
     roc_batch_slice, roc_with_kernel, RocBatchRange, RocInput, RocParams,
 };
@@ -42,11 +40,9 @@ fn roc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = RocBatchRange { period: (2, 64, 3) };
 
-    
     let cpu =
         vector_ta::indicators::roc::roc_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch)?;
 
-    
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let cuda = CudaRoc::new(0).expect("CudaRoc::new");
     let dev = cuda
@@ -68,7 +64,7 @@ fn roc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
         let diff = (expected - gotf).abs();
-        
+
         let tol_i = 5e-4 + expected.abs() * 1e-4;
         if diff > max_ratio {
             max_ratio = diff;
@@ -98,19 +94,17 @@ fn roc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 11usize; 
-    let rows = 2048usize; 
+    let cols = 11usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
-            
             let x = (t as f64) + (s as f64) * 0.2;
             tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -127,7 +121,6 @@ fn roc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaRoc::new(0).expect("CudaRoc::new");
     let dev = cuda

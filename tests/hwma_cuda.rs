@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::hwma::{
     hwma_batch_with_kernel, HwmaBatchRange, HwmaBuilder, HwmaParams,
 };
@@ -44,7 +42,7 @@ fn hwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let sweep = HwmaBatchRange {
         na: (0.10, 0.40, 0.10),
         nb: (0.05, 0.25, 0.05),
-        
+
         nc: (0.05, 0.10, 0.05),
     };
 
@@ -64,7 +62,6 @@ fn hwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda hwma batch result");
 
-    
     let (atol, rtol) = (3.0e-2f64, 5.0e-6f64);
     let mut max_ratio = 0.0f64;
     let mut worst_idx = 0usize;

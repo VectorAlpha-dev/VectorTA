@@ -1,12 +1,3 @@
-//! CUDA wrapper for rolling Standard Deviation (population) indicator.
-//!
-//! Parity goals per Agents Guide:
-//! - API/behavior match ALMA-style wrappers (policy enums, NON_BLOCKING stream)
-//! - PTX load with DetermineTargetFromContext and O2 fallback
-//! - VRAM estimation + ~64MB headroom; grid-y chunking to <= 65_535 for batch
-//! - Batch uses host prefix sums of x and x^2 and NaN counts (f64 accum)
-//! - Many-series×one-param uses time-major scan with incremental raw sums
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -15,7 +6,7 @@ use cust::context::Context;
 use cust::device::Device;
 use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -31,13 +22,24 @@ pub enum CudaStddevError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -87,10 +89,12 @@ pub struct CudaStddev {
     debug_many_logged: bool,
 }
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct Float2 { pub x: f32, pub y: f32 }
+struct Float2 {
+    pub x: f32,
+    pub y: f32,
+}
 unsafe impl DeviceCopy for Float2 {}
 
 impl CudaStddev {
@@ -107,8 +111,7 @@ impl CudaStddev {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -142,10 +145,18 @@ impl CudaStddev {
         self.device_id
     }
 
-    pub fn set_policy(&mut self, policy: CudaStddevPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaStddevPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaStddevPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaStddevPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -181,11 +192,7 @@ impl CudaStddev {
         let (gx, gy, gz) = (grid.x, grid.y, grid.z);
         let (bx, by, bz) = (block.x, block.y, block.z);
         let max_threads_per_block = 1024u32;
-        if bx
-            .saturating_mul(by)
-            .saturating_mul(bz)
-            > max_threads_per_block
-        {
+        if bx.saturating_mul(by).saturating_mul(bz) > max_threads_per_block {
             return Err(CudaStddevError::LaunchConfigTooLarge {
                 gx,
                 gy,
@@ -233,9 +240,7 @@ impl CudaStddev {
     }
 
     fn expand_grid_checked(r: &StdDevBatchRange) -> Result<Vec<StdDevParams>, CudaStddevError> {
-        fn axis_usize(
-            (s, e, st): (usize, usize, usize),
-        ) -> Result<Vec<usize>, CudaStddevError> {
+        fn axis_usize((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, CudaStddevError> {
             if st == 0 || s == e {
                 return Ok(vec![s]);
             }
@@ -271,9 +276,7 @@ impl CudaStddev {
             }
             Ok(v)
         }
-        fn axis_f64(
-            (s, e, st): (f64, f64, f64),
-        ) -> Result<Vec<f64>, CudaStddevError> {
+        fn axis_f64((s, e, st): (f64, f64, f64)) -> Result<Vec<f64>, CudaStddevError> {
             if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
                 return Ok(vec![s]);
             }
@@ -306,14 +309,9 @@ impl CudaStddev {
 
         let periods = axis_usize(r.period)?;
         let nbdevs = axis_f64(r.nbdev)?;
-        let cap = periods
-            .len()
-            .checked_mul(nbdevs.len())
-            .ok_or_else(|| {
-                CudaStddevError::InvalidInput(
-                    "stddev CUDA: parameter grid size overflow".into(),
-                )
-            })?;
+        let cap = periods.len().checked_mul(nbdevs.len()).ok_or_else(|| {
+            CudaStddevError::InvalidInput("stddev CUDA: parameter grid size overflow".into())
+        })?;
 
         let mut out = Vec::with_capacity(cap);
         for &p in &periods {
@@ -380,12 +378,17 @@ impl CudaStddev {
         Float2 { x: hi, y: lo }
     }
 
-    
     fn build_prefixes_ds_locked(
         data: &[f32],
-    ) -> cust::error::CudaResult<(LockedBuffer<Float2>, LockedBuffer<Float2>, LockedBuffer<i32>)> {
+    ) -> cust::error::CudaResult<(
+        LockedBuffer<Float2>,
+        LockedBuffer<Float2>,
+        LockedBuffer<i32>,
+    )> {
         let n = data.len();
-        let cap = n.checked_add(1).ok_or_else(|| cust::error::CudaError::InvalidValue)?;
+        let cap = n
+            .checked_add(1)
+            .ok_or_else(|| cust::error::CudaError::InvalidValue)?;
         let mut ps1: LockedBuffer<Float2> = unsafe { LockedBuffer::uninitialized(cap)? };
         let mut ps2: LockedBuffer<Float2> = unsafe { LockedBuffer::uninitialized(cap)? };
         let mut psn: LockedBuffer<i32> = unsafe { LockedBuffer::uninitialized(cap)? };
@@ -425,16 +428,26 @@ impl CudaStddev {
         combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaStddevError> {
-        let func = self
-            .module
-            .get_function("stddev_batch_f32")
-            .map_err(|_| CudaStddevError::MissingKernelSymbol { name: "stddev_batch_f32" })?;
+        let func = self.module.get_function("stddev_batch_f32").map_err(|_| {
+            CudaStddevError::MissingKernelSymbol {
+                name: "stddev_batch_f32",
+            }
+        })?;
 
         #[inline(always)]
         fn pick_block_x(len: usize) -> u32 {
-            if len >= (1usize << 20) { 512 } else if len >= (1usize << 14) { 256 } else { 128 }
+            if len >= (1usize << 20) {
+                512
+            } else if len >= (1usize << 14) {
+                256
+            } else {
+                128
+            }
         }
-        let block_x: u32 = match self.policy.batch { BatchKernelPolicy::Auto => pick_block_x(len), BatchKernelPolicy::Plain { block_x } => block_x.max(64) };
+        let block_x: u32 = match self.policy.batch {
+            BatchKernelPolicy::Auto => pick_block_x(len),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+        };
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
         let grid_base: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -448,7 +461,6 @@ impl CudaStddev {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        
         const TILE: u32 = 4;
         let mut launched = 0usize;
         while launched < combos {
@@ -502,11 +514,10 @@ impl CudaStddev {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.0 as i32).collect();
         let nbdevs: Vec<f32> = combos.iter().map(|c| c.1).collect();
-        
-        let (h_ps1, h_ps2, h_psn) = Self::build_prefixes_ds_locked(data_f32)
-            .map_err(CudaStddevError::Cuda)?;
 
-        
+        let (h_ps1, h_ps2, h_psn) =
+            Self::build_prefixes_ds_locked(data_f32).map_err(CudaStddevError::Cuda)?;
+
         let item_f2 = std::mem::size_of::<Float2>();
         let item_i32 = std::mem::size_of::<i32>();
         let item_f32 = std::mem::size_of::<f32>();
@@ -519,12 +530,9 @@ impl CudaStddev {
             .ok_or_else(|| CudaStddevError::InvalidInput("prefix bytes overflow".into()))?;
         let bytes_prefix = bytes_prefix_f2
             .checked_add(
-                h_psn
-                    .len()
-                    .checked_mul(item_i32)
-                    .ok_or_else(|| {
-                        CudaStddevError::InvalidInput("nan-count bytes overflow".into())
-                    })?,
+                h_psn.len().checked_mul(item_i32).ok_or_else(|| {
+                    CudaStddevError::InvalidInput("nan-count bytes overflow".into())
+                })?,
             )
             .ok_or_else(|| CudaStddevError::InvalidInput("prefix total bytes overflow".into()))?;
         let bytes_params = periods
@@ -544,7 +552,6 @@ impl CudaStddev {
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
-        
         let mut d_ps1: DeviceBuffer<Float2> =
             unsafe { DeviceBuffer::uninitialized_async(h_ps1.len(), &self.stream) }?;
         let mut d_ps2: DeviceBuffer<Float2> =
@@ -603,12 +610,11 @@ impl CudaStddev {
         out: &mut [f32],
     ) -> Result<(usize, usize, Vec<StdDevParams>), CudaStddevError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
-        let expected = combos
-            .len()
-            .checked_mul(len)
-            .ok_or_else(|| {
-                CudaStddevError::InvalidInput("output length overflow in stddev_batch_into_host_f32".into())
-            })?;
+        let expected = combos.len().checked_mul(len).ok_or_else(|| {
+            CudaStddevError::InvalidInput(
+                "output length overflow in stddev_batch_into_host_f32".into(),
+            )
+        })?;
         if out.len() != expected {
             return Err(CudaStddevError::InvalidInput(format!(
                 "output slice length mismatch (expected {}, got {})",
@@ -648,7 +654,7 @@ impl CudaStddev {
                 "nbdev must be non-negative and finite".into(),
             ));
         }
-        
+
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1;
@@ -673,7 +679,6 @@ impl CudaStddev {
             first_valids[s] = fv;
         }
 
-        
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
         let bytes_in = elems
@@ -693,16 +698,13 @@ impl CudaStddev {
 
         let d_in = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         let func = self
             .module
             .get_function("stddev_many_series_one_param_f32")
-            .map_err(|_| {
-                CudaStddevError::MissingKernelSymbol {
-                    name: "stddev_many_series_one_param_f32",
-                }
+            .map_err(|_| CudaStddevError::MissingKernelSymbol {
+                name: "stddev_many_series_one_param_f32",
             })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
@@ -715,7 +717,7 @@ impl CudaStddev {
             (*(self as *const _ as *mut CudaStddev)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
-        
+
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
             let mut fv_ptr = d_fv.as_device_ptr().as_raw();
@@ -745,7 +747,6 @@ impl CudaStddev {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -813,10 +814,10 @@ pub mod benches {
             .expect("d_ps2");
         let d_psn = unsafe { DeviceBuffer::from_slice_async(h_psn.as_slice(), &cuda.stream) }
             .expect("d_psn");
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &cuda.stream) }
-            .expect("d_periods");
-        let d_nbdevs = unsafe { DeviceBuffer::from_slice_async(&nbdevs, &cuda.stream) }
-            .expect("d_nbdevs");
+        let d_periods =
+            unsafe { DeviceBuffer::from_slice_async(&periods, &cuda.stream) }.expect("d_periods");
+        let d_nbdevs =
+            unsafe { DeviceBuffer::from_slice_async(&nbdevs, &cuda.stream) }.expect("d_nbdevs");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
                 .expect("d_out");

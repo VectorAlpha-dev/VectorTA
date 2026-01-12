@@ -1,17 +1,3 @@
-//! CUDA support for Forecast Oscillator (FOSC).
-//!
-//! Math pattern classification: recurrence/IIR.
-//! - Batch (one series × many params): each parameter row is processed by a
-//!   single thread that scans time sequentially with O(1) sliding OLS updates.
-//! - Many-series × one-param (time-major): each series/column is processed by
-//!   one thread with the same scan. No global prefixes are required.
-//!
-//! Semantics match the scalar FOSC implementation:
-//! - Warmup per row/series: warm = first_valid + period - 1
-//! - Warmup prefix is filled with NaN
-//! - If current value is NaN or 0.0, output is NaN
-//! - Critical accumulations and OLS solve use f64 for parity; outputs are f32
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -23,8 +9,8 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use std::env;
 use std::cell::Cell;
+use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -35,7 +21,11 @@ pub enum CudaFoscError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -43,7 +33,14 @@ pub enum CudaFoscError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -53,14 +50,14 @@ pub enum CudaFoscError {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    
+
     OneD { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    
+
     OneD { block_x: u32 },
 }
 
@@ -71,7 +68,10 @@ pub struct CudaFoscPolicy {
 }
 impl Default for CudaFoscPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -83,7 +83,7 @@ pub struct CudaFosc {
     policy: CudaFoscPolicy,
     last_batch_block_x: Cell<Option<u32>>,
     last_many_block_x: Cell<Option<u32>>,
-    
+
     debug_batch_logged: AtomicBool,
     debug_many_logged: AtomicBool,
 }
@@ -144,12 +144,24 @@ impl CudaFosc {
         }
     }
 
-    pub fn set_policy(&mut self, policy: CudaFoscPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaFoscPolicy { &self.policy }
-    pub fn selected_batch_block_x(&self) -> Option<u32> { self.last_batch_block_x.get() }
-    pub fn selected_many_block_x(&self) -> Option<u32> { self.last_many_block_x.get() }
-    pub fn device_id(&self) -> u32 { self.device_id }
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn set_policy(&mut self, policy: CudaFoscPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaFoscPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_block_x(&self) -> Option<u32> {
+        self.last_batch_block_x.get()
+    }
+    pub fn selected_many_block_x(&self) -> Option<u32> {
+        self.last_many_block_x.get()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -158,7 +170,10 @@ impl CudaFosc {
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(bx) = self.last_batch_block_x.get() {
-                eprintln!("[DEBUG] FOSC batch selected block_x={} (one thread per combo)", bx);
+                eprintln!(
+                    "[DEBUG] FOSC batch selected block_x={} (one thread per combo)",
+                    bx
+                );
                 self.debug_batch_logged.store(true, Ordering::Relaxed);
             }
         }
@@ -173,13 +188,14 @@ impl CudaFosc {
         }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(bx) = self.last_many_block_x.get() {
-                eprintln!("[DEBUG] FOSC many-series selected block_x={} (one thread per series)", bx);
+                eprintln!(
+                    "[DEBUG] FOSC many-series selected block_x={} (one thread per series)",
+                    bx
+                );
                 self.debug_many_logged.store(true, Ordering::Relaxed);
             }
         }
     }
-
-    
 
     pub fn fosc_batch_dev(
         &self,
@@ -193,16 +209,23 @@ impl CudaFosc {
             .checked_mul(n_combos)
             .ok_or_else(|| CudaFoscError::InvalidInput("rows*cols overflow".into()))?;
 
-        
         let headroom = 64 * 1024 * 1024usize;
         let required = len
             .checked_mul(std::mem::size_of::<f32>())
-            .and_then(|a| n_combos.checked_mul(std::mem::size_of::<i32>()).map(|b| a + b))
+            .and_then(|a| {
+                n_combos
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .map(|b| a + b)
+            })
             .and_then(|c| elems.checked_mul(std::mem::size_of::<f32>()).map(|d| c + d))
             .ok_or_else(|| CudaFoscError::InvalidInput("byte size overflow".into()))?;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaFoscError::OutOfMemory { required, free, headroom });
+                return Err(CudaFoscError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
                 return Err(CudaFoscError::InvalidInput(
                     "insufficient device memory for fosc_batch_dev".into(),
@@ -223,10 +246,13 @@ impl CudaFosc {
             &mut d_out,
         )?;
 
-        
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -242,10 +268,11 @@ impl CudaFosc {
         if len <= 0 || n_combos <= 0 {
             return Ok(());
         }
-        let func = self
-            .module
-            .get_function("fosc_batch_f32")
-            .map_err(|_| CudaFoscError::MissingKernelSymbol { name: "fosc_batch_f32" })?;
+        let func = self.module.get_function("fosc_batch_f32").map_err(|_| {
+            CudaFoscError::MissingKernelSymbol {
+                name: "fosc_batch_f32",
+            }
+        })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -279,8 +306,6 @@ impl CudaFosc {
         Ok(())
     }
 
-    
-
     pub fn fosc_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -304,7 +329,11 @@ impl CudaFosc {
             .ok_or_else(|| CudaFoscError::InvalidInput("byte size overflow".into()))?;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaFoscError::OutOfMemory { required, free, headroom });
+                return Err(CudaFoscError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
                 return Err(CudaFoscError::InvalidInput(
                     "insufficient device memory for fosc_many_series_one_param".into(),
@@ -325,10 +354,13 @@ impl CudaFosc {
             &mut d_out,
         )?;
 
-        
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -350,8 +382,8 @@ impl CudaFosc {
         let func = self
             .module
             .get_function("fosc_many_series_one_param_time_major_f32")
-            .map_err(|_| {
-                CudaFoscError::MissingKernelSymbol { name: "fosc_many_series_one_param_time_major_f32" }
+            .map_err(|_| CudaFoscError::MissingKernelSymbol {
+                name: "fosc_many_series_one_param_time_major_f32",
             })?;
 
         let block_x = match self.policy.many_series {
@@ -385,8 +417,6 @@ impl CudaFosc {
         self.maybe_log_many_debug();
         Ok(())
     }
-
-    
 
     fn expand_periods(r: &FoscBatchRange) -> Result<Vec<usize>, CudaFoscError> {
         let (start, end, step) = r.period;
@@ -569,7 +599,14 @@ impl CudaFosc {
             || gy > max_gy
             || gz > max_gz
         {
-            return Err(CudaFoscError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaFoscError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -598,15 +635,13 @@ fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
     YChunks { n, launched: 0 }
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 250; 
+    const PARAM_SWEEP: usize = 250;
     const MANY_SERIES_COLS: usize = 250;
     const MANY_SERIES_ROWS: usize = 1_000_000;
 
@@ -703,7 +738,8 @@ pub mod benches {
         let data_tm = gen_time_major_prices(cols, rows);
         let params = FoscParams { period: Some(14) };
         let (first_valids, period) =
-            CudaFosc::prepare_many_series_inputs(&data_tm, cols, rows, &params).expect("prepare_many_series_inputs");
+            CudaFosc::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series_inputs");
         let d_tm = DeviceBuffer::from_slice(&data_tm).expect("d_tm");
         let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
         let d_out: DeviceBuffer<f32> =

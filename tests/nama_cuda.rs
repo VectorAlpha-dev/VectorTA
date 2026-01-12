@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::nama::{
     nama_batch_with_kernel, nama_with_kernel, NamaBatchRange, NamaInput, NamaParams,
 };

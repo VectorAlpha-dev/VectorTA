@@ -4,22 +4,22 @@ use std::path::Path;
 use crate::unified_benchmark::{UnifiedMeasurement, LibraryType};
 use crate::json_export::BenchmarkJsonExport;
 
-/// Global collector for benchmark measurements
-/// This collects all measurements during the benchmark run
-/// and exports them to JSON at the end
+
+
+
 pub struct BenchmarkCollector {
     measurements: Mutex<Vec<UnifiedMeasurement>>,
 }
 
 impl BenchmarkCollector {
-    /// Create a new collector
+
     pub fn new() -> Self {
         Self {
             measurements: Mutex::new(Vec::new()),
         }
     }
 
-    /// Add a measurement
+
     pub fn add_measurement(
         &self,
         indicator: &str,
@@ -41,7 +41,7 @@ impl BenchmarkCollector {
         }
     }
 
-    /// Export all collected measurements to JSON
+
     pub fn export_to_json(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let measurements = self.measurements.lock().unwrap();
 
@@ -56,7 +56,7 @@ impl BenchmarkCollector {
         println!("\n✅ Benchmark results exported to: {}", path.display());
         println!("   Total measurements: {}", measurements.len());
 
-        
+
         let mut indicators = std::collections::HashSet::new();
         let mut libraries = std::collections::HashSet::new();
         for m in measurements.iter() {

@@ -1,59 +1,3 @@
-//! # Rolling Deviation Indicator
-//!
-//! Decision log: SIMD/CUDA status — SIMD enabled for stddev/mode; CUDA wrapper for stddev only; batch stddev uses prefix sums. Numerical outputs unchanged; warmups match scalar.
-//!
-//! Computes rolling Standard Deviation, Mean Absolute Deviation, or Median Absolute Deviation.
-//! This indicator provides three different measures of variability in a data series:
-//!
-//! ## Deviation Types
-//!
-//! ### Standard Deviation (devtype = 0)
-//! Measures the amount of variation or dispersion of a set of values. A low standard deviation
-//! indicates that values tend to be close to the mean, while a high standard deviation indicates
-//! that values are spread out over a wider range.
-//!
-//! Formula: σ = √(Σ(x - μ)² / n)
-//!
-//! ### Mean Absolute Deviation (devtype = 1)
-//! The average of the absolute deviations from the mean. It's more robust to outliers than
-//! standard deviation but less commonly used in financial analysis.
-//!
-//! Formula: MAD = Σ|x - μ| / n
-//!
-//! ### Median Absolute Deviation (devtype = 2)
-//! The median of the absolute deviations from the median. This is the most robust measure
-//! against outliers and is useful for identifying anomalies in data.
-//!
-//! Formula: MedAD = median(|x - median(x)|)
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points). Must be >= 2 for standard deviation.
-//! - **devtype**: Type of deviation: 0 = Standard Deviation, 1 = Mean Absolute, 2 = Median Absolute.
-//!
-//! ## Returns
-//! - **`Ok(DeviationOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(DeviationError)`** otherwise.
-//!
-//! ## Example
-//! ```rust
-//! use rust_backtester::indicators::deviation::{deviation, DeviationInput, DeviationParams};
-//!
-//! let data = vec![10.0, 20.0, 30.0, 25.0, 35.0, 28.0, 33.0, 29.0, 31.0, 30.0];
-//! let params = DeviationParams {
-//!     period: Some(5),
-//!     devtype: Some(0), // Standard deviation
-//! };
-//! let input = DeviationInput::from_slice(&data, params);
-//! let output = deviation(&input).unwrap();
-//! ```
-//!
-//! ## Developer Notes
-//! - SIMD status: AVX2/AVX512 enable a vectorized first-window init for Standard Deviation (devtype 0,3), then use the O(1) scalar slide. >5% speedup at 1M; modest at 100k. MAD/MedAD fall back to scalar.
-//! - Batch: row-specific stddev uses prefix sums (shared across rows) for O(1) per output; MAD/MedAD remain scalar per-window.
-//! - Streaming: StdDev/Mode O(1); MAD/MedAD O(log n) exact via order-statistics treap.
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -63,18 +7,18 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::deviation_wrapper::CudaDeviation;
+use crate::utilities::data_loader::{source_type, Candles};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
-use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -94,7 +38,6 @@ fn deviation_auto_kernel() -> Kernel {
     let k = detect_best_kernel();
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     {
-        // AVX2 is often faster than AVX-512 for this kernel due to AVX-512 downclock.
         if k == Kernel::Avx512
             && std::arch::is_x86_feature_detected!("avx2")
             && std::arch::is_x86_feature_detected!("fma")
@@ -115,7 +58,6 @@ impl<'a> AsRef<[f64]> for DeviationInput<'a> {
     }
 }
 
-/// Data type for deviation indicator.
 #[derive(Debug, Clone)]
 pub enum DeviationData<'a> {
     Candles {
@@ -125,7 +67,6 @@ pub enum DeviationData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Input for deviation indicator.
 #[derive(Debug, Clone)]
 pub struct DeviationInput<'a> {
     pub data: DeviationData<'a>,
@@ -181,15 +122,16 @@ impl<'a> DeviationInput<'a> {
     }
 }
 
-/// Output for deviation indicator.
 #[derive(Debug, Clone)]
 pub struct DeviationOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters for deviation indicator.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct DeviationParams {
     pub period: Option<usize>,
     pub devtype: Option<usize>,
@@ -203,7 +145,6 @@ impl Default for DeviationParams {
     }
 }
 
-/// Builder for deviation indicator.
 #[derive(Copy, Clone, Debug)]
 pub struct DeviationBuilder {
     period: Option<usize>,
@@ -268,7 +209,6 @@ impl DeviationBuilder {
     }
 }
 
-/// Deviation indicator errors.
 #[derive(Debug, Error)]
 pub enum DeviationError {
     #[error("deviation: empty input data")]
@@ -284,7 +224,11 @@ pub enum DeviationError {
     #[error("deviation: Invalid devtype (must be 0, 1, or 2). devtype={devtype}")]
     InvalidDevType { devtype: usize },
     #[error("deviation: invalid range expansion start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("deviation: non-batch kernel passed to batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("deviation: Calculation error: {0}")]
@@ -296,12 +240,7 @@ pub fn deviation(input: &DeviationInput) -> Result<DeviationOutput, DeviationErr
     deviation_with_kernel(input, Kernel::Auto)
 }
 
-/// Writes Deviation outputs into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length.
-/// - Uses runtime kernel auto-detection (same as `deviation()`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline(always)]
 pub fn deviation_into(input: &DeviationInput, out: &mut [f64]) -> Result<(), DeviationError> {
     deviation_into_slice(out, input, Kernel::Auto)
@@ -356,7 +295,6 @@ fn deviation_compute_into(
     kernel: Kernel,
     out: &mut [f64],
 ) -> Result<(), DeviationError> {
-    // Respect kernel enum, route to SIMD for stddev/mode when available; otherwise scalar
     match kernel {
         Kernel::Scalar | Kernel::ScalarBatch => match devtype {
             0 => standard_deviation_rolling_into(data, period, first, out),
@@ -407,7 +345,6 @@ fn deviation_compute_into(
     }
 }
 
-// Replace your current deviation_with_kernel with this.
 pub fn deviation_with_kernel(
     input: &DeviationInput,
     kernel: Kernel,
@@ -418,11 +355,6 @@ pub fn deviation_with_kernel(
     Ok(DeviationOutput { values: out })
 }
 
-// Removed duplicate `deviation_into` definition.
-// The public `deviation_into` is already provided above and forwards to
-// `deviation_into_slice(..., Kernel::Auto)` to avoid code duplication.
-
-// Replace your current deviation_into_slice with this.
 pub fn deviation_into_slice(
     dst: &mut [f64],
     input: &DeviationInput,
@@ -436,7 +368,7 @@ pub fn deviation_into_slice(
         });
     }
     deviation_compute_into(data, period, devtype, first, chosen, dst)?;
-    // finalize warmup NaNs after compute
+
     let warm = first + period - 1;
     for v in &mut dst[..warm] {
         *v = f64::NAN;
@@ -466,7 +398,6 @@ pub fn deviation_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize, out: &mut [f64]) {
-    // Only stddev / "mode" deviation uses the AVX2 fast init; other types fallback.
     if !(devtype == 0 || devtype == 3) {
         let _ = standard_deviation_rolling_into(data, period, first, out);
         return;
@@ -480,7 +411,6 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
         let warm = first + period - 1;
         let n = period as f64;
 
-        // ---- Vectorized init of first window: sum/sumsq and nonfinite count
         let mut sumv = _mm256_setzero_pd();
         let mut sqrv = _mm256_setzero_pd();
         let mut bad = 0usize;
@@ -493,14 +423,13 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
         let end = first + period;
         while j + 4 <= end {
             let x = _mm256_loadu_pd(data.as_ptr().add(j));
-            // mask non-finite: isnan OR isinf
+
             let isnan = _mm256_cmp_pd(x, x, _CMP_NEQ_UQ);
             let xabs = _mm256_andnot_pd(sign_mask, x);
             let isinf = _mm256_cmp_pd(xabs, v_inf, _CMP_EQ_OQ);
             let bad_bits = (_mm256_movemask_pd(isnan) | _mm256_movemask_pd(isinf)) as u32;
             bad += bad_bits.count_ones() as usize;
 
-            // Zero-out bad lanes and accumulate
             let bad_mask = _mm256_or_pd(isnan, isinf);
             let good = _mm256_blendv_pd(x, zero, bad_mask);
             sumv = _mm256_add_pd(sumv, good);
@@ -508,14 +437,13 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
 
             j += 4;
         }
-        // Horizontal reduce AVX2 vectors
+
         let mut tmp = [0.0f64; 4];
         _mm256_storeu_pd(tmp.as_mut_ptr(), sumv);
         let mut sum = tmp.iter().sum::<f64>();
         _mm256_storeu_pd(tmp.as_mut_ptr(), sqrv);
         let mut sumsq = tmp.iter().sum::<f64>();
 
-        // tail (<=3)
         while j < end {
             let v = *data.get_unchecked(j);
             if !v.is_finite() {
@@ -538,7 +466,6 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
             out[warm] = var.sqrt();
         }
 
-        // ---- Scalar O(1) slide
         let mut i = warm + 1;
         while i < data.len() {
             let v_in = *data.get_unchecked(i);
@@ -557,7 +484,6 @@ pub fn deviation_avx2(data: &[f64], period: usize, first: usize, devtype: usize,
             }
 
             if bad > 0 || !sum.is_finite() || !sumsq.is_finite() {
-                // Recompute from scratch when window is finite but accumulators are not
                 if bad == 0 {
                     let start = i + 1 - period;
                     let mut s = 0.0;
@@ -604,7 +530,6 @@ pub fn deviation_avx512(
     devtype: usize,
     out: &mut [f64],
 ) {
-    // Only stddev / "mode" deviation benefits here; others fallback to scalar
     if !(devtype == 0 || devtype == 3) {
         let _ = standard_deviation_rolling_into(data, period, first, out);
         return;
@@ -630,14 +555,13 @@ pub fn deviation_avx512(
         while j + 8 <= end {
             let x = _mm512_loadu_pd(data.as_ptr().add(j));
             let xabs = _mm512_andnot_pd(sign_mask, x);
-            // Masks for NaN and Inf
+
             let mask_nan: u8 = _mm512_cmp_pd_mask(x, x, _CMP_NEQ_UQ);
             let mask_inf: u8 = _mm512_cmp_pd_mask(xabs, v_inf, _CMP_EQ_OQ);
             let mask_good: u8 = !(mask_nan | mask_inf);
 
             bad += (mask_nan | mask_inf).count_ones() as usize;
 
-            // Zero out bad lanes
             let good = _mm512_maskz_mov_pd(mask_good, x);
             sumv = _mm512_add_pd(sumv, good);
             sqrv = _mm512_fmadd_pd(good, good, sqrv);
@@ -645,14 +569,12 @@ pub fn deviation_avx512(
             j += 8;
         }
 
-        // reduce to scalars
         let mut tmp = [0.0f64; 8];
         _mm512_storeu_pd(tmp.as_mut_ptr(), sumv);
         let mut sum = tmp.iter().sum::<f64>();
         _mm512_storeu_pd(tmp.as_mut_ptr(), sqrv);
         let mut sumsq = tmp.iter().sum::<f64>();
 
-        // tail
         while j < end {
             let v = *data.get_unchecked(j);
             if !v.is_finite() {
@@ -675,7 +597,6 @@ pub fn deviation_avx512(
             out[warm] = var.sqrt();
         }
 
-        // scalar O(1) slide for the rest
         let mut i = warm + 1;
         while i < data.len() {
             let v_in = *data.get_unchecked(i);
@@ -755,7 +676,6 @@ pub fn deviation_avx512_long(
     deviation_avx512(data, period, first, devtype, out);
 }
 
-/// Batch param sweep for deviation.
 #[derive(Clone, Debug)]
 pub struct DeviationBatchRange {
     pub period: (usize, usize, usize),
@@ -770,7 +690,6 @@ impl Default for DeviationBatchRange {
     }
 }
 
-/// Builder for batch deviation.
 #[derive(Clone, Debug, Default)]
 pub struct DeviationBatchBuilder {
     range: DeviationBatchRange,
@@ -834,7 +753,6 @@ pub fn deviation_batch_with_kernel(
     deviation_batch_par_slice(data, sweep, simd)
 }
 
-/// Output for batch deviation grid.
 #[derive(Clone, Debug)]
 pub struct DeviationBatchOutput {
     pub values: Vec<f64>,
@@ -859,7 +777,6 @@ impl DeviationBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &DeviationBatchRange) -> Vec<DeviationParams> {
-    // Robust expansion: zero step => static; support reversed bounds; checked capacity.
     fn expand_axis(start: usize, end: usize, step: usize) -> Option<Vec<usize>> {
         if step == 0 {
             return Some(vec![start]);
@@ -955,13 +872,11 @@ fn deviation_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(DeviationError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(DeviationError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(DeviationError::OutputLengthMismatch {
             expected,
@@ -969,7 +884,6 @@ fn deviation_batch_inner_into(
         });
     }
 
-    // Treat out as uninit and stamp NaN prefixes using your helper, just like ALMA matrix path
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -980,12 +894,11 @@ fn deviation_batch_inner_into(
         .iter()
         .map(|c| {
             let warmup = first + c.period.unwrap() - 1;
-            warmup.min(cols) // Ensure warmup doesn't exceed column width
+            warmup.min(cols)
         })
         .collect();
     init_matrix_prefixes(out_mu, cols, &warms);
 
-    
     let mut ps: Vec<f64> = Vec::new();
     let mut ps2: Vec<f64> = Vec::new();
     let mut pc: Vec<usize> = Vec::new();
@@ -1016,16 +929,16 @@ fn deviation_batch_inner_into(
         let dst = unsafe {
             std::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len())
         };
-        
+
         if (devtype == 0 || devtype == 3) && !ps.is_empty() {
             let n = period as f64;
             let warm = first + period - 1;
-            
+
             let mut i = warm;
             while i < cols {
                 let l = i + 1 - period;
                 let r = i;
-                
+
                 if pc[r + 1] - pc[l] > 0 {
                     dst[i] = f64::NAN;
                 } else {
@@ -1041,7 +954,6 @@ fn deviation_batch_inner_into(
                 i += 1;
             }
         } else {
-            
             let _ = deviation_compute_into(data, period, devtype, first, kern, dst);
         }
     };
@@ -1069,8 +981,6 @@ fn deviation_batch_inner_into(
 
     Ok(combos)
 }
-
-
 
 #[inline(always)]
 pub fn deviation_batch_slice(
@@ -1107,15 +1017,12 @@ fn deviation_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let _expected = rows
-        .checked_mul(cols)
-        .ok_or(DeviationError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let _expected = rows.checked_mul(cols).ok_or(DeviationError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_f64 =
@@ -1145,7 +1052,6 @@ fn standard_deviation_rolling_into(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), DeviationError> {
-    
     if period == 1 {
         for i in first..data.len() {
             out[i] = 0.0;
@@ -1168,12 +1074,10 @@ fn standard_deviation_rolling_into(
     let n = period as f64;
     let warm = first + period - 1;
 
-    
     let mut sum = 0.0f64;
     let mut sumsq = 0.0f64;
-    let mut bad = 0usize; 
+    let mut bad = 0usize;
 
-    
     let mut j = first;
     let end0 = first + period;
     while j < end0 {
@@ -1187,13 +1091,12 @@ fn standard_deviation_rolling_into(
         j += 1;
     }
 
-    
     if bad > 0 || !sum.is_finite() || !sumsq.is_finite() {
         out[warm] = f64::NAN;
     } else {
         let mean = sum / n;
         let mut var = (sumsq / n) - mean * mean;
-        
+
         let scale = (sumsq / n).abs();
         if var.abs() / (scale.max(1e-30)) < 1e-10 {
             let start = warm + 1 - period;
@@ -1213,13 +1116,11 @@ fn standard_deviation_rolling_into(
         out[warm] = var.sqrt();
     }
 
-    
     let mut i = warm + 1;
     while i < data.len() {
         let v_in = unsafe { *data.get_unchecked(i) };
         let v_out = unsafe { *data.get_unchecked(i - period) };
 
-        
         if !v_in.is_finite() {
             bad += 1;
         } else {
@@ -1234,7 +1135,6 @@ fn standard_deviation_rolling_into(
         }
 
         if bad > 0 || !sum.is_finite() || !sumsq.is_finite() {
-            
             if bad == 0 {
                 let start = i + 1 - period;
                 let mut s = 0.0;
@@ -1249,7 +1149,7 @@ fn standard_deviation_rolling_into(
                 if s.is_finite() && s2.is_finite() {
                     let mean = s / n;
                     let mut var = (s2 / n) - mean * mean;
-                    
+
                     let scale = (s2 / n).abs();
                     if var.abs() / (scale.max(1e-30)) < 1e-10 {
                         let mut v2 = 0.0;
@@ -1321,7 +1221,6 @@ fn standard_deviation_rolling(
     }
     let mut result = alloc_with_nan_prefix(data.len(), first_valid_idx + period - 1);
 
-    
     let mut sum = 0.0;
     let mut sumsq = 0.0;
     let mut has_nan = false;
@@ -1347,7 +1246,6 @@ fn standard_deviation_rolling(
         let val_in = data[i];
         let val_out = data[i - period];
 
-        
         let window_start = i + 1 - period;
         has_nan = data[window_start..=i].iter().any(|&x| x.is_nan());
 
@@ -1381,12 +1279,9 @@ fn mean_absolute_deviation_rolling_into(
     let n = period as f64;
     let warm = first + period - 1;
 
-    
-    
     let mut sum = 0.0f64;
     let mut bad = 0usize;
 
-    
     let mut j = first;
     let end0 = first + period;
     while j < end0 {
@@ -1399,11 +1294,9 @@ fn mean_absolute_deviation_rolling_into(
         j += 1;
     }
 
-    
     if bad > 0 {
         out[warm] = f64::NAN;
     } else {
-        
         let start = warm + 1 - period;
         let a = unsafe { *data.get_unchecked(start) };
         let mut res = 0.0f64;
@@ -1413,7 +1306,7 @@ fn mean_absolute_deviation_rolling_into(
             k += 1;
         }
         let mean = a + res / n;
-        
+
         let mut abs_sum = 0.0f64;
         let mut k2 = start;
         let stop = k2 + (period & !3);
@@ -1436,7 +1329,6 @@ fn mean_absolute_deviation_rolling_into(
         out[warm] = abs_sum / n;
     }
 
-    
     let mut i = warm + 1;
     while i < data.len() {
         let v_in = unsafe { *data.get_unchecked(i) };
@@ -1456,7 +1348,6 @@ fn mean_absolute_deviation_rolling_into(
         if bad > 0 {
             out[i] = f64::NAN;
         } else {
-            
             let start = i + 1 - period;
             let mean = if sum.is_finite() {
                 sum / n
@@ -1523,7 +1414,6 @@ fn mean_absolute_deviation_rolling(
         }
         let window = &data[window_start..=i];
 
-        
         if window.iter().any(|&x| x.is_nan()) {
             result[i] = f64::NAN;
         } else {
@@ -1581,7 +1471,6 @@ fn median_absolute_deviation_rolling_into(
         }
     }
 
-    
     {
         let start = warm + 1 - period;
         let mut j = start;
@@ -1621,7 +1510,6 @@ fn median_absolute_deviation_rolling_into(
         }
     }
 
-    
     let mut i = warm + 1;
     while i < data.len() {
         let v_in = unsafe { *data.get_unchecked(i) };
@@ -1689,7 +1577,6 @@ fn median_absolute_deviation_rolling(
     let mut result = alloc_with_nan_prefix(data.len(), first_valid_idx + period - 1);
     let start_window_end = first_valid_idx + period - 1;
 
-    
     const STACK_SIZE: usize = 256;
     let mut stack_buffer: [f64; STACK_SIZE] = [0.0; STACK_SIZE];
     let mut heap_buffer: Vec<f64> = if period > STACK_SIZE {
@@ -1705,13 +1592,11 @@ fn median_absolute_deviation_rolling(
         }
         let window = &data[window_start..=i];
 
-        
         if window.iter().any(|&x| x.is_nan()) {
             result[i] = f64::NAN;
         } else {
             let median = find_median(window);
 
-            
             let abs_devs = if period <= STACK_SIZE {
                 &mut stack_buffer[..period]
             } else {
@@ -1735,9 +1620,6 @@ fn mode_deviation_rolling_into(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), DeviationError> {
-    
-    
-    
     standard_deviation_rolling_into(data, period, first, out)
 }
 
@@ -1746,20 +1628,17 @@ fn mode_deviation_rolling(
     data: &[f64],
     period: usize,
 ) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    
-    
     standard_deviation_rolling(data, period)
 }
 
 #[inline]
 fn find_median(slice: &[f64]) -> f64 {
-    
     if slice.is_empty() {
         return f64::NAN;
     }
 
     const STACK_SIZE: usize = 256;
-    
+
     if slice.len() <= STACK_SIZE {
         let mut buf: [f64; STACK_SIZE] = [0.0; STACK_SIZE];
         let n = slice.len();
@@ -1802,22 +1681,21 @@ fn find_median(slice: &[f64]) -> f64 {
     }
 }
 
-/// Streaming rolling deviation.
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", wasm_bindgen)]
+#[cfg_attr(all(target_arch = "wasm32", feature = "wasm"), wasm_bindgen)]
 pub struct DeviationStream {
     period: usize,
     devtype: usize,
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    
+
     sum: f64,
     sum_sq: f64,
     count: usize,
-    
+
     inv_n: f64,
-    
+
     tree: OstTreap,
 }
 
@@ -1848,42 +1726,35 @@ impl DeviationStream {
         })
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.update_impl(value)
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[inline(always)]
     fn std_dev_ring_o1(&self) -> f64 {
-        
         if self.count == 0 {
             return f64::NAN;
         }
 
-        
         if self.period == 1 {
             return 0.0;
         }
 
-        
         if self.count < self.period {
-            
             return f64::NAN;
         }
 
-        
-        
         let mean = self.sum * self.inv_n;
         let var = (self.sum_sq * self.inv_n) - mean * mean;
         var.sqrt()
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[inline(always)]
     fn mean_abs_dev_ring(&self) -> f64 {
-        
         if self.buffer.iter().any(|&x| !x.is_finite()) {
             return f64::NAN;
         }
@@ -1901,10 +1772,9 @@ impl DeviationStream {
         abs_sum / n
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[inline(always)]
     fn median_abs_dev_ring(&self) -> f64 {
-        
         if self.buffer.iter().any(|&x| x.is_nan()) {
             return f64::NAN;
         }
@@ -2065,7 +1935,6 @@ fn norm(x: f64) -> f64 {
 fn sqrt_fast(x: f64) -> f64 {
     x.sqrt()
 }
-
 
 #[derive(Debug, Clone, Default)]
 struct OstTreap {
@@ -2310,7 +2179,7 @@ impl OstTreap {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 impl DeviationStream {
     #[wasm_bindgen(constructor)]
@@ -2329,24 +2198,18 @@ impl DeviationStream {
 
     #[inline(always)]
     fn std_dev_ring_o1(&self) -> f64 {
-        
         if self.count == 0 {
             return f64::NAN;
         }
 
-        
         if self.period == 1 {
             return 0.0;
         }
 
-        
         if self.count < self.period {
-            
             return f64::NAN;
         }
 
-        
-        
         let mean = self.sum * self.inv_n;
         let var = (self.sum_sq * self.inv_n) - mean * mean;
         var.sqrt()
@@ -2354,7 +2217,6 @@ impl DeviationStream {
 
     #[inline(always)]
     fn mean_abs_dev_ring(&self) -> f64 {
-        
         if self.buffer.iter().any(|&x| !x.is_finite()) {
             return f64::NAN;
         }
@@ -2374,7 +2236,6 @@ impl DeviationStream {
 
     #[inline(always)]
     fn median_abs_dev_ring(&self) -> f64 {
-        
         if self.buffer.iter().any(|&x| x.is_nan()) {
             return f64::NAN;
         }
@@ -2385,7 +2246,6 @@ impl DeviationStream {
     }
 }
 
-/// Row-level kernel API
 #[inline(always)]
 pub unsafe fn deviation_row_scalar(
     data: &[f64],
@@ -2524,15 +2384,14 @@ mod tests {
     use std::error::Error;
 
     #[test]
-fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>> {
-        
+    fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>> {
         let len = 256;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
             let x = (i as f64 * 0.1).sin() * 10.0 + (i % 7) as f64;
             data.push(x);
         }
-        
+
         if len >= 2 {
             data[0] = f64::NAN;
             data[1] = f64::NAN;
@@ -2540,23 +2399,18 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
         let input = DeviationInput::from_slice(&data, DeviationParams::default());
 
-        
         let baseline = deviation(&input)?.values;
 
-        
         let mut into_out = vec![0.0; len];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             deviation_into(&input, &mut into_out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
-            
             return Ok(());
         }
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -2808,53 +2662,52 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
         let candles = read_candles_from_csv(file_path)?;
         let data = candles.select_candle_field("close")?;
 
-        
         let test_params = vec![
-            DeviationParams::default(), 
+            DeviationParams::default(),
             DeviationParams {
                 period: Some(2),
                 devtype: Some(0),
-            }, 
+            },
             DeviationParams {
                 period: Some(5),
                 devtype: Some(0),
-            }, 
+            },
             DeviationParams {
                 period: Some(5),
                 devtype: Some(1),
-            }, 
+            },
             DeviationParams {
                 period: Some(5),
                 devtype: Some(2),
-            }, 
+            },
             DeviationParams {
                 period: Some(20),
                 devtype: Some(0),
-            }, 
+            },
             DeviationParams {
                 period: Some(20),
                 devtype: Some(1),
-            }, 
+            },
             DeviationParams {
                 period: Some(20),
                 devtype: Some(2),
-            }, 
+            },
             DeviationParams {
                 period: Some(50),
                 devtype: Some(0),
-            }, 
+            },
             DeviationParams {
                 period: Some(50),
                 devtype: Some(1),
-            }, 
+            },
             DeviationParams {
                 period: Some(100),
                 devtype: Some(0),
-            }, 
+            },
             DeviationParams {
                 period: Some(100),
                 devtype: Some(2),
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2863,12 +2716,11 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2918,7 +2770,7 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
     #[cfg(not(debug_assertions))]
     fn check_deviation_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_deviation_tests {
@@ -2961,7 +2813,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
     #[test]
     fn test_deviation_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..251usize {
@@ -2971,18 +2822,15 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
         let input = DeviationInput::with_defaults(&data);
 
-        
         let baseline = deviation(&input)?.values;
 
-        
         let mut out = vec![0.0f64; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             deviation_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             deviation_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -3017,12 +2865,12 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                 period in 2usize..=50,
                 devtype in 0usize..=2
             ) {
-                
+
                 if data.iter().all(|x| x.is_nan()) {
                     return Ok(());
                 }
 
-                
+
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 if data.len() - first_valid < period {
                     return Ok(());
@@ -3034,46 +2882,46 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                 };
                 let input = DeviationInput::from_slice(&data, params);
 
-                
+
                 let result = deviation(&input);
 
-                
+
                 if let Ok(output) = result {
                     prop_assert_eq!(output.values.len(), data.len());
 
-                    
+
                     for i in 0..(first_valid + period - 1).min(data.len()) {
                         prop_assert!(output.values[i].is_nan());
                     }
 
-                    
+
                     if devtype <= 2 {
                         for i in (first_valid + period - 1)..data.len() {
-                            
+
                             let window_start = if i >= period - 1 { i + 1 - period } else { 0 };
                             let window = &data[window_start..=i];
                             let window_has_nan = window.iter().any(|x| x.is_nan());
 
-                            
+
                             let would_overflow = match devtype {
                                 0 => {
-                                    
+
                                     let sum: f64 = window.iter().sum();
                                     let sumsq: f64 = window.iter().map(|&x| x * x).sum();
                                     !sum.is_finite() || !sumsq.is_finite()
                                 },
                                 1 => {
-                                    
+
                                     window.iter().any(|&x| !x.is_finite())
                                 },
                                 2 => {
-                                    
+
                                     window.iter().any(|&x| !x.is_finite())
                                 },
                                 _ => false,
                             };
 
-                            
+
                             if window_has_nan || would_overflow {
                                 prop_assert!(output.values[i].is_nan());
                             } else {
@@ -3094,17 +2942,16 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        let strat = (2usize..=50) 
-            .prop_flat_map(|period| {
-                (
-                    prop::collection::vec(
-                        (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
-                        period + 10..400,
-                    ),
-                    Just(period),
-                    0usize..=2, 
-                )
-            });
+        let strat = (2usize..=50).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
+                    period + 10..400,
+                ),
+                Just(period),
+                0usize..=2,
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period, devtype)| {
@@ -3119,11 +2966,9 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                 let DeviationOutput { values: ref_out } =
                     deviation_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_period = first_valid + period - 1;
 
-                
                 for i in 0..warmup_period.min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -3133,43 +2978,33 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                     );
                 }
 
-                
                 prop_assert_eq!(out.len(), data.len());
 
-                
                 for i in warmup_period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     prop_assert!(
-                        y.is_nan() || y >= -1e-12, 
+                        y.is_nan() || y >= -1e-12,
                         "Deviation at index {} is negative: {}",
                         i,
                         y
                     );
 
-                    
-                    
-                    
                     let window = &data[i + 1 - period..=i];
                     let all_same = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-14);
-	                    if all_same && window.iter().all(|x| x.is_finite()) {
-	                        
-	                        
-	                        prop_assert!(
+                    if all_same && window.iter().all(|x| x.is_finite()) {
+                        prop_assert!(
 								y.abs() < 1e-2 || y.is_nan(),
 								"Deviation should be ~0 (or NaN due to precision bug) for constant window at index {}: {}",
 								i,
 								y
 							);
-	                    }
+                    }
 
-                    
                     if devtype == 0 && y.is_finite() && y > 1e-10 {
-                        
                         let variance = y * y;
-                        
+
                         let window_mean = window.iter().sum::<f64>() / (period as f64);
                         let computed_var = window
                             .iter()
@@ -3190,7 +3025,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 						);
                     }
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -3204,8 +3038,7 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
                     let ulp_diff: u64 = y.to_bits().abs_diff(r.to_bits());
                     let abs_diff = (y - r).abs();
-                    
-                    
+
                     let tol = (r.abs() * 1e-7_f64).max(1e-6_f64);
                     prop_assert!(
                         abs_diff <= tol || ulp_diff <= 4,
@@ -3216,8 +3049,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                         ulp_diff
                     );
 
-                    
-                    
                     let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
                     let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let window_range = window_max - window_min;
@@ -3230,12 +3061,9 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                         i
                     );
 
-                    
                     match devtype {
                         0 => {
-                            
                             if y.is_finite() && y > 0.0 {
-                                
                                 let window_mean = window.iter().sum::<f64>() / (period as f64);
                                 let theoretical_var = window
                                     .iter()
@@ -3244,10 +3072,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                     / (period as f64);
                                 let theoretical_std = theoretical_var.sqrt();
 
-                                
-                                
-                                
-                                
                                 let tolerance = theoretical_std * 1e-4 + 1e-10;
                                 prop_assert!(
 									y <= theoretical_std + tolerance,
@@ -3257,7 +3081,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 									i
 								);
 
-                                
                                 let window_min =
                                     window.iter().cloned().fold(f64::INFINITY, f64::min);
                                 let window_max =
@@ -3266,7 +3089,7 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                 let max_bound = max_possible_std * 1.001 + 1e-8;
 
                                 prop_assert!(
-                                    y <= max_bound, 
+                                    y <= max_bound,
                                     "StdDev {} exceeds maximum possible {} (bound={}) at index {}",
                                     y,
                                     max_possible_std,
@@ -3276,8 +3099,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                             }
                         }
                         1 => {
-                            
-                            
                             let std_dev_params = DeviationParams {
                                 period: Some(period),
                                 devtype: Some(0),
@@ -3286,9 +3107,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                             if let Ok(std_output) = deviation_with_kernel(&std_input, kernel) {
                                 let std_val = std_output.values[i];
                                 if std_val.is_finite() && y.is_finite() {
-                                    
-                                    
-                                    
                                     let tolerance = std_val * 1e-7 + 1e-9;
                                     prop_assert!(
                                         y <= std_val + tolerance,
@@ -3301,9 +3119,7 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                             }
                         }
                         2 => {
-                            
                             if y.is_finite() && y > 0.0 {
-                                
                                 prop_assert!(
                                     y <= window_range + 1e-12,
                                     "MedianAbsDev {} exceeds window range {} at index {}",
@@ -3312,9 +3128,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                     i
                                 );
 
-                                
-                                
-                                
                                 let std_dev_params = DeviationParams {
                                     period: Some(period),
                                     devtype: Some(0),
@@ -3323,8 +3136,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                 if let Ok(std_output) = deviation_with_kernel(&std_input, kernel) {
                                     let std_val = std_output.values[i];
                                     if std_val.is_finite() && std_val > 0.0 {
-                                        
-                                        
                                         prop_assert!(
                                             y <= std_val * 1.5 + 1e-9,
                                             "MedAD {} exceeds 1.5x StdDev {} at index {}",
@@ -3335,7 +3146,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                     }
                                 }
 
-                                
                                 let mut sorted_window: Vec<f64> = window.iter().cloned().collect();
                                 sorted_window.sort_by(|a, b| {
                                     a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
@@ -3363,19 +3173,12 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                         _ => {}
                     }
 
-                    
-                    
                     if i >= warmup_period + period && y.is_finite() {
-                        
-                        
-                        
                         let old_idx = i - period - 1;
                         if old_idx < data.len() {
-                            
                             let current_window = &data[i + 1 - period..=i];
                             let window_variance = match devtype {
                                 0 => {
-                                    
                                     let mean = current_window.iter().sum::<f64>() / (period as f64);
                                     let var = current_window
                                         .iter()
@@ -3385,7 +3188,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                     var.sqrt()
                                 }
                                 1 => {
-                                    
                                     let mean = current_window.iter().sum::<f64>() / (period as f64);
                                     current_window
                                         .iter()
@@ -3393,16 +3195,13 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                                         .sum::<f64>()
                                         / (period as f64)
                                 }
-                                2 => {
-                                    
-                                    y
-                                }
+                                2 => y,
                                 _ => y,
                             };
 
                             if devtype != 2 {
                                 let diff = (y - window_variance).abs();
-                                let tolerance = window_variance * 1e-6 + 1e-8; 
+                                let tolerance = window_variance * 1e-6 + 1e-8;
                                 prop_assert!(
 									diff <= tolerance,
 									"Rolling window deviation mismatch at index {}: computed {} vs expected {} (diff={})",
@@ -3491,17 +3290,15 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
         let c = read_candles_from_csv(file)?;
         let data = c.select_candle_field("close")?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 0, 2, 1),    
-            (5, 25, 5, 0, 0, 0),    
-            (5, 25, 5, 1, 1, 0),    
-            (5, 25, 5, 2, 2, 0),    
-            (30, 60, 15, 0, 2, 1),  
-            (2, 5, 1, 0, 2, 1),     
-            (50, 100, 25, 0, 0, 0), 
-            (10, 10, 0, 0, 2, 1),   
+            (2, 10, 2, 0, 2, 1),
+            (5, 25, 5, 0, 0, 0),
+            (5, 25, 5, 1, 1, 0),
+            (5, 25, 5, 2, 2, 0),
+            (30, 60, 15, 0, 2, 1),
+            (2, 5, 1, 0, 2, 1),
+            (50, 100, 25, 0, 0, 0),
+            (10, 10, 0, 0, 2, 1),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, d_start, d_end, d_step)) in
@@ -3523,7 +3320,6 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3579,7 +3375,7 @@ fn test_deviation_into_matches_api_v2() -> Result<(), Box<dyn std::error::Error>
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -3711,8 +3507,6 @@ pub fn deviation_batch_py<'py>(
     Ok(dict)
 }
 
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "deviation_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, devtype_range=(0,0,0), device_id=0))]
@@ -3780,7 +3574,7 @@ pub fn deviation_cuda_many_series_one_param_dev_py<'py>(
     make_device_array_py(device_id, inner)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn deviation_js(data: &[f64], period: usize, devtype: usize) -> Result<Vec<f64>, JsValue> {
     let params = DeviationParams {
@@ -3794,23 +3588,23 @@ pub fn deviation_js(data: &[f64], period: usize, devtype: usize) -> Result<Vec<f
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DeviationBatchConfig {
     pub period_range: (usize, usize, usize),
     pub devtype_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DeviationBatchJsOutput {
     pub values: Vec<f64>,
-    pub combos: usize, // Changed to usize to match test expectations
+    pub combos: usize,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = deviation_batch)]
 pub fn deviation_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: DeviationBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -3831,7 +3625,7 @@ pub fn deviation_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn deviation_batch_metadata(
     period_start: usize,
@@ -3857,7 +3651,7 @@ pub fn deviation_batch_metadata(
     metadata
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn deviation_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3866,7 +3660,7 @@ pub fn deviation_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn deviation_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3876,7 +3670,7 @@ pub fn deviation_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn deviation_into(
     in_ptr: *const f64,
@@ -3910,7 +3704,7 @@ pub fn deviation_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn deviation_batch_into(
     in_ptr: *const f64,

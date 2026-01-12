@@ -1,23 +1,3 @@
-//! # Market Facilitation Index (marketefi)
-//!
-//! Market Facilitation Index (marketefi) measures price movement efficiency relative to trading volume.
-//!
-//! ## Parameters
-//! - No adjustable parameters; calculation is direct.
-//!
-//! ## Returns
-//! - **`Ok(MarketefiOutput)`** on success, containing a `Vec<f64>` matching the input length,
-//!   with leading `NaN`s until the first valid index.
-//! - **`Err(MarketefiError)`** on failure
-//!
-//! ## Developer Notes
-//! - Decision: SIMD enabled; >5% faster than scalar at 100k (AVX2/AVX-512).
-//! - SIMD: AVX2/AVX-512 kernels enabled; selected via `detect_best_kernel()`.
-//! - Streaming: O(1) with direct calculation `(high - low) / volume`.
-//! - Memory: Uses zero-copy helpers (`alloc_with_nan_prefix`, `make_uninit_matrix`, `init_matrix_prefixes`).
-//! - Row-specific batch: not attempted (no reusable cross-row precompute for `(high - low) / volume`).
-//! - CUDA: wrapper enabled; VRAM handles carry primary-context guards and device_id, and Python interop exposes CUDA Array Interface v3 + DLPack v1.x capsules.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -36,19 +16,19 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, CudaMarketefi};
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::{cuda_available, CudaMarketefi};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::DeviceArrayF32Py as SharedDeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -72,7 +52,10 @@ pub enum MarketefiData<'a> {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MarketefiParams;
 
 impl Default for MarketefiParams {
@@ -180,14 +163,18 @@ pub enum MarketefiError {
     #[error("marketefi: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("marketefi: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("marketefi: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("marketefi: Zero or NaN volume at a valid index.")]
     ZeroOrNaNVolume,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<MarketefiError> for JsValue {
     fn from(err: MarketefiError) -> Self {
         JsValue::from_str(&err.to_string())
@@ -236,7 +223,6 @@ fn marketefi_prepare<'a>(
         .ok_or(MarketefiError::AllValuesNaN)?;
 
     let chosen = match kernel {
-        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 => Kernel::Avx2,
             other => other,
@@ -278,11 +264,17 @@ fn marketefi_compute_into_any_valid(
 ) -> bool {
     unsafe {
         match kernel {
-            Kernel::Scalar | Kernel::ScalarBatch => marketefi_scalar_any_valid(high, low, volume, first, out),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                marketefi_scalar_any_valid(high, low, volume, first, out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => marketefi_avx2_any_valid(high, low, volume, first, out),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                marketefi_avx2_any_valid(high, low, volume, first, out)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => marketefi_avx512_any_valid(high, low, volume, first, out),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                marketefi_avx512_any_valid(high, low, volume, first, out)
+            }
             _ => marketefi_scalar_any_valid(high, low, volume, first, out),
         }
     }
@@ -334,12 +326,7 @@ pub fn marketefi_with_kernel(
     Ok(MarketefiOutput { values: out })
 }
 
-/// Writes Market Facilitation Index (marketefi) values into a caller-provided buffer without allocations.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (`marketefi` / `marketefi_with_kernel`).
-/// - Output slice length must equal the input length; returns `OutputLengthMismatch` on mismatch.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), MarketefiError> {
     let (h, l, v, first, chosen) = marketefi_prepare(input, Kernel::Auto)?;
@@ -350,7 +337,6 @@ pub fn marketefi_into(input: &MarketefiInput, out: &mut [f64]) -> Result<(), Mar
         });
     }
 
-    
     for x in &mut out[..first] {
         *x = f64::from_bits(0x7ff8_0000_0000_0000);
     }
@@ -390,7 +376,6 @@ fn marketefi_scalar_any_valid(
 
         let mut i = first_valid;
         while i + 4 <= n {
-            
             let v0 = *vp.add(i);
             if v0 == 0.0 {
                 *op.add(i) = qnan;
@@ -404,7 +389,6 @@ fn marketefi_scalar_any_valid(
                 }
             }
 
-            
             let v1 = *vp.add(i + 1);
             if v1 == 0.0 {
                 *op.add(i + 1) = qnan;
@@ -418,7 +402,6 @@ fn marketefi_scalar_any_valid(
                 }
             }
 
-            
             let v2 = *vp.add(i + 2);
             if v2 == 0.0 {
                 *op.add(i + 2) = qnan;
@@ -432,7 +415,6 @@ fn marketefi_scalar_any_valid(
                 }
             }
 
-            
             let v3 = *vp.add(i + 3);
             if v3 == 0.0 {
                 *op.add(i + 3) = qnan;
@@ -520,14 +502,13 @@ pub fn marketefi_avx512(
 
             let diff = _mm512_sub_pd(h, l);
 
-            
             let mut y = _mm512_rcp14_pd(v);
-            
+
             let two = _mm512_set1_pd(2.0);
             let t1 = _mm512_mul_pd(v, y);
             let t2 = _mm512_sub_pd(two, t1);
             y = _mm512_mul_pd(y, t2);
-            
+
             let t1b = _mm512_mul_pd(v, y);
             let t2b = _mm512_sub_pd(two, t1b);
             y = _mm512_mul_pd(y, t2b);
@@ -599,7 +580,6 @@ fn marketefi_avx512_any_valid(
 
             let diff = _mm512_sub_pd(h, l);
 
-            
             let mut y = _mm512_rcp14_pd(v);
             let two = _mm512_set1_pd(2.0);
             let t1 = _mm512_mul_pd(v, y);
@@ -784,8 +764,6 @@ pub fn marketefi_avx512_long(
     marketefi_avx512(high, low, volume, first_valid, out)
 }
 
-
-
 #[inline(always)]
 pub fn marketefi_row_scalar(
     high: &[f64],
@@ -846,7 +824,7 @@ pub fn marketefi_row_avx512_long(
 }
 
 #[derive(Clone, Debug)]
-pub struct MarketefiBatchRange; 
+pub struct MarketefiBatchRange;
 
 impl Default for MarketefiBatchRange {
     fn default() -> Self {
@@ -933,7 +911,7 @@ fn marketefi_batch_inner_into(
     low: &[f64],
     volume: &[f64],
     kernel: Kernel,
-    _parallel: bool, 
+    _parallel: bool,
     out: &mut [f64],
 ) -> Result<(), MarketefiError> {
     if high.is_empty() || low.is_empty() || volume.is_empty() {
@@ -948,17 +926,16 @@ fn marketefi_batch_inner_into(
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .ok_or(MarketefiError::AllValuesNaN)?;
 
-    
     let out_mu = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
-    init_matrix_prefixes(out_mu, cols, &[first]); 
+    init_matrix_prefixes(out_mu, cols, &[first]);
 
     let chosen = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
-    
+
     let row = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut f64, cols) };
     marketefi_compute_into(
         high,
@@ -987,16 +964,15 @@ fn marketefi_batch_inner(
 ) -> Result<MarketefiBatchOutput, MarketefiError> {
     let cols = high.len();
 
-    
     let combos = expand_grid(&MarketefiBatchRange::default());
-    let rows = combos.len(); 
+    let rows = combos.len();
 
-    
-    rows.checked_mul(cols).ok_or_else(|| MarketefiError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols overflow".to_string(),
-    })?;
+    rows.checked_mul(cols)
+        .ok_or_else(|| MarketefiError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols overflow".to_string(),
+        })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -1030,8 +1006,6 @@ pub fn expand_grid(_: &MarketefiBatchRange) -> Vec<MarketefiParams> {
     vec![MarketefiParams]
 }
 
-
-
 #[derive(Debug, Clone, Default)]
 pub struct MarketefiStream;
 
@@ -1041,9 +1015,6 @@ impl MarketefiStream {
         Self
     }
 
-    /// Exact IEEE-754 path (unchanged semantics):
-    /// - returns None if any input is NaN or if `volume == 0.0`
-    /// - otherwise computes (high - low) / volume
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, volume: f64) -> Option<f64> {
         if high.is_nan() || low.is_nan() || volume.is_nan() || volume == 0.0 {
@@ -1054,10 +1025,6 @@ impl MarketefiStream {
         }
     }
 
-    /// Optional fast-math path (opt-in):
-    /// Uses a reciprocal approximation refined by 2x Newton–Raphson in f64.
-    /// Typically matches full double precision while avoiding a full hardware divide.
-    /// Semantics: same "None" behavior as `update()`, otherwise returns a value.
     #[inline(always)]
     pub fn update_fast(&mut self, high: f64, low: f64, volume: f64) -> Option<f64> {
         if high.is_nan() || low.is_nan() || volume.is_nan() || volume == 0.0 {
@@ -1068,8 +1035,6 @@ impl MarketefiStream {
         }
     }
 
-    /// Optional: unchecked exact path for frameworks that validate inputs externally.
-    /// Safety contract: caller guarantees no NaNs and `volume != 0.0`.
     #[inline(always)]
     pub fn update_unchecked(&mut self, high: f64, low: f64, volume: f64) -> f64 {
         debug_assert!(!high.is_nan() && !low.is_nan() && !volume.is_nan() && volume != 0.0);
@@ -1077,28 +1042,19 @@ impl MarketefiStream {
     }
 }
 
-/// Fast-math helper: double-precision reciprocal via f32 seed + 2x Newton–Raphson.
-/// - For extremely tiny |x| that underflow in f32, safely fall back to exact division.
-/// - Uses `mul_add` to take advantage of hardware FMA when available.
 #[inline(always)]
 fn approx_recip_nr2_f64(x: f64) -> f64 {
-    
     const F32_MIN_NORM: f64 = f32::MIN_POSITIVE as f64;
     if x.abs() < F32_MIN_NORM {
-        
         return 1.0 / x;
     }
 
-    
     let mut y = (1.0f32 / (x as f32)) as f64;
 
-    
-    
     y *= (-x).mul_add(y, 2.0);
     y *= (-x).mul_add(y, 2.0);
     y
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "marketefi")]
@@ -1152,9 +1108,12 @@ impl MarketefiStreamPy {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "MarketefiDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "MarketefiDeviceArrayF32",
+    unsendable
+)]
 pub struct MarketefiDeviceArrayF32Py {
     pub(crate) inner: SharedDeviceArrayF32Py,
 }
@@ -1180,7 +1139,8 @@ impl MarketefiDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        self.inner.__dlpack__(py, stream, max_version, dl_device, copy)
+        self.inner
+            .__dlpack__(py, stream, max_version, dl_device, copy)
     }
 }
 
@@ -1214,24 +1174,19 @@ pub fn marketefi_batch_py<'py>(
     let v = volume.as_slice()?;
     let k = validate_kernel(kernel, true)?;
 
-    // rows=1
     let rows = 1usize;
     let cols = h.len();
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    py.allow_threads(|| {
-        // write directly to NumPy buffer
-        marketefi_batch_inner_into(h, l, v, k, true, out_slice)
-    })
-    .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    py.allow_threads(|| marketefi_batch_inner_into(h, l, v, k, true, out_slice))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     Ok(dict)
 }
 
-// ====== PYTHON CUDA BINDINGS ======
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "marketefi_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, volume_f32, device_id=0))]
@@ -1311,7 +1266,6 @@ pub fn marketefi_cuda_many_series_one_param_dev_py(
     ))
 }
 
-// Unit tests
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1323,35 +1277,34 @@ mod tests {
 
     #[test]
     fn test_marketefi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Small but non-trivial synthetic data with NaNs and a zero-volume entry
         let len = 256;
         let mut high = vec![f64::NAN; len];
         let mut low = vec![f64::NAN; len];
         let mut volume = vec![f64::NAN; len];
 
-        // Warmup region with NaNs, then valid data; include a zero volume later
         for i in 10..len {
             let base = 100.0 + (i as f64) * 0.1;
             let spread = 0.5 + (i % 7) as f64 * 0.05;
             high[i] = base + spread;
             low[i] = base - spread * 0.3;
-            volume[i] = if i % 53 == 0 { 0.0 } else { 1000.0 + (i as f64) };
+            volume[i] = if i % 53 == 0 {
+                0.0
+            } else {
+                1000.0 + (i as f64)
+            };
         }
 
         let input = MarketefiInput::from_slices(&high, &low, &volume, MarketefiParams::default());
 
-        // Baseline via Vec-returning API (Auto kernel)
         let baseline = marketefi_with_kernel(&input, Kernel::Auto)?;
 
-        // Into API into caller-allocated buffer
         let mut out = vec![0.0; len];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             marketefi_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // In wasm builds native `marketefi_into` is not available; emulate via into_slice
             marketefi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1441,10 +1394,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data
-        // Generate realistic market data with varying scenarios
         let strat = (50usize..400, 0usize..7, any::<u64>()).prop_map(|(len, scenario, seed)| {
-            // LCG-based deterministic RNG for reproducible tests
             let mut rng_state = seed.wrapping_mul(1664525).wrapping_add(1013904223);
             let mut next_f64 = || {
                 rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
@@ -1457,7 +1407,6 @@ mod tests {
 
             match scenario {
                 0 => {
-                    // Random realistic market data
                     for _ in 0..len {
                         let base = 50.0 + next_f64() * 450.0;
                         let spread = 0.1 + next_f64() * 10.0;
@@ -1467,7 +1416,6 @@ mod tests {
                     }
                 }
                 1 => {
-                    // Constant prices (high = low) - should produce 0.0
                     let price = 100.0 + next_f64() * 200.0;
                     for _ in 0..len {
                         high.push(price);
@@ -1476,7 +1424,6 @@ mod tests {
                     }
                 }
                 2 => {
-                    // Trending market with increasing volatility
                     let mut base = 100.0;
                     for i in 0..len {
                         let trend = 0.5 * (i as f64 / len as f64);
@@ -1488,33 +1435,30 @@ mod tests {
                     }
                 }
                 3 => {
-                    // Small volumes (edge case testing)
                     for _ in 0..len {
                         let base = 50.0 + next_f64() * 100.0;
                         let spread = 0.1 + next_f64() * 5.0;
                         high.push(base + spread);
                         low.push(base);
-                        volume.push(0.001 + next_f64() * 1.0); // Very small volumes
+                        volume.push(0.001 + next_f64() * 1.0);
                     }
                 }
                 4 => {
-                    // Large volumes and price ranges
                     for _ in 0..len {
                         let base = 1000.0 + next_f64() * 9000.0;
                         let spread = 10.0 + next_f64() * 100.0;
                         high.push(base + spread);
                         low.push(base);
-                        volume.push(1e6 + next_f64() * 1e7); // Large volumes
+                        volume.push(1e6 + next_f64() * 1e7);
                     }
                 }
                 5 => {
-                    // Zero volumes mixed with valid volumes
                     for i in 0..len {
                         let base = 100.0 + next_f64() * 100.0;
                         let spread = 1.0 + next_f64() * 5.0;
                         high.push(base + spread);
                         low.push(base);
-                        // Every 5th element has zero volume
+
                         if i % 5 == 0 {
                             volume.push(0.0);
                         } else {
@@ -1523,14 +1467,13 @@ mod tests {
                     }
                 }
                 _ => {
-                    // Inverted prices (high < low) - data quality issue but should handle
                     for _ in 0..len {
                         let base = 100.0 + next_f64() * 200.0;
                         let spread = 1.0 + next_f64() * 10.0;
-                        // Occasionally invert high and low
+
                         if next_f64() < 0.3 {
-                            high.push(base - spread); // high is lower
-                            low.push(base); // low is higher
+                            high.push(base - spread);
+                            low.push(base);
                         } else {
                             high.push(base + spread);
                             low.push(base);
@@ -1549,13 +1492,10 @@ mod tests {
                 let input =
                     MarketefiInput::from_slices(&high, &low, &volume, MarketefiParams::default());
 
-                // Get output from the kernel being tested
                 let output = marketefi_with_kernel(&input, kernel)?;
 
-                // Get reference output from scalar kernel
                 let ref_output = marketefi_with_kernel(&input, Kernel::Scalar)?;
 
-                // Property 1: Output length must match input length
                 prop_assert_eq!(
                     output.values.len(),
                     high.len(),
@@ -1564,7 +1504,6 @@ mod tests {
                     high.len()
                 );
 
-                // Property 2: First valid index behavior - all values before first valid index should be NaN
                 let first_valid = (0..high.len())
                     .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !volume[i].is_nan());
 
@@ -1580,7 +1519,6 @@ mod tests {
                     }
                 }
 
-                // Property 3: Mathematical accuracy - verify calculation
                 for i in 0..high.len() {
                     let expected = if high[i].is_nan()
                         || low[i].is_nan()
@@ -1612,7 +1550,6 @@ mod tests {
                     }
                 }
 
-                // Property 4: Kernel consistency - all kernels must produce identical results
                 for i in 0..output.values.len() {
                     let out_val = output.values[i];
                     let ref_val = ref_output.values[i];
@@ -1630,7 +1567,6 @@ mod tests {
                     );
                 }
 
-                // Property 5: Special case - when high equals low, result should be 0.0 (for non-zero volume)
                 if scenario == 1 {
                     for i in 0..output.values.len() {
                         if !high[i].is_nan()
@@ -1648,7 +1584,6 @@ mod tests {
                     }
                 }
 
-                // Property 6: Zero volume should produce NaN
                 if scenario == 5 {
                     for i in 0..output.values.len() {
                         if volume[i] == 0.0 {
@@ -1662,7 +1597,6 @@ mod tests {
                     }
                 }
 
-                // Property 7: Inverted prices (high < low) should produce negative values
                 if scenario == 6 {
                     for i in 0..output.values.len() {
                         if !high[i].is_nan()
@@ -1678,7 +1612,6 @@ mod tests {
                     }
                 }
 
-                // Property 8: Check for poison values
                 for (i, &val) in output.values.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -1752,11 +1685,9 @@ mod tests {
 
         let input = MarketefiInput::from_slices(&high, &low, &volume, MarketefiParams::default());
 
-        // Test with pre-allocated buffer
         let mut dst = vec![0.0; high.len()];
         marketefi_into_slice(&mut dst, &input, Kernel::Scalar)?;
 
-        // Compare with regular marketefi function
         let output = marketefi(&input)?;
 
         assert_eq!(dst.len(), output.values.len());
@@ -1773,7 +1704,6 @@ mod tests {
             );
         }
 
-        // Verify the calculation is correct
         for i in 0..high.len() {
             let expected = (high[i] - low[i]) / volume[i];
             assert!(
@@ -1795,19 +1725,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Since marketefi has no parameters, we just test with default params
         let params = MarketefiParams::default();
         let input = MarketefiInput::from_candles(&candles, "high", "low", "volume", params.clone());
         let output = marketefi_with_kernel(&input, kernel)?;
 
         for (i, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
-                continue; // NaN values are expected during warmup
+                continue;
             }
 
             let bits = val.to_bits();
 
-            // Check all three poison patterns
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1835,7 +1763,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_marketefi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -1873,7 +1801,6 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Since marketefi has no parameters, we only have one configuration to test
         let output = MarketefiBatchBuilder::new().kernel(kernel).apply_slices(
             source_type(&c, "high"),
             source_type(&c, "low"),
@@ -1889,7 +1816,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check all three poison patterns with detailed context
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1920,7 +1846,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -1947,8 +1873,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn marketefi_js(high: &[f64], low: &[f64], volume: &[f64]) -> Result<Vec<f64>, JsValue> {
     let input = MarketefiInput::from_slices(high, low, volume, MarketefiParams::default());
@@ -1961,7 +1886,7 @@ pub fn marketefi_js(high: &[f64], low: &[f64], volume: &[f64]) -> Result<Vec<f64
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn marketefi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1970,7 +1895,7 @@ pub fn marketefi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn marketefi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1980,7 +1905,7 @@ pub fn marketefi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn marketefi_into(
     high_ptr: *const f64,
@@ -2000,7 +1925,6 @@ pub fn marketefi_into(
 
         let input = MarketefiInput::from_slices(high, low, volume, MarketefiParams::default());
 
-        // Check for aliasing - if any input pointer equals output pointer
         if high_ptr == out_ptr || low_ptr == out_ptr || volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             marketefi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -2017,13 +1941,11 @@ pub fn marketefi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
-pub struct MarketefiBatchConfig {
-    // No parameters for marketefi, so empty config
-}
+pub struct MarketefiBatchConfig {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MarketefiBatchJsOutput {
     pub values: Vec<f64>,
@@ -2032,7 +1954,7 @@ pub struct MarketefiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = marketefi_batch)]
 pub fn marketefi_batch_js(
     high: &[f64],
@@ -2054,7 +1976,7 @@ pub fn marketefi_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn marketefi_batch_into(
     high_ptr: *const f64,
@@ -2072,10 +1994,10 @@ pub fn marketefi_batch_into(
         let h = core::slice::from_raw_parts(high_ptr, len);
         let l = core::slice::from_raw_parts(low_ptr, len);
         let v = core::slice::from_raw_parts(volume_ptr, len);
-        let out = core::slice::from_raw_parts_mut(out_ptr, len); // rows=1
+        let out = core::slice::from_raw_parts_mut(out_ptr, len);
 
         marketefi_batch_inner_into(h, l, v, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(1) // rows
+        Ok(1)
     }
 }

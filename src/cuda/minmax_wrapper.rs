@@ -1,13 +1,3 @@
-//! CUDA support for the MinMax (Local Extrema) indicator.
-//!
-//! Parity goals with ALMA-class wrappers:
-//! - PTX load via include_str!(.../minmax_kernel.ptx) with DetermineTargetFromContext + O2
-//! - NON_BLOCKING stream
-//! - Policy enums (plain 1D for batch; 1D blocks per series for many-series)
-//! - VRAM checks with ~64MB headroom and grid.y chunking for batch rows
-//! - Public device entry points return VRAM-backed arrays without staging
-//! - Warmup/NaN semantics match scalar minmax.rs exactly
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -25,7 +15,6 @@ use std::fmt;
 use std::sync::Arc;
 use thiserror::Error;
 
-
 #[inline]
 fn floor_log2_usize(mut n: usize) -> usize {
     debug_assert!(n > 0);
@@ -39,14 +28,18 @@ fn floor_log2_usize(mut n: usize) -> usize {
 
 #[inline]
 fn sparse_table_levels(n: usize) -> usize {
-    if n == 0 { 0 } else { floor_log2_usize(n) + 1 }
+    if n == 0 {
+        0
+    } else {
+        floor_log2_usize(n) + 1
+    }
 }
 
-/// Bytes for RMQ scratch (low_min + high_max + valid_low + valid_high)
-/// = K * N * (4 + 4 + 1 + 1) = 10 * K * N.
 #[inline]
 fn rmq_scratch_bytes(n: usize) -> usize {
-    10usize.saturating_mul(sparse_table_levels(n)).saturating_mul(n)
+    10usize
+        .saturating_mul(sparse_table_levels(n))
+        .saturating_mul(n)
 }
 
 #[derive(Error, Debug)]
@@ -54,16 +47,18 @@ pub enum CudaMinmaxError {
     #[error("CUDA error: {0}")]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge {
         gx: u32,
         gy: u32,
@@ -78,7 +73,6 @@ pub enum CudaMinmaxError {
     NotImplemented,
 }
 
-/// Four VRAM-backed arrays (is_min, is_max, last_min, last_max)
 pub struct DeviceMinmaxQuad {
     pub is_min: DeviceBuffer<f32>,
     pub is_max: DeviceBuffer<f32>,
@@ -140,8 +134,7 @@ impl CudaMinmax {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -196,7 +189,6 @@ impl CudaMinmax {
         }
     }
 
-    
     pub fn minmax_batch_dev(
         &self,
         high: &[f32],
@@ -210,7 +202,6 @@ impl CudaMinmax {
         }
         let len = high.len();
 
-        
         let mut first_valid: Option<i32> = None;
         for (i, (&h, &l)) in high.iter().zip(low.iter()).enumerate() {
             if h.is_finite() && l.is_finite() {
@@ -221,9 +212,8 @@ impl CudaMinmax {
         let first_valid = first_valid
             .ok_or_else(|| CudaMinmaxError::InvalidInput("all values are NaN".into()))?;
 
-        
         let combos = expand_grid(sweep)?;
-        
+
         let max_o = combos
             .iter()
             .map(|c| c.order.unwrap_or(3))
@@ -238,7 +228,6 @@ impl CudaMinmax {
             )));
         }
 
-        
         let in_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_mul(2))
@@ -256,7 +245,9 @@ impl CudaMinmax {
             .checked_mul(len)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| {
-                CudaMinmaxError::InvalidInput("output element count overflow for minmax batch".into())
+                CudaMinmaxError::InvalidInput(
+                    "output element count overflow for minmax batch".into(),
+                )
             })?;
         let out_bytes = out_elems
             .checked_mul(std::mem::size_of::<f32>())
@@ -267,7 +258,9 @@ impl CudaMinmax {
             .checked_add(params_bytes)
             .and_then(|b| b.checked_add(out_bytes))
             .ok_or_else(|| {
-                CudaMinmaxError::InvalidInput("total allocation size overflow for minmax batch".into())
+                CudaMinmaxError::InvalidInput(
+                    "total allocation size overflow for minmax batch".into(),
+                )
             })?;
 
         if !Self::will_fit(base_required, 64 * 1024 * 1024) {
@@ -284,45 +277,30 @@ impl CudaMinmax {
             }
         }
 
-        
         let d_high = DeviceBuffer::from_slice(high)?;
         let d_low = DeviceBuffer::from_slice(low)?;
         let orders_i32: Vec<i32> = combos.iter().map(|p| p.order.unwrap_or(3) as i32).collect();
         let d_orders = DeviceBuffer::from_slice(&orders_i32)?;
 
-        
         let elems = combos
             .len()
             .checked_mul(len)
             .ok_or_else(|| CudaMinmaxError::InvalidInput("output element count overflow".into()))?;
-        let mut d_is_min: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_is_max: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_last_min: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_last_max: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_is_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_is_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_last_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_last_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        
         let k_levels = sparse_table_levels(len);
         let rmq_bytes = rmq_scratch_bytes(len);
         let avg_k = {
-            let s: f64 = combos
-                .iter()
-                .map(|c| c.order.unwrap_or(3) as f64)
-                .sum();
+            let s: f64 = combos.iter().map(|c| c.order.unwrap_or(3) as f64).sum();
             s / (combos.len() as f64)
         };
-        
-        
-        
-        let use_rmq_by_cost = (combos.len() as f64) * avg_k
-            >= 16.0 * (len as f64).log2().max(1.0);
 
-        let rmq_required = base_required
-            .checked_add(rmq_bytes)
-            .unwrap_or(usize::MAX);
+        let use_rmq_by_cost = (combos.len() as f64) * avg_k >= 16.0 * (len as f64).log2().max(1.0);
+
+        let rmq_required = base_required.checked_add(rmq_bytes).unwrap_or(usize::MAX);
         let want_rmq = match self.policy.batch {
             BatchKernelPolicy::Plain { .. } => false,
             BatchKernelPolicy::Auto => {
@@ -334,14 +312,9 @@ impl CudaMinmax {
         let mut first_valid_i = first_valid as i32;
 
         if want_rmq {
-            
-            let st_elems = k_levels
-                .checked_mul(len)
-                .ok_or_else(|| {
-                    CudaMinmaxError::InvalidInput(
-                        "sparse table size overflow in minmax batch".into(),
-                    )
-                })?;
+            let st_elems = k_levels.checked_mul(len).ok_or_else(|| {
+                CudaMinmaxError::InvalidInput("sparse table size overflow in minmax batch".into())
+            })?;
             let mut st_low_min: DeviceBuffer<f32> =
                 unsafe { DeviceBuffer::uninitialized(st_elems) }?;
             let mut st_high_max: DeviceBuffer<f32> =
@@ -351,7 +324,6 @@ impl CudaMinmax {
             let mut st_valid_high: DeviceBuffer<u8> =
                 unsafe { DeviceBuffer::uninitialized(st_elems) }?;
 
-            
             let f_init = self
                 .module
                 .get_function("st_init_level0_minmax_valid_f32")
@@ -377,7 +349,6 @@ impl CudaMinmax {
                     name: "forward_fill_two_streams_f32",
                 })?;
 
-            
             let block_x = 256u32;
             let grid_x = ((len as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x, 1, 1).into();
@@ -401,7 +372,6 @@ impl CudaMinmax {
                 self.stream.launch(&f_init, grid, block, 0, args)?;
             }
 
-            
             for k in 1..k_levels {
                 let span = 1usize << k;
                 if len < span {
@@ -425,10 +395,9 @@ impl CudaMinmax {
                         &mut vhigh_ptr as *mut _ as *mut c_void,
                     ];
                     self.stream.launch(&f_build, gridk, block, 0, args)?;
-            }
+                }
             }
 
-            
             let block_x = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } => block_x.max(64),
                 _ => 256,
@@ -469,7 +438,6 @@ impl CudaMinmax {
                     self.stream.launch(&f_rmq, grid, block, 0, args)?;
                 }
 
-                
                 let ff_grid: GridSize = (count as u32, 1, 1).into();
                 let ff_block: BlockSize = (256u32, 1, 1).into();
                 unsafe {
@@ -506,16 +474,16 @@ impl CudaMinmax {
             ));
         }
 
-        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
             _ => 256,
         };
-        let grid_x = 1u32; 
-        let func = self
-            .module
-            .get_function("minmax_batch_f32")
-            .map_err(|_| CudaMinmaxError::MissingKernelSymbol { name: "minmax_batch_f32" })?;
+        let grid_x = 1u32;
+        let func = self.module.get_function("minmax_batch_f32").map_err(|_| {
+            CudaMinmaxError::MissingKernelSymbol {
+                name: "minmax_batch_f32",
+            }
+        })?;
 
         let mut start = 0usize;
         const MAX_GRID_Y: usize = 65_535;
@@ -563,7 +531,6 @@ impl CudaMinmax {
         ))
     }
 
-    
     pub fn minmax_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -590,7 +557,6 @@ impl CudaMinmax {
             return Err(CudaMinmaxError::InvalidInput("invalid order".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv: Option<i32> = None;
@@ -616,7 +582,6 @@ impl CudaMinmax {
             first_valids[s] = found;
         }
 
-        
         let elem = std::mem::size_of::<f32>();
         let bytes = cols
             .checked_mul(rows)
@@ -627,8 +592,7 @@ impl CudaMinmax {
                     .and_then(|m| b.checked_add(m))
             })
             .and_then(|b| {
-                cols
-                    .checked_mul(rows)
+                cols.checked_mul(rows)
                     .and_then(|n| n.checked_mul(elem))
                     .and_then(|x| x.checked_mul(4))
                     .and_then(|x| b.checked_add(x))
@@ -650,25 +614,18 @@ impl CudaMinmax {
             }
         }
 
-        
         let d_high = DeviceBuffer::from_slice(high_tm)?;
         let d_low = DeviceBuffer::from_slice(low_tm)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
 
-        
         let total = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaMinmaxError::InvalidInput("cols*rows overflow".into()))?;
-        let mut d_is_min: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total) }?;
-        let mut d_is_max: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total) }?;
-        let mut d_last_min: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total) }?;
-        let mut d_last_max: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_is_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_is_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_last_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_last_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
-        
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
             _ => 256,
@@ -678,10 +635,8 @@ impl CudaMinmax {
         let func = self
             .module
             .get_function("minmax_many_series_one_param_time_major_f32")
-            .map_err(|_| {
-                CudaMinmaxError::MissingKernelSymbol {
-                    name: "minmax_many_series_one_param_time_major_f32",
-                }
+            .map_err(|_| CudaMinmaxError::MissingKernelSymbol {
+                name: "minmax_many_series_one_param_time_major_f32",
             })?;
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
@@ -720,7 +675,6 @@ impl CudaMinmax {
         })
     }
 }
-
 
 #[inline]
 fn expand_grid(r: &MinmaxBatchRange) -> Result<Vec<MinmaxParams>, CudaMinmaxError> {
@@ -771,7 +725,6 @@ fn expand_grid(r: &MinmaxBatchRange) -> Result<Vec<MinmaxParams>, CudaMinmaxErro
     Ok(out)
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
@@ -799,7 +752,6 @@ pub mod benches {
             let mut first_valid_i = self.first_valid;
             let mut rows_i = self.rows as i32;
 
-            
             let f_rmq = self
                 .cuda
                 .module
@@ -874,7 +826,7 @@ pub mod benches {
 
     fn prep_minmax_batch() -> Box<dyn CudaBenchState> {
         let len = 60_000usize;
-        
+
         let mut h = vec![f32::NAN; len];
         let mut l = vec![f32::NAN; len];
         for i in 3..len {
@@ -907,7 +859,6 @@ pub mod benches {
         let mut st_valid_high: DeviceBuffer<u8> =
             unsafe { DeviceBuffer::uninitialized(st_elems) }.expect("st_valid_high");
 
-        
         let f_init = cuda
             .module
             .get_function("st_init_level0_minmax_valid_f32")
@@ -1001,15 +952,13 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![
-            CudaBenchScenario::new(
-                "minmax",
-                "batch_dev",
-                "minmax_cuda_batch_dev",
-                "60k_x_13orders",
-                prep_minmax_batch,
-            )
-            .with_inner_iters(4),
-        ]
+        vec![CudaBenchScenario::new(
+            "minmax",
+            "batch_dev",
+            "minmax_cuda_batch_dev",
+            "60k_x_13orders",
+            prep_minmax_batch,
+        )
+        .with_inner_iters(4)]
     }
 }

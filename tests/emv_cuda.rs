@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::emv::{emv_with_kernel, EmvInput};
 use vector_ta::utilities::enums::Kernel;
 
@@ -47,13 +45,11 @@ fn emv_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         volume[i] = ((x * 0.0067).sin().abs() + 0.9) * 500.0 + 100.0;
     }
 
-    
     let cpu = {
         let input = EmvInput::from_slices(&high, &low, &close, &volume);
         emv_with_kernel(&input, Kernel::Scalar)?.values
     };
 
-    
     let h32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let v32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
@@ -104,7 +100,6 @@ fn emv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -125,7 +120,6 @@ fn emv_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let high_tm32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let vol_tm32: Vec<f32> = vol_tm.iter().map(|&v| v as f32).collect();

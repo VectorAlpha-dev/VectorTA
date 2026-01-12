@@ -40,7 +40,6 @@ fn ttm_trend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let (src, cls) = make_series(len);
     let sweep = TtmTrendBatchRange { period: (5, 64, 7) };
 
-    
     let cpu = ttm_trend_batch_with_kernel(&src, &cls, &sweep, Kernel::ScalarBatch)?;
     let cpu_f32: Vec<f32> = cpu
         .values
@@ -48,7 +47,6 @@ fn ttm_trend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
         .map(|&b| if b { 1.0 } else { 0.0 })
         .collect();
 
-    
     let src_f32: Vec<f32> = src.iter().map(|&v| v as f32).collect();
     let cls_f32: Vec<f32> = cls.iter().map(|&v| v as f32).collect();
     let cuda = CudaTtmTrend::new(0).expect("CudaTtmTrend::new");
@@ -82,8 +80,8 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut src_tm = vec![f64::NAN; cols * rows];
     let mut cls_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -97,7 +95,6 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let period = 13usize;
 
-    
     let mut cpu_bool_tm = vec![false; cols * rows];
     for s in 0..cols {
         let mut src = vec![f64::NAN; rows];
@@ -123,7 +120,6 @@ fn ttm_trend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         .map(|&b| if b { 1.0 } else { 0.0 })
         .collect();
 
-    
     let src_tm_f32: Vec<f32> = src_tm.iter().map(|&v| v as f32).collect();
     let cls_tm_f32: Vec<f32> = cls_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaTtmTrend::new(0).expect("CudaTtmTrend::new");

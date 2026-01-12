@@ -22,15 +22,30 @@ pub enum CudaAroonError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -40,8 +55,8 @@ pub enum CudaAroonError {
 }
 
 pub struct DeviceArrayF32Pair {
-    pub first: DeviceArrayF32,  
-    pub second: DeviceArrayF32, 
+    pub first: DeviceArrayF32,
+    pub second: DeviceArrayF32,
 }
 
 impl DeviceArrayF32Pair {
@@ -92,25 +107,40 @@ impl CudaAroon {
     }
 
     #[inline]
-    pub fn context_arc_clone(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc_clone(&self) -> Arc<Context> {
+        self._context.clone()
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"), Err(_) => true }
+        match env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
+            Err(_) => true,
+        }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(bytes_needed: usize, headroom: usize) -> Result<(), CudaAroonError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             if bytes_needed.saturating_add(headroom) <= free {
                 Ok(())
             } else {
-                Err(CudaAroonError::OutOfMemory { required: bytes_needed, free, headroom })
+                Err(CudaAroonError::OutOfMemory {
+                    required: bytes_needed,
+                    free,
+                    headroom,
+                })
             }
         } else {
             Ok(())
@@ -124,15 +154,42 @@ impl CudaAroon {
             lens.push(start);
         } else if start < end {
             let mut v = start;
-            while v <= end { lens.push(v); match v.checked_add(step) { Some(n) => { if n==v { break; } v = n; }, None => break } }
+            while v <= end {
+                lens.push(v);
+                match v.checked_add(step) {
+                    Some(n) => {
+                        if n == v {
+                            break;
+                        }
+                        v = n;
+                    }
+                    None => break,
+                }
+            }
         } else {
             let mut v = start;
-            loop { lens.push(v); if v == end { break; } let n = v.saturating_sub(step); if n==v { break; } v = n; if v < end { break; } }
+            loop {
+                lens.push(v);
+                if v == end {
+                    break;
+                }
+                let n = v.saturating_sub(step);
+                if n == v {
+                    break;
+                }
+                v = n;
+                if v < end {
+                    break;
+                }
+            }
         }
         if lens.is_empty() {
             return Err(CudaAroonError::InvalidRange { start, end, step });
         }
-        Ok(lens.into_iter().map(|l| AroonParams { length: Some(l) }).collect())
+        Ok(lens
+            .into_iter()
+            .map(|l| AroonParams { length: Some(l) })
+            .collect())
     }
 
     fn find_first_valid_pair(high: &[f32], low: &[f32]) -> Option<usize> {
@@ -146,7 +203,6 @@ impl CudaAroon {
         None
     }
 
-    /// Batch: one series × many params (row-major outputs)
     pub fn aroon_batch_dev(
         &self,
         high_f32: &[f32],
@@ -176,7 +232,10 @@ impl CudaAroon {
             .len()
             .checked_mul(n)
             .ok_or_else(|| CudaAroonError::InvalidInput("rows*cols overflow".into()))?;
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         let in_bytes = high_f32.len().saturating_mul(4) + low_f32.len().saturating_mul(4);
         let param_bytes = lengths_i32.len().saturating_mul(4);
         let out_bytes = out_elems
@@ -192,8 +251,10 @@ impl CudaAroon {
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_f32, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_f32, &self.stream) }?;
         let d_lengths = unsafe { DeviceBuffer::from_slice_async(&lengths_i32, &self.stream) }?;
-        let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
-        let mut d_down: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_up: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
+        let mut d_down: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
         let _ = self.launch_batch_kernel(
             &d_high,
@@ -243,13 +304,13 @@ impl CudaAroon {
             return Ok(0);
         }
 
-        let mut func = self
-            .module
-            .get_function("aroon_batch_f32")
-            .map_err(|_| CudaAroonError::MissingKernelSymbol { name: "aroon_batch_f32" })?;
+        let mut func = self.module.get_function("aroon_batch_f32").map_err(|_| {
+            CudaAroonError::MissingKernelSymbol {
+                name: "aroon_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        
         let shmem_bytes_usize: usize = 2 * (max_len + 1) * std::mem::size_of::<i32>();
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
 
@@ -282,7 +343,6 @@ impl CudaAroon {
         Ok(selected_block_x)
     }
 
-    /// Many-series × one-param (time-major). Returns two VRAM-backed matrices.
     pub fn aroon_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -306,11 +366,9 @@ impl CudaAroon {
             ));
         }
         if length == 0 || length > rows {
-            
             return Err(CudaAroonError::InvalidInput("invalid length".into()));
         }
 
-        
         let mut first_valids: Vec<i32> = vec![-1; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -324,8 +382,7 @@ impl CudaAroon {
         }
 
         let headroom = 64 * 1024 * 1024;
-        let in_bytes =
-            high_tm_f32.len().saturating_mul(4) + low_tm_f32.len().saturating_mul(4);
+        let in_bytes = high_tm_f32.len().saturating_mul(4) + low_tm_f32.len().saturating_mul(4);
         let first_bytes = cols.saturating_mul(4);
         let out_bytes = n
             .checked_mul(4)
@@ -340,20 +397,28 @@ impl CudaAroon {
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm_f32, &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm_f32, &self.stream) }?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
-        let mut d_down: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
+        let mut d_up: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
+        let mut d_down: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
 
         let mut func = self
             .module
             .get_function("aroon_many_series_one_param_f32")
-            .map_err(|_| CudaAroonError::MissingKernelSymbol { name: "aroon_many_series_one_param_f32" })?;
+            .map_err(|_| CudaAroonError::MissingKernelSymbol {
+                name: "aroon_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
-        
+
         let shmem_bytes_usize: usize = 2 * (length + 1) * std::mem::size_of::<i32>();
         let (suggested_block, _min_grid) = func
             .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
             .unwrap_or((128, 0));
-        let block_x: u32 = if suggested_block > 0 { suggested_block } else { 128 } as u32;
+        let block_x: u32 = if suggested_block > 0 {
+            suggested_block
+        } else {
+            128
+        } as u32;
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
@@ -389,7 +454,6 @@ impl CudaAroon {
         })
     }
 
-    /// Host-copy helper for batch (returns row-major up/down)
     pub fn aroon_batch_into_host_f32(
         &self,
         high_f32: &[f32],
@@ -415,14 +479,23 @@ impl CudaAroon {
         Ok((rows, cols, combos))
     }
 
-    /// Optional: return page-locked host buffers to overlap D->H without extra copies
     pub fn aroon_batch_into_pinned_host_f32(
         &self,
         high_f32: &[f32],
         low_f32: &[f32],
         sweep: &AroonBatchRange,
-    ) -> Result<(LockedBuffer<f32>, LockedBuffer<f32>, usize, usize, Vec<AroonParams>), CudaAroonError> {
-        let CudaAroonBatchResult { outputs, combos } = self.aroon_batch_dev(high_f32, low_f32, sweep)?;
+    ) -> Result<
+        (
+            LockedBuffer<f32>,
+            LockedBuffer<f32>,
+            usize,
+            usize,
+            Vec<AroonParams>,
+        ),
+        CudaAroonError,
+    > {
+        let CudaAroonBatchResult { outputs, combos } =
+            self.aroon_batch_dev(high_f32, low_f32, sweep)?;
         let rows = outputs.rows();
         let cols = outputs.cols();
         let expected = rows
@@ -444,7 +517,6 @@ impl CudaAroon {
         Ok((pinned_up, pinned_dn, rows, cols, combos))
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -498,7 +570,9 @@ pub mod benches {
     }
     fn prep_batch_dev() -> Box<dyn CudaBenchState> {
         let (h, l) = gen_series(200_000);
-        let sweep = AroonBatchRange { length: (10, 500, 1) };
+        let sweep = AroonBatchRange {
+            length: (10, 500, 1),
+        };
         let cuda = CudaAroon::new(0).expect("cuda aroon");
 
         let combos = CudaAroon::expand_lengths(&sweep).expect("aroon lengths");
@@ -600,7 +674,6 @@ pub mod benches {
         let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
 
-        
         let mut func = cuda
             .module
             .get_function("aroon_many_series_one_param_f32")
@@ -610,7 +683,11 @@ pub mod benches {
         let (suggested_block, _min_grid) = func
             .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
             .unwrap_or((128, 0));
-        let block_x: u32 = (if suggested_block > 0 { suggested_block } else { 128 }) as u32;
+        let block_x: u32 = (if suggested_block > 0 {
+            suggested_block
+        } else {
+            128
+        }) as u32;
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
 
         let elems = cols * rows;
@@ -633,8 +710,8 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let bytes_batch = (200_000usize * 2 + (500 - 10 + 1) * 200_000usize * 2) * 4; 
-        let bytes_many = 256usize * 16_384usize * 2 * 4 * 3; 
+        let bytes_batch = (200_000usize * 2 + (500 - 10 + 1) * 200_000usize * 2) * 4;
+        let bytes_many = 256usize * 16_384usize * 2 * 4 * 3;
         vec![
             CudaBenchScenario::new(
                 "aroon",

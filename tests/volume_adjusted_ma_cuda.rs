@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::volume_adjusted_ma::{
     VolumeAdjustedMaBatchRange, VolumeAdjustedMaBuilder, VolumeAdjustedMaParams,
     VolumeAdjustedMa_batch_with_kernel,

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehma::{
     ehma_batch_with_kernel, EhmaBatchRange, EhmaBuilder, EhmaParams,
 };

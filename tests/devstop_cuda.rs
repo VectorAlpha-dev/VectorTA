@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::devstop::{
     devstop_batch_with_kernel, devstop_with_kernel, DevStopBatchRange, DevStopData, DevStopInput,
     DevStopParams,
@@ -67,8 +65,7 @@ fn devstop_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host_out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host_out)?;
 
-    
-    let tol = 5e-2; 
+    let tol = 5e-2;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host_out[idx] as f64;
@@ -106,7 +103,6 @@ fn devstop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let period = 20usize;
     let mult = 1.5f64;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

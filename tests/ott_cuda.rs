@@ -86,7 +86,6 @@ fn ott_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let period = 10usize;
     let percent = 1.4;
     let mut cpu_tm = vec![f64::NAN; cols * rows];

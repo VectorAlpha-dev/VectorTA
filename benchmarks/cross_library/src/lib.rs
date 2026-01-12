@@ -45,10 +45,10 @@ pub mod tulip {
     use super::*;
     use std::slice;
 
-    /// Find a Tulip indicator by name and return its metadata pointer.
-    ///
-    /// This is useful for hot loops (benchmarks) that want to avoid allocating
-    /// per-call pointer arrays in `call_indicator`.
+
+
+
+
     pub unsafe fn find_indicator(name: &str) -> Result<*const ti_indicator_info, String> {
         let c_name = std::ffi::CString::new(name).unwrap();
         let indicator = ti_find_indicator(c_name.as_ptr());
@@ -60,10 +60,10 @@ pub mod tulip {
         Ok(indicator)
     }
 
-    /// Low-overhead Tulip call that uses precomputed input/output pointer arrays.
-    ///
-    /// This avoids per-call allocations present in `call_indicator` and is intended for
-    /// benchmark hot loops. Caller must ensure pointer arrays have the correct lengths.
+
+
+
+
     pub unsafe fn call_indicator_ptrs(
         indicator: *const ti_indicator_info,
         size: usize,
@@ -77,7 +77,7 @@ pub mod tulip {
 
         let info = &*indicator;
 
-        
+
         if input_ptrs.len() != info.inputs as usize {
             return Err(format!(
                 "Expected {} inputs, got {}",
@@ -94,7 +94,7 @@ pub mod tulip {
             ));
         }
 
-        
+
         let indicator_fn = info.indicator.expect("Indicator function not found");
         let result = indicator_fn(
             size as c_int,
@@ -110,7 +110,7 @@ pub mod tulip {
         Ok(())
     }
 
-    /// Safe wrapper for Tulip indicator calls
+
     pub unsafe fn call_indicator(
         name: &str,
         size: usize,
@@ -127,7 +127,7 @@ pub mod tulip {
 
         let info = &*indicator;
 
-        
+
         if inputs.len() != info.inputs as usize {
             return Err(format!(
                 "Expected {} inputs, got {}",
@@ -142,7 +142,7 @@ pub mod tulip {
             ));
         }
 
-        
+
         let input_ptrs: Vec<*const TulipReal> = inputs
             .iter()
             .map(|slice| slice.as_ptr() as *const TulipReal)
@@ -153,7 +153,7 @@ pub mod tulip {
             .map(|slice| slice.as_mut_ptr() as *mut TulipReal)
             .collect();
 
-        
+
         let indicator_fn = info.indicator.expect("Indicator function not found");
         let result = indicator_fn(
             size as c_int,
@@ -169,7 +169,7 @@ pub mod tulip {
         Ok(())
     }
 
-    /// Get the start index for an indicator
+
     pub unsafe fn get_start_index(name: &str, options: &[f64]) -> Result<usize, String> {
         let c_name = std::ffi::CString::new(name).unwrap();
         let indicator = ti_find_indicator(c_name.as_ptr());
@@ -185,7 +185,7 @@ pub mod tulip {
         Ok(start as usize)
     }
 
-    /// Query Tulip for input/output arity for a given indicator name.
+
     pub unsafe fn get_io_counts(name: &str) -> Result<(usize, usize), String> {
         let c_name = std::ffi::CString::new(name).unwrap();
         let indicator = ti_find_indicator(c_name.as_ptr());

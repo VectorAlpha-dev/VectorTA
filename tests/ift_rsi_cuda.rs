@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::ift_rsi::{
     ift_rsi_batch_with_kernel, ift_rsi_with_kernel, IftRsiBatchRange, IftRsiBuilder, IftRsiInput,
     IftRsiParams,
@@ -61,7 +59,6 @@ fn ift_rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    
     let tol = 3e-2;
     for idx in 0..host.len() {
         assert!(
@@ -88,7 +85,6 @@ fn ift_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
-            
             let x = (r as f64) + (s as f64) * 0.2;
             data_tm[r * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
@@ -97,7 +93,6 @@ fn ift_rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let rsi_p = 5usize;
     let wma_p = 9usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

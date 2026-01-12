@@ -1,26 +1,3 @@
-//! # Linear Regression Slope
-//!
-//! Computes the slope (coefficient `b`) of the linear regression line over a moving window.
-//! The slope indicates the rate of change in the linear trend.
-//!
-//! ## Parameters
-//! - **period**: The window size (number of data points). Defaults to 14
-//!
-//! ## Inputs
-//! - Single data slice (typically close prices)
-//!
-//! ## Returns
-//! - **`Ok(LinearRegSlopeOutput)`** containing values (Vec<f64>) representing regression slope
-//! - Output length matches input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - Decision log: SIMD kernels are stubbed to the scalar path; CUDA wrapper is present with typed errors + VRAM checks and Python exposes CAI v3 + DLPack v1.x via shared `DeviceArrayF32Py`. Numerical outputs are unchanged.
-//! - Scalar optimized: O(N) rolling accumulators for Sy and Sxy with Kahan-compensated updates and periodic exact recompute to bound drift. Matches tests and avoids O(N·P).
-//! - SIMD status: AVX2/AVX512 kernels are currently short-circuited to the scalar path. Vectorizing the initial window introduced tiny numeric deltas beyond the module’s tight tolerance; with O(1) rolling updates dominating, SIMD did not yield consistent wins. Revisit if tolerance/patterns change.
-//! - Streaming: O(1) updates with Kahan compensation + periodic exact recompute; matches scalar outputs.
-//! - Memory optimization: ✅ Uses `alloc_with_nan_prefix` (zero-copy)
-//! - Batch operations: ✅ Implemented with parallel processing support; no row-specific shared-precompute variant yet (consider prefix sums for future work).
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -29,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -77,7 +54,10 @@ pub struct LinearRegSlopeOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct LinearRegSlopeParams {
     pub period: Option<usize>,
 }
@@ -190,7 +170,11 @@ pub enum LinearRegSlopeError {
     #[error("linearreg_slope: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("linearreg_slope: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("linearreg_slope: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -211,7 +195,7 @@ pub fn linearreg_slope_with_kernel(
         return Err(LinearRegSlopeError::EmptyInputData);
     }
     let period = input.get_period();
-    
+
     if period < 2 || period > data.len() {
         return Err(LinearRegSlopeError::InvalidPeriod {
             period,
@@ -254,12 +238,6 @@ pub fn linearreg_slope_with_kernel(
 
 #[inline]
 pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
-    
-    
-    
-    
-    
     let len = data.len();
     if len == 0 {
         return;
@@ -272,7 +250,6 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
         return;
     }
 
-    
     let x = 0.5 * p * (p + 1.0);
     let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
     let denom = p * x2 - x * x;
@@ -297,7 +274,6 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
     unsafe {
         let dp = data.as_ptr();
 
-        
         let mut y = 0.0f64;
         let mut y_c = 0.0f64;
         let mut xy = 0.0f64;
@@ -314,7 +290,6 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
         let mut out_ptr = out.as_mut_ptr().add(base + period - 1);
 
         while in_new.add(1) < end {
-            
             let v0 = *in_new;
             kahan_add(&mut y, &mut y_c, v0);
             kahan_add(&mut xy, &mut xy_c, v0 * p);
@@ -323,7 +298,6 @@ pub fn linearreg_slope_scalar(data: &[f64], period: usize, first: usize, out: &m
             kahan_add(&mut xy, &mut xy_c, -y);
             kahan_add(&mut y, &mut y_c, -*in_old);
 
-            
             let v1 = *in_new.add(1);
             kahan_add(&mut y, &mut y_c, v1);
             kahan_add(&mut xy, &mut xy_c, v1 * p);
@@ -513,7 +487,7 @@ fn expand_grid(r: &LinearRegSlopeBatchRange) -> Vec<LinearRegSlopeParams> {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -569,7 +543,6 @@ fn linearreg_slope_batch_inner(
         });
     }
 
-    
     for combo in &combos {
         let period = combo.period.unwrap();
         if period < 2 {
@@ -594,14 +567,14 @@ fn linearreg_slope_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let _total = rows.checked_mul(cols).ok_or(LinearRegSlopeError::InvalidRange {
-        start: sweep.period.0,
-        end: sweep.period.1,
-        step: sweep.period.2,
-    })?;
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(LinearRegSlopeError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warmup_periods: Vec<usize> = combos
         .iter()
@@ -649,7 +622,6 @@ fn linearreg_slope_batch_inner_into(
         });
     }
 
-    
     for combo in &combos {
         let period = combo.period.unwrap();
         if period < 2 {
@@ -675,14 +647,14 @@ fn linearreg_slope_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let _total = rows.checked_mul(cols).ok_or(LinearRegSlopeError::InvalidRange {
-        start: sweep.period.0,
-        end: sweep.period.1,
-        step: sweep.period.2,
-    })?;
+    let _total = rows
+        .checked_mul(cols)
+        .ok_or(LinearRegSlopeError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap() - 1;
         let row_start = row * cols;
@@ -691,7 +663,6 @@ fn linearreg_slope_batch_inner_into(
         }
     }
 
-    
     if rows <= 1 {
         let out_uninit = unsafe {
             std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -729,14 +700,11 @@ fn linearreg_slope_batch_inner_into(
             }
         }
     } else {
-        
-        
         let mut py = Vec::with_capacity(data.len() + 1);
         let mut pky = Vec::with_capacity(data.len() + 1);
         py.push(0.0);
         pky.push(0.0);
         if first > 0 {
-            
             py.resize(first + 1, 0.0);
             pky.resize(first + 1, 0.0);
         }
@@ -748,7 +716,6 @@ fn linearreg_slope_batch_inner_into(
             pky.push(prev_ky + (i as f64) * y);
         }
 
-        
         let out_uninit = unsafe {
             std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
         };
@@ -846,14 +813,12 @@ unsafe fn linearreg_slope_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct LinearRegSlopeStream {
-    
     period: usize,
     buffer: Vec<f64>,
-    head: usize, 
+    head: usize,
     filled: bool,
-    warm_count: usize, 
+    warm_count: usize,
 
-    
     n: f64,
     m: f64,
     sum_x: f64,
@@ -861,15 +826,13 @@ pub struct LinearRegSlopeStream {
     denom: f64,
     inv_denom: f64,
 
-    
-    sum_y: f64,    
-    sum_y_c: f64,  
-    sum_xy: f64,   
-    sum_xy_c: f64, 
+    sum_y: f64,
+    sum_y_c: f64,
+    sum_xy: f64,
+    sum_xy_c: f64,
 
-    
     step: usize,
-    recalc_mask: usize, 
+    recalc_mask: usize,
 }
 
 impl LinearRegSlopeStream {
@@ -886,13 +849,12 @@ impl LinearRegSlopeStream {
         let n = period as f64;
         let m = (period - 1) as f64;
 
-        
         let sum_x = 0.5 * m * n;
-        
+
         let sum_x2 = (m * n) * (2.0 * m + 1.0) / 6.0;
 
         let denom = n * sum_x2 - sum_x * sum_x;
-        
+
         let inv_denom = if denom.abs() > f64::EPSILON {
             1.0 / denom
         } else {
@@ -919,35 +881,28 @@ impl LinearRegSlopeStream {
             sum_xy_c: 0.0,
 
             step: 0,
-            recalc_mask: 255, 
+            recalc_mask: 255,
         })
     }
 
-    /// O(1) update. Returns `Some(slope)` once `period` samples have been seen, else `None`.
-    /// Behavior on non-finite input: resets the window and returns `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !value.is_finite() {
             self.reset_state();
             return None;
         }
 
         if !self.filled {
-            
             let j = self.warm_count as f64;
 
-            
             self.buffer[self.head] = value;
             self.head = (self.head + 1) % self.period;
 
-            
             let y0 = value - self.sum_y_c;
             let t0 = self.sum_y + y0;
             self.sum_y_c = (t0 - self.sum_y) - y0;
             self.sum_y = t0;
 
-            
             let jy = j * value;
             let y1 = jy - self.sum_xy_c;
             let t1 = self.sum_xy + y1;
@@ -959,25 +914,21 @@ impl LinearRegSlopeStream {
                 return None;
             }
 
-            
             self.filled = true;
-            
+
             return self.emit_slope();
         }
 
-        
         let y_old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
 
-        
         let delta0 = value - y_old;
         let yk0 = delta0 - self.sum_y_c;
         let t0 = self.sum_y + yk0;
         self.sum_y_c = (t0 - self.sum_y) - yk0;
         self.sum_y = t0;
 
-        
         let delta1 = -self.sum_y + self.n * value;
         let yk1 = delta1 - self.sum_xy_c;
         let t1 = self.sum_xy + yk1;
@@ -986,7 +937,6 @@ impl LinearRegSlopeStream {
 
         self.step = self.step.wrapping_add(1);
         if (self.step & self.recalc_mask) == 0 {
-            
             self.recompute_exact();
         }
 
@@ -999,14 +949,11 @@ impl LinearRegSlopeStream {
             return None;
         }
 
-        
-        
         if self.m > 0.0 {
-            let first = self.buffer[self.head]; 
-            let last = self.buffer[(self.head + self.period - 1) % self.period]; 
+            let first = self.buffer[self.head];
+            let last = self.buffer[(self.head + self.period - 1) % self.period];
             let a2 = (last - first) / self.m;
 
-            
             let s0_model = a2.mul_add(self.sum_x, first * self.n);
             let s1_model = a2.mul_add(self.sum_x2, first * self.sum_x);
 
@@ -1017,7 +964,6 @@ impl LinearRegSlopeStream {
             }
         }
 
-        
         let num = self.n.mul_add(self.sum_xy, -self.sum_x * self.sum_y);
         Some(num * self.inv_denom)
     }
@@ -1051,7 +997,6 @@ impl LinearRegSlopeStream {
         self.sum_y_c = 0.0;
         self.sum_xy = 0.0;
         self.sum_xy_c = 0.0;
-        
     }
 }
 
@@ -1115,11 +1060,9 @@ pub fn linearreg_slope_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("linearreg_slope: rows*cols overflow"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -1136,7 +1079,6 @@ pub fn linearreg_slope_batch_py<'py>(
         init_matrix_prefixes(out_mu, cols, &warm);
     }
 
-    
     let kern = validate_kernel(kernel, true)?;
     py.allow_threads(|| {
         let k = match kern {
@@ -1153,7 +1095,6 @@ pub fn linearreg_slope_batch_py<'py>(
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1166,7 +1107,6 @@ pub fn linearreg_slope_batch_py<'py>(
     )?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaLinearregSlope;
@@ -1209,7 +1149,14 @@ pub fn linearreg_slope_cuda_batch_dev_py<'py>(
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) }, dict))
+    Ok((
+        DeviceArrayF32Py {
+            inner,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1245,7 +1192,11 @@ pub fn linearreg_slope_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(feature = "python")]
@@ -1272,7 +1223,6 @@ impl LinearRegSlopeStreamPy {
     }
 }
 
-/// Write directly to output slice - no allocations
 pub fn linearreg_slope_into_slice(
     dst: &mut [f64],
     input: &LinearRegSlopeInput,
@@ -1283,7 +1233,7 @@ pub fn linearreg_slope_into_slice(
         return Err(LinearRegSlopeError::EmptyInputData);
     }
     let period = input.get_period();
-    
+
     if period < 2 || period > data.len() {
         return Err(LinearRegSlopeError::InvalidPeriod {
             period,
@@ -1330,7 +1280,6 @@ pub fn linearreg_slope_into_slice(
         }
     }
 
-    
     let warmup_end = first_valid_idx + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -1339,7 +1288,7 @@ pub fn linearreg_slope_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_slope_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = LinearRegSlopeParams {
@@ -1354,12 +1303,7 @@ pub fn linearreg_slope_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsVal
     Ok(output)
 }
 
-/// Write linear regression slope values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup semantics (prefix up to `first_valid + period - 1`).
-/// - `out.len()` must equal the input slice length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn linearreg_slope_into(
     input: &LinearRegSlopeInput,
@@ -1368,7 +1312,7 @@ pub fn linearreg_slope_into(
     linearreg_slope_into_slice(out, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_slope_into(
     in_ptr: *const f64,
@@ -1388,7 +1332,6 @@ pub fn linearreg_slope_into(
         let input = LinearRegSlopeInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             linearreg_slope_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1403,7 +1346,7 @@ pub fn linearreg_slope_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_slope_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1412,7 +1355,7 @@ pub fn linearreg_slope_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_slope_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1422,13 +1365,13 @@ pub fn linearreg_slope_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LinearRegSlopeBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LinearRegSlopeBatchJsOutput {
     pub values: Vec<f64>,
@@ -1437,7 +1380,7 @@ pub struct LinearRegSlopeBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = linearreg_slope_batch)]
 pub fn linearreg_slope_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: LinearRegSlopeBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1447,7 +1390,6 @@ pub fn linearreg_slope_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
         period: config.period_range,
     };
 
-    
     let output = linearreg_slope_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1462,7 +1404,7 @@ pub fn linearreg_slope_batch_js(data: &[f64], config: JsValue) -> Result<JsValue
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_slope_batch_into(
     in_ptr: *const f64,
@@ -1496,7 +1438,6 @@ pub fn linearreg_slope_batch_into(
 
         let out = core::slice::from_raw_parts_mut(out_ptr, total);
 
-        
         let first = data
             .iter()
             .position(|x| !x.is_nan())
@@ -1509,7 +1450,6 @@ pub fn linearreg_slope_batch_into(
             core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
         init_matrix_prefixes(out_mu, cols, &warm);
 
-        
         linearreg_slope_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1589,7 +1529,7 @@ mod tests {
             "[{}] linearreg_slope should fail with period=1 (needs at least 2 points for slope)",
             test_name
         );
-        
+
         if let Err(e) = res {
             let msg = e.to_string();
             assert!(
@@ -1689,21 +1629,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            LinearRegSlopeParams::default(),            
-            LinearRegSlopeParams { period: Some(2) },   
-            LinearRegSlopeParams { period: Some(3) },   
-            LinearRegSlopeParams { period: Some(5) },   
-            LinearRegSlopeParams { period: Some(7) },   
-            LinearRegSlopeParams { period: Some(10) },  
-            LinearRegSlopeParams { period: Some(14) },  
-            LinearRegSlopeParams { period: Some(20) },  
-            LinearRegSlopeParams { period: Some(21) },  
-            LinearRegSlopeParams { period: Some(30) },  
-            LinearRegSlopeParams { period: Some(50) },  
-            LinearRegSlopeParams { period: Some(100) }, 
-            LinearRegSlopeParams { period: Some(200) }, 
+            LinearRegSlopeParams::default(),
+            LinearRegSlopeParams { period: Some(2) },
+            LinearRegSlopeParams { period: Some(3) },
+            LinearRegSlopeParams { period: Some(5) },
+            LinearRegSlopeParams { period: Some(7) },
+            LinearRegSlopeParams { period: Some(10) },
+            LinearRegSlopeParams { period: Some(14) },
+            LinearRegSlopeParams { period: Some(20) },
+            LinearRegSlopeParams { period: Some(21) },
+            LinearRegSlopeParams { period: Some(30) },
+            LinearRegSlopeParams { period: Some(50) },
+            LinearRegSlopeParams { period: Some(100) },
+            LinearRegSlopeParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1712,12 +1651,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1767,7 +1705,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_linearreg_slope_tests {
@@ -1805,10 +1743,9 @@ mod tests {
         check_linearreg_slope_no_poison
     );
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_linearreg_slope_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 512usize;
         let mut data = vec![0.0f64; n];
         for i in 0..n {
@@ -1816,13 +1753,10 @@ mod tests {
             data[i] = 1.0 + 0.01 * t + (t * 0.2).sin() * 0.5;
         }
 
-        
         let input = LinearRegSlopeInput::from_slice(&data, LinearRegSlopeParams::default());
 
-        
         let base = linearreg_slope(&input)?.values;
 
-        
         let mut into_out = vec![0.0f64; n];
         linearreg_slope_into(&input, &mut into_out)?;
 
@@ -1865,18 +1799,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (30, 60, 15),  
-            (2, 5, 1),     
-            (10, 30, 10),  
-            (14, 21, 7),   
-            (14, 14, 0),   
-            (50, 150, 25), 
-            (3, 15, 3),    
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 30, 10),
+            (14, 21, 7),
+            (14, 14, 0),
+            (50, 150, 25),
+            (3, 15, 3),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1895,7 +1827,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1982,55 +1913,44 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100)
             .prop_flat_map(|period| {
                 (
-                    
                     prop::collection::vec(
                         (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                         period..=500,
                     ),
                     Just(period),
-                    
                     0usize..=5,
                 )
             })
             .prop_map(|(mut data, period, scenario)| {
-                
                 match scenario {
-                    0 => {
-                        
-                    }
+                    0 => {}
                     1 => {
-                        
                         let constant = data.get(0).copied().unwrap_or(100.0);
                         data.iter_mut().for_each(|x| *x = constant);
                     }
                     2 => {
-                        
                         for (i, val) in data.iter_mut().enumerate() {
                             *val = 2.0 * i as f64 + 10.0;
                         }
                     }
                     3 => {
-                        
                         let mut base = 100.0;
                         for val in data.iter_mut() {
                             *val = base;
-                            base += (0.1 + (*val).abs() * 1e-6); 
+                            base += (0.1 + (*val).abs() * 1e-6);
                         }
                     }
                     4 => {
-                        
                         let mut base = 1000.0;
                         for val in data.iter_mut() {
                             *val = base;
-                            base -= (0.1 + (*val).abs() * 1e-6); 
+                            base -= (0.1 + (*val).abs() * 1e-6);
                         }
                     }
                     5 => {
-                        
                         for (i, val) in data.iter_mut().enumerate() {
                             *val = if i % 20 == 0 {
                                 1000.0 * (if i % 40 == 0 { 1.0 } else { -1.0 })
@@ -2051,16 +1971,12 @@ mod tests {
                 };
                 let input = LinearRegSlopeInput::from_slice(&data, params);
 
-                
                 let LinearRegSlopeOutput { values: out } =
                     linearreg_slope_with_kernel(&input, kernel).unwrap();
 
-                
                 let LinearRegSlopeOutput { values: ref_out } =
                     linearreg_slope_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
-                
                 for i in 0..(period - 1).min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2070,14 +1986,11 @@ mod tests {
                     );
                 }
 
-                
                 for i in (period - 1)..data.len() {
                     let window = &data[i + 1 - period..=i];
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
-                    
                     if y.is_finite() && r.is_finite() {
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
@@ -2092,7 +2005,6 @@ mod tests {
                             ulp_diff
                         );
                     } else {
-                        
                         prop_assert_eq!(
                             y.is_nan(),
                             r.is_nan(),
@@ -2103,8 +2015,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     if window
                         .windows(2)
                         .all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
@@ -2117,18 +2027,14 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     let is_linear = {
                         if period >= 3 {
-                            
                             let x1 = 0.0;
                             let y1 = window[0];
                             let x2 = (period - 1) as f64;
                             let y2 = window[period - 1];
                             let expected_slope = (y2 - y1) / (x2 - x1);
 
-                            
                             let mut is_linear = true;
                             for (j, &val) in window.iter().enumerate() {
                                 let expected = y1 + expected_slope * j as f64;
@@ -2139,7 +2045,6 @@ mod tests {
                             }
 
                             if is_linear {
-                                
                                 prop_assert!(
                                     (y - expected_slope).abs() <= 1e-9,
                                     "Linear data slope mismatch at idx {}: {} vs expected {}",
@@ -2154,8 +2059,6 @@ mod tests {
                         }
                     };
 
-                    
-                    
                     let is_increasing = window.windows(2).all(|w| w[1] > w[0]);
                     if is_increasing && !is_linear {
                         prop_assert!(
@@ -2166,8 +2069,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     let is_decreasing = window.windows(2).all(|w| w[1] < w[0]);
                     if is_decreasing && !is_linear {
                         prop_assert!(
@@ -2178,13 +2079,10 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     if y.is_finite() {
                         let data_range = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
                             - window.iter().cloned().fold(f64::INFINITY, f64::min);
 
-                        
                         if data_range < 1e-9 {
                             prop_assert!(
                                 y.abs() <= 1e-6,
@@ -2193,10 +2091,10 @@ mod tests {
                                 y
                             );
                         } else {
-                            let max_slope = data_range / (period as f64 * 0.5); 
+                            let max_slope = data_range / (period as f64 * 0.5);
 
                             prop_assert!(
-                                y.abs() <= max_slope * 5.0, 
+                                y.abs() <= max_slope * 5.0,
                                 "Slope magnitude too large at idx {}: {} (max expected ~{})",
                                 i,
                                 y.abs(),
@@ -2205,8 +2103,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     prop_assert!(!y.is_infinite(), "Found infinite value at idx {}: {}", i, y);
                 }
 

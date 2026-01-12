@@ -1,15 +1,3 @@
-//! CUDA wrapper for Squeeze Momentum Indicator (SMI).
-//!
-//! Parity with ALMA-style wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/squeeze_momentum_kernel.ptx"))
-//! - Stream NON_BLOCKING
-//! - Minimal policies + introspection
-//! - VRAM checks and grid chunking (grid.y <= 65_535)
-//!
-//! Exposes two device APIs:
-//! - Batch (one series × many params): returns three DeviceArrayF32 handles
-//! - Many-series × one param (time-major): returns three DeviceArrayF32 handles
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
@@ -30,7 +18,11 @@ pub enum CudaSmiError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -38,7 +30,14 @@ pub enum CudaSmiError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -79,7 +78,6 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-
 #[derive(Clone, Debug)]
 struct SmCombo {
     lbb: usize,
@@ -112,7 +110,8 @@ impl CudaSqueezeMomentum {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -182,11 +181,8 @@ impl CudaSqueezeMomentum {
         }
     }
 
-    
-
     #[inline]
     fn sparse_k(n: usize) -> i32 {
-        
         let mut k: i32 = 1;
         let mut span: usize = 1;
         while (span << 1) <= n {
@@ -198,7 +194,6 @@ impl CudaSqueezeMomentum {
 
     #[inline]
     fn precompute_bytes(len: usize, k: usize) -> usize {
-        
         let floats = (4 * len) + (2 * k * len);
         let ints = len + 1;
         floats * std::mem::size_of::<f32>() + ints * std::mem::size_of::<i32>()
@@ -330,7 +325,7 @@ impl CudaSqueezeMomentum {
             .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
             .ok_or_else(|| CudaSmiError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep)?;
-        
+
         let mut need = 0usize;
         for c in &combos {
             need = need.max(c.lbb.max(c.lkc));
@@ -364,7 +359,9 @@ impl CudaSqueezeMomentum {
         let mut func: Function = self
             .module
             .get_function("squeeze_momentum_batch_f32")
-            .map_err(|_| CudaSmiError::MissingKernelSymbol { name: "squeeze_momentum_batch_f32" })?;
+            .map_err(|_| CudaSmiError::MissingKernelSymbol {
+                name: "squeeze_momentum_batch_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match self.policy.batch {
@@ -402,8 +399,7 @@ impl CudaSqueezeMomentum {
                 &mut p_mo as *mut _ as *mut c_void,
                 &mut p_si as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaSqueezeMomentum)).last_batch =
@@ -431,7 +427,9 @@ impl CudaSqueezeMomentum {
         let mut func: Function = self
             .module
             .get_function("smi_precompute_shared_f32")
-            .map_err(|_| CudaSmiError::MissingKernelSymbol { name: "smi_precompute_shared_f32" })?;
+            .map_err(|_| CudaSmiError::MissingKernelSymbol {
+                name: "smi_precompute_shared_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let grid: GridSize = (1, 1, 1).into();
         let block: BlockSize = (256, 1, 1).into();
@@ -462,8 +460,7 @@ impl CudaSqueezeMomentum {
                 &mut p_stmin as *mut _ as *mut c_void,
                 &mut k_i as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         Ok(())
     }
@@ -497,7 +494,9 @@ impl CudaSqueezeMomentum {
         let mut func: Function = self
             .module
             .get_function("squeeze_momentum_batch_f32_opt")
-            .map_err(|_| CudaSmiError::MissingKernelSymbol { name: "squeeze_momentum_batch_f32_opt" })?;
+            .map_err(|_| CudaSmiError::MissingKernelSymbol {
+                name: "squeeze_momentum_batch_f32_opt",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match self.policy.batch {
@@ -573,7 +572,6 @@ impl CudaSqueezeMomentum {
         let (combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
 
-        
         let in_bytes = 3usize
             .saturating_mul(len)
             .saturating_mul(std::mem::size_of::<f32>());
@@ -605,7 +603,6 @@ impl CudaSqueezeMomentum {
             }
         }
 
-        
         let d_h = DeviceBuffer::from_slice(high_f32)?;
         let d_l = DeviceBuffer::from_slice(low_f32)?;
         let d_c = DeviceBuffer::from_slice(close_f32)?;
@@ -619,7 +616,6 @@ impl CudaSqueezeMomentum {
         let d_lkc = DeviceBuffer::from_slice(&v_lkc)?;
         let d_mkc = DeviceBuffer::from_slice(&v_mkc)?;
 
-        
         let elems = combos
             .len()
             .checked_mul(len)
@@ -628,7 +624,6 @@ impl CudaSqueezeMomentum {
         let mut d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_si: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        
         let n = len;
         let mut d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
         let mut d_ps_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }?;
@@ -639,7 +634,6 @@ impl CudaSqueezeMomentum {
         let mut d_st_max: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(st_size) }?;
         let mut d_st_min: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(st_size) }?;
 
-        
         self.launch_precompute(
             &d_h,
             &d_l,
@@ -655,7 +649,6 @@ impl CudaSqueezeMomentum {
             Self::sparse_k(len),
         )?;
 
-        
         let max_lkc = combos.iter().map(|c| c.lkc).max().unwrap_or(1);
         self.launch_batch_kernel_opt(
             &d_h,
@@ -702,7 +695,6 @@ impl CudaSqueezeMomentum {
         ))
     }
 
-    
     pub fn squeeze_momentum_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -732,7 +724,7 @@ impl CudaSqueezeMomentum {
         if lbb == 0 || lkc == 0 || lbb > rows || lkc > rows {
             return Err(CudaSmiError::InvalidInput("invalid window lengths".into()));
         }
-        
+
         let in_bytes = 3usize
             .saturating_mul(expected)
             .saturating_mul(std::mem::size_of::<f32>());
@@ -740,9 +732,7 @@ impl CudaSqueezeMomentum {
             .saturating_mul(expected)
             .saturating_mul(std::mem::size_of::<f32>());
         let fv_bytes = cols.saturating_mul(std::mem::size_of::<i32>());
-        let required = in_bytes
-            .saturating_add(out_bytes)
-            .saturating_add(fv_bytes);
+        let required = in_bytes.saturating_add(out_bytes).saturating_add(fv_bytes);
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
@@ -758,7 +748,6 @@ impl CudaSqueezeMomentum {
             }
         }
 
-        
         let mut fv = vec![0i32; cols];
         for s in 0..cols {
             let mut found = None;
@@ -811,8 +800,8 @@ impl CudaSqueezeMomentum {
             let mut p_l = d_l.as_device_ptr().as_raw();
             let mut p_c = d_c.as_device_ptr().as_raw();
             let mut p_fv = d_fv.as_device_ptr().as_raw();
-            let mut cols_i = cols as i32; 
-            let mut rows_i = rows as i32; 
+            let mut cols_i = cols as i32;
+            let mut rows_i = rows as i32;
             let mut lbb_i = lbb as i32;
             let mut mbb_f = mbb as f32;
             let mut lkc_i = lkc as i32;
@@ -863,13 +852,12 @@ impl CudaSqueezeMomentum {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 1_000_00; 
+    const ONE_SERIES_LEN: usize = 1_000_00;
     const PARAM_SWEEP: usize = 128;
 
     fn bytes_one_series_many_params() -> usize {
@@ -895,7 +883,7 @@ pub mod benches {
         first_valid: usize,
         k: i32,
         max_lkc: usize,
-        
+
         d_tr: DeviceBuffer<f32>,
         d_ps_close: DeviceBuffer<f32>,
         d_ps_close2: DeviceBuffer<f32>,
@@ -903,7 +891,7 @@ pub mod benches {
         d_log2: DeviceBuffer<i32>,
         d_st_max: DeviceBuffer<f32>,
         d_st_min: DeviceBuffer<f32>,
-        
+
         d_sq: DeviceBuffer<f32>,
         d_mo: DeviceBuffer<f32>,
         d_si: DeviceBuffer<f32>,
@@ -966,7 +954,6 @@ pub mod benches {
         let v_mkc: Vec<f32> = combos.iter().map(|c| c.mkc).collect();
         let max_lkc = combos.iter().map(|c| c.lkc).max().unwrap_or(1);
 
-        
         let d_h = DeviceBuffer::from_slice(&h).expect("d_h H2D");
         let d_l = DeviceBuffer::from_slice(&l).expect("d_l H2D");
         let d_c = DeviceBuffer::from_slice(&c).expect("d_c H2D");
@@ -975,7 +962,6 @@ pub mod benches {
         let d_lkc = DeviceBuffer::from_slice(&v_lkc).expect("d_lkc H2D");
         let d_mkc = DeviceBuffer::from_slice(&v_mkc).expect("d_mkc H2D");
 
-        
         let n = len;
         let k = CudaSqueezeMomentum::sparse_k(len);
         let k_levels_us = k as usize;
@@ -1009,7 +995,6 @@ pub mod benches {
         )
         .expect("precompute");
 
-        
         let elems = n_combos * len;
         let d_sq: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_sq");
         let d_mo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_mo");

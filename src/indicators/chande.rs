@@ -1,37 +1,3 @@
-//! # Chande Exits (Chandelier Exits)
-//!
-//! A volatility-based trailing stop indicator that combines Average True Range (ATR) with rolling
-//! highest high or lowest low values to create adaptive stop-loss levels. Designed to protect
-//! profits by trailing price movements while allowing room for normal volatility. The indicator
-//! follows price movements more closely in trending markets and provides wider stops in volatile conditions.
-//!
-//! ## Parameters
-//! - **period**: Window size for both ATR calculation and rolling max/min (default: 22)
-//! - **mult**: ATR multiplier for stop distance (default: 3.0)
-//! - **direction**: Trading direction - "long" or "short" (default: "long")
-//!
-//! ## Inputs
-//! - Requires high, low, and close price arrays
-//! - Supports both raw slices and Candles data structure
-//!
-//! ## Returns
-//! - **`Ok(ChandeOutput)`** containing a `Vec<f64>` of stop levels matching input length
-//! - For long: Highest High[period] - ATR[period] * multiplier
-//! - For short: Lowest Low[period] + ATR[period] * multiplier
-//!
-//! ## Developer Notes (Implementation Status)
-//! - **Scalar path**: Single-pass O(n) using Wilder ATR (RMA) + monotonic deques for rolling
-//!   max/min. Warmup uses NaN prefix identical to alma.rs patterns.
-//! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to the scalar implementation.
-//!   Rationale: the hot loop is sequential (ATR recurrence) and deque-bound (rolling max/min),
-//!   so end-to-end AVX wins are typically within noise; we short-circuit to scalar for
-//!   performance stability and identical numerics.
-//! - **Streaming Performance**: O(1) with deques in the streaming API.
-//! - **Memory Optimization**: Uses `alloc_with_nan_prefix`/matrix helpers; no O(N) temps per output.
-//! - **Batch**: Parallel per-row supported. Potential future optimization: precompute the TR stream
-//!   once across rows; current design favors simplicity and clarity.
-//! - **Decision log**: SIMD kept as scalar delegate; CUDA wrapper returns VRAM handles with CAI v3 + DLPack v1.x and syncs streams before hand-off; scalar/CPU outputs remain the numerical reference.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -54,6 +20,10 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -63,15 +33,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -92,7 +58,10 @@ pub struct ChandeOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ChandeParams {
     pub period: Option<usize>,
     pub mult: Option<f64>,
@@ -243,22 +212,26 @@ impl ChandeBuilder {
 
 #[derive(Debug, Error)]
 pub enum ChandeError {
-    #[error("chande: Input series are empty.")] 
+    #[error("chande: Input series are empty.")]
     EmptyInputData,
-    #[error("chande: All values are NaN.")] 
+    #[error("chande: All values are NaN.")]
     AllValuesNaN,
-    #[error("chande: Invalid period: period={period}, data_len={data_len}")] 
+    #[error("chande: Invalid period: period={period}, data_len={data_len}")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("chande: not enough valid data: needed={needed}, valid={valid}")] 
+    #[error("chande: not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
-    #[error("chande: input length mismatch: high={h}, low={l}, close={c}")] 
+    #[error("chande: input length mismatch: high={h}, low={l}, close={c}")]
     DataLengthMismatch { h: usize, l: usize, c: usize },
-    #[error("chande: Invalid direction: {direction}")] 
+    #[error("chande: Invalid direction: {direction}")]
     InvalidDirection { direction: String },
     #[error("chande: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("chande: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: isize, end: isize, step: isize },
+    InvalidRange {
+        start: isize,
+        end: isize,
+        step: isize,
+    },
     #[error("chande: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("chande: invalid input: {0}")]
@@ -326,7 +299,6 @@ pub fn chande_with_kernel(
         other => other,
     };
 
-    
     let chosen = match (
         chosen,
         cfg!(all(feature = "nightly-avx", target_arch = "x86_64")),
@@ -357,17 +329,12 @@ pub fn chande_with_kernel(
     Ok(ChandeOutput { values: out })
 }
 
-/// Writes Chande Exits values into a caller-provided output slice without allocating.
-///
-/// - Preserves NaN warmup semantics identical to the Vec-returning API.
-/// - `out.len()` must equal the input length; otherwise an error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn chande_into(input: &ChandeInput, out: &mut [f64]) -> Result<(), ChandeError> {
     chande_into_slice(out, input, Kernel::Auto)
 }
 
-/// Helper function to compute chande directly into a pre-allocated slice
 #[inline]
 pub fn chande_compute_into(
     high: &[f64],
@@ -390,7 +357,10 @@ pub fn chande_compute_into(
         });
     }
     if out.len() != high.len() {
-        return Err(ChandeError::OutputLengthMismatch { expected: high.len(), got: out.len() });
+        return Err(ChandeError::OutputLengthMismatch {
+            expected: high.len(),
+            got: out.len(),
+        });
     }
     let len = high.len();
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
@@ -427,7 +397,6 @@ pub fn chande_compute_into(
         k => k,
     };
 
-    
     let chosen = match (
         chosen,
         cfg!(all(feature = "nightly-avx", target_arch = "x86_64")),
@@ -456,8 +425,6 @@ pub fn chande_compute_into(
     Ok(())
 }
 
-/// Helper function for WASM to compute chande directly into a pre-allocated slice
-/// This follows the pattern from alma_into_slice for zero-copy operations
 #[inline]
 pub fn chande_into_slice(
     dst: &mut [f64],
@@ -490,19 +457,15 @@ pub fn chande_scalar(
     let alpha = 1.0 / period as f64;
     let warmup = first + period - 1;
 
-    
     let mut sum_tr = 0.0f64;
     let mut rma = 0.0f64;
     let mut prev_close = close[first];
 
-    
     use std::collections::VecDeque;
 
     if dir == "long" {
-        
         let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
         for i in first..len {
-            
             let hi = high[i];
             let lo = low[i];
             let tr = if i == first {
@@ -514,7 +477,6 @@ pub fn chande_scalar(
                 hl.max(hc).max(lc)
             };
 
-            
             if i >= warmup {
                 let window_start = i + 1 - period;
                 while let Some(&j) = dq.front() {
@@ -525,7 +487,7 @@ pub fn chande_scalar(
                     }
                 }
             }
-            
+
             while let Some(&j) = dq.back() {
                 if high[j] <= hi {
                     dq.pop_back();
@@ -535,17 +497,15 @@ pub fn chande_scalar(
             }
             dq.push_back(i);
 
-            
             if i < warmup {
                 sum_tr += tr;
             } else if i == warmup {
                 sum_tr += tr;
                 rma = sum_tr / period as f64;
-                
+
                 let max_h = high[*dq.front().expect("deque nonempty at warmup")];
                 out[i] = (-rma).mul_add(mult, max_h);
             } else {
-                
                 rma = alpha.mul_add(tr - rma, rma);
                 let max_h = high[*dq.front().expect("deque nonempty in steady state")];
                 out[i] = (-rma).mul_add(mult, max_h);
@@ -554,10 +514,8 @@ pub fn chande_scalar(
             prev_close = close[i];
         }
     } else {
-        
         let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
         for i in first..len {
-            
             let hi = high[i];
             let lo = low[i];
             let tr = if i == first {
@@ -569,7 +527,6 @@ pub fn chande_scalar(
                 hl.max(hc).max(lc)
             };
 
-            
             if i >= warmup {
                 let window_start = i + 1 - period;
                 while let Some(&j) = dq.front() {
@@ -580,7 +537,7 @@ pub fn chande_scalar(
                     }
                 }
             }
-            
+
             while let Some(&j) = dq.back() {
                 if low[j] >= lo {
                     dq.pop_back();
@@ -590,17 +547,15 @@ pub fn chande_scalar(
             }
             dq.push_back(i);
 
-            
             if i < warmup {
                 sum_tr += tr;
             } else if i == warmup {
                 sum_tr += tr;
                 rma = sum_tr / period as f64;
-                
+
                 let min_l = low[*dq.front().expect("deque nonempty at warmup")];
                 out[i] = rma.mul_add(mult, min_l);
             } else {
-                
                 rma = alpha.mul_add(tr - rma, rma);
                 let min_l = low[*dq.front().expect("deque nonempty in steady state")];
                 out[i] = rma.mul_add(mult, min_l);
@@ -638,7 +593,6 @@ pub fn chande_avx512(
     first: usize,
     out: &mut [f64],
 ) {
-    
     unsafe { chande_fast_unchecked(high, low, close, period, mult, dir, first, out) }
 }
 
@@ -808,26 +762,21 @@ unsafe fn chande_fast_unchecked(
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct ChandeStream {
-    
     period: usize,
     mult: f64,
     direction: String,
     is_long: bool,
 
-    
-    alpha: f64, 
+    alpha: f64,
 
-    
     atr: f64,
     close_prev: f64,
-    t: usize,     
-    warm: usize,  
-    filled: bool, 
+    t: usize,
+    warm: usize,
+    filled: bool,
 
-    
     max_deque: std::collections::VecDeque<(f64, usize)>,
     min_deque: std::collections::VecDeque<(f64, usize)>,
 }
@@ -870,7 +819,6 @@ impl ChandeStream {
 
     #[inline(always)]
     fn evict_old(&mut self) {
-        
         let window_start = self.t.saturating_sub(self.period - 1);
         if self.is_long {
             while let Some(&(_, idx)) = self.max_deque.front() {
@@ -893,7 +841,6 @@ impl ChandeStream {
 
     #[inline(always)]
     fn push_max(&mut self, v: f64) {
-        
         while let Some(&(back, _)) = self.max_deque.back() {
             if back <= v {
                 self.max_deque.pop_back();
@@ -906,7 +853,6 @@ impl ChandeStream {
 
     #[inline(always)]
     fn push_min(&mut self, v: f64) {
-        
         while let Some(&(back, _)) = self.min_deque.back() {
             if back >= v {
                 self.min_deque.pop_back();
@@ -919,9 +865,6 @@ impl ChandeStream {
 
     #[inline(always)]
     fn tr(&self, high: f64, low: f64) -> f64 {
-        
-        
-        
         if self.warm == 0 {
             high - low
         } else {
@@ -941,11 +884,9 @@ impl ChandeStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        
         let tr = self.tr(high, low);
 
         if !self.filled {
-            
             if self.is_long {
                 self.push_max(high);
             } else {
@@ -956,7 +897,7 @@ impl ChandeStream {
 
             let now_ready = self.warm == self.period;
             if now_ready {
-                self.atr *= self.alpha; 
+                self.atr *= self.alpha;
                 self.filled = true;
             }
 
@@ -966,23 +907,22 @@ impl ChandeStream {
             if !now_ready {
                 return None;
             }
-            
+
             if self.is_long {
                 let m = self.max_deque.front().unwrap().0;
-                Some((-self.atr).mul_add(self.mult, m)) 
+                Some((-self.atr).mul_add(self.mult, m))
             } else {
                 let m = self.min_deque.front().unwrap().0;
-                Some(self.atr.mul_add(self.mult, m)) 
+                Some(self.atr.mul_add(self.mult, m))
             }
         } else {
-            
             self.evict_old();
             if self.is_long {
                 self.push_max(high);
             } else {
                 self.push_min(low);
             }
-            
+
             self.atr = self.alpha.mul_add(tr - self.atr, self.atr);
 
             self.close_prev = close;
@@ -1126,24 +1066,33 @@ fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Result<Vec<ChandeParams>, Cha
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        
+
         if start < end {
-            if step == 0 { return Ok(vec![start]); }
+            if step == 0 {
+                return Ok(vec![start]);
+            }
             Ok((start..=end).step_by(step).collect())
         } else {
-            
             let step_i = step as isize;
-            if step_i == 0 { return Ok(vec![start]); }
+            if step_i == 0 {
+                return Ok(vec![start]);
+            }
             let mut vals = Vec::new();
             let mut x = start as isize;
             let end_i = end as isize;
             while x >= end_i {
                 vals.push(x as usize);
                 x = x.saturating_sub(step_i);
-                if step_i <= 0 { break; }
+                if step_i <= 0 {
+                    break;
+                }
             }
             if vals.is_empty() {
-                return Err(ChandeError::InvalidRange { start: start as isize, end: end as isize, step: step as isize });
+                return Err(ChandeError::InvalidRange {
+                    start: start as isize,
+                    end: end as isize,
+                    step: step as isize,
+                });
             }
             Ok(vals)
         }
@@ -1168,17 +1117,25 @@ fn expand_grid(r: &ChandeBatchRange, dir: &str) -> Result<Vec<ChandeParams>, Cha
             }
         }
         if v.is_empty() {
-            return Err(ChandeError::InvalidRange { start: start as isize, end: end as isize, step: step as isize });
+            return Err(ChandeError::InvalidRange {
+                start: start as isize,
+                end: end as isize,
+                step: step as isize,
+            });
         }
         Ok(v)
     }
     let periods = axis_usize(r.period)?;
     let mults = axis_f64(r.mult)?;
-    
+
     let cap = periods
         .len()
         .checked_mul(mults.len())
-        .ok_or(ChandeError::InvalidRange { start: 0, end: 0, step: 0 })?;
+        .ok_or(ChandeError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        })?;
     let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &m in &mults {
@@ -1239,7 +1196,11 @@ fn chande_batch_inner(
 
     let combos = expand_grid(sweep, dir)?;
     if combos.is_empty() {
-        return Err(ChandeError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(ChandeError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
@@ -1251,22 +1212,19 @@ fn chande_batch_inner(
     }
     let rows = combos.len();
     let cols = high.len();
-    
+
     let _total = rows
         .checked_mul(cols)
         .ok_or(ChandeError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1312,7 +1270,6 @@ fn chande_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1329,7 +1286,6 @@ fn chande_batch_inner(
     })
 }
 
-/// Computes batch chande directly into pre-allocated output slice
 #[inline(always)]
 fn chande_batch_inner_into(
     high: &[f64],
@@ -1354,7 +1310,11 @@ fn chande_batch_inner_into(
 
     let combos = expand_grid(sweep, dir)?;
     if combos.is_empty() {
-        return Err(ChandeError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(ChandeError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
 
     let first = first_valid3(high, low, close).ok_or(ChandeError::AllValuesNaN)?;
@@ -1369,22 +1329,22 @@ fn chande_batch_inner_into(
 
     let cols = high.len();
 
-    
     let expected = combos
         .len()
         .checked_mul(cols)
         .ok_or_else(|| ChandeError::InvalidInput("rows*cols overflow".into()))?;
     if out.len() != expected {
-        return Err(ChandeError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(ChandeError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
     };
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap() - 1;
         let row_start = row * cols;
@@ -1521,24 +1481,20 @@ mod tests {
 
     #[test]
     fn test_chande_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = ChandeInput::with_default_candles(&candles);
 
-        
         let baseline = chande(&input)?;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             chande_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             chande_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1781,7 +1737,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_chande_no_poison(
         test_name: &str,
@@ -1791,7 +1746,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let param_combinations = vec![
             ChandeParams {
                 period: Some(10),
@@ -1814,16 +1768,13 @@ mod tests {
             let input = ChandeInput::from_candles(&candles, params.clone());
             let output = chande_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
@@ -1832,7 +1783,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
@@ -1841,7 +1791,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params: period={}, mult={}, direction={}",
@@ -1855,7 +1804,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_chande_no_poison(
         _test_name: &str,
@@ -1891,30 +1839,18 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
-
-        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
-                
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                     period..400,
                 )
                 .prop_flat_map(move |close| {
-                    
                     let len = close.len();
                     (
                         Just(close.clone()),
-                        prop::collection::vec(
-                            0.0f64..1000.0f64, 
-                            len,
-                        ),
-                        prop::collection::vec(
-                            0.0f64..1000.0f64, 
-                            len,
-                        ),
+                        prop::collection::vec(0.0f64..1000.0f64, len),
+                        prop::collection::vec(0.0f64..1000.0f64, len),
                     )
                         .prop_map(move |(c, high_spread, low_spread)| {
                             let high: Vec<f64> = c
@@ -1931,8 +1867,8 @@ mod tests {
                         })
                 }),
                 Just(period),
-                0.1f64..10.0f64, 
-                prop::bool::ANY, 
+                0.1f64..10.0f64,
+                prop::bool::ANY,
             )
         });
 
@@ -1940,7 +1876,6 @@ mod tests {
             .run(&strat, |((high, low, close), period, mult, is_long)| {
                 let direction = if is_long { "long" } else { "short" };
 
-                
                 let candles = Candles {
                     high: high.clone(),
                     low: low.clone(),
@@ -1962,25 +1897,20 @@ mod tests {
 
                 let input = ChandeInput::from_candles(&candles, params);
 
-                
                 let result = chande_with_kernel(&input, kernel);
 
-                
                 prop_assert!(result.is_ok(), "Chande should succeed for valid inputs");
                 let output = result.unwrap();
 
-                
                 prop_assert_eq!(
                     output.values.len(),
                     high.len(),
                     "Output length should match input"
                 );
 
-                
                 let first_valid = close.iter().position(|&x| !x.is_nan()).unwrap_or(0);
                 let warmup_period = first_valid + period - 1;
 
-                
                 for i in 0..warmup_period.min(output.values.len()) {
                     prop_assert!(
                         output.values[i].is_nan(),
@@ -1989,7 +1919,6 @@ mod tests {
                     );
                 }
 
-                
                 if warmup_period < output.values.len() {
                     for i in warmup_period..output.values.len() {
                         let val = output.values[i];
@@ -2002,8 +1931,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in warmup_period..output.values.len() {
                     let start_idx = i + 1 - period;
                     let period_high = high[start_idx..=i].iter().cloned().fold(f64::MIN, f64::max);
@@ -2011,7 +1938,6 @@ mod tests {
                     let val = output.values[i];
 
                     if is_long {
-                        
                         prop_assert!(
                             val <= period_high + 1e-6,
                             "Long exit {} should be <= period high {} at index {}",
@@ -2020,7 +1946,6 @@ mod tests {
                             i
                         );
                     } else {
-                        
                         prop_assert!(
                             val >= period_low - 1e-6,
                             "Short exit {} should be >= period low {} at index {}",
@@ -2031,13 +1956,11 @@ mod tests {
                     }
                 }
 
-                
                 let ref_output = chande_with_kernel(&input, Kernel::Scalar).unwrap();
                 for i in 0..output.values.len() {
                     let val = output.values[i];
                     let ref_val = ref_output.values[i];
 
-                    
                     if !val.is_finite() || !ref_val.is_finite() {
                         prop_assert_eq!(
                             val.to_bits(),
@@ -2050,7 +1973,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let val_bits = val.to_bits();
                     let ref_bits = ref_val.to_bits();
                     let ulp_diff = val_bits.abs_diff(ref_bits);
@@ -2065,11 +1987,6 @@ mod tests {
                     );
                 }
 
-                
-                
-                
-                
-                
                 if period == 1 && warmup_period < output.values.len() {
                     for i in warmup_period..output.values.len() {
                         let val = output.values[i];
@@ -2079,9 +1996,7 @@ mod tests {
                             i
                         );
 
-                        
                         if is_long {
-                            
                             prop_assert!(
                                 val <= high[i] + 1e-6,
                                 "Period=1 long exit {} should be <= high {} at index {}",
@@ -2090,7 +2005,6 @@ mod tests {
                                 i
                             );
                         } else {
-                            
                             prop_assert!(
                                 val >= low[i] - 1e-6,
                                 "Period=1 short exit {} should be >= low {} at index {}",
@@ -2102,7 +2016,6 @@ mod tests {
                     }
                 }
 
-                
                 let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
@@ -2112,8 +2025,7 @@ mod tests {
                     && all_same_low
                     && warmup_period + 10 < output.values.len()
                 {
-                    
-                    let stable_start = warmup_period + period; 
+                    let stable_start = warmup_period + period;
                     if stable_start + 2 < output.values.len() {
                         for i in stable_start..output.values.len() - 1 {
                             prop_assert!(
@@ -2145,7 +2057,6 @@ mod tests {
         check_chande_no_poison
     );
 
-    
     #[cfg(feature = "proptest")]
     generate_all_chande_tests!(check_chande_property);
 
@@ -2179,7 +2090,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2187,17 +2097,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = ChandeBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 30, 10) 
-            .mult_range(2.0, 5.0, 1.5) 
+            .period_range(10, 30, 10)
+            .mult_range(2.0, 5.0, 1.5)
             .direction("long")
             .apply_candles(&c)?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -2207,7 +2114,6 @@ mod tests {
             let col = idx % output.cols;
             let params = &output.combos[row];
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
@@ -2216,7 +2122,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
@@ -2225,7 +2130,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, mult={}, direction={}",
@@ -2235,11 +2139,10 @@ mod tests {
             }
         }
 
-        
         let output_short = ChandeBatchBuilder::new()
             .kernel(kernel)
-            .period_range(15, 45, 15) 
-            .mult_range(1.0, 4.0, 1.5) 
+            .period_range(15, 45, 15)
+            .mult_range(1.0, 4.0, 1.5)
             .direction("short")
             .apply_candles(&c)?;
 
@@ -2281,7 +2184,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2313,10 +2215,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 }
-
-
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "chande")]
@@ -2396,8 +2294,8 @@ pub fn chande_batch_py<'py>(
         period: period_range,
         mult: mult_range,
     };
-    let combos = expand_grid(&sweep, direction)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos =
+        expand_grid(&sweep, direction).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
     let total = rows
@@ -2413,7 +2311,7 @@ pub fn chande_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        
+
         let simd = match simd {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2452,12 +2350,12 @@ pub fn chande_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Chande", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "DeviceArrayF32Chande",
+    unsendable
+)]
 pub struct DeviceArrayF32ChandePy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -2502,8 +2400,7 @@ impl DeviceArrayF32ChandePy {
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = _dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2523,9 +2420,8 @@ impl DeviceArrayF32ChandePy {
         }
         let _ = _stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -2589,8 +2485,8 @@ pub fn chande_cuda_batch_dev_py(
     };
 
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let mut cuda = CudaChande::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda =
+            CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let dev_arr = cuda
@@ -2636,32 +2532,28 @@ pub fn chande_cuda_many_series_one_param_dev_py(
     }
 
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaChande::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaChande::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        let arr = cuda.chande_many_series_one_param_time_major_dev(
-            high_slice,
-            low_slice,
-            close_slice,
-            cols,
-            rows,
-            period,
-            mult,
-            direction,
-        )
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let arr = cuda
+            .chande_many_series_one_param_time_major_dev(
+                high_slice,
+                low_slice,
+                close_slice,
+                cols,
+                rows,
+                period,
+                mult,
+                direction,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
 
     Ok(DeviceArrayF32ChandePy::new(inner, ctx, dev_id))
 }
 
-// ============================
-// WASM Bindings
-// ============================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chande_js(
     high: &[f64],
@@ -2683,7 +2575,7 @@ pub fn chande_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ChandeBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2691,7 +2583,7 @@ pub struct ChandeBatchConfig {
     pub direction: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ChandeBatchJsOutput {
     pub values: Vec<f64>,
@@ -2700,7 +2592,7 @@ pub struct ChandeBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chande_batch_js(
     high: &[f64],
@@ -2723,26 +2615,15 @@ pub fn chande_batch_js(
 
     let simd = detect_best_batch_kernel().to_non_batch();
 
-    let out = chande_batch_inner(
-        high,
-        low,
-        close,
-        &sweep,
-        direction,
-        simd,
-        false,
-    )
-    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let out = chande_batch_inner(high, low, close, &sweep, direction, simd, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Create JS object with values, periods, mults, directions arrays
     let js_obj = js_sys::Object::new();
 
-    // Convert values to JS array
     let values_arr = js_sys::Float64Array::new_with_length(out.values.len() as u32);
     values_arr.copy_from(&out.values);
     js_sys::Reflect::set(&js_obj, &JsValue::from_str("values"), &values_arr.into())?;
 
-    // Extract periods, mults, directions from combos
     let periods: Vec<f64> = out
         .combos
         .iter()
@@ -2755,7 +2636,6 @@ pub fn chande_batch_js(
         .map(|c| c.direction.as_ref().unwrap().clone())
         .collect();
 
-    // Convert to JS arrays
     let periods_arr = js_sys::Float64Array::new_with_length(periods.len() as u32);
     periods_arr.copy_from(&periods);
     js_sys::Reflect::set(&js_obj, &JsValue::from_str("periods"), &periods_arr.into())?;
@@ -2764,14 +2644,12 @@ pub fn chande_batch_js(
     mults_arr.copy_from(&mults);
     js_sys::Reflect::set(&js_obj, &JsValue::from_str("mults"), &mults_arr.into())?;
 
-    // Convert directions to JS array
     let dirs_arr = js_sys::Array::new();
     for dir in &directions {
         dirs_arr.push(&JsValue::from_str(dir));
     }
     js_sys::Reflect::set(&js_obj, &JsValue::from_str("directions"), &dirs_arr.into())?;
 
-    // Add rows and cols
     js_sys::Reflect::set(
         &js_obj,
         &JsValue::from_str("rows"),
@@ -2786,7 +2664,7 @@ pub fn chande_batch_js(
     Ok(js_obj.into())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = chande_batch)]
 pub fn chande_batch_unified_js(
     high: &[f64],
@@ -2801,16 +2679,8 @@ pub fn chande_batch_unified_js(
         mult: cfg.mult_range,
     };
     let simd = detect_best_batch_kernel().to_non_batch();
-    let out = chande_batch_inner(
-        high,
-        low,
-        close,
-        &sweep,
-        &cfg.direction,
-        simd,
-        false,
-    )
-    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let out = chande_batch_inner(high, low, close, &sweep, &cfg.direction, simd, false)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
     let js = ChandeBatchJsOutput {
         values: out.values,
         combos: out.combos,
@@ -2821,7 +2691,7 @@ pub fn chande_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chande_alloc(len: usize) -> *mut f64 {
     let mut v: Vec<f64> = Vec::with_capacity(len);
@@ -2829,7 +2699,7 @@ pub fn chande_alloc(len: usize) -> *mut f64 {
     std::mem::forget(v);
     p
 }
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chande_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2837,7 +2707,7 @@ pub fn chande_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chande_into(
     h_ptr: *const f64,
@@ -2866,7 +2736,6 @@ pub fn chande_into(
         let c = std::slice::from_raw_parts(c_ptr, len);
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
 
-        // Handle aliasing safely
         if out_ptr as *const f64 == h_ptr
             || out_ptr as *const f64 == l_ptr
             || out_ptr as *const f64 == c_ptr
@@ -2895,7 +2764,7 @@ pub fn chande_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chande_batch_into(
     h_ptr: *const f64,
@@ -2932,15 +2801,15 @@ pub fn chande_batch_into(
             period: (p_start, p_end, p_step),
             mult: (m_start, m_end, m_step),
         };
-        let combos = expand_grid(&sweep, direction)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos =
+            expand_grid(&sweep, direction).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
-        // Map Auto to concrete compute kernel
+
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::nadaraya_watson_envelope::{
     nadaraya_watson_envelope_batch_with_kernel, nadaraya_watson_envelope_with_kernel,
     NweBatchRange, NweInput, NweParams,
@@ -62,7 +60,7 @@ fn nwe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.upper.buf.copy_to(&mut upper_gpu).expect("copy upper");
     pair.lower.buf.copy_to(&mut lower_gpu).expect("copy lower");
 
-    let tol = 2e-3; 
+    let tol = 2e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values_upper[idx];
         let b = upper_gpu[idx] as f64;
@@ -96,8 +94,8 @@ fn nwe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 6usize; 
-    let rows = 2048usize; 
+    let cols = 6usize;
+    let rows = 2048usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 12)..rows {
@@ -112,7 +110,6 @@ fn nwe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         lookback: Some(200),
     };
 
-    
     let mut upper_cpu = vec![f64::NAN; cols * rows];
     let mut lower_cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {

@@ -1,59 +1,28 @@
-//! # Normalized Moving Average (NMA)
-//!
-//! A technique that computes an adaptive moving average by transforming input
-//! values into log space and weighting differences between consecutive values.
-//! The weighting ratio depends on a series of square-root increments. This design
-//! aims to normalize large price changes without oversmoothing small fluctuations.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points, default: 40)
-//!
-//! ## Returns
-//! - **`Ok(NmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(NmaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Fully implemented - 4-wide SIMD with vectorized log transforms and weighted averaging
-//! - **AVX512 kernel**: ✅ Fully implemented - 8-wide SIMD with v2 variant for additional optimizations
-//! - **Streaming update**: ⚠️ O(n) complexity - dot_ring() iterates through all period weights
-//!   - TODO: Could optimize to O(1) with incremental computation of weighted sums
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **Note**: Log-space transformations benefit significantly from SIMD parallel processing
-
-
-
-
-
-
-
-
-
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::{CudaNma, DeviceArrayF32};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::{CudaNma, DeviceArrayF32};
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use core::arch::wasm32::*;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
-use thiserror::Error;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
+use thiserror::Error;
 
 impl<'a> AsRef<[f64]> for NmaInput<'a> {
     #[inline(always)]
@@ -80,7 +49,10 @@ pub struct NmaOutput {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct NmaParams {
     pub period: Option<usize>,
 }
@@ -193,7 +165,11 @@ pub enum NmaError {
     #[error("nma: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("nma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("nma: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("nma: invalid input: {0}")]
@@ -209,23 +185,7 @@ pub fn nma(input: &NmaInput) -> Result<NmaOutput, NmaError> {
 fn nma_prepare<'a>(
     input: &'a NmaInput,
     kernel: Kernel,
-) -> Result<
-    (
-        
-        &'a [f64],
-        // period
-        usize,
-        // first
-        usize,
-        // ln_values
-        Vec<f64>,
-        // sqrt_diffs
-        Vec<f64>,
-        // chosen
-        Kernel,
-    ),
-    NmaError,
-> {
+) -> Result<(&'a [f64], usize, usize, Vec<f64>, Vec<f64>, Kernel), NmaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
 
@@ -258,16 +218,13 @@ fn nma_prepare<'a>(
         other => other,
     };
 
-    // Allocate ln buffer up-front. For SIMD kernels, the kernel overwrites this
-    // buffer (and building it here would redundantly compute ln() twice).
-    let mut ln_values = alloc_with_nan_prefix(len, 0); // No NaN prefix needed
+    let mut ln_values = alloc_with_nan_prefix(len, 0);
     if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
         for i in 0..len {
             ln_values[i] = data[i].max(1e-10).ln();
         }
     }
 
-    // Pre-compute sqrt differences - small vector, regular Vec is OK
     let mut sqrt_diffs = vec![0.0; period];
     for i in 0..period {
         let s0 = (i as f64).sqrt();
@@ -321,13 +278,11 @@ fn nma_compute_into(
 }
 
 pub fn nma_with_kernel(input: &NmaInput, kernel: Kernel) -> Result<NmaOutput, NmaError> {
-    // ────────────────────▼───────────────────  mark both bindings `mut`
     let (data, period, first, mut ln_values, mut sqrt_diffs, chosen) = nma_prepare(input, kernel)?;
 
     let warm = first + period;
     let mut out = alloc_with_nan_prefix(data.len(), warm);
 
-    // ───────────────────▼──────────────▼────── pass them mutably
     nma_compute_into(
         data,
         period,
@@ -344,13 +299,11 @@ pub fn nma_with_kernel(input: &NmaInput, kernel: Kernel) -> Result<NmaOutput, Nm
 pub fn nma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
 
-    // Allocate uninitialized for data-sized vector
     let mut ln_values = alloc_with_nan_prefix(len, 0);
     for i in 0..len {
         ln_values[i] = data[i].max(1e-10).ln();
     }
 
-    // Small vector, regular Vec is OK
     let mut sqrt_diffs = vec![0.0; period];
     for i in 0..period {
         let s0 = (i as f64).sqrt();
@@ -386,33 +339,24 @@ pub fn nma_scalar_with_precomputed(
 ) {
     let len = data.len();
 
-    // Use original forward weights and index in reverse during the dot to avoid
-    // per-call allocation. This was measured faster on our workloads.
-
-    // Forward-scan the ln window to improve locality and reduce index math.
-    // For t in 0..period we accumulate |ln[base+t+1] - ln[base+t]| and
-    // multiply by reversed weights sqrt_diffs[period-1-t].
     for j in (first + period)..len {
         let base = j - period;
 
         let mut num = 0.0f64;
         let mut denom = 0.0f64;
 
-        // Walk differences contiguously within the window.
         let mut prev = ln_values[base];
         for t in 0..period {
             let cur = ln_values[base + t + 1];
             let diff = (cur - prev).abs();
             prev = cur;
 
-            // Reverse weights mapping: t=0 (oldest diff) -> weight[period-1]
             num += diff * sqrt_diffs[period - 1 - t];
             denom += diff;
         }
 
         let ratio = if denom == 0.0 { 0.0 } else { num / denom };
 
-        // Final interpolation between x0=data[j-period] and x1=data[j-period+1]
         let x0 = data[j - period];
         let x1 = data[j - period + 1];
         out[j] = (x1 - x0).mul_add(ratio, x0);
@@ -431,7 +375,7 @@ unsafe fn nma_simd128(
 ) {
     use core::arch::wasm32::*;
 
-    const STEP: usize = 2; // Process 2 doubles at a time (128-bit vectors)
+    const STEP: usize = 2;
     let len = data.len();
 
     for j in (first + period)..len {
@@ -441,32 +385,24 @@ unsafe fn nma_simd128(
         let mut num_acc = f64x2_splat(0.0);
         let mut denom_acc = f64x2_splat(0.0);
 
-        // Process vectorized chunks
         for blk in 0..chunks {
             let i = blk * STEP;
 
-            // Load ln values for the difference calculation
-            // ln_values[j - i] and ln_values[j - i - 1] for both lanes
             let ln_curr_0 = f64x2(ln_values[j - i], ln_values[j - i - 1]);
             let ln_prev_0 = f64x2(ln_values[j - i - 1], ln_values[j - i - 2]);
 
-            // Calculate absolute differences
             let diff = f64x2_sub(ln_curr_0, ln_prev_0);
             let abs_diff = f64x2_abs(diff);
 
-            // Load sqrt_diffs
             let sqrt_d = v128_load(sqrt_diffs.as_ptr().add(i) as *const v128);
 
-            // Accumulate
             num_acc = f64x2_add(num_acc, f64x2_mul(abs_diff, sqrt_d));
             denom_acc = f64x2_add(denom_acc, abs_diff);
         }
 
-        // Horizontal sum
         let mut num = f64x2_extract_lane::<0>(num_acc) + f64x2_extract_lane::<1>(num_acc);
         let mut denom = f64x2_extract_lane::<0>(denom_acc) + f64x2_extract_lane::<1>(denom_acc);
 
-        // Handle tail elements
         for i in (chunks * STEP)..period {
             let oi = (ln_values[j - i] - ln_values[j - i - 1]).abs();
             num += oi * sqrt_diffs[i];
@@ -483,22 +419,17 @@ unsafe fn nma_simd128(
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,avx512bw,fma")]
 unsafe fn fast_ln_avx512_hi(x: __m512d) -> __m512d {
-    // Constants
     let one = _mm512_set1_pd(1.0);
     let two = _mm512_set1_pd(2.0);
     let half = _mm512_set1_pd(0.5);
     let ln2 = _mm512_set1_pd(std::f64::consts::LN_2);
     let sqrt_half = _mm512_set1_pd(0.7071067811865475244);
 
-    // Special case handling for values near 1.0
-    // For |x-1| < 0.2, use Taylor series: ln(x) ≈ (x-1) - (x-1)²/2 + (x-1)³/3 - ...
-    // This covers the range [0.8, 1.2] where the polynomial approximation has poor accuracy
     let threshold = _mm512_set1_pd(0.2);
     let x_minus_1 = _mm512_sub_pd(x, one);
     let abs_x_minus_1 = _mm512_abs_pd(x_minus_1);
     let near_one_mask = _mm512_cmp_pd_mask(abs_x_minus_1, threshold, _CMP_LT_OQ);
 
-    // Taylor series coefficients for ln(1+y) where y = x-1
     let c2 = _mm512_set1_pd(-0.5);
     let c3 = _mm512_set1_pd(1.0 / 3.0);
     let c4 = _mm512_set1_pd(-0.25);
@@ -507,13 +438,11 @@ unsafe fn fast_ln_avx512_hi(x: __m512d) -> __m512d {
     let c7 = _mm512_set1_pd(1.0 / 7.0);
     let c8 = _mm512_set1_pd(-0.125);
 
-    // Compute Taylor series: ln(x) = y - y²/2 + y³/3 - y⁴/4 + ...
     let y = x_minus_1;
     let y2 = _mm512_mul_pd(y, y);
     let y3 = _mm512_mul_pd(y2, y);
     let y4 = _mm512_mul_pd(y2, y2);
 
-    // Higher accuracy Taylor expansion
     let mut taylor = y;
     taylor = _mm512_fmadd_pd(y2, c2, taylor);
     taylor = _mm512_fmadd_pd(y3, c3, taylor);
@@ -527,55 +456,43 @@ unsafe fn fast_ln_avx512_hi(x: __m512d) -> __m512d {
     taylor = _mm512_fmadd_pd(y7, c7, taylor);
     taylor = _mm512_fmadd_pd(y8, c8, taylor);
 
-    // For values not near 1.0, use the original algorithm
-    // Extract exponent and mantissa
     let ix = _mm512_castpd_si512(x);
     let exp_mask = _mm512_set1_epi64(0x7FF0000000000000u64 as i64);
     let mantissa_mask = _mm512_set1_epi64(0x000FFFFFFFFFFFFFu64 as i64);
     let bias = _mm512_set1_epi64(1023);
 
-    // Extract exponent
     let exp_bits = _mm512_and_si512(ix, exp_mask);
     let exp_shifted = _mm512_srli_epi64::<52>(exp_bits);
     let e = _mm512_sub_epi64(exp_shifted, bias);
     let e_f64 = _mm512_cvtepi64_pd(e);
 
-    // Set mantissa to [1, 2) range
     let mantissa_bits = _mm512_and_si512(ix, mantissa_mask);
     let one_bits = _mm512_set1_epi64(0x3FF0000000000000u64 as i64);
     let m_bits = _mm512_or_si512(mantissa_bits, one_bits);
     let mut m = _mm512_castsi512_pd(m_bits);
 
-    // Conditional fold to [sqrt(0.5), sqrt(2))
     let needs_fold = _mm512_cmp_pd_mask(m, sqrt_half, _CMP_LT_OQ);
     m = _mm512_mask_mul_pd(m, needs_fold, m, two);
     let e_adjust = _mm512_mask_sub_pd(e_f64, needs_fold, e_f64, one);
 
-    // Compute f = m - 1
     let f = _mm512_sub_pd(m, one);
 
-    // Compute s = f / (2 + f)
     let two_plus_f = _mm512_add_pd(two, f);
     let s = _mm512_div_pd(f, two_plus_f);
     let z = _mm512_mul_pd(s, s);
     let w = _mm512_mul_pd(z, z);
 
-    // Ultra high-precision polynomial coefficients (11th degree)
-    // These coefficients are from the Cephes library and provide ~0.5 ULP accuracy
-    let lg1 = _mm512_set1_pd(6.666666666666735130e-01); // 2/3
-    let lg2 = _mm512_set1_pd(3.999999999940941908e-01); // 2/5
-    let lg3 = _mm512_set1_pd(2.857142874366239149e-01); // 2/7
-    let lg4 = _mm512_set1_pd(2.222219843214978396e-01); // 2/9
-    let lg5 = _mm512_set1_pd(1.818357216161805012e-01); // 2/11
-    let lg6 = _mm512_set1_pd(1.531383769920937332e-01); // 2/13
-    let lg7 = _mm512_set1_pd(1.479819860511658591e-01); // ~2/13.5
-                                                        // Additional high-order terms for better accuracy
+    let lg1 = _mm512_set1_pd(6.666666666666735130e-01);
+    let lg2 = _mm512_set1_pd(3.999999999940941908e-01);
+    let lg3 = _mm512_set1_pd(2.857142874366239149e-01);
+    let lg4 = _mm512_set1_pd(2.222219843214978396e-01);
+    let lg5 = _mm512_set1_pd(1.818357216161805012e-01);
+    let lg6 = _mm512_set1_pd(1.531383769920937332e-01);
+    let lg7 = _mm512_set1_pd(1.479819860511658591e-01);
+
     let lg8 = _mm512_set1_pd(1.333355814642869980e-01);
     let lg9 = _mm512_set1_pd(1.253141636393179328e-01);
 
-    // Evaluate polynomial using Horner's method with FMA
-    
-    
     let mut r1 = lg9;
     r1 = _mm512_fmadd_pd(r1, z, lg7);
     r1 = _mm512_fmadd_pd(r1, z, lg5);
@@ -583,7 +500,6 @@ unsafe fn fast_ln_avx512_hi(x: __m512d) -> __m512d {
     r1 = _mm512_fmadd_pd(r1, z, lg1);
     r1 = _mm512_mul_pd(r1, z);
 
-    
     let mut r2 = lg8;
     r2 = _mm512_fmadd_pd(r2, z, lg6);
     r2 = _mm512_fmadd_pd(r2, z, lg4);
@@ -592,22 +508,14 @@ unsafe fn fast_ln_avx512_hi(x: __m512d) -> __m512d {
 
     let r = _mm512_add_pd(r1, r2);
 
-    
-    
     let hfsq = _mm512_mul_pd(_mm512_mul_pd(half, f), f);
 
-    
-    
-    
-    
     let ln1pf = _mm512_sub_pd(f, hfsq);
     let s_squared_times_f = _mm512_mul_pd(_mm512_mul_pd(s, s), f);
     let ln1pf = _mm512_fmadd_pd(s_squared_times_f, r, ln1pf);
 
-    
     let general_result = _mm512_fmadd_pd(e_adjust, ln2, ln1pf);
 
-    
     _mm512_mask_blend_pd(near_one_mask, general_result, taylor)
 }
 
@@ -624,50 +532,38 @@ pub unsafe fn nma_avx2(
 ) {
     let len = data.len();
 
-    
     let epsilon = _mm256_set1_pd(1e-10);
-    
+
     let one = _mm256_set1_pd(1.0);
     let zero = _mm256_setzero_pd();
 
-    
     let mut i = 0;
     while i + 4 <= len {
         let vals = _mm256_loadu_pd(data.as_ptr().add(i));
         let clamped = _mm256_max_pd(vals, epsilon);
 
-        
-        
-        
-        
         let mut ln_vals = [0.0f64; 4];
         _mm256_storeu_pd(ln_vals.as_mut_ptr(), clamped);
         for j in 0..4 {
             ln_vals[j] = ln_vals[j].ln();
         }
         let ln_result = _mm256_loadu_pd(ln_vals.as_ptr());
-        
 
-        
         _mm256_storeu_pd(ln_values.as_mut_ptr().add(i), ln_result);
 
         i += 4;
     }
 
-    
     for j in i..len {
         ln_values[j] = data[j].max(1e-10).ln();
     }
 
-    
     for j in (first + period)..len {
         let mut num_accum = zero;
         let mut denom_accum = zero;
 
-        
         let mut idx = 0;
         while idx + 4 <= period {
-            
             let mut diffs = [0.0f64; 4];
             for k in 0..4 {
                 let i = idx + k;
@@ -676,21 +572,17 @@ pub unsafe fn nma_avx2(
             }
             let oi_vec = _mm256_loadu_pd(diffs.as_ptr());
 
-            
             let weights = _mm256_loadu_pd(sqrt_diffs.as_ptr().add(idx));
 
-            
             num_accum = _mm256_fmadd_pd(oi_vec, weights, num_accum);
             denom_accum = _mm256_add_pd(denom_accum, oi_vec);
 
             idx += 4;
         }
 
-        
         let num_scalar = horizontal_sum_avx2(num_accum);
         let denom_scalar = horizontal_sum_avx2(denom_accum);
 
-        
         let mut num_final = num_scalar;
         let mut denom_final = denom_scalar;
 
@@ -700,7 +592,6 @@ pub unsafe fn nma_avx2(
             denom_final += oi;
         }
 
-        
         let ratio = if denom_final == 0.0 {
             0.0
         } else {
@@ -711,38 +602,30 @@ pub unsafe fn nma_avx2(
     }
 }
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn horizontal_sum_avx2(v: __m256d) -> f64 {
-    
     let vlow = _mm256_castpd256_pd128(v);
     let vhigh = _mm256_extractf128_pd(v, 1);
 
-    
     let sum128 = _mm_add_pd(vlow, vhigh);
 
-    
     let high64 = _mm_unpackhi_pd(sum128, sum128);
 
-    
     _mm_cvtsd_f64(_mm_add_sd(sum128, high64))
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx2")]
 unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
-    
     let one = _mm256_set1_pd(1.0);
     let two = _mm256_set1_pd(2.0);
     let half = _mm256_set1_pd(0.5);
     let ln2 = _mm256_set1_pd(std::f64::consts::LN_2);
     let sqrt_half = _mm256_set1_pd(0.7071067811865475244);
 
-    
     let mut mantissa = [0.0f64; 4];
     let mut exponent = [0i32; 4];
     _mm256_storeu_pd(mantissa.as_mut_ptr(), x);
@@ -751,12 +634,11 @@ unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
         let bits = mantissa[j].to_bits();
         let exp_bits = ((bits >> 52) & 0x7FF) as i32;
         exponent[j] = exp_bits - 1023;
-        
+
         let mantissa_bits = (bits & !0x7FF0000000000000) | 0x3FF0000000000000;
         mantissa[j] = f64::from_bits(mantissa_bits);
     }
 
-    
     let mut m = _mm256_loadu_pd(mantissa.as_ptr());
     let e_vals = [
         exponent[0] as f64,
@@ -766,21 +648,17 @@ unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
     ];
     let mut e_f64 = _mm256_loadu_pd(e_vals.as_ptr());
 
-    
     let mask = _mm256_cmp_pd(m, sqrt_half, _CMP_LT_OQ);
     m = _mm256_blendv_pd(m, _mm256_mul_pd(m, two), mask);
     e_f64 = _mm256_blendv_pd(e_f64, _mm256_sub_pd(e_f64, one), mask);
 
-    
     let f = _mm256_sub_pd(m, one);
 
-    
     let two_plus_f = _mm256_add_pd(two, f);
     let s = _mm256_div_pd(f, two_plus_f);
     let z = _mm256_mul_pd(s, s);
     let w = _mm256_mul_pd(z, z);
 
-    
     let lg1 = _mm256_set1_pd(6.666666666666735130e-01);
     let lg2 = _mm256_set1_pd(3.999999999940941908e-01);
     let lg3 = _mm256_set1_pd(2.857142874366239149e-01);
@@ -789,7 +667,6 @@ unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
     let lg6 = _mm256_set1_pd(1.531383769920937332e-01);
     let lg7 = _mm256_set1_pd(1.479819860511658591e-01);
 
-    
     let mut r1 = lg7;
     r1 = _mm256_fmadd_pd(r1, z, lg5);
     r1 = _mm256_fmadd_pd(r1, z, lg3);
@@ -803,13 +680,11 @@ unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
 
     let r = _mm256_add_pd(r1, r2);
 
-    
     let hfsq = _mm256_mul_pd(_mm256_mul_pd(half, f), f);
     let f_times_hfsq = _mm256_mul_pd(f, hfsq);
     let ln1pf = _mm256_sub_pd(f, hfsq);
     let ln1pf = _mm256_fmadd_pd(f_times_hfsq, r, ln1pf);
 
-    
     _mm256_fmadd_pd(e_f64, ln2, ln1pf)
 }
 
@@ -817,10 +692,8 @@ unsafe fn fast_ln_avx2_hi(x: __m256d) -> __m256d {
 #[inline]
 #[target_feature(enable = "avx512f")]
 unsafe fn _mm512_abs_pd(a: __m512d) -> __m512d {
-    
-    
-    let sign_mask = _mm512_set1_pd(-0.0); 
-    _mm512_andnot_pd(sign_mask, a) 
+    let sign_mask = _mm512_set1_pd(-0.0);
+    _mm512_andnot_pd(sign_mask, a)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -836,59 +709,37 @@ pub unsafe fn nma_avx512(
 ) {
     let len = data.len();
 
-    
     let one = _mm512_set1_pd(1.0);
     let zero = _mm512_setzero_pd();
 
-    
     for i in 0..len {
         ln_values[i] = data[i].max(1e-10).ln();
     }
 
-    
     for j in (first + period)..len {
         let mut num_accum = zero;
         let mut denom_accum = zero;
 
-        
         let mut idx = 0;
         while idx + 8 <= period {
-            
-            
-            
-
-            
             if j >= idx + 8 {
-                
                 let base_ptr = ln_values.as_ptr().add(j - idx - 8);
 
-                
                 let prev = _mm512_loadu_pd(base_ptr);
-                
+
                 let curr = _mm512_loadu_pd(base_ptr.add(1));
 
-                
-                
-                
-
-                
                 let diff = _mm512_sub_pd(curr, prev);
                 let abs_diff = _mm512_abs_pd(diff);
 
-                
-                
-                
                 let perm_indices = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
                 let oi_vec = _mm512_permutexvar_pd(perm_indices, abs_diff);
 
-                
                 let weights = _mm512_loadu_pd(sqrt_diffs.as_ptr().add(idx));
 
-                
                 num_accum = _mm512_fmadd_pd(oi_vec, weights, num_accum);
                 denom_accum = _mm512_add_pd(denom_accum, oi_vec);
             } else {
-                
                 for k in 0..8 {
                     let i = idx + k;
                     let oi = (ln_values[j - i] - ln_values[j - i - 1]).abs();
@@ -907,7 +758,6 @@ pub unsafe fn nma_avx512(
             idx += 8;
         }
 
-        
         let mut num_scalar = _mm512_reduce_add_pd(num_accum);
         let mut denom_scalar = _mm512_reduce_add_pd(denom_accum);
 
@@ -917,7 +767,6 @@ pub unsafe fn nma_avx512(
             denom_scalar += oi;
         }
 
-        
         let ratio = if denom_scalar == 0.0 {
             0.0
         } else {
@@ -928,7 +777,6 @@ pub unsafe fn nma_avx512(
     }
 }
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,fma")]
@@ -936,8 +784,8 @@ pub unsafe fn nma_avx512_v2(
     data: &[f64],
     period: usize,
     first: usize,
-    ln_values: &mut [f64], 
-    sqrt_diffs: &mut [f64], 
+    ln_values: &mut [f64],
+    sqrt_diffs: &mut [f64],
     out: &mut [f64],
 ) {
     use aligned_vec::AVec;
@@ -947,49 +795,40 @@ pub unsafe fn nma_avx512_v2(
     debug_assert!(len == ln_values.len());
     debug_assert!(period >= 1 && period <= len);
 
-    
     for i in 0..len {
         ln_values[i] = data[i].max(1e-10).ln();
     }
-    
+
     for i in 0..len - 1 {
         ln_values[i] = (ln_values[i + 1] - ln_values[i]).abs();
     }
     ln_values[len - 1] = 0.0;
-    let d = ln_values; 
+    let d = ln_values;
 
-    
     let mut s = alloc_with_nan_prefix(len + 1, 0);
     s[0] = 0.0;
     for k in 0..len {
         s[k + 1] = s[k] + d[k];
     }
 
-    
-    
     let wlen_padded = (period + 7) & !7;
     let mut w_rev = AVec::<f64>::with_capacity(64, wlen_padded);
     w_rev.resize(wlen_padded, 0.0);
     for i in 0..period {
         w_rev[i] = sqrt_diffs[period - 1 - i];
     }
-    
 
-    
     let warm = first + period;
     let zero = _mm512_setzero_pd();
 
     for j in warm..len {
-        let base = j - period; 
+        let base = j - period;
 
-        
         let denom = s[j] - s[j - period];
 
-        
         let mut num_acc = zero;
         let mut t = 0usize;
 
-        
         while t + 16 <= period {
             let d0 = _mm512_loadu_pd(d.as_ptr().add(base + t));
             let w0 = _mm512_loadu_pd(w_rev.as_ptr().add(t));
@@ -1016,14 +855,12 @@ pub unsafe fn nma_avx512_v2(
         let num = _mm512_reduce_add_pd(num_acc);
         let ratio = if denom == 0.0 { 0.0 } else { num / denom };
 
-        
         let i0 = period - 1;
         let x2 = data[j - i0 - 1];
         let dx = data[j - i0] - x2;
         out[j] = ratio.mul_add(dx, x2);
     }
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl,fma")]
@@ -1048,65 +885,54 @@ unsafe fn nma_batch_avx512_optimized(
     let rows = combos.len();
     let cols = len;
 
-    
     let mut ln_values = alloc_with_nan_prefix(len, 0);
     for i in 0..len {
         ln_values[i] = data[i].max(1e-10).ln();
     }
-    
+
     for i in 0..len - 1 {
         ln_values[i] = (ln_values[i + 1] - ln_values[i]).abs();
     }
     ln_values[len - 1] = 0.0;
-    let d = &mut ln_values; 
+    let d = &mut ln_values;
 
-    
     let mut s = alloc_with_nan_prefix(len + 1, 0);
     s[0] = 0.0;
     for k in 0..len {
         s[k + 1] = s[k] + d[k];
     }
 
-    
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let warm = first + period;
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        
         let wlen_padded = (period + 7) & !7;
         let mut w_rev = AVec::<f64>::with_capacity(64, wlen_padded);
         w_rev.resize(wlen_padded, 0.0);
 
-        
         for i in 0..period {
             let s0 = ((period - 1 - i) as f64).sqrt();
             let s1 = ((period - i) as f64).sqrt();
             w_rev[i] = s1 - s0;
         }
 
-        
         let zero = _mm512_setzero_pd();
 
         for j in warm..len {
             let base = j - period;
 
-            
             let denom = s[j] - s[j - period];
 
-            
             let mut num_acc = zero;
             let mut t = 0usize;
 
-            
             while t + 16 <= period {
                 let d0 = _mm512_loadu_pd(d.as_ptr().add(base + t));
                 let w0 = _mm512_loadu_pd(w_rev.as_ptr().add(t));
@@ -1133,7 +959,6 @@ unsafe fn nma_batch_avx512_optimized(
             let num = _mm512_reduce_add_pd(num_acc);
             let ratio = if denom == 0.0 { 0.0 } else { num / denom };
 
-            
             let i0 = period - 1;
             let x2 = data[j - i0 - 1];
             let dx = data[j - i0] - x2;
@@ -1141,7 +966,6 @@ unsafe fn nma_batch_avx512_optimized(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1162,7 +986,6 @@ unsafe fn nma_batch_avx512_optimized(
         }
     }
 
-    
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(NmaBatchOutput {
@@ -1182,16 +1005,14 @@ pub fn nma_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(NmaError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(NmaError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, 
+        _ => Kernel::Scalar,
     };
     nma_batch_par_slice(data, sweep, simd)
 }
@@ -1340,7 +1161,6 @@ fn nma_batch_inner_into_scalar_reuse(
         });
     }
 
-    
     let rows = combos.len();
     let cols = len;
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
@@ -1349,7 +1169,6 @@ fn nma_batch_inner_into_scalar_reuse(
     };
     unsafe { init_matrix_prefixes(out_mu, cols, &warm) };
 
-    
     let mut ln = alloc_with_nan_prefix(len, 0);
     for i in 0..len {
         ln[i] = data[i].max(1e-10).ln();
@@ -1360,7 +1179,6 @@ fn nma_batch_inner_into_scalar_reuse(
     ln[len.saturating_sub(1)] = 0.0;
     let d = &ln;
 
-    
     let mut s = alloc_with_nan_prefix(len + 1, 0);
     s[0] = 0.0;
     for i in 0..len {
@@ -1370,7 +1188,7 @@ fn nma_batch_inner_into_scalar_reuse(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let p = combos[row].period.unwrap();
         let warm = first + p;
-        
+
         let mut w_rev = Vec::with_capacity(p);
         for i in 0..p {
             let s0 = ((p - 1 - i) as f64).sqrt();
@@ -1386,14 +1204,14 @@ fn nma_batch_inner_into_scalar_reuse(
             let denom = s[j] - s[j - p];
 
             let mut num = 0.0;
-            
+
             for t in 0..p {
                 num += d[base + t] * w_rev[t];
             }
 
             let ratio = if denom == 0.0 { 0.0 } else { num / denom };
-            let x2 = data[j - p]; 
-            let x1 = data[j - p + 1]; 
+            let x2 = data[j - p];
+            let x1 = data[j - p + 1];
             dst[j] = ratio.mul_add(x1 - x2, x2);
         }
     };
@@ -1445,7 +1263,6 @@ fn nma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<NmaBatchOutput, NmaError> {
-    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if kern == Kernel::Avx512 {
         let first = data
@@ -1461,11 +1278,11 @@ fn nma_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let _ = rows.checked_mul(cols).ok_or_else(|| NmaError::InvalidInput("rows*cols overflow".into()))?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| NmaError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     if kern == Kernel::Scalar {
-        
         let first = data
             .iter()
             .position(|x| !x.is_nan())
@@ -1474,11 +1291,10 @@ fn nma_batch_inner(
         let mut raw = make_uninit_matrix(rows, cols);
         unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-        
         let out: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(raw.as_mut_ptr() as *mut f64, raw.len()) };
         let combos = nma_batch_inner_into_scalar_reuse(data, sweep, parallel, out)?;
-        
+
         let mut guard = core::mem::ManuallyDrop::new(raw);
         let values = unsafe {
             Vec::from_raw_parts(
@@ -1516,12 +1332,9 @@ fn nma_batch_inner(
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let period = combos[row].period.unwrap();
 
-        
         let out_row = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
@@ -1538,8 +1351,6 @@ fn nma_batch_inner(
         }
     };
 
-    
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1561,8 +1372,6 @@ fn nma_batch_inner(
         }
     }
 
-    
-    
     let mut guard = core::mem::ManuallyDrop::new(raw);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1614,18 +1423,15 @@ fn nma_batch_inner_into(
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let period = combos[row].period.unwrap();
 
-        
         let out_row = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
@@ -1642,7 +1448,6 @@ fn nma_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1674,52 +1479,42 @@ fn nma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn nma_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    
     let len = data.len();
     let mut ln_values = alloc_with_nan_prefix(len, 0);
 
-    
     let mut sqrt_diffs = vec![0.0; period];
 
-    
     for i in 0..len {
         ln_values[i] = data[i].max(1e-10).ln();
     }
 
-    
     for k in 0..period {
         let s0 = (k as f64).sqrt();
         let s1 = ((k + 1) as f64).sqrt();
         sqrt_diffs[k] = s1 - s0;
     }
 
-    
     nma_avx2(data, period, first, &mut ln_values, &mut sqrt_diffs, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn nma_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    
     let len = data.len();
     let mut ln_values = alloc_with_nan_prefix(len, 0);
 
-    
     let mut sqrt_diffs = vec![0.0; period];
 
-    
     for i in 0..len {
         ln_values[i] = data[i].max(1e-10).ln();
     }
 
-    
     for k in 0..period {
         let s0 = (k as f64).sqrt();
         let s1 = ((k + 1) as f64).sqrt();
         sqrt_diffs[k] = s1 - s0;
     }
 
-    
     nma_avx512_v2(data, period, first, &mut ln_values, &mut sqrt_diffs, out);
 }
 
@@ -1737,34 +1532,27 @@ pub unsafe fn nma_row_avx512_long(data: &[f64], first: usize, period: usize, out
 
 #[derive(Debug, Clone)]
 pub struct NmaStream {
-    
     period: usize,
 
-    
     m: usize,
-    
+
     alpha: Vec<f64>,
     beta: Vec<f64>,
     beta_pow_p: Vec<f64>,
 
-    
-    
     d_ring: Vec<f64>,
-    d_head: usize,   
-    d_count: usize,  
-    denom: f64,      
-    x_acc: Vec<f64>, 
+    d_head: usize,
+    d_count: usize,
+    denom: f64,
+    x_acc: Vec<f64>,
 
-    
-    buffer: Vec<f64>,    
-    ln_buffer: Vec<f64>, 
-    head: usize,         
-    filled: bool,        
+    buffer: Vec<f64>,
+    ln_buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
 
-    
     sqrt_diffs: Vec<f64>,
 }
-
 
 #[inline(always)]
 fn ln_pos(x: f64) -> f64 {
@@ -1773,8 +1561,6 @@ fn ln_pos(x: f64) -> f64 {
 }
 
 impl NmaStream {
-    /// Construct the stream. Complexity: O(period * M) once to fit the SOE.
-    /// Returns Err if period == 0.
     pub fn try_new(params: NmaParams) -> Result<Self, NmaError> {
         let period = params.period.unwrap_or(40);
         if period == 0 {
@@ -1784,7 +1570,6 @@ impl NmaStream {
             });
         }
 
-        
         let mut sqrt_diffs = Vec::with_capacity(period);
         for i in 0..period {
             let s0 = (i as f64).sqrt();
@@ -1792,9 +1577,6 @@ impl NmaStream {
             sqrt_diffs.push(s1 - s0);
         }
 
-        
-        
-        
         const GAMMAS: [f64; 4] = [0.25, 1.2, 3.0, 8.0];
         let m = if period <= 64 { 3 } else { 4 };
         let mut beta = Vec::with_capacity(m);
@@ -1802,8 +1584,6 @@ impl NmaStream {
             beta.push((-g / (period as f64)).exp());
         }
 
-        
-        
         let alpha = fit_exp_weights_least_squares(&sqrt_diffs, &beta);
 
         let mut beta_pow_p = Vec::with_capacity(m);
@@ -1832,56 +1612,42 @@ impl NmaStream {
         })
     }
 
-    /// Push one value. Returns None until we have period+1 samples.
-    /// Thereafter, returns the NMA value computed in O(M) time.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         if !value.is_finite() {
-            
             self.reset_state();
             return None;
         }
 
-        
         let ln_val = ln_pos(value.max(1e-10));
 
-        
-        
         let prev_idx = (self.head + self.period) % (self.period + 1);
         let prev_ln = self.ln_buffer[prev_idx];
 
-        
         self.buffer[self.head] = value;
         self.ln_buffer[self.head] = ln_val;
 
-        
         self.head = (self.head + 1) % (self.period + 1);
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
 
-        
         if prev_ln.is_nan() {
             return None;
         }
 
-        
         let d_new = (ln_val - prev_ln).abs();
 
-        
         if self.d_count < self.period {
-            
             self.d_ring[self.d_head] = d_new;
             self.d_head = (self.d_head + 1) % self.period;
             self.d_count += 1;
             self.denom += d_new;
 
-            
             for m in 0..self.m {
                 self.x_acc[m] = self.beta[m] * self.x_acc[m] + d_new;
             }
         } else {
-            
             let d_old = self.d_ring[self.d_head];
             self.d_ring[self.d_head] = d_new;
             self.d_head = (self.d_head + 1) % self.period;
@@ -1889,18 +1655,14 @@ impl NmaStream {
             self.denom += d_new - d_old;
 
             for m in 0..self.m {
-                
-                
                 self.x_acc[m] = self.beta[m] * self.x_acc[m] + d_new - self.beta_pow_p[m] * d_old;
             }
         }
 
-        
         if !self.filled {
             return None;
         }
 
-        
         let mut num = 0.0f64;
         for m in 0..self.m {
             num = (self.alpha[m] * self.x_acc[m]).mul_add(1.0, num);
@@ -1911,8 +1673,6 @@ impl NmaStream {
             num / self.denom
         };
 
-        
-        
         let x0 = self.buffer[self.head];
         let x1 = self.buffer[(self.head + 1) % (self.period + 1)];
 
@@ -1941,15 +1701,10 @@ impl NmaStream {
     }
 }
 
-/// Fit α in w[i] ≈ Σ α_m β_m^i by least squares using normal equations.
-/// A = P×M with A[i,m]=β_m^i. We form AᵀA and Aᵀw analytically where possible.
-/// Complexity: O(P*M + M^3), with tiny M.
 fn fit_exp_weights_least_squares(w: &[f64], beta: &[f64]) -> Vec<f64> {
     let p = w.len();
     let m = beta.len();
 
-    
-    
     let mut ata = vec![0.0f64; m * m];
     for u in 0..m {
         for v in u..m {
@@ -1963,7 +1718,7 @@ fn fit_exp_weights_least_squares(w: &[f64], beta: &[f64]) -> Vec<f64> {
             ata[v * m + u] = s;
         }
     }
-    
+
     let mut atw = vec![0.0f64; m];
     for u in 0..m {
         let mut pow = 1.0f64;
@@ -1976,20 +1731,16 @@ fn fit_exp_weights_least_squares(w: &[f64], beta: &[f64]) -> Vec<f64> {
         atw[u] = sum;
     }
 
-    
     let lambda = 1e-12;
     for i in 0..m {
         ata[i * m + i] += lambda;
     }
 
-    solve_linear_system(&mut ata, &mut atw, m) 
+    solve_linear_system(&mut ata, &mut atw, m)
 }
 
-/// Dense Gaussian elimination with partial pivoting for tiny M (≤ 6).
 fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
-    
     for k in 0..n {
-        
         let mut piv = k;
         let mut maxv = a[k * n + k].abs();
         for i in (k + 1)..n {
@@ -2007,10 +1758,9 @@ fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
         }
         let akk = a[k * n + k];
         if akk.abs() < 1e-18 {
-            
             a[k * n + k] = 1e-18;
         }
-        
+
         for i in (k + 1)..n {
             let f = a[i * n + k] / a[k * n + k];
             if f != 0.0 {
@@ -2021,7 +1771,7 @@ fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
             }
         }
     }
-    
+
     let mut x = vec![0.0f64; n];
     for i in (0..n).rev() {
         let mut s = b[i];
@@ -2032,9 +1782,6 @@ fn solve_linear_system(a: &mut [f64], b: &mut [f64], n: usize) -> Vec<f64> {
     }
     x
 }
-
-
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2091,8 +1838,6 @@ impl NmaStreamPy {
         Ok(NmaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated NMA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2117,7 +1862,6 @@ pub fn nma_batch_py<'py>(
         period: period_range,
     };
 
-    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
@@ -2125,11 +1869,9 @@ pub fn nma_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -2142,12 +1884,11 @@ pub fn nma_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => kernel,
             };
-            
+
             nma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2198,7 +1939,14 @@ pub fn nma_cuda_batch_dev_py<'py>(
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((NmaDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id }, dict))
+    Ok((
+        NmaDeviceArrayF32Py {
+            inner,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2234,9 +1982,12 @@ pub fn nma_cuda_many_series_one_param_dev_py(
         Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
 
-    Ok(NmaDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id })
+    Ok(NmaDeviceArrayF32Py {
+        inner,
+        _ctx: ctx_arc,
+        device_id: dev_id,
+    })
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "NmaDeviceArrayF32", unsendable)]
@@ -2262,13 +2013,12 @@ impl NmaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producing stream is synchronized before return; omit "stream" per CAI v3
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
         (2, self.device_id as i32)
     }
 
@@ -2283,7 +2033,6 @@ impl NmaDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2304,12 +2053,15 @@ impl NmaDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -2322,16 +2074,16 @@ impl NmaDeviceArrayF32Py {
     }
 }
 
-/// Write NMA directly to output slice - no allocations
 pub fn nma_into_slice(dst: &mut [f64], input: &NmaInput, kern: Kernel) -> Result<(), NmaError> {
     let (data, period, first, mut ln_values, mut sqrt_diffs, chosen) = nma_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(NmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(NmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
-    // Compute NMA values directly into dst
     nma_compute_into(
         data,
         period,
@@ -2342,7 +2094,6 @@ pub fn nma_into_slice(dst: &mut [f64], input: &NmaInput, kern: Kernel) -> Result
         dst,
     );
 
-    // Fill warmup period with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let warmup_end = first + period;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end] {
@@ -2352,23 +2103,17 @@ pub fn nma_into_slice(dst: &mut [f64], input: &NmaInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Writes NMA into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup prefix exactly as the Vec-returning API does.
-/// - Output slice length must equal input length; returns `OutputLengthMismatch` on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn nma_into(input: &NmaInput, out: &mut [f64]) -> Result<(), NmaError> {
-    // Delegate to the slice variant with automatic kernel selection
     nma_into_slice(out, input, Kernel::Auto)
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = NmaParams {
@@ -2376,23 +2121,21 @@ pub fn nma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = NmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer (use best kernel for WASM)
     nma_into_slice(&mut output, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NmaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2401,7 +2144,7 @@ pub struct NmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = nma_batch)]
 pub fn nma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: NmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2411,7 +2154,6 @@ pub fn nma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         period: config.period_range,
     };
 
-    // For WASM, use ScalarBatch explicitly to avoid kernel detection issues
     let output = nma_batch_inner(data, &sweep, Kernel::ScalarBatch, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2426,7 +2168,7 @@ pub fn nma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_batch_js(
     data: &[f64],
@@ -2438,13 +2180,12 @@ pub fn nma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     nma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_batch_metadata_js(
     period_start: usize,
@@ -2455,15 +2196,16 @@ pub fn nma_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let metadata: Vec<f64> =
-        combos.iter().map(|combo| combo.period.unwrap() as f64).collect();
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let metadata: Vec<f64> = combos
+        .iter()
+        .map(|combo| combo.period.unwrap() as f64)
+        .collect();
 
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_batch_rows_cols_js(
     period_start: usize,
@@ -2478,22 +2220,18 @@ pub fn nma_batch_rows_cols_js(
     vec![combos.len(), data_len]
 }
 
-// ================== Zero-Copy WASM Functions ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2501,7 +2239,7 @@ pub fn nma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_into(
     in_ptr: *const f64,
@@ -2509,38 +2247,30 @@ pub fn nma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to nma_into"));
     }
 
     unsafe {
-        // Create slice from pointer
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        // Calculate NMA
         let params = NmaParams {
             period: Some(period),
         };
         let input = NmaInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
             let mut temp = alloc_with_nan_prefix(len, 0);
             nma_into_slice(&mut temp, &input, Kernel::Scalar)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             nma_into_slice(out, &input, Kernel::Scalar)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2550,7 +2280,7 @@ pub fn nma_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nma_batch_into(
     in_ptr: *const f64,
@@ -2571,14 +2301,12 @@ pub fn nma_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Use optimized batch processing with ScalarBatch for WASM
         nma_batch_inner_into(data, &sweep, Kernel::ScalarBatch, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2607,7 +2335,6 @@ mod tests {
 
     #[test]
     fn test_nma_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare a small, non-trivial positive input slice (ensure > 0 for ln())
         let n = 256usize;
         let mut data = vec![0.0f64; n];
         for i in 0..n {
@@ -2618,24 +2345,20 @@ mod tests {
         let params = NmaParams::default();
         let input = NmaInput::from_slice(&data, params);
 
-        // Baseline via Vec-returning API
         let baseline = nma(&input)?.values;
 
-        // Preallocate output buffer and compute via into-API
         let mut out = vec![0.0f64; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             nma_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // For completeness if tests ever run with wasm feature, fall back to slice variant
             nma_into_slice(&mut out, &input, detect_best_kernel())?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper: treat NaN == NaN; otherwise require tight epsilon equality
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -2671,8 +2394,7 @@ mod tests {
         let result_last_five_nma = &nma_result.values[start_index..];
         for (i, &value) in result_last_five_nma.iter().enumerate() {
             let expected_value = expected_last_five_nma[i];
-            // Allow slightly higher tolerance for fast log approximation (1-2 ULP error)
-            // The relative error should be < 0.01% for financial applications
+
             let tolerance = if test_name.contains("avx512") {
                 1.0
             } else {
@@ -2806,7 +2528,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: Generate period from 2 to 100, then data with length >= period+1
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2824,7 +2545,6 @@ mod tests {
                 };
                 let input = NmaInput::from_slice(&data, params);
 
-                // Compute NMA with specified kernel and scalar reference
                 let result = nma_with_kernel(&input, kernel);
                 prop_assert!(result.is_ok(), "NMA computation failed: {:?}", result.err());
                 let out = result.unwrap().values;
@@ -2833,14 +2553,11 @@ mod tests {
                 prop_assert!(ref_result.is_ok(), "Reference NMA failed");
                 let ref_out = ref_result.unwrap().values;
 
-                // Property 1: Output length matches input
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                // Find first valid data point
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_end = first_valid + period;
 
-                // Property 2: NaN values only in warmup period
                 for i in 0..warmup_end.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2850,7 +2567,6 @@ mod tests {
                     );
                 }
 
-                // Property 3: All values after warmup are finite
                 for i in warmup_end..out.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -2860,17 +2576,12 @@ mod tests {
                     );
                 }
 
-                // Property 4: NMA output is bounded by the two interpolated data points
-                // NMA formula: data[j-period+1] * ratio + data[j-period] * (1-ratio)
-                // This is a weighted average between data[j-period+1] and data[j-period]
                 for i in warmup_end..out.len() {
                     let point1 = data[i - period + 1];
                     let point2 = data[i - period];
                     let min_bound = point1.min(point2);
                     let max_bound = point1.max(point2);
 
-                    // Allow small tolerance for floating point errors
-                    // AVX512 uses SLEEF fast math approximations which need more tolerance
                     let tolerance = if test_name.contains("avx512") {
                         1e-7
                     } else {
@@ -2886,7 +2597,6 @@ mod tests {
                     );
                 }
 
-                // Property 5: When all data is constant, NMA equals that constant
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && !data.is_empty() {
                     for i in warmup_end..out.len() {
                         prop_assert!(
@@ -2899,13 +2609,8 @@ mod tests {
                     }
                 }
 
-                // Property 6: Period=1 special case
                 if period == 1 {
-                    // With period=1, warmup is first_valid+1
-                    // NMA should essentially pass through recent values
                     for i in (first_valid + 1)..out.len() {
-                        // For period=1, the formula simplifies significantly
-                        // We expect the output to be very close to the input
                         prop_assert!(
                             (out[i] - data[i]).abs() < 1e-6,
                             "Period=1: NMA[{}] = {} should be close to data[{}] = {}",
@@ -2917,22 +2622,11 @@ mod tests {
                     }
                 }
 
-                // Property 7: Ratio bounds check
-                // The internal ratio used in NMA formula should be in [0, 1]
-                // This validates the mathematical correctness of the algorithm
-                // We can't directly check the ratio, but we can verify that
-                
                 for i in warmup_end..out.len() {
                     let point1 = data[i - period + 1];
                     let point2 = data[i - period];
 
-                    
-                    
-                    
-                    
-
                     if (point1 - point2).abs() > 1e-10 {
-                        
                         let implied_ratio = (out[i] - point2) / (point1 - point2);
                         prop_assert!(
                             implied_ratio >= -1e-9 && implied_ratio <= 1.0 + 1e-9,
@@ -2946,11 +2640,8 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in 0..out.len() {
                     if !out[i].is_finite() || !ref_out[i].is_finite() {
-                        
                         prop_assert_eq!(
                             out[i].is_nan(),
                             ref_out[i].is_nan(),
@@ -2960,17 +2651,11 @@ mod tests {
                         continue;
                     }
 
-                    
                     let out_bits = out[i].to_bits();
                     let ref_bits = ref_out[i].to_bits();
                     let ulp_diff = out_bits.abs_diff(ref_bits);
 
-                    
-                    
-                    
                     if test_name.contains("avx512") {
-                        
-                        
                         let rel_error = if ref_out[i].abs() > 1e-10 {
                             ((out[i] - ref_out[i]) / ref_out[i]).abs()
                         } else {
@@ -2986,7 +2671,6 @@ mod tests {
                             ulp_diff
                         );
                     } else {
-                        
                         prop_assert!(
                             (out[i] - ref_out[i]).abs() <= 1e-9 || ulp_diff <= 25,
                             "Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
@@ -2998,9 +2682,6 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 let has_small_values = data.iter().any(|&x| x > 0.0 && x < 1e-8);
                 if has_small_values {
                     for i in warmup_end..out.len() {
@@ -3049,7 +2730,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_nma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -3057,33 +2737,29 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_cases = vec![
-            NmaParams { period: Some(40) },  
-            NmaParams { period: Some(10) },  
-            NmaParams { period: Some(5) },   
-            NmaParams { period: Some(20) },  
-            NmaParams { period: Some(60) },  
-            NmaParams { period: Some(100) }, 
-            NmaParams { period: Some(3) },   
-            NmaParams { period: Some(80) },  
-            NmaParams { period: None },      
+            NmaParams { period: Some(40) },
+            NmaParams { period: Some(10) },
+            NmaParams { period: Some(5) },
+            NmaParams { period: Some(20) },
+            NmaParams { period: Some(60) },
+            NmaParams { period: Some(100) },
+            NmaParams { period: Some(3) },
+            NmaParams { period: Some(80) },
+            NmaParams { period: None },
         ];
 
         for params in test_cases {
             let input = NmaInput::from_candles(&candles, "close", params);
             let output = nma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -3092,7 +2768,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -3101,7 +2776,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -3115,7 +2789,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_nma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -3188,7 +2861,7 @@ mod tests {
             }
         };
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -3196,18 +2869,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            
             (10, 30, 10),
-            
-            (40, 40, 0),   
-            (3, 15, 3),    
-            (50, 100, 25), 
-            (5, 25, 5),    
-            (20, 80, 20),  
-            (8, 24, 8),    
-            (60, 120, 30), 
+            (40, 40, 0),
+            (3, 15, 3),
+            (50, 100, 25),
+            (5, 25, 5),
+            (20, 80, 20),
+            (8, 24, 8),
+            (60, 120, 30),
         ];
 
         for (p_start, p_end, p_step) in batch_configs {
@@ -3216,9 +2886,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -3228,7 +2896,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -3237,7 +2904,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -3246,7 +2912,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -3260,7 +2925,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())

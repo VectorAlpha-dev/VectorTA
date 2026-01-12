@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::frama::{
     frama_batch_with_kernel, FramaBatchRange, FramaBuilder, FramaParams,
 };
@@ -83,12 +81,6 @@ fn frama_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::er
         .copy_to(&mut gpu_flat)
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-    
-    
-    
-    
-    
-    
     let atol = 1.5e-2;
     let rtol = 2.5e-2;
     for (idx, gpu_v) in gpu_flat.iter().enumerate() {
@@ -182,8 +174,6 @@ fn frama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         .copy_to(&mut gpu_flat)
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
 
-    
-    
     let atol = 1.5e-2;
     let rtol = 2.5e-2;
     for (idx, gpu_v) in gpu_flat.iter().enumerate() {

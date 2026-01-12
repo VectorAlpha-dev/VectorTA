@@ -1,25 +1,3 @@
-//! # Ulcer Index (UI)
-//!
-//! The Ulcer Index (UI) is a volatility indicator that measures price drawdown from recent highs
-//! and focuses on downside risk. It is calculated as the square root of the average of the squared
-//! percentage drawdowns from the rolling maximum price within a specified window.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points), default 14.
-//! - **scalar**: Multiplier applied to drawdown, default 100.0.
-//!
-//! ## Returns
-//! - **Ok(UiOutput)** on success, containing a Vec<f64> matching the input length.
-//! - **Err(UiError)** otherwise.
-//!
-//! ## Developer Notes
-//! - Decision: scalar path optimized (monotonic deque + ring-sum). Bitmask-valid fast path for period ≤64 tested but disabled by default here due to neutral/slower results; revisit after profiling. Sqrt input clamped at 0 to avoid FP round-off negatives.
-//! - Streaming: O(1) UiStream via monotonic deque (rolling max) + ring-sum (squared drawdowns); behavior matches scalar warmup and validity.
-//! - SIMD status: AVX2/AVX512 stubs delegate to scalar (branch-heavy rolling max; SIMD underperforms). Kept for future work.
-//! - Batch status: row-specific SIMD not attempted; algorithmic batch optimization groups rows by period and scales a base (scalar=1.0) series per row.
-//! - Memory/Perf: uses `alloc_with_nan_prefix` and zero-copy outputs; warmup handling matches alma.rs patterns.
-//! - CUDA status: GPU batch and many-series kernels are exposed via `CudaUi`, with primary-context–safe VRAM handles and Python interop through CAI v3 + DLPack v1.x.
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -30,7 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -46,7 +24,6 @@ use core::arch::x86_64::*;
 use rayon::prelude::*;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaUi;
@@ -78,7 +55,10 @@ pub struct UiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct UiParams {
     pub period: Option<usize>,
     pub scalar: Option<f64>,
@@ -214,7 +194,7 @@ pub enum UiError {
     InvalidRange { start: f64, end: f64, step: f64 },
     #[error("ui: Invalid kernel for batch operation. Expected batch kernel, got: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    
+
     #[error("ui: Empty input")]
     EmptyInput,
     #[error("ui: Invalid length: expected = {expected}, actual = {actual}")]
@@ -261,24 +241,22 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
         other => other,
     };
 
-    let span = period
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(2))
-        .ok_or(UiError::InvalidRange {
-            start: period as f64,
-            end: len as f64,
-            step: 2.0,
-        })?;
-    let warmup = first
-        .checked_add(span)
-        .ok_or(UiError::InvalidRange {
-            start: period as f64,
-            end: len as f64,
-            step: 2.0,
-        })?;
+    let span =
+        period
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or(UiError::InvalidRange {
+                start: period as f64,
+                end: len as f64,
+                step: 2.0,
+            })?;
+    let warmup = first.checked_add(span).ok_or(UiError::InvalidRange {
+        start: period as f64,
+        end: len as f64,
+        step: 2.0,
+    })?;
     let mut out = alloc_with_nan_prefix(len, warmup.min(len));
 
-    
     match chosen {
         Kernel::Scalar | Kernel::ScalarBatch => ui_scalar(data, period, scalar, first, &mut out),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -291,12 +269,7 @@ pub fn ui_with_kernel(input: &UiInput, kernel: Kernel) -> Result<UiOutput, UiErr
     Ok(UiOutput { values: out })
 }
 
-/// Write Ulcer Index values into a caller-provided buffer without allocating.
-///
-/// - Preserves the exact NaN warmup prefix semantics of `ui()`/`ui_with_kernel()`.
-/// - The output slice length must equal the input length.
-/// - Uses `Kernel::Auto` dispatch for kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
@@ -336,22 +309,20 @@ pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
 
     let chosen = detect_best_kernel();
 
-    
-    let span = period
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(2))
-        .ok_or(UiError::InvalidRange {
-            start: period as f64,
-            end: len as f64,
-            step: 2.0,
-        })?;
-    let warmup = first
-        .checked_add(span)
-        .ok_or(UiError::InvalidRange {
-            start: period as f64,
-            end: len as f64,
-            step: 2.0,
-        })?;
+    let span =
+        period
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or(UiError::InvalidRange {
+                start: period as f64,
+                end: len as f64,
+                step: 2.0,
+            })?;
+    let warmup = first.checked_add(span).ok_or(UiError::InvalidRange {
+        start: period as f64,
+        end: len as f64,
+        step: 2.0,
+    })?;
     let nan_q = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warmup.min(len)] {
         *v = nan_q;
@@ -370,27 +341,19 @@ pub fn ui_into(input: &UiInput, out: &mut [f64]) -> Result<(), UiError> {
 }
 
 pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &mut [f64]) {
-    
-    
-    
-    
-    
     debug_assert_eq!(out.len(), data.len());
     let len = data.len();
     if len == 0 {
         return;
     }
 
-    
     let inv_period = 1.0 / (period as f64);
     let warmup_end = first + (period * 2 - 2);
 
-    
-    
     let cap = period;
     let mut deq: Vec<usize> = vec![0usize; cap];
-    let mut head = 0usize; 
-    let mut tail = 0usize; 
+    let mut head = 0usize;
+    let mut tail = 0usize;
     let mut dsize = 0usize;
 
     #[inline(always)]
@@ -409,23 +372,17 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
         }
     }
 
-    
     let mut sq_ring: Vec<f64> = vec![0.0f64; period];
     let mut ring_idx = 0usize;
     let mut sum = 0.0f64;
     let mut count = 0usize;
 
-    
-    
-    
     if false && period <= 64 {
         let mut valid_mask: u64 = 0;
 
         for i in first..len {
-            
             let start = if i + 1 >= period { i + 1 - period } else { 0 };
 
-            
             while dsize != 0 {
                 let j = unsafe { *deq.get_unchecked(head) };
                 if j < start {
@@ -436,7 +393,6 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
                 }
             }
 
-            
             let xi = unsafe { *data.get_unchecked(i) };
             let xi_finite = xi.is_finite();
             if xi_finite {
@@ -446,34 +402,30 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
                     let j = unsafe { *deq.get_unchecked(back) };
                     let xj = unsafe { *data.get_unchecked(j) };
                     if xj <= xi {
-                        
                         tail = back;
                         dsize -= 1;
                     } else {
                         break;
                     }
                 }
-                
+
                 unsafe { *deq.get_unchecked_mut(tail) = i };
                 inc_wrap(&mut tail, cap);
                 dsize += 1;
             }
 
-            
             let mut new_valid = false;
             let mut new_sq: f64 = 0.0;
             if i + 1 >= first + period && dsize != 0 {
                 let jmax = unsafe { *deq.get_unchecked(head) };
                 let m = unsafe { *data.get_unchecked(jmax) };
                 if xi_finite && m.is_finite() && m.abs() > f64::EPSILON {
-                    
                     let dd = (xi - m) * (scalar / m);
                     new_sq = dd.mul_add(dd, 0.0);
                     new_valid = true;
                 }
             }
 
-            
             let bit = 1u64 << ring_idx;
             if (valid_mask & bit) != 0 {
                 sum -= unsafe { *sq_ring.get_unchecked(ring_idx) };
@@ -492,13 +444,12 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
                 ring_idx = 0;
             }
 
-            
             if i >= warmup_end {
                 let dst = unsafe { out.get_unchecked_mut(i) };
                 if count == period {
                     let mut avg = sum * inv_period;
                     if avg < 0.0 {
-                        avg = 0.0; 
+                        avg = 0.0;
                     }
                     *dst = avg.sqrt();
                 } else {
@@ -509,16 +460,11 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
         return;
     }
 
-    
     let mut valid_ring: Vec<u8> = vec![0u8; period];
 
-    
-    
     for i in first..len {
-        
         let start = if i + 1 >= period { i + 1 - period } else { 0 };
 
-        
         while dsize != 0 {
             let j = unsafe { *deq.get_unchecked(head) };
             if j < start {
@@ -529,7 +475,6 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
             }
         }
 
-        
         let xi = unsafe { *data.get_unchecked(i) };
         let xi_finite = xi.is_finite();
         if xi_finite {
@@ -539,30 +484,26 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
                 let j = unsafe { *deq.get_unchecked(back) };
                 let xj = unsafe { *data.get_unchecked(j) };
                 if xj <= xi {
-                    
                     tail = back;
                     dsize -= 1;
                 } else {
                     break;
                 }
             }
-            
+
             unsafe { *deq.get_unchecked_mut(tail) = i };
             inc_wrap(&mut tail, cap);
             dsize += 1;
         }
 
-        
         let mut new_valid: u8 = 0;
         let mut new_sq: f64 = 0.0;
 
         if i + 1 >= first + period && dsize != 0 {
             let jmax = unsafe { *deq.get_unchecked(head) };
             let m = unsafe { *data.get_unchecked(jmax) };
-            
+
             if xi_finite && m.is_finite() && m.abs() > f64::EPSILON {
-                
-                
                 let scaled = scalar / m;
                 let diff = xi - m;
                 let dd = diff * scaled;
@@ -571,7 +512,6 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
             }
         }
 
-        
         let old_valid = unsafe { *valid_ring.get_unchecked(ring_idx) };
         if old_valid != 0 {
             sum -= unsafe { *sq_ring.get_unchecked(ring_idx) };
@@ -590,13 +530,12 @@ pub fn ui_scalar(data: &[f64], period: usize, scalar: f64, first: usize, out: &m
             ring_idx = 0;
         }
 
-        
         if i >= warmup_end {
             let dst = unsafe { out.get_unchecked_mut(i) };
             if count == period {
                 let mut avg = sum * inv_period;
                 if avg < 0.0 {
-                    avg = 0.0; 
+                    avg = 0.0;
                 }
                 *dst = avg.sqrt();
             } else {
@@ -647,33 +586,26 @@ pub struct UiStream {
     period: usize,
     scalar: f64,
 
-    
     i: usize,
 
-    
     first_finite: Option<usize>,
-    
+
     warmup_end: Option<usize>,
 
-    
-    
-    
-    buffer: Vec<f64>, 
-    deq: Vec<usize>,  
-    dq_head: usize,   
-    dq_tail: usize,   
-    dq_size: usize,   
+    buffer: Vec<f64>,
+    deq: Vec<usize>,
+    dq_head: usize,
+    dq_tail: usize,
+    dq_size: usize,
 
-    
-    sq_ring: Vec<f64>, 
-    ring_idx: usize,   
+    sq_ring: Vec<f64>,
+    ring_idx: usize,
 
-    
-    valid_mask: u64,             
-    valid_ring: Option<Vec<u8>>, 
+    valid_mask: u64,
+    valid_ring: Option<Vec<u8>>,
 
-    sum_sq: f64,        
-    count_valid: usize, 
+    sum_sq: f64,
+    count_valid: usize,
 }
 
 impl UiStream {
@@ -732,25 +664,20 @@ impl UiStream {
         }
     }
 
-    /// O(1) amortized update.
-    /// Returns Some(UI) when we have a fully valid window; otherwise None (during warmup or invalid data).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let p = self.period;
-        let cap = p; 
+        let cap = p;
 
-        
         let pos = self.i % p;
         self.buffer[pos] = value;
 
-        
         if self.first_finite.is_none() && value.is_finite() {
             let f = self.i;
             self.first_finite = Some(f);
             self.warmup_end = Some(f + (p * 2 - 2));
         }
 
-        
         let start = if self.i + 1 >= p { self.i + 1 - p } else { 0 };
         while self.dq_size != 0 {
             let j = unsafe { *self.deq.get_unchecked(self.dq_head) };
@@ -762,7 +689,6 @@ impl UiStream {
             }
         }
 
-        
         let xi = value;
         let xi_finite = xi.is_finite();
         if xi_finite {
@@ -772,7 +698,6 @@ impl UiStream {
                 let j = unsafe { *self.deq.get_unchecked(back) };
                 let xj = unsafe { *self.buffer.get_unchecked(j % p) };
                 if xj <= xi {
-                    
                     self.dq_tail = back;
                     self.dq_size -= 1;
                 } else {
@@ -786,7 +711,6 @@ impl UiStream {
             self.dq_size += 1;
         }
 
-        
         let mut new_valid = false;
         let mut new_sq = 0.0f64;
 
@@ -795,16 +719,14 @@ impl UiStream {
                 let jmax = unsafe { *self.deq.get_unchecked(self.dq_head) };
                 let m = unsafe { *self.buffer.get_unchecked(jmax % p) };
                 if xi_finite && m.is_finite() && m.abs() > f64::EPSILON {
-                    
                     let dd = (xi - m) * (self.scalar / m);
-                    
+
                     new_sq = dd.mul_add(dd, 0.0);
                     new_valid = true;
                 }
             }
         }
 
-        
         if self.period <= 64 {
             let bit = 1u64 << self.ring_idx;
             if (self.valid_mask & bit) != 0 {
@@ -840,18 +762,16 @@ impl UiStream {
             self.ring_idx = 0;
         }
 
-        
         let i_now = self.i;
         self.i = self.i.wrapping_add(1);
 
-        
         if let Some(we) = self.warmup_end {
             if i_now >= we && self.count_valid == p {
                 let mut avg = self.sum_sq / (p as f64);
                 if avg < 0.0 {
                     avg = 0.0;
-                } 
-                  
+                }
+
                 return Some(avg.sqrt());
             }
         }
@@ -942,7 +862,7 @@ pub fn ui_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, 
+        _ => Kernel::Scalar,
     };
     ui_batch_par_slice(data, sweep, simd)
 }
@@ -987,7 +907,6 @@ fn expand_grid(r: &UiBatchRange) -> Result<Vec<UiParams>, UiError> {
             }
             Ok(vals)
         } else {
-            
             let mut v: Vec<usize> = (end..=start).step_by(step).collect();
             if v.is_empty() {
                 return Err(UiError::InvalidRange {
@@ -1004,13 +923,13 @@ fn expand_grid(r: &UiBatchRange) -> Result<Vec<UiParams>, UiError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return Ok(vec![start]);
         }
-        
+
         if (start < end && step <= 0.0) || (start > end && step >= 0.0) {
             return Err(UiError::InvalidRange { start, end, step });
         }
         let mut v = Vec::new();
         let mut x = start;
-        let max_iterations: usize = 10_000; 
+        let max_iterations: usize = 10_000;
         let mut iterations: usize = 0;
         if start < end {
             while x <= end + 1e-12 {
@@ -1022,13 +941,12 @@ fn expand_grid(r: &UiBatchRange) -> Result<Vec<UiParams>, UiError> {
                 iterations += 1;
             }
         } else {
-            
             while x >= end - 1e-12 {
                 if iterations >= max_iterations {
                     return Err(UiError::InvalidRange { start, end, step });
                 }
                 v.push(x);
-                x += step; 
+                x += step;
                 iterations += 1;
             }
         }
@@ -1092,17 +1010,19 @@ fn ui_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<UiBatchOutput, UiError> {
-    
     if data.is_empty() {
         return Err(UiError::EmptyInputData);
     }
 
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(UiError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
+        return Err(UiError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
+        });
     }
 
-    
     let kern = match kern {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -1113,21 +1033,20 @@ fn ui_batch_inner(
         .position(|x| x.is_finite())
         .ok_or(UiError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let span = max_p
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(2))
-        .ok_or(UiError::InvalidRange {
-            start: max_p as f64,
-            end: data.len() as f64,
-            step: 2.0,
-        })?;
-    let max_warmup = first
-        .checked_add(span)
-        .ok_or(UiError::InvalidRange {
-            start: max_p as f64,
-            end: data.len() as f64,
-            step: 2.0,
-        })?;
+    let span =
+        max_p
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or(UiError::InvalidRange {
+                start: max_p as f64,
+                end: data.len() as f64,
+                step: 2.0,
+            })?;
+    let max_warmup = first.checked_add(span).ok_or(UiError::InvalidRange {
+        start: max_p as f64,
+        end: data.len() as f64,
+        step: 2.0,
+    })?;
     if data.len() <= max_warmup {
         return Err(UiError::NotEnoughValidData {
             needed: max_warmup + 1,
@@ -1137,23 +1056,19 @@ fn ui_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(UiError::InvalidRange {
-            start: rows as f64,
-            end: cols as f64,
-            step: 0.0,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(UiError::InvalidRange {
+        start: rows as f64,
+        end: cols as f64,
+        step: 0.0,
+    })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let combos = ui_batch_inner_into(data, sweep, kern, parallel, out_slice)?;
 
-    
     let values_vec = unsafe {
         let ptr = buf_guard.as_mut_ptr() as *mut f64;
         let len = buf_guard.len();
@@ -1172,43 +1087,32 @@ fn ui_batch_inner(
 
 #[inline(always)]
 fn ui_row_scalar(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
-    
     ui_scalar(data, period, scalar, first, out);
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 fn ui_row_avx2(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
-    
-    
     ui_row_scalar(data, first, period, scalar, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 fn ui_row_avx512(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
-    
-    
     ui_row_scalar(data, first, period, scalar, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 fn ui_row_avx512_short(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
-    
-    
     ui_row_scalar(data, first, period, scalar, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 fn ui_row_avx512_long(data: &[f64], first: usize, period: usize, scalar: f64, out: &mut [f64]) {
-    
-    
     ui_row_scalar(data, first, period, scalar, out)
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ui")]
@@ -1281,7 +1185,7 @@ pub fn ui_batch_py<'py>(
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                _ => Kernel::Scalar, 
+                _ => Kernel::Scalar,
             };
             ui_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
@@ -1333,7 +1237,6 @@ impl UiStreamPy {
     }
 }
 
-
 #[inline(always)]
 fn ui_batch_inner_into(
     data: &[f64],
@@ -1342,14 +1245,17 @@ fn ui_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<UiParams>, UiError> {
-    
     if data.is_empty() {
         return Err(UiError::EmptyInputData);
     }
 
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(UiError::InvalidRange { start: sweep.period.0 as f64, end: sweep.period.1 as f64, step: sweep.period.2 as f64 });
+        return Err(UiError::InvalidRange {
+            start: sweep.period.0 as f64,
+            end: sweep.period.1 as f64,
+            step: sweep.period.2 as f64,
+        });
     }
 
     let first = data
@@ -1357,21 +1263,20 @@ fn ui_batch_inner_into(
         .position(|x| x.is_finite())
         .ok_or(UiError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let span = max_p
-        .checked_mul(2)
-        .and_then(|v| v.checked_sub(2))
-        .ok_or(UiError::InvalidRange {
-            start: max_p as f64,
-            end: data.len() as f64,
-            step: 2.0,
-        })?;
-    let max_warmup = first
-        .checked_add(span)
-        .ok_or(UiError::InvalidRange {
-            start: max_p as f64,
-            end: data.len() as f64,
-            step: 2.0,
-        })?;
+    let span =
+        max_p
+            .checked_mul(2)
+            .and_then(|v| v.checked_sub(2))
+            .ok_or(UiError::InvalidRange {
+                start: max_p as f64,
+                end: data.len() as f64,
+                step: 2.0,
+            })?;
+    let max_warmup = first.checked_add(span).ok_or(UiError::InvalidRange {
+        start: max_p as f64,
+        end: data.len() as f64,
+        step: 2.0,
+    })?;
     if data.len() <= max_warmup {
         return Err(UiError::NotEnoughValidData {
             needed: max_warmup + 1,
@@ -1382,31 +1287,26 @@ fn ui_batch_inner_into(
     let cols = data.len();
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
-        let span_row = period
-            .checked_mul(2)
-            .and_then(|v| v.checked_sub(2))
-            .ok_or(UiError::InvalidRange {
-                start: period as f64,
-                end: data.len() as f64,
-                step: 2.0,
-            })?;
-        let warmup = first
-            .checked_add(span_row)
-            .ok_or(UiError::InvalidRange {
-                start: period as f64,
-                end: data.len() as f64,
-                step: 2.0,
-            })?;
+        let span_row =
+            period
+                .checked_mul(2)
+                .and_then(|v| v.checked_sub(2))
+                .ok_or(UiError::InvalidRange {
+                    start: period as f64,
+                    end: data.len() as f64,
+                    step: 2.0,
+                })?;
+        let warmup = first.checked_add(span_row).ok_or(UiError::InvalidRange {
+            start: period as f64,
+            end: data.len() as f64,
+            step: 2.0,
+        })?;
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
             out[row_start + i] = f64::NAN;
         }
     }
 
-    
-    
-    
-    
     use std::collections::BTreeMap;
     let mut by_period: BTreeMap<usize, Vec<(usize, f64)>> = BTreeMap::new();
     for (row, combo) in combos.iter().enumerate() {
@@ -1417,7 +1317,6 @@ fn ui_batch_inner_into(
     }
 
     let mut process_group = |(period, rows): (&usize, &Vec<(usize, f64)>)| {
-        
         let mut base = vec![f64::NAN; cols];
         match kern {
             Kernel::Scalar => ui_row_scalar(data, first, *period, 1.0, &mut base),
@@ -1428,7 +1327,6 @@ fn ui_batch_inner_into(
             _ => ui_row_scalar(data, first, *period, 1.0, &mut base),
         }
 
-        
         for &(row, scalar) in rows.iter() {
             let s = scalar.abs();
             let row_start = row * cols;
@@ -1441,15 +1339,12 @@ fn ui_batch_inner_into(
     };
 
     if parallel {
-        
-        
         #[cfg(not(target_arch = "wasm32"))]
         {
             use rayon::prelude::*;
             use std::collections::HashMap;
             use std::sync::Arc;
 
-            
             let period_keys: Vec<usize> = by_period.keys().copied().collect();
             let base_map: HashMap<usize, Arc<Vec<f64>>> = period_keys
                 .par_iter()
@@ -1467,14 +1362,13 @@ fn ui_batch_inner_into(
                 })
                 .collect();
 
-            
             out.par_chunks_mut(cols)
                 .enumerate()
                 .for_each(|(row, slice)| {
                     let p = combos[row].period.unwrap();
                     let s = combos[row].scalar.unwrap().abs();
                     let base = base_map.get(&p).expect("base series present");
-                    
+
                     for i in 0..cols {
                         let v = base[i];
                         slice[i] = if v.is_finite() { v * s } else { v };
@@ -1484,7 +1378,6 @@ fn ui_batch_inner_into(
 
         #[cfg(target_arch = "wasm32")]
         {
-            
             for entry in by_period.iter() {
                 process_group(entry);
             }
@@ -1498,13 +1391,10 @@ fn ui_batch_inner_into(
     Ok(combos)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-/// Core helper for writing directly to output slice - no allocations
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(), UiError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
@@ -1547,7 +1437,6 @@ pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(
         other => other,
     };
 
-    
     let warmup = first + (period * 2 - 2);
     for v in &mut dst[..warmup.min(len)] {
         *v = f64::NAN;
@@ -1564,8 +1453,7 @@ pub fn ui_into_slice(dst: &mut [f64], input: &UiInput, kern: Kernel) -> Result<(
     Ok(())
 }
 
-/// Safe API - allocates and returns Vec<f64>
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ui_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsValue> {
     if !scalar.is_finite() {
@@ -1585,8 +1473,7 @@ pub fn ui_js(data: &[f64], period: usize, scalar: f64) -> Result<Vec<f64>, JsVal
     Ok(output)
 }
 
-/// Fast API with aliasing detection - zero allocations unless aliased
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ui_into(
     in_ptr: *const f64,
@@ -1611,7 +1498,6 @@ pub fn ui_into(
         let input = UiInput::from_slice(data, params);
 
         if in_ptr == out_ptr.cast_const() {
-            
             let mut temp = vec![0.0; len];
             ui_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1626,8 +1512,7 @@ pub fn ui_into(
     }
 }
 
-/// Memory allocation for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ui_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1636,8 +1521,7 @@ pub fn ui_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-/// Memory deallocation for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ui_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1647,16 +1531,14 @@ pub fn ui_free(ptr: *mut f64, len: usize) {
     }
 }
 
-/// Batch configuration for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct UiBatchConfig {
     pub period_range: (usize, usize, usize),
     pub scalar_range: (f64, f64, f64),
 }
 
-/// Batch output for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct UiBatchJsOutput {
     pub values: Vec<f64>,
@@ -1665,8 +1547,7 @@ pub struct UiBatchJsOutput {
     pub cols: usize,
 }
 
-/// Batch processing API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ui_batch)]
 pub fn ui_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: UiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1690,8 +1571,6 @@ pub fn ui_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
-
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ui_cuda_batch_dev")]
@@ -1751,8 +1630,7 @@ pub fn ui_cuda_many_series_one_param_dev_py(
     make_device_array_py(device_id, inner)
 }
 
-/// Fast batch API with raw pointers
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ui_batch_into(
     in_ptr: *const f64,
@@ -1777,8 +1655,7 @@ pub fn ui_batch_into(
             scalar: (scalar_start, scalar_end, scalar_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -1934,35 +1811,34 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            UiParams::default(), 
+            UiParams::default(),
             UiParams {
-                period: Some(2), 
+                period: Some(2),
                 scalar: Some(100.0),
             },
             UiParams {
-                period: Some(5), 
+                period: Some(5),
                 scalar: Some(50.0),
             },
             UiParams {
-                period: Some(10), 
+                period: Some(10),
                 scalar: Some(100.0),
             },
             UiParams {
-                period: Some(20), 
+                period: Some(20),
                 scalar: Some(200.0),
             },
             UiParams {
-                period: Some(50), 
+                period: Some(50),
                 scalar: Some(100.0),
             },
             UiParams {
-                period: Some(100), 
+                period: Some(100),
                 scalar: Some(100.0),
             },
             UiParams {
-                period: Some(14), 
+                period: Some(14),
                 scalar: Some(1.0),
             },
             UiParams {
@@ -1974,7 +1850,7 @@ mod tests {
                 scalar: Some(1000.0),
             },
             UiParams {
-                period: Some(7), 
+                period: Some(7),
                 scalar: Some(75.0),
             },
             UiParams {
@@ -1989,12 +1865,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2047,7 +1922,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_ui_tests {
@@ -2084,7 +1959,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
 
         let strat = (2usize..=20, 1.0f64..200.0f64).prop_flat_map(|(period, scalar)| {
-            let min_data_needed = period * 2 - 2 + 20; 
+            let min_data_needed = period * 2 - 2 + 20;
             (
                 prop::collection::vec(
                     (0.001f64..1e6f64)
@@ -2107,7 +1982,6 @@ mod tests {
                 let UiOutput { values: out } = ui_with_kernel(&input, kernel).unwrap();
                 let UiOutput { values: ref_out } = ui_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let warmup_period = period * 2 - 2;
                 for i in 0..warmup_period.min(data.len()) {
                     prop_assert!(
@@ -2119,7 +1993,6 @@ mod tests {
                     );
                 }
 
-                
                 for (i, &value) in out.iter().enumerate() {
                     if !value.is_nan() {
                         prop_assert!(
@@ -2132,7 +2005,6 @@ mod tests {
                     }
                 }
 
-                
                 let is_monotonic_increase = data.windows(2).all(|w| w[1] >= w[0]);
                 if is_monotonic_increase && data.len() > warmup_period {
                     for i in warmup_period..data.len() {
@@ -2146,9 +2018,7 @@ mod tests {
                     }
                 }
 
-                
                 if period == 1 {
-                    
                     for (i, &value) in out.iter().enumerate() {
                         prop_assert!(
                             value.abs() < 1e-9,
@@ -2160,7 +2030,6 @@ mod tests {
                     }
                 }
 
-                
                 let is_flat = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 if is_flat && data.len() > warmup_period {
                     for i in warmup_period..data.len() {
@@ -2174,13 +2043,8 @@ mod tests {
                     }
                 }
 
-                
-                
-                
-                
                 for i in warmup_period..data.len() {
                     if !out[i].is_nan() {
-                        
                         prop_assert!(
                             out[i] <= scalar * 1.1,
                             "[{}] UI exceeds theoretical maximum at index {}: UI={}, max={}",
@@ -2190,7 +2054,6 @@ mod tests {
                             scalar * 1.1
                         );
 
-                        
                         prop_assert!(
                             out[i].is_finite(),
                             "[{}] UI is not finite at index {}: {}",
@@ -2201,7 +2064,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -2230,7 +2092,6 @@ mod tests {
                     );
                 }
 
-                
                 let UiOutput { values: out2 } = ui_with_kernel(&input, kernel).unwrap();
                 for i in 0..data.len() {
                     if out[i].is_finite() && out2[i].is_finite() {
@@ -2252,8 +2113,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if scalar > 1.0 && scalar < 100.0 {
                     let params2 = UiParams {
                         period: Some(period),
@@ -2276,19 +2135,15 @@ mod tests {
                     }
                 }
 
-                
-                
                 let has_large_stable_region =
                     data.len() > period * 4 && data.iter().all(|&x| x > 0.1 && x < 1e5);
                 if has_large_stable_region {
-                    
                     let valid_count = out[warmup_period..]
                         .iter()
                         .filter(|&&x| !x.is_nan())
                         .count();
                     let expected_valid = data.len() - warmup_period;
 
-                    
                     prop_assert!(
                         valid_count as f64 >= expected_valid as f64 * 0.8,
                         "[{}] Too few valid outputs: {} out of {} expected",
@@ -2298,16 +2153,12 @@ mod tests {
                     );
                 }
 
-                
-                
                 if data.len() > period * 4 {
-                    
                     let mut min_volatility_ui = f64::INFINITY;
                     let mut max_volatility_ui = 0.0;
 
                     for i in warmup_period..data.len() {
                         if !out[i].is_nan() {
-                            
                             let window_start = i.saturating_sub(period - 1);
                             let window = &data[window_start..=i];
                             let max_price =
@@ -2315,7 +2166,6 @@ mod tests {
                             let min_price = window.iter().cloned().fold(f64::INFINITY, f64::min);
                             let price_range = (max_price - min_price) / max_price;
 
-                            
                             if price_range < 0.01 && out[i] < min_volatility_ui {
                                 min_volatility_ui = out[i];
                             }
@@ -2325,7 +2175,6 @@ mod tests {
                         }
                     }
 
-                    
                     if min_volatility_ui != f64::INFINITY && max_volatility_ui > 0.0 {
                         prop_assert!(
 							max_volatility_ui >= min_volatility_ui,
@@ -2335,23 +2184,15 @@ mod tests {
                     }
                 }
 
-                
-                
                 if period <= 5 && data.len() > warmup_period + period {
-                    
                     for i in (warmup_period + period)..data.len().min(warmup_period + period * 2) {
                         if !out[i].is_nan() && out[i] > scalar * 0.01 {
-                            
-                            
-                            
                             let mut sum_squared_dd = 0.0;
                             let mut valid_count = 0;
 
-                            
                             for j in 0..period {
                                 let pos = i - j;
                                 if pos >= period - 1 {
-                                    
                                     let max_start = pos + 1 - period;
                                     let max_end = pos + 1;
                                     let rolling_max = data[max_start..max_end]
@@ -2369,28 +2210,26 @@ mod tests {
 
                             if valid_count == period {
                                 let manual_ui = (sum_squared_dd / period as f64).sqrt();
-                                
+
                                 let tolerance = manual_ui * 0.05 + 1e-6;
                                 prop_assert!(
 									(out[i] - manual_ui).abs() <= tolerance,
 									"[{}] Direct formula verification failed at index {}: calculated={}, expected={}, diff={}",
 									test_name, i, out[i], manual_ui, (out[i] - manual_ui).abs()
 								);
-                                break; 
+                                break;
                             }
                         }
                     }
                 }
 
-                
-                
                 let has_low_volatility =
-                    data.windows(2).all(|w| (w[1] - w[0]).abs() / w[0] < 0.0001); 
+                    data.windows(2).all(|w| (w[1] - w[0]).abs() / w[0] < 0.0001);
                 if has_low_volatility && data.len() > warmup_period {
                     for i in warmup_period..data.len() {
                         if !out[i].is_nan() {
                             prop_assert!(
-                                out[i] < scalar * 0.01, 
+                                out[i] < scalar * 0.01,
                                 "[{}] UI too high for near-zero volatility at index {}: UI={}",
                                 test_name,
                                 i,
@@ -2462,18 +2301,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 100.0, 100.0, 0.0), 
-            (5, 25, 5, 50.0, 150.0, 50.0), 
-            (30, 60, 15, 100.0, 100.0, 0.0), 
-            (2, 5, 1, 1.0, 100.0, 33.0),   
-            (10, 20, 2, 200.0, 200.0, 0.0), 
-            (14, 14, 0, 1.0, 1000.0, 199.0), 
-            (3, 12, 3, 75.0, 125.0, 25.0), 
-            (50, 100, 25, 100.0, 500.0, 200.0), 
-            (7, 21, 7, 50.0, 50.0, 0.0),   
+            (2, 10, 2, 100.0, 100.0, 0.0),
+            (5, 25, 5, 50.0, 150.0, 50.0),
+            (30, 60, 15, 100.0, 100.0, 0.0),
+            (2, 5, 1, 1.0, 100.0, 33.0),
+            (10, 20, 2, 200.0, 200.0, 0.0),
+            (14, 14, 0, 1.0, 1000.0, 199.0),
+            (3, 12, 3, 75.0, 125.0, 25.0),
+            (50, 100, 25, 100.0, 500.0, 200.0),
+            (7, 21, 7, 50.0, 50.0, 0.0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, s_start, s_end, s_step)) in
@@ -2495,7 +2332,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2554,7 +2390,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2583,23 +2419,19 @@ mod tests {
 
     #[test]
     fn test_ui_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = UiInput::with_default_candles(&candles);
 
-        
         let baseline = ui(&input)?.values;
 
-        
         let mut out = vec![0.0; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             ui_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             ui_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 

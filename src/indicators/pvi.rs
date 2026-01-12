@@ -1,26 +1,3 @@
-//! # Positive Volume Index (PVI)
-//!
-//! The Positive Volume Index (PVI) tracks price changes only when volume increases, starting from an initial value.
-//! Like ALMA, this indicator provides builder, batch, and streaming APIs, kernel stubs, and parameter expansion.
-//!
-//! Decision: Streaming kernel micro-optimized; exact math preserved and NaN handling kept cold. O(1) per tick maintained.
-//!
-//! ## Parameters
-//! - **initial_value**: Starting PVI value. Default is 1000.0.
-//!
-//! ## Returns
-//! - **`Ok(PviOutput)`** on success, with a Vec<f64> of PVI values matching the input length.
-//! - **`Err(PviError)`** on failure
-//!
-//! ## Developer Notes
-//! - **SIMD**: AVX2/AVX512 paths mirror the optimized scalar loop with prefetch and unrolling.
-//!   PVI is sequential, so expect modest gains on long series; runtime selects AVX512 → AVX2 → Scalar.
-//! - **Batch**: Row-specific optimized variant implemented via a shared multiplicative scale precompute
-//!   (affine in initial value). This yields substantial speedups for many initial_value rows.
-//! - **Streaming**: O(1) with simple cumulative calculation
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **Decision log**: SIMD under `nightly-avx` (AVX2/AVX512 stubs), CUDA wrapper returns VRAM handles with typed errors, and Python interop exposes CAI v3 + DLPack v1.x; numerical outputs unchanged.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -29,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -83,7 +60,10 @@ pub struct PviOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct PviParams {
     pub initial_value: Option<f64>,
 }
@@ -199,9 +179,7 @@ pub enum PviError {
     AllValuesNaN,
     #[error("pvi: close and volume data have different lengths")]
     MismatchedLength,
-    #[error(
-        "pvi: Not enough valid data: needed at least {needed} valid data points, got {valid}"
-    )]
+    #[error("pvi: Not enough valid data: needed at least {needed} valid data points, got {valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("pvi: output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
@@ -288,12 +266,7 @@ pub fn pvi_with_kernel(input: &PviInput, kernel: Kernel) -> Result<PviOutput, Pv
     Ok(PviOutput { values: out })
 }
 
-/// Compute PVI directly into a caller-provided output slice (no allocations).
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API by pre-filling the
-///   warmup prefix with the same quiet-NaN pattern used by `alloc_with_nan_prefix`.
-/// - `out.len()` must equal the input length; otherwise a length error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
     let (close, volume) = match &input.data {
@@ -322,7 +295,6 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
         });
     }
 
-    
     let first_valid_idx = close
         .iter()
         .zip(volume.iter())
@@ -333,14 +305,12 @@ pub fn pvi_into(input: &PviInput, out: &mut [f64]) -> Result<(), PviError> {
         return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
-    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm = first_valid_idx.min(out.len());
     for v in &mut out[..warm] {
         *v = qnan;
     }
 
-    
     let chosen = match Kernel::Auto {
         Kernel::Auto => match detect_best_kernel() {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -408,8 +378,6 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
         return Err(PviError::NotEnoughValidData { needed: 2, valid });
     }
 
-    
-
     let chosen = match kern {
         Kernel::Auto => match detect_best_kernel() {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -438,7 +406,6 @@ pub fn pvi_into_slice(dst: &mut [f64], input: &PviInput, kern: Kernel) -> Result
         }
     }
 
-    
     for v in &mut dst[..first_valid_idx] {
         *v = f64::NAN;
     }
@@ -479,7 +446,6 @@ pub fn pvi_scalar(
         return;
     }
 
-    
     let mut pvi = initial;
     out[first_valid] = pvi;
 
@@ -510,7 +476,6 @@ pub fn pvi_scalar(
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64, out: &mut [f64]) {
-    
     debug_assert_eq!(close.len(), volume.len());
     debug_assert_eq!(close.len(), out.len());
     let n = close.len();
@@ -538,7 +503,6 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
         let rem = n - (first_valid + 1);
 
         while j + 1 < rem {
-            
             let c0 = *cptr.add(j);
             let v0 = *vptr.add(j);
             if not_nan(c0) && not_nan(v0) && not_nan(prev_close) && not_nan(prev_vol) {
@@ -557,7 +521,6 @@ pub fn pvi_avx2(close: &[f64], volume: &[f64], first_valid: usize, initial: f64,
                 }
             }
 
-            
             let c1 = *cptr.add(j + 1);
             let v1 = *vptr.add(j + 1);
             if not_nan(c1) && not_nan(v1) && not_nan(prev_close) && not_nan(prev_vol) {
@@ -604,7 +567,6 @@ pub fn pvi_avx512_short(
     initial: f64,
     out: &mut [f64],
 ) {
-    
     pvi_avx2(close, volume, first_valid, initial, out)
 }
 
@@ -617,7 +579,6 @@ pub fn pvi_avx512_long(
     initial: f64,
     out: &mut [f64],
 ) {
-    
     pvi_avx2(close, volume, first_valid, initial, out)
 }
 
@@ -649,42 +610,28 @@ impl PviStream {
         })
     }
 
-    /// O(1) update; returns `Some(pvi)` when a value is produced, else `None` (caller typically writes NaN).
-    ///
-    /// Hot path characteristics:
-    /// - In `Valid` state we only test the current inputs for NaN. `last_*` are guaranteed non-NaN.
-    /// - Volume check short-circuits when `volume <= last_volume` (PVI stays constant).
-    /// - Math mirrors the scalar batch kernel (`pvi += r * pvi`) to preserve rounding/semantics.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<f64> {
-        
         if let StreamState::Init = self.state {
             return self.init_or_none(close, volume);
         }
 
-        
         if close.is_nan() | volume.is_nan() {
-            
             return self.cold_invalid(close, volume);
         }
 
         if volume > self.last_volume {
-            
-            
             let prev = self.last_close;
             let r = (close - prev) / prev;
             self.curr += r * self.curr;
-            
         }
 
-        
         self.last_close = close;
         self.last_volume = volume;
 
         Some(self.curr)
     }
 
-    /// First valid tick handler: seed state and emit the initial value.
     #[inline(always)]
     fn init_or_none(&mut self, close: f64, volume: f64) -> Option<f64> {
         if close.is_nan() || volume.is_nan() {
@@ -697,16 +644,12 @@ impl PviStream {
         Some(self.curr)
     }
 
-    /// Rare path: at least one of {close, volume} is NaN. Kept cold to help branch prediction & I-cache.
     #[cold]
     #[inline(never)]
     fn cold_invalid(&mut self, _close: f64, _volume: f64) -> Option<f64> {
-        
-        
         None
     }
 
-    /// Optional: zero-checking variant for inner tight loops when inputs are guaranteed finite.
     #[inline(always)]
     pub fn update_unchecked_finite(&mut self, close: f64, volume: f64) -> f64 {
         debug_assert!(self.state == StreamState::Valid);
@@ -938,10 +881,8 @@ fn pvi_batch_inner(
     let rows = combos.len();
     let cols = close.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     if rows <= 32 {
         let mut warm = [0usize; 32];
         for i in 0..rows {
@@ -953,15 +894,12 @@ fn pvi_batch_inner(
         init_matrix_prefixes(&mut buf_mu, cols, &warm);
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
 
-    
     let out_f: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
     pvi_batch_inner_into(close, volume, sweep, kern, parallel, out_f)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1017,7 +955,6 @@ fn pvi_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut core::mem::MaybeUninit<f64>,
@@ -1025,10 +962,6 @@ fn pvi_batch_inner_into(
         )
     };
 
-    
-    
-    
-    
     let mut scale = vec![f64::NAN; cols];
     scale[first_valid_idx] = 1.0;
 
@@ -1070,14 +1003,11 @@ fn pvi_batch_inner_into(
     let do_row = |row: usize, dst_row_mu: &mut [core::mem::MaybeUninit<f64>]| unsafe {
         let iv = combos[row].initial_value.unwrap_or(1000.0);
 
-        
         let dst_row: &mut [f64] =
             core::slice::from_raw_parts_mut(dst_row_mu.as_mut_ptr() as *mut f64, dst_row_mu.len());
 
-        
         *dst_row.get_unchecked_mut(first_valid_idx) = iv;
 
-        
         let mut j = first_valid_idx + 1;
         while j < cols {
             let s = *scale.get_unchecked(j);
@@ -1351,36 +1281,35 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            PviParams::default(), 
+            PviParams::default(),
             PviParams {
                 initial_value: Some(100.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(500.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(5000.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(10000.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(0.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(1.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(-1000.0),
-            }, 
+            },
             PviParams {
                 initial_value: Some(999999.0),
-            }, 
+            },
             PviParams {
                 initial_value: None,
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1389,12 +1318,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1429,29 +1357,25 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[test]
     fn test_pvi_into_matches_api() {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("load candles");
 
         let input = PviInput::from_candles(&candles, "close", "volume", PviParams::default());
 
-        
         let baseline = pvi(&input).expect("pvi baseline").values;
 
-        
         let mut into_out = vec![0.0f64; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             pvi_into(&input, &mut into_out).expect("pvi_into");
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             pvi_into_slice(&mut into_out, &input, Kernel::Auto).expect("pvi_into_slice");
         }
 
@@ -1480,19 +1404,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (
-            
             prop::collection::vec(
                 (-1e6f64..1e6f64).prop_filter("finite close", |x| x.is_finite() && x.abs() > 1e-10),
                 10..400,
             ),
-            
             prop::collection::vec(
                 (0f64..1e6f64).prop_filter("finite volume", |x| x.is_finite()),
                 10..400,
             ),
-            
             100f64..10000f64,
         )
             .prop_filter("same length", |(close, volume, _)| {
@@ -1507,27 +1427,24 @@ mod tests {
                 };
                 let input = PviInput::from_slices(&close_data, &volume_data, params);
 
-                
                 let output = match pvi_with_kernel(&input, kernel) {
                     Ok(o) => o,
-                    Err(_) => return Ok(()), 
+                    Err(_) => return Ok(()),
                 };
                 let out = &output.values;
 
                 let scalar_output = match pvi_with_kernel(&input, Kernel::Scalar) {
                     Ok(o) => o,
-                    Err(_) => return Ok(()), 
+                    Err(_) => return Ok(()),
                 };
                 let ref_out = &scalar_output.values;
 
-                
                 let first_valid_idx = close_data
                     .iter()
                     .zip(volume_data.iter())
                     .position(|(&c, &v)| !c.is_nan() && !v.is_nan());
 
                 if let Some(first_idx) = first_valid_idx {
-                    
                     if !out[first_idx].is_nan() {
                         prop_assert!(
                             (out[first_idx] - initial_value).abs() < 1e-9,
@@ -1538,7 +1455,6 @@ mod tests {
                         );
                     }
 
-                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                             if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
@@ -1553,7 +1469,6 @@ mod tests {
                         }
                     }
 
-                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                             if !volume_data[i].is_nan() && !volume_data[i - 1].is_nan() {
@@ -1571,7 +1486,6 @@ mod tests {
                         }
                     }
 
-                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !out[i].is_nan()
                             && i > 0
@@ -1599,7 +1513,6 @@ mod tests {
                         }
                     }
 
-                    
                     for i in 0..out.len() {
                         if out[i].is_nan() && ref_out[i].is_nan() {
                             continue;
@@ -1614,7 +1527,6 @@ mod tests {
                         );
                     }
 
-                    
                     for (i, &val) in out.iter().enumerate() {
                         if !val.is_nan() {
                             let bits = val.to_bits();
@@ -1630,7 +1542,6 @@ mod tests {
                         }
                     }
 
-                    
                     if volume_data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                         for &val in out.iter().skip(first_idx) {
                             if !val.is_nan() {
@@ -1643,7 +1554,6 @@ mod tests {
                         }
                     }
 
-                    
                     let is_monotonic_increasing = volume_data
                         .windows(2)
                         .all(|w| !w[0].is_nan() && !w[1].is_nan() && w[1] > w[0]);
@@ -1655,7 +1565,6 @@ mod tests {
                                 && !close_data[i].is_nan()
                                 && !close_data[i - 1].is_nan()
                             {
-                                
                                 if (close_data[i] - close_data[i - 1]).abs() > 1e-10 {
                                     prop_assert!(
 										(out[i] - last_valid_pvi).abs() > 1e-10,
@@ -1668,8 +1577,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     for i in (first_idx + 1)..close_data.len() {
                         if !volume_data[i].is_nan()
                             && !volume_data[i - 1].is_nan()
@@ -1678,14 +1585,12 @@ mod tests {
                             && !close_data[i - 1].is_nan()
                             && close_data[i - 1].abs() > 1e-10
                         {
-                            
-                            
                             if !out[i].is_nan() && i > 0 && !out[i - 1].is_nan() {
                                 let expected_change = ((close_data[i] - close_data[i - 1])
                                     / close_data[i - 1])
                                     * out[i - 1];
                                 let expected_pvi = out[i - 1] + expected_change;
-                                
+
                                 prop_assert!(
 									(out[i] - expected_pvi).abs() < 1e-9 || out[i].is_infinite(),
 									"PVI calculation should be correct or handle extreme values at index {}",
@@ -1695,10 +1600,8 @@ mod tests {
                         }
                     }
 
-                    
                     for (i, &val) in out.iter().enumerate() {
                         if !val.is_nan() {
-                            
                             prop_assert!(
                                 val.is_finite(),
                                 "PVI should be finite, but got {} at index {}",
@@ -1706,9 +1609,6 @@ mod tests {
                                 i
                             );
 
-                            
-                            
-                            
                             if initial_value > 0.0
                                 && val.is_finite()
                                 && val.abs() < initial_value * 100.0
@@ -1800,16 +1700,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (100.0, 500.0, 100.0),       
-            (1000.0, 5000.0, 1000.0),    
-            (10000.0, 50000.0, 10000.0), 
-            (900.0, 1100.0, 50.0),       
-            (0.0, 100.0, 25.0),          
-            (-1000.0, 1000.0, 500.0),    
-            (1.0, 10.0, 1.0),            
-            (999999.0, 1000001.0, 1.0),  
+            (100.0, 500.0, 100.0),
+            (1000.0, 5000.0, 1000.0),
+            (10000.0, 50000.0, 10000.0),
+            (900.0, 1100.0, 50.0),
+            (0.0, 100.0, 25.0),
+            (-1000.0, 1000.0, 500.0),
+            (1.0, 10.0, 1.0),
+            (999999.0, 1000001.0, 1.0),
         ];
 
         for (cfg_idx, &(start, end, step)) in test_configs.iter().enumerate() {
@@ -1828,7 +1727,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1998,7 +1896,7 @@ impl PviStreamPy {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pvi_js(close: &[f64], volume: &[f64], initial_value: f64) -> Result<Vec<f64>, JsValue> {
     let params = PviParams {
@@ -2013,7 +1911,7 @@ pub fn pvi_js(close: &[f64], volume: &[f64], initial_value: f64) -> Result<Vec<f
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pvi_into(
     close_ptr: *const f64,
@@ -2035,7 +1933,6 @@ pub fn pvi_into(
         };
         let input = PviInput::from_slices(close, volume, params);
 
-        
         if close_ptr == out_ptr || volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             pvi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -2051,7 +1948,7 @@ pub fn pvi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pvi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2060,7 +1957,7 @@ pub fn pvi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pvi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2070,13 +1967,13 @@ pub fn pvi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PviBatchConfig {
     pub initial_value_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PviBatchJsOutput {
     pub values: Vec<f64>,
@@ -2085,7 +1982,7 @@ pub struct PviBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = pvi_batch)]
 pub fn pvi_batch_js(close: &[f64], volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: PviBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2109,7 +2006,7 @@ pub fn pvi_batch_js(close: &[f64], volume: &[f64], config: JsValue) -> Result<Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pvi_batch_into(
     close_ptr: *const f64,
@@ -2132,8 +2029,7 @@ pub fn pvi_batch_into(
             initial_value: (initial_value_start, initial_value_end, initial_value_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total = rows
             .checked_mul(len)
@@ -2155,13 +2051,12 @@ pub fn pvi_batch_into(
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaPvi;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaPvi;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2192,7 +2087,7 @@ impl PviDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream is synchronized before returning the handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2210,7 +2105,6 @@ impl PviDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Array API stream semantics: producer is already synchronized, so we only validate.
         if let Some(s_obj) = stream.as_ref() {
             if let Ok(s) = s_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -2221,7 +2115,6 @@ impl PviDeviceArrayF32Py {
             }
         }
 
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2233,20 +2126,14 @@ impl PviDeviceArrayF32Py {
             }
         }
 
-        if copy
-            .as_ref()
-            .and_then(|c| c.extract::<bool>(py).ok())
-            == Some(true)
-        {
+        if copy.as_ref().and_then(|c| c.extract::<bool>(py).ok()) == Some(true) {
             return Err(PyValueError::new_err(
                 "copy=True not supported for PviDeviceArrayF32",
             ));
         }
 
-        // Producer stream is synchronized before returning the handle; ignore consumer stream.
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let inner = self
             .inner
             .take()
@@ -2295,17 +2182,15 @@ pub fn pvi_cuda_batch_dev_py(
     if inits_slice.is_empty() {
         return Err(PyValueError::new_err("initial_values must be non-empty"));
     }
-    let (inner, ctx, dev_id) = py
-        .allow_threads(|| {
-            let cuda =
-                CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
-            let dev_id = cuda.device_id();
-            let arr = cuda
-                .pvi_batch_dev(close_slice, volume_slice, inits_slice)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
-        })?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .pvi_batch_dev(close_slice, volume_slice, inits_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+    })?;
     Ok(PviDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
@@ -2326,22 +2211,20 @@ pub fn pvi_cuda_many_series_one_param_dev_py(
     }
     let close_slice = close_tm.as_slice()?;
     let volume_slice = volume_tm.as_slice()?;
-    let (inner, ctx, dev_id) = py
-        .allow_threads(|| {
-            let cuda =
-                CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
-            let dev_id = cuda.device_id();
-            let arr = cuda
-                .pvi_many_series_one_param_time_major_dev(
-                    close_slice,
-                    volume_slice,
-                    cols,
-                    rows,
-                    initial_value,
-                )
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
-        })?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaPvi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .pvi_many_series_one_param_time_major_dev(
+                close_slice,
+                volume_slice,
+                cols,
+                rows,
+                initial_value,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+    })?;
     Ok(PviDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }

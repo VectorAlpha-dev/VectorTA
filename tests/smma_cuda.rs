@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::smma::{
     smma_batch_with_kernel, SmmaBatchRange, SmmaBuilder, SmmaParams,
 };

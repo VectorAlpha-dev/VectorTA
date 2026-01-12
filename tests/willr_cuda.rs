@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::willr::{
     willr_with_kernel, WillrBatchBuilder, WillrBatchRange, WillrBuilder, WillrInput, WillrParams,
 };
@@ -101,12 +99,11 @@ fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let rows = 2048usize;
     let period = 14usize;
 
-    
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        let fv = s.min(5); 
+        let fv = s.min(5);
         for t in fv..rows {
             let x = (t as f64) * 0.0021 + (s as f64) * 0.017;
             let base = (x).sin() + 0.0007 * (t as f64);
@@ -116,7 +113,6 @@ fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -138,7 +134,6 @@ fn willr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    
     let high_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let close_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

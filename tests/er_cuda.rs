@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::er::{
     er_batch_with_kernel, er_with_kernel, ErBatchRange, ErData, ErInput, ErParams,
 };
@@ -42,10 +40,8 @@ fn er_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = ErBatchRange { period: (5, 49, 2) };
 
-    
     let cpu = er_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
-    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaEr::new(0).expect("CudaEr::new");
     let dev = cuda.er_batch_dev(&price_f32, &sweep).expect("er_batch_dev");
@@ -55,7 +51,7 @@ fn er_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
 
-    let tol = 5e-2; 
+    let tol = 5e-2;
     for idx in 0..got.len() {
         assert!(
             approx_eq(cpu.values[idx], got[idx] as f64, tol),
@@ -74,8 +70,8 @@ fn er_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -85,7 +81,6 @@ fn er_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     }
     let period = 20usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -105,7 +100,6 @@ fn er_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         }
     }
 
-    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaEr::new(0).expect("CudaEr::new");
     let dev = cuda

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::rocr::{
     rocr_batch_with_kernel, rocr_with_kernel, RocrBatchRange, RocrData, RocrInput, RocrParams,
 };
@@ -58,7 +56,7 @@ fn rocr_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-5; 
+    let tol = 2e-5;
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -92,7 +90,6 @@ fn rocr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -122,7 +119,7 @@ fn rocr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let mut host_tm = vec![0f32; dev_tm.len()];
     dev_tm.buf.copy_to(&mut host_tm)?;
-    let tol = 2e-5; 
+    let tol = 2e-5;
     for idx in 0..host_tm.len() {
         assert!(
             approx_eq(cpu_tm[idx], host_tm[idx] as f64, tol),

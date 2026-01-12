@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::alma::{
     alma_batch_with_kernel, AlmaBatchRange, AlmaBuilder, AlmaParams,
 };
@@ -16,7 +14,9 @@ use vector_ta::cuda::moving_averages::alma_wrapper::{
 
 #[cfg(feature = "cuda")]
 fn should_force_skip_cuda() -> bool {
-    std::env::var("SKIP_CUDA_TESTS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+    std::env::var("SKIP_CUDA_TESTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
@@ -130,8 +130,6 @@ fn compare_many_series(policy: CudaAlmaPolicy, cols: usize, rows: usize, period:
         assert!(approx_eq(cpu_tm[i], host[i] as f64, atol, rtol));
     }
 }
-
-
 
 #[cfg(feature = "cuda")]
 #[test]

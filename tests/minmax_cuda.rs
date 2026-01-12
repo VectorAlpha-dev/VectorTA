@@ -1,7 +1,5 @@
-
-
 use vector_ta::indicators::minmax::{
-    minmax_batch_with_kernel, MinmaxBatchRange, MinmaxParams, MinmaxInput, minmax_with_kernel,
+    minmax_batch_with_kernel, minmax_with_kernel, MinmaxBatchRange, MinmaxInput, MinmaxParams,
 };
 
 use vector_ta::utilities::enums::Kernel;
@@ -138,7 +136,6 @@ fn minmax_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     }
     let order = 9usize;
 
-    
     let mut cpu_is_min = vec![f64::NAN; cols * rows];
     let mut cpu_is_max = vec![f64::NAN; cols * rows];
     let mut cpu_last_min = vec![f64::NAN; cols * rows];

@@ -1,29 +1,3 @@
-//! # Weighted Close Price (WCLPRICE)
-//!
-//! WCLPRICE calculates a weighted average price that gives double weight to the closing price,
-//! useful for identifying price levels with heavier emphasis on closing values.
-//!
-//! ## Parameters
-//! - None (uses high, low, and close price data)
-//!
-//! ## Returns
-//! - **`Ok(WclpriceOutput)`** containing a `Vec<f64>` of weighted close values matching input length.
-//! - **`Err(WclpriceError)`** on invalid data or mismatched input lengths.
-//!
-//! ## Developer Notes
-//! - SIMD Status: AVX2/AVX512 kernels implemented (vectorized `(h + l + 2c)/4`).
-//!   - Nightly AVX benches (100k, `-C target-cpu=native`):
-//!     - scalar: ~49 µs (single-series bench group)
-//!     - avx2: ~23.6 µs, avx512: ~23.3 µs (>5% vs scalar)
-//!   - Stable scalar-only bench (legacy group `wclprice_bench`): ~31 µs after scalar optimizations.
-//! - Scalar path optimized: branch-free NaN propagation, unrolled by 8/4, uses `mul_add`.
-//! - Streaming Performance: O(1) per element; stateless.
-//! - Decision: Streaming path uses `mul_add` and reciprocal multiplies to match scalar/SIMD rounding
-//!   and avoid division; returns `None` if any input is NaN. No fast-math beyond FMA-style `mul_add`.
-//! - Memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch.
-//! - Batch: single-row only (no params); row SIMD reuses single-series kernels.
-//! - Decision log: SIMD enabled (AVX2/AVX512); CUDA wrapper present for batch/many-series; Python interop uses CAI v3 + DLPack v1.x; numerical outputs match scalar.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaWclprice};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -37,9 +11,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
@@ -52,9 +26,6 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use std::error::Error;
 use thiserror::Error;
-
-
-
 
 #[derive(Debug, Clone)]
 pub enum WclpriceData<'a> {
@@ -74,7 +45,10 @@ pub struct WclpriceOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct WclpriceParams;
 
 impl Default for WclpriceParams {
@@ -165,7 +139,11 @@ pub enum WclpriceError {
     #[error("wclprice: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("wclprice: invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("wclprice: invalid kernel for batch mode: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("wclprice: missing candle field '{field}'")]
@@ -200,7 +178,7 @@ fn wclprice_prepare<'a>(
     let ll = low.len();
     let lc = close.len();
     let len = lh.min(ll).min(lc);
-    // Note: We compute on min(len) for compatibility, though ideally all lengths should match
+
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(WclpriceError::AllValuesNaN)?;
@@ -243,14 +221,9 @@ pub fn wclprice_with_kernel(
     Ok(WclpriceOutput { values: out })
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
-/// Writes Weighted Close Price (WCLPRICE) values into the provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (prefix through the first valid
-///   index is filled with NaN).
-/// - The output slice length must equal the effective input length
-///   (`min(high.len(), low.len(), close.len())`).
+
 pub fn wclprice_into(input: &WclpriceInput, out: &mut [f64]) -> Result<(), WclpriceError> {
     wclprice_into_slice(out, input, Kernel::Auto)
 }
@@ -263,9 +236,12 @@ pub fn wclprice_into_slice(
 ) -> Result<(), WclpriceError> {
     let (high, low, close, len, first, chosen) = wclprice_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(WclpriceError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(WclpriceError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
-    // warmup prefix
+
     if first > 0 {
         dst[..first].fill(f64::NAN);
     }
@@ -290,16 +266,12 @@ pub fn wclprice_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    // Process up to the minimum common length; callers ensure `out` is that length
     let len = high.len().min(low.len()).min(close.len());
     debug_assert_eq!(out.len(), len);
 
-    // Using arithmetic to naturally propagate NaNs avoids a branch.
-    // y = (h + l + 2c) / 4 = c*0.5 + (h + l)*0.25
     const HALF: f64 = 0.5;
     const QUARTER: f64 = 0.25;
 
-    // Manually unroll by 8 (then 4) to improve ILP and reduce loop overhead while staying safe.
     let mut i = first_valid;
     let end = len;
     while i + 8 <= end {
@@ -399,15 +371,14 @@ pub unsafe fn wclprice_avx2(
     let vquart = _mm256_set1_pd(0.25);
 
     const STEP: usize = 4;
-    // Unroll x2: process 8 doubles per iteration
+
     while i + 2 * STEP <= end {
-        // i..i+3
         let h0 = _mm256_loadu_pd(high.as_ptr().add(i));
         let l0 = _mm256_loadu_pd(low.as_ptr().add(i));
         let c0 = _mm256_loadu_pd(close.as_ptr().add(i));
         let hl0 = _mm256_add_pd(h0, l0);
         let t0 = _mm256_mul_pd(hl0, vquart);
-        // i+4..i+7
+
         let h1 = _mm256_loadu_pd(high.as_ptr().add(i + STEP));
         let l1 = _mm256_loadu_pd(low.as_ptr().add(i + STEP));
         let c1 = _mm256_loadu_pd(close.as_ptr().add(i + STEP));
@@ -422,7 +393,7 @@ pub unsafe fn wclprice_avx2(
 
         i += 2 * STEP;
     }
-    // Remainder vector
+
     while i + STEP <= end {
         let h = _mm256_loadu_pd(high.as_ptr().add(i));
         let l = _mm256_loadu_pd(low.as_ptr().add(i));
@@ -464,16 +435,14 @@ pub unsafe fn wclprice_avx512(
     let vquart = _mm512_set1_pd(0.25);
 
     const STEP: usize = 8;
-    // Unroll x2: process 16 doubles per iteration
+
     while i + 2 * STEP <= end {
-        // i..i+7
         let h0 = _mm512_loadu_pd(high.as_ptr().add(i));
         let l0 = _mm512_loadu_pd(low.as_ptr().add(i));
         let c0 = _mm512_loadu_pd(close.as_ptr().add(i));
         let hl0 = _mm512_add_pd(h0, l0);
         let t0 = _mm512_mul_pd(hl0, vquart);
 
-        // i+8..i+15
         let h1 = _mm512_loadu_pd(high.as_ptr().add(i + STEP));
         let l1 = _mm512_loadu_pd(low.as_ptr().add(i + STEP));
         let c1 = _mm512_loadu_pd(close.as_ptr().add(i + STEP));
@@ -488,7 +457,7 @@ pub unsafe fn wclprice_avx512(
 
         i += 2 * STEP;
     }
-    // Remainder vector
+
     while i + STEP <= end {
         let h = _mm512_loadu_pd(high.as_ptr().add(i));
         let l = _mm512_loadu_pd(low.as_ptr().add(i));
@@ -592,7 +561,7 @@ pub fn wclprice_row_avx512_long(
 }
 
 #[derive(Clone, Debug)]
-pub struct WclpriceBatchRange; // No parameters
+pub struct WclpriceBatchRange;
 
 impl Default for WclpriceBatchRange {
     fn default() -> Self {
@@ -702,7 +671,6 @@ pub fn wclprice_batch_inner(
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(WclpriceError::AllValuesNaN)?;
 
-    // 1 row matrix
     let mut buf_mu = make_uninit_matrix(1, len);
     init_matrix_prefixes(&mut buf_mu, len, &[first]);
 
@@ -758,14 +726,15 @@ fn wclprice_batch_inner_into(
     }
     let len = high.len().min(low.len()).min(close.len());
     if out.len() < len {
-        return Err(WclpriceError::OutputLengthMismatch { expected: len, got: out.len() });
+        return Err(WclpriceError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
     }
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(WclpriceError::AllValuesNaN)?;
 
-    // Since WCLPRICE has no parameters, we only have one row
-    // Fill the output slice with NaN up to first valid index
     if first > 0 {
         out[..first].fill(f64::NAN);
     }
@@ -794,13 +763,10 @@ impl Default for WclpriceStream {
 impl WclpriceStream {
     #[inline(always)]
     pub fn update(&mut self, h: f64, l: f64, c: f64) -> Option<f64> {
-        // Fast reject: if any input is NaN, signal missing with None.
-        // Use non-short-circuit OR to keep a single branch.
         if h.is_nan() | l.is_nan() | c.is_nan() {
             return None;
         }
-        // Match scalar/SIMD arithmetic and rounding:
-        // y = c*0.5 + (h + l)*0.25 (FMA-friendly)
+
         Some(c.mul_add(0.5, (h + l) * 0.25))
     }
 }
@@ -894,7 +860,7 @@ pub fn wclprice_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    // Alma-compatible param vectors: single row, so length-1 placeholders
+
     dict.set_item("periods", vec![0u64].into_pyarray(py))?;
     dict.set_item("offsets", vec![0.0f64].into_pyarray(py))?;
     dict.set_item("sigmas", vec![0.0f64].into_pyarray(py))?;
@@ -924,13 +890,16 @@ pub fn wclprice_cuda_dev_py(
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+        cuda.wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
             .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -954,12 +923,15 @@ pub fn wclprice_cuda_batch_dev_py(
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
+        cuda.wclprice_batch_dev(hs, ls, cs, &WclpriceBatchRange)
             .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -992,15 +964,18 @@ pub fn wclprice_cuda_many_series_one_param_dev_py(
             CudaWclprice::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .wclprice_many_series_one_param_time_major_dev(hs, ls, cs, cols, rows)
+        cuda.wclprice_many_series_one_param_time_major_dev(hs, ls, cs, cols, rows)
             .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(ctx), device_id: Some(dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wclprice_js(high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
     if high.is_empty() || low.is_empty() || close.is_empty() {
@@ -1016,7 +991,7 @@ pub fn wclprice_js(high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>,
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wclprice_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1025,7 +1000,7 @@ pub fn wclprice_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wclprice_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1035,7 +1010,7 @@ pub fn wclprice_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wclprice_into(
     high_ptr: *const f64,
@@ -1055,7 +1030,6 @@ pub fn wclprice_into(
 
         let input = WclpriceInput::from_slices(high, low, close);
 
-        // Check for aliasing with any input pointer
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             wclprice_into_slice(&mut temp, &input, detect_best_kernel())
@@ -1072,13 +1046,11 @@ pub fn wclprice_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
-pub struct WclpriceBatchConfig {
-    // intentionally empty; reserved for future
-}
+pub struct WclpriceBatchConfig {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WclpriceBatchJsOutput {
     pub values: Vec<f64>,
@@ -1087,7 +1059,7 @@ pub struct WclpriceBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = wclprice_batch)]
 pub fn wclprice_batch_unified_js(
     high: &[f64],
@@ -1109,7 +1081,7 @@ pub fn wclprice_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wclprice_batch_into(
     high_ptr: *const f64,
@@ -1127,10 +1099,8 @@ pub fn wclprice_batch_into(
         let low = std::slice::from_raw_parts(low_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        // WCLPRICE has no parameters, so only 1 row
         let rows = 1;
 
-        // Check for aliasing with any input pointer
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             wclprice_batch_inner_into(high, low, close, detect_best_kernel(), false, &mut temp)
@@ -1157,16 +1127,13 @@ mod tests {
 
     #[test]
     fn test_wclprice_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing repository CSV so inputs match other tests
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
         let input = WclpriceInput::from_candles(&candles);
 
-        // Baseline via Vec-returning API
         let WclpriceOutput { values: expected } = wclprice(&input)?;
 
-        // Preallocate output and call the new into API
         let mut out = vec![0.0f64; expected.len()];
         wclprice_into(&input, &mut out)?;
 
@@ -1175,13 +1142,7 @@ mod tests {
             let a = expected[i];
             let b = out[i];
             let equal = (a.is_nan() && b.is_nan()) || (a == b);
-            assert!(
-                equal,
-                "mismatch at {}: expected={}, got={}",
-                i,
-                a,
-                b
-            );
+            assert!(equal, "mismatch at {}: expected={}, got={}", i, a, b);
         }
         Ok(())
     }
@@ -1251,7 +1212,6 @@ mod tests {
         let input = WclpriceInput::from_candles(&candles);
         let result = wclprice_with_kernel(&input, kernel)?;
 
-        // Reference values provided by user
         let expected_last_five = [59225.5, 59212.75, 59078.5, 59150.75, 58711.25];
 
         let start = result.values.len().saturating_sub(5);
@@ -1274,22 +1234,19 @@ mod tests {
     fn check_wclprice_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Test with real candle data
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with full candle data
         let input = WclpriceInput::from_candles(&candles);
         let output = wclprice_with_kernel(&input, kernel)?;
 
         for (i, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
-                continue; // NaN values are expected during warmup
+                continue;
             }
 
             let bits = val.to_bits();
 
-            // Check all three poison patterns
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1315,9 +1272,7 @@ mod tests {
             }
         }
 
-        // Test with various slice patterns to ensure no poison in different scenarios
         let test_patterns = vec![
-            // (description, high, low, close)
             (
                 "small dataset",
                 vec![100.0, 101.0, 102.0],
@@ -1422,7 +1377,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_wclprice_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1433,15 +1388,12 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic price data with proper OHLC constraints
         let strat = (2usize..=400).prop_flat_map(|len| {
             prop::collection::vec(
-                // Generate low first, then high >= low, then close within [low, high]
-                // This ensures valid OHLC data where close is always between low and high
                 (0.0f64..1e6f64)
                     .prop_filter("finite non-negative price", |x| x.is_finite() && *x >= 0.0)
                     .prop_flat_map(|low| {
-                        (0.0f64..10000.0f64) // Allow larger spreads for more realistic volatility
+                        (0.0f64..10000.0f64)
                             .prop_filter("finite diff", |x| x.is_finite())
                             .prop_flat_map(move |high_diff| {
                                 let high = low + high_diff;
@@ -1458,7 +1410,6 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |price_data| {
-                // Extract high, low, close arrays from generated data
                 let mut high = Vec::with_capacity(price_data.len());
                 let mut low = Vec::with_capacity(price_data.len());
                 let mut close = Vec::with_capacity(price_data.len());
@@ -1469,15 +1420,12 @@ mod tests {
                     close.push(*c);
                 }
 
-                // Create input and compute output
                 let input = WclpriceInput::from_slices(&high, &low, &close);
                 let WclpriceOutput { values: out } = wclprice_with_kernel(&input, kernel)?;
 
-                // Also compute with scalar kernel for reference
                 let WclpriceOutput { values: ref_out } =
                     wclprice_with_kernel(&input, Kernel::Scalar)?;
 
-                // Verify properties for each output value
                 for i in 0..price_data.len() {
                     let h = high[i];
                     let l = low[i];
@@ -1485,8 +1433,6 @@ mod tests {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 1: Formula correctness
-                    // WCLPRICE = (high + low + 2*close) / 4
                     if h.is_finite() && l.is_finite() && c.is_finite() {
                         let expected = (h + l + 2.0 * c) / 4.0;
                         prop_assert!(
@@ -1500,7 +1446,6 @@ mod tests {
                             c
                         );
                     } else {
-                        // If any input is NaN/infinite, output should be NaN
                         prop_assert!(
                             y.is_nan(),
                             "Expected NaN at idx {} when input has non-finite values, got {}",
@@ -1509,8 +1454,6 @@ mod tests {
                         );
                     }
 
-                    // Property 2: Output bounds
-                    // WCLPRICE should be within the range of input values
                     if h.is_finite() && l.is_finite() && c.is_finite() {
                         let min_val = h.min(l).min(c);
                         let max_val = h.max(l).max(c);
@@ -1524,13 +1467,10 @@ mod tests {
                         );
                     }
 
-                    // Property 3: Kernel consistency
-                    // All kernels should produce identical results
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
                     if !y.is_finite() || !r.is_finite() {
-                        // For NaN/infinite values, bit patterns should match exactly
                         prop_assert!(
                             y_bits == r_bits,
                             "NaN/infinite mismatch at idx {}: {} vs {} (bits: {:016x} vs {:016x})",
@@ -1541,7 +1481,6 @@ mod tests {
                             r_bits
                         );
                     } else {
-                        // For finite values, allow small ULP difference
                         let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                         prop_assert!(
                             (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1553,8 +1492,6 @@ mod tests {
                         );
                     }
 
-                    // Property 4: Special cases
-                    // When all prices are equal, WCLPRICE should equal that price
                     if (h - l).abs() < f64::EPSILON && (h - c).abs() < f64::EPSILON {
                         prop_assert!(
                             (y - h).abs() <= 1e-9,
@@ -1616,16 +1553,13 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test batch processing with candle data
         let output = WclpriceBatchBuilder::new()
             .kernel(kernel)
             .apply_candles(&c)?;
 
-        // WCLPRICE has no parameters, so there's only one row
         assert_eq!(output.rows, 1);
         assert_eq!(output.cols, c.close.len());
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
                 continue;
@@ -1658,9 +1592,7 @@ mod tests {
             }
         }
 
-        
         let test_configs = vec![
-            
             (
                 "small data",
                 vec![100.0, 101.0, 102.0],
@@ -1740,7 +1672,6 @@ mod tests {
                 .kernel(kernel)
                 .apply_slices(high, low, close)?;
 
-            
             assert_eq!(
                 output.rows, 1,
                 "[{}] Config {}: Expected 1 row for WCLPRICE",
@@ -1754,7 +1685,6 @@ mod tests {
                 cfg_idx
             );
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1793,7 +1723,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {

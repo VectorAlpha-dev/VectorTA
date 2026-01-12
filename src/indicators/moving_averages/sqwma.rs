@@ -1,34 +1,9 @@
-//! # Square Weighted Moving Average (SQWMA)
-//!
-//! A specialized moving average that applies squared weights to recent data
-//! points. Uses `period - 1` data points with weights from `period^2` down to `2^2`.
-//! The most recent value receives `(period)^2` weight, and each preceding value's
-//! weight decreases quadratically. This approach enhances sensitivity to current
-//! price changes while still smoothing out older noise.
-//!
-//! ## Parameters
-//! - **period**: Defines the weight range; uses `period - 1` data points (must be ≥ 2).
-//!
-//! ## Returns
-//! - **`Ok(SqwmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(SqwmaError)`** otherwise.
-//!
-//! ## Developer Status
-//! - Scalar kernel: Reference O(p) weighted sum for batch path (strict tests preserved).
-//! - Batch row kernel: O(1) per-step via exact sliding recurrence; periodic rebase every 64 steps.
-//! - AVX2/AVX512: Stubs delegate to scalar/batch (memory-bound; minimal wins expected).
-//! - Streaming update: O(p) per update to match the scalar dot-product path exactly (tests require
-//!   near bit-for-bit equality). The O(1) recurrence state is retained, but we rebase from the ring
-//!   every step to produce identical outputs.
-//! - Memory: GOOD — constant ring buffer; no per-tick allocations; no per-tick Vec growth.
-// Decision log: SIMD present but selects scalar for parity; CUDA wrappers provided for FP32 with JIT PTX; outputs match scalar reference; no change to unit references.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaSqwma;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::{DeviceArrayF32Py, make_device_array_py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -37,9 +12,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyAny, PyDict, PyList};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -82,7 +57,10 @@ pub struct SqwmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SqwmaParams {
     pub period: Option<usize>,
 }
@@ -198,7 +176,11 @@ pub enum SqwmaError {
     #[error("sqwma: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("sqwma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("sqwma: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("sqwma: arithmetic overflow when computing {what}")]
@@ -236,13 +218,12 @@ pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutp
             valid: len - first,
         });
     }
-    
+
     let mut weights: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, period - 1);
     for i in 0..(period - 1) {
         weights.push((period as f64 - i as f64).powi(2));
     }
     let weight_sum: f64 = weights.iter().sum();
-    
 
     let warm = first + period + 1;
     let mut out = alloc_with_nan_prefix(len, warm);
@@ -272,7 +253,7 @@ pub fn sqwma_with_kernel(input: &SqwmaInput, kernel: Kernel) -> Result<SqwmaOutp
 #[inline]
 pub fn sqwma_scalar(
     data: &[f64],
-    weights: &[f64], 
+    weights: &[f64],
     period: usize,
     first: usize,
     weight_sum: f64,
@@ -375,13 +356,8 @@ pub unsafe fn sqwma_avx512_long(
     sqwma_scalar(data, weights, period, first, weight_sum, out)
 }
 
-
-
-
-
 #[derive(Clone, Debug)]
 pub struct SqwmaStream {
-    
     period: usize,
     weights: Vec<f64>,
     weight_sum: f64,
@@ -391,17 +367,14 @@ pub struct SqwmaStream {
     pm1f: f64,
     c1: f64,
 
-    
     ring: Vec<f64>,
     tail: usize,
     len: usize,
 
-    
     a_sum: f64,
     b_sum: f64,
     r_acc: f64,
 
-    
     count: usize,
     seeded: bool,
     rebase_ctr: usize,
@@ -417,7 +390,6 @@ impl SqwmaStream {
             });
         }
 
-        
         let mut weights = Vec::with_capacity(period - 1);
         for i in 0..(period - 1) {
             weights.push((period as f64 - i as f64).powi(2));
@@ -452,7 +424,6 @@ impl SqwmaStream {
 
     #[inline(always)]
     fn ring_push(&mut self, x: f64) -> Option<f64> {
-        
         if self.len < self.period {
             let pos = (self.tail + self.len) % self.period;
             self.ring[pos] = x;
@@ -472,11 +443,10 @@ impl SqwmaStream {
 
     #[inline(always)]
     fn rebase_from_ring(&mut self) {
-        
         debug_assert!(self.len == self.period);
 
         let p = self.period;
-        let m_len = p - 1; 
+        let m_len = p - 1;
         let mut a = 0.0;
         let mut b = 0.0;
         let mut r = 0.0;
@@ -525,16 +495,12 @@ impl SqwmaStream {
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.count = self.count.wrapping_add(1);
 
-        
         let x_out_opt = self.ring_push(value);
 
-        
-        
         if self.count < (self.period + 2) {
             return None;
         }
 
-        
         if !self.seeded {
             debug_assert!(self.len == self.period);
             self.rebase_from_ring();
@@ -543,25 +509,19 @@ impl SqwmaStream {
             return Some(self.r_acc * self.inv_weight_sum);
         }
 
-        
-        
-        
         let x_out = self.ring[self.tail];
         let mut r = self.r_acc;
-        r = self.p2.mul_add(value, r); 
-        r = (2.0_f64).mul_add(self.b_sum, r); 
-        r = self.c1.mul_add(self.a_sum, r); 
-        r -= x_out; 
+        r = self.p2.mul_add(value, r);
+        r = (2.0_f64).mul_add(self.b_sum, r);
+        r = self.c1.mul_add(self.a_sum, r);
+        r -= x_out;
         self.r_acc = r;
 
-        
         let a_prev = self.a_sum;
         self.a_sum = a_prev + value - x_out;
         self.b_sum = self.b_sum + a_prev - self.pm1f * x_out;
 
-        
-        
-        const REBASE_MASK: usize = 0; 
+        const REBASE_MASK: usize = 0;
         self.rebase_ctr = self.rebase_ctr.wrapping_add(1);
         if (self.rebase_ctr & REBASE_MASK) == 0 {
             self.rebase_from_ring();
@@ -685,7 +645,7 @@ fn expand_grid(r: &SqwmaBatchRange) -> Result<Vec<SqwmaParams>, SqwmaError> {
             }
             return Ok(v);
         }
-        
+
         if step == 0 {
             return Ok(vec![start]);
         }
@@ -693,11 +653,19 @@ fn expand_grid(r: &SqwmaBatchRange) -> Result<Vec<SqwmaParams>, SqwmaError> {
         let mut cur = start;
         loop {
             v.push(cur);
-            if cur == end { break; }
-            cur = cur.checked_sub(step).ok_or(SqwmaError::InvalidRange { start, end, step })?;
-            if cur < end { break; }
+            if cur == end {
+                break;
+            }
+            cur = cur
+                .checked_sub(step)
+                .ok_or(SqwmaError::InvalidRange { start, end, step })?;
+            if cur < end {
+                break;
+            }
         }
-        if v.is_empty() { return Err(SqwmaError::InvalidRange { start, end, step }); }
+        if v.is_empty() {
+            return Err(SqwmaError::InvalidRange { start, end, step });
+        }
         Ok(v)
     }
     let periods = axis_usize(r.period)?;
@@ -716,7 +684,9 @@ fn sqwma_build_flat_weights(
     let rows = combos.len();
     let cap = rows
         .checked_mul(max_p)
-        .ok_or(SqwmaError::ArithmeticOverflow { what: "rows * max_p (weights)" })?;
+        .ok_or(SqwmaError::ArithmeticOverflow {
+            what: "rows * max_p (weights)",
+        })?;
     let mut flat_w = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cap);
     flat_w.resize(cap, 0.0);
     let mut sums = vec![0.0; rows];
@@ -830,30 +800,27 @@ fn sqwma_batch_inner(
         });
     }
     let rows = combos.len();
-    
+
     let _elems = rows
         .checked_mul(cols)
-        .ok_or(SqwmaError::ArithmeticOverflow { what: "rows * cols (batch output)" })?;
+        .ok_or(SqwmaError::ArithmeticOverflow {
+            what: "rows * cols (batch output)",
+        })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| (first + c.period.unwrap() + 1).min(cols))
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     sqwma_batch_inner_into(data, &combos, kern, first, max_p, parallel, out)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -875,8 +842,8 @@ unsafe fn sqwma_row_scalar(
     data: &[f64],
     first: usize,
     period: usize,
-    p_minus_1: usize,  
-    w_ptr: *const f64, 
+    p_minus_1: usize,
+    w_ptr: *const f64,
     w_sum: f64,
     out: &mut [f64],
 ) {
@@ -898,10 +865,9 @@ unsafe fn sqwma_row_scalar(
     let inv_ws = 1.0 / w_sum;
     let p_f = p as f64;
     let p2 = p_f * p_f;
-    let c1 = 1.0 - 2.0 * p_f; 
+    let c1 = 1.0 - 2.0 * p_f;
     let pm1f = (p - 1) as f64;
 
-    
     let mut a_sum = 0.0;
     let mut b_sum = 0.0;
     let mut r_acc = 0.0;
@@ -946,7 +912,6 @@ unsafe fn sqwma_row_scalar(
 
     *out.get_unchecked_mut(j0) = r_acc * inv_ws;
 
-    
     let mut j = j0 + 1;
     let mut iter_since_rebase = 0usize;
     const REBASE_MASK: usize = (1usize << 6) - 1;
@@ -1256,7 +1221,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_sqwma_no_poison(
         test_name: &str,
@@ -1267,19 +1231,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        let test_periods = vec![
-            2,   
-            5,   
-            14,  
-            30,  
-            50,  
-            100, 
-            200, 
-        ];
+        let test_periods = vec![2, 5, 14, 30, 50, 100, 200];
 
         for &period in &test_periods {
-            
             if period > candles.close.len() {
                 continue;
             }
@@ -1293,16 +1247,13 @@ mod tests {
             );
             let output = sqwma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1310,7 +1261,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1318,7 +1268,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1331,7 +1280,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_sqwma_no_poison(
         _test_name: &str,
@@ -1348,25 +1296,21 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let close_data = &candles.close;
 
-        
-        
         let strat = (
-            2usize..=50,                                  
-            0usize..close_data.len().saturating_sub(200), 
-            100usize..=200,                               
+            2usize..=50,
+            0usize..close_data.len().saturating_sub(200),
+            100usize..=200,
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(period, start_idx, slice_len)| {
-                
                 let end_idx = (start_idx + slice_len).min(close_data.len());
                 if end_idx <= start_idx || end_idx - start_idx < period + 10 {
-                    return Ok(()); 
+                    return Ok(());
                 }
 
                 let data_slice = &close_data[start_idx..end_idx];
@@ -1375,24 +1319,18 @@ mod tests {
                 };
                 let input = SqwmaInput::from_slice(data_slice, params.clone());
 
-                
                 let result = sqwma_with_kernel(&input, kernel);
 
-                
                 let scalar_result = sqwma_with_kernel(&input, Kernel::Scalar);
 
-                
                 match (result, scalar_result) {
                     (Ok(SqwmaOutput { values: out }), Ok(SqwmaOutput { values: ref_out })) => {
-                        
                         prop_assert_eq!(out.len(), data_slice.len());
                         prop_assert_eq!(ref_out.len(), data_slice.len());
 
-                        
                         let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
-                        let expected_warmup = first + period + 1; 
+                        let expected_warmup = first + period + 1;
 
-                        
                         for i in 0..expected_warmup.min(out.len()) {
                             prop_assert!(
                                 out[i].is_nan(),
@@ -1402,15 +1340,12 @@ mod tests {
                             );
                         }
 
-                        
-                        
                         let mut weights = Vec::with_capacity(period - 1);
                         for i in 0..(period - 1) {
                             weights.push((period as f64 - i as f64).powi(2));
                         }
                         let weight_sum: f64 = weights.iter().sum();
 
-                        
                         for i in 0..(period - 1) {
                             let expected_weight = (period as f64 - i as f64).powi(2);
                             prop_assert!(
@@ -1422,23 +1357,19 @@ mod tests {
                             );
                         }
 
-                        
                         prop_assert!(
                             weight_sum > 0.0,
                             "Weight sum should be positive: {}",
                             weight_sum
                         );
 
-                        
                         for i in expected_warmup..out.len() {
                             let y = out[i];
                             let r = ref_out[i];
 
-                            
                             prop_assert!(!y.is_nan(), "Unexpected NaN at index {}", i);
                             prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
 
-                            
                             let y_bits = y.to_bits();
                             let r_bits = r.to_bits();
 
@@ -1454,7 +1385,6 @@ mod tests {
                                 continue;
                             }
 
-                            
                             let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                             prop_assert!(
                                 (y - r).abs() <= 1e-9 || ulp_diff <= 5,
@@ -1465,17 +1395,14 @@ mod tests {
                                 ulp_diff
                             );
 
-                            
-                            
                             if i >= period - 1 {
-                                let window_start = i - (period - 2); 
-                                let window_end = i + 1; 
+                                let window_start = i - (period - 2);
+                                let window_end = i + 1;
                                 let window = &data_slice[window_start..window_end];
                                 let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
                                 let max_val =
                                     window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-                                
                                 prop_assert!(
                                     y >= min_val - 1e-9 && y <= max_val + 1e-9,
                                     "SQWMA value {} outside window bounds [{}, {}] at index {}",
@@ -1487,14 +1414,12 @@ mod tests {
                             }
                         }
 
-                        
                         let const_data = vec![42.0; period + 10];
                         let const_input = SqwmaInput::from_slice(&const_data, params.clone());
                         if let Ok(SqwmaOutput { values: const_out }) =
                             sqwma_with_kernel(&const_input, kernel)
                         {
-                            
-                            let const_warmup = period + 1; 
+                            let const_warmup = period + 1;
                             for (i, &val) in const_out.iter().enumerate() {
                                 if i >= const_warmup && !val.is_nan() {
                                     prop_assert!(
@@ -1506,7 +1431,6 @@ mod tests {
                             }
                         }
 
-                        
                         if period > 2 {
                             for i in 1..(period - 1) {
                                 let ratio = weights[i] / weights[i - 1];
@@ -1524,7 +1448,6 @@ mod tests {
                         }
                     }
                     (Err(e1), Err(e2)) => {
-                        
                         prop_assert_eq!(
                             std::mem::discriminant(&e1),
                             std::mem::discriminant(&e2),
@@ -1616,7 +1539,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1624,18 +1546,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            (2, 10, 1),    
-            (5, 20, 5),    
-            (10, 30, 10),  
-            (14, 100, 7),  
-            (50, 200, 50), 
-            (2, 5, 1),     
+            (2, 10, 1),
+            (5, 20, 5),
+            (10, 30, 10),
+            (14, 100, 7),
+            (50, 200, 50),
+            (2, 5, 1),
         ];
 
         for (start, end, step) in batch_configs {
-            
             if start > c.close.len() {
                 continue;
             }
@@ -1645,9 +1565,7 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1657,7 +1575,6 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap_or(0);
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1665,7 +1582,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1673,7 +1589,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1686,7 +1601,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1700,7 +1614,6 @@ mod tests {
 
     #[test]
     fn test_sqwma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 256usize;
         let mut data = vec![f64::NAN; 3];
         for i in 3..len {
@@ -1708,13 +1621,10 @@ mod tests {
             data.push((x * 0.017).sin() * 10.0 + (x * 0.013).cos() * 3.0 + (i % 7) as f64);
         }
 
-        
         let input = SqwmaInput::from_slice(&data, SqwmaParams::default());
 
-        
         let baseline = sqwma(&input)?.values;
 
-        
         let mut out = vec![0.0; len];
         sqwma_into(&input, &mut out)?;
 
@@ -1741,31 +1651,7 @@ mod tests {
 #[cfg(feature = "python")]
 #[pyfunction(name = "sqwma")]
 #[pyo3(signature = (data, period, kernel=None))]
-/// Compute the Square Weighted Moving Average (SQWMA) of the input data.
-///
-/// SQWMA applies squared weights to recent data points, with the most recent
-/// value receiving (period)^2 weight, and each preceding value's weight
-/// decreasing quadratically.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Window size (number of data points, must be >= 2).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of SQWMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period < 2, period > data length, etc).
+
 pub fn sqwma_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1776,19 +1662,17 @@ pub fn sqwma_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?; // Validate before allow_threads
+    let kern = validate_kernel(kernel, false)?;
 
     let params = SqwmaParams {
         period: Some(period),
     };
     let sqwma_in = SqwmaInput::from_slice(slice_in, params);
 
-    // GOOD: Get Vec<f64> from Rust function
     let result_vec: Vec<f64> = py
         .allow_threads(|| sqwma_with_kernel(&sqwma_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // GOOD: Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1811,8 +1695,6 @@ impl SqwmaStreamPy {
         Ok(SqwmaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated SQWMA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -1821,22 +1703,7 @@ impl SqwmaStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "sqwma_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
-/// Compute SQWMA for multiple parameter combinations in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'periods' arrays.
+
 pub fn sqwma_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1863,7 +1730,6 @@ pub fn sqwma_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     py.allow_threads(|| {
-        // Warm prefixes in the Python buffer
         let first = slice_in
             .iter()
             .position(|x| !x.is_nan())
@@ -1875,7 +1741,7 @@ pub fn sqwma_batch_py<'py>(
                 valid: slice_in.len() - first,
             });
         }
-        // Init NaN prefixes
+
         let warm: Vec<usize> = combos
             .iter()
             .map(|c| (first + c.period.unwrap() + 1).min(cols))
@@ -1925,8 +1791,7 @@ pub fn sqwma_cuda_batch_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaSqwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .sqwma_batch_dev(slice_in, &sweep)
+        cuda.sqwma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -1954,15 +1819,14 @@ pub fn sqwma_cuda_many_series_one_param_dev_py(
 
     let inner = py.allow_threads(|| {
         let cuda = CudaSqwma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .sqwma_many_series_one_param_time_major_dev(flat, cols, rows, period)
+        cuda.sqwma_many_series_one_param_time_major_dev(flat, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
     Ok(make_device_array_py(device_id, inner)?)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SqwmaParams {
@@ -1970,17 +1834,15 @@ pub fn sqwma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = SqwmaInput::from_slice(data, params);
 
-    // Allocate output buffer once
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
     sqwma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_batch_js(
     data: &[f64],
@@ -1992,13 +1854,12 @@ pub fn sqwma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     sqwma_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_batch_metadata_js(
     period_start: usize,
@@ -2015,9 +1876,6 @@ pub fn sqwma_batch_metadata_js(
     Ok(periods)
 }
 
-// ================== Optimized WASM Helper Functions ==================
-
-/// Write directly to output slice - no allocations
 pub fn sqwma_into_slice(
     dst: &mut [f64],
     input: &SqwmaInput,
@@ -2033,7 +1891,10 @@ pub fn sqwma_into_slice(
     let period = input.params.period.unwrap_or(14);
 
     if dst.len() != data.len() {
-        return Err(SqwmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(SqwmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     if period < 2 || period > data.len() {
@@ -2055,21 +1916,18 @@ pub fn sqwma_into_slice(
         });
     }
 
-    // Build weights
     let mut weights = Vec::with_capacity(period - 1);
     for i in 0..(period - 1) {
         weights.push((period as f64 - i as f64).powi(2));
     }
     let weight_sum: f64 = weights.iter().sum();
 
-    // Fill warmup with NaN
     let warmup = first + period + 1;
     let warmup_end = warmup.min(dst.len());
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
     }
 
-    // Compute SQWMA
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         other => other,
@@ -2095,34 +1953,24 @@ pub fn sqwma_into_slice(
     Ok(())
 }
 
-/// Write SQWMA results into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API does.
-/// - `out.len()` must equal the input length; returns the module's existing
-///   `InvalidPeriod/length` error on mismatch.
-/// - Uses `Kernel::Auto` for dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn sqwma_into(input: &SqwmaInput, out: &mut [f64]) -> Result<(), SqwmaError> {
     sqwma_into_slice(out, input, Kernel::Auto)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2130,7 +1978,7 @@ pub fn sqwma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_into(
     in_ptr: *const f64,
@@ -2138,38 +1986,30 @@ pub fn sqwma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        
         if period < 2 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        
         let params = SqwmaParams {
             period: Some(period),
         };
         let input = SqwmaInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             sqwma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             sqwma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2179,15 +2019,13 @@ pub fn sqwma_into(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SqwmaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SqwmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2196,7 +2034,7 @@ pub struct SqwmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = sqwma_batch)]
 pub fn sqwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: SqwmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2220,7 +2058,7 @@ pub fn sqwma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sqwma_batch_into(
     in_ptr: *const f64,
@@ -2259,7 +2097,6 @@ pub fn sqwma_batch_into(
             return Err(JsValue::from_str("Not enough valid data"));
         }
 
-        
         let warm: Vec<usize> = combos
             .iter()
             .map(|c| (first + c.period.unwrap() + 1).min(cols))
@@ -2268,7 +2105,6 @@ pub fn sqwma_batch_into(
             std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
         init_matrix_prefixes(mu, cols, &warm);
 
-        
         sqwma_batch_inner_into(data, &combos, Kernel::Auto, first, max_p, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

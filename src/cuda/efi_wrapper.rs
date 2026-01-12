@@ -1,15 +1,6 @@
-//! CUDA support for Elder's Force Index (EFI)
-//!
-//! Matches ALMA wrapper parity: policy enums, NON_BLOCKING stream, PTX
-//! load with DetermineTargetFromContext + OptLevel O2 (with fallbacks),
-//! VRAM checks, and simple batch/many-series entry points.
-//!
-//! Math pattern: recurrence/IIR (EMA over price-diff × volume). We compute
-//! per-step `diff = (p[t] - p[t-1]) * v[t]` and apply `prev = prev + alpha*(diff-prev)`.
-
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32; // Reuse common VRAM handle
+use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::efi::{EfiBatchRange, EfiParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -32,20 +23,29 @@ pub enum CudaEfiError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
-// -------- Policies (knobs kept simple; IIR scan is sequential) --------
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum BatchKernelPolicy {
@@ -137,20 +137,27 @@ impl CudaEfi {
     }
 
     #[inline]
-    pub fn synchronize(&self) -> Result<(), CudaEfiError> { self.stream.synchronize().map_err(Into::into) }
+    pub fn synchronize(&self) -> Result<(), CudaEfiError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
 
     #[inline]
     fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaEfiError> {
         let (gx, gy, gz) = (grid.x, grid.y, grid.z);
         let (bx, by, bz) = (block.x, block.y, block.z);
         let threads = (bx as u64) * (by as u64) * (bz as u64);
-        if threads > 1024 { // conservative default limit
-            return Err(CudaEfiError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        if threads > 1024 {
+            return Err(CudaEfiError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
-
-    // ---------- Public device entry points ----------
 
     pub fn efi_batch_dev(
         &self,
@@ -160,7 +167,6 @@ impl CudaEfi {
     ) -> Result<DeviceArrayF32, CudaEfiError> {
         let mut prepared = Self::prepare_batch_inputs(prices_f32, volumes_f32, sweep)?;
 
-        // Build diffs directly into pinned host memory (faster HtoD)
         let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(prepared.series_len) }
             .map_err(CudaEfiError::Cuda)?;
         {
@@ -176,7 +182,6 @@ impl CudaEfi {
             }
         }
 
-        // VRAM estimate + async copies (checked to avoid overflow)
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -216,16 +221,21 @@ impl CudaEfi {
                 .async_copy_from(h_diffs.as_slice(), &self.stream)
                 .map_err(CudaEfiError::Cuda)?;
         }
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream).map_err(CudaEfiError::Cuda)? };
-        let d_alphas = unsafe { DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream).map_err(CudaEfiError::Cuda)? };
+        let d_periods = unsafe {
+            DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)
+                .map_err(CudaEfiError::Cuda)?
+        };
+        let d_alphas = unsafe {
+            DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)
+                .map_err(CudaEfiError::Cuda)?
+        };
         let out_len = prepared
             .combos
             .len()
             .checked_mul(prepared.series_len)
             .ok_or_else(|| CudaEfiError::InvalidInput("output elements overflow".into()))?;
         let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(out_len, &self.stream)
-                .map_err(CudaEfiError::Cuda)?
+            DeviceBuffer::uninitialized_async(out_len, &self.stream).map_err(CudaEfiError::Cuda)?
         };
 
         self.launch_batch_kernel_with_diffs(
@@ -240,7 +250,11 @@ impl CudaEfi {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: prepared.combos.len(), cols: prepared.series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: prepared.combos.len(),
+            cols: prepared.series_len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -265,9 +279,24 @@ impl CudaEfi {
                 "period/alpha buffers must match n_combos".into(),
             ));
         }
-        if let Some(exp) = n_combos.checked_mul(series_len) { if d_out.len() != exp { return Err(CudaEfiError::InvalidInput("output length mismatch".into())); } } else { return Err(CudaEfiError::InvalidInput("rows*cols overflow".into())); }
-        // Ensure current device matches wrapper device
-        unsafe { let mut cur: i32 = 0; let _ = cust::sys::cuCtxGetDevice(&mut cur); if cur as u32 != self.device_id { return Err(CudaEfiError::DeviceMismatch { buf: self.device_id, current: cur as u32 }); } }
+        if let Some(exp) = n_combos.checked_mul(series_len) {
+            if d_out.len() != exp {
+                return Err(CudaEfiError::InvalidInput("output length mismatch".into()));
+            }
+        } else {
+            return Err(CudaEfiError::InvalidInput("rows*cols overflow".into()));
+        }
+
+        unsafe {
+            let mut cur: i32 = 0;
+            let _ = cust::sys::cuCtxGetDevice(&mut cur);
+            if cur as u32 != self.device_id {
+                return Err(CudaEfiError::DeviceMismatch {
+                    buf: self.device_id,
+                    current: cur as u32,
+                });
+            }
+        }
         self.launch_batch_kernel(
             d_prices, d_volumes, d_periods, d_alphas, series_len, warm, n_combos, d_out,
         )
@@ -339,10 +368,12 @@ impl CudaEfi {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+        })
     }
-
-    // ---------- Kernel launches ----------
 
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
@@ -356,12 +387,12 @@ impl CudaEfi {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEfiError> {
-        let func = self
-            .module
-            .get_function("efi_batch_f32")
-            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_batch_f32" })?;
+        let func = self.module.get_function("efi_batch_f32").map_err(|_| {
+            CudaEfiError::MissingKernelSymbol {
+                name: "efi_batch_f32",
+            }
+        })?;
 
-        // Policy: 1 block per combo; thread 0 does the scan
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
             BatchKernelPolicy::Auto => 128,
@@ -395,8 +426,6 @@ impl CudaEfi {
         Ok(())
     }
 
-    /// Fast path for one price series × many params with time‑major output.
-    /// Returns DeviceArrayF32 with rows=series_len, cols=n_combos.
     pub fn efi_batch_time_major_dev(
         &self,
         prices_f32: &[f32],
@@ -406,8 +435,8 @@ impl CudaEfi {
         let mut prepared = Self::prepare_batch_inputs(prices_f32, volumes_f32, sweep)?;
         let n = prepared.series_len;
 
-        // Build diffs into pinned host buffer
-        let mut h_diffs = unsafe { LockedBuffer::<f32>::uninitialized(n) }.map_err(CudaEfiError::Cuda)?;
+        let mut h_diffs =
+            unsafe { LockedBuffer::<f32>::uninitialized(n) }.map_err(CudaEfiError::Cuda)?;
         {
             let diffs = unsafe { h_diffs.as_mut_slice() };
             diffs.fill(f32::NAN);
@@ -421,7 +450,6 @@ impl CudaEfi {
             }
         }
 
-        // VRAM estimate (checked)
         let params_bytes_periods = prepared
             .periods_i32
             .len()
@@ -450,14 +478,18 @@ impl CudaEfi {
             .ok_or_else(|| CudaEfiError::InvalidInput("total VRAM size overflow".into()))?;
         Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
-        // Upload
         let mut d_diffs: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n, &self.stream).map_err(CudaEfiError::Cuda)?
         };
         unsafe {
-            d_diffs.async_copy_from(h_diffs.as_slice(), &self.stream).map_err(CudaEfiError::Cuda)?;
+            d_diffs
+                .async_copy_from(h_diffs.as_slice(), &self.stream)
+                .map_err(CudaEfiError::Cuda)?;
         }
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream).map_err(CudaEfiError::Cuda)? };
+        let d_periods = unsafe {
+            DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream)
+                .map_err(CudaEfiError::Cuda)?
+        };
         let d_alphas = unsafe {
             DeviceBuffer::from_slice_async(&prepared.alphas_f32, &self.stream)
                 .map_err(CudaEfiError::Cuda)?
@@ -479,7 +511,11 @@ impl CudaEfi {
 
         self.stream.synchronize().map_err(CudaEfiError::Cuda)?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: prepared.combos.len() })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n,
+            cols: prepared.combos.len(),
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -496,9 +532,14 @@ impl CudaEfi {
         let func = self
             .module
             .get_function("efi_one_series_many_params_from_diff_tm_f32")
-            .or_else(|_| self.module.get_function("efi_one_series_many_params_from_diff_rm_f32"))
+            .or_else(|_| {
+                self.module
+                    .get_function("efi_one_series_many_params_from_diff_rm_f32")
+            })
             .or_else(|_| self.module.get_function("efi_batch_from_diff_f32"))
-            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_batch_from_diff_f32" })?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol {
+                name: "efi_batch_from_diff_f32",
+            })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -523,7 +564,10 @@ impl CudaEfi {
             )
             .map_err(CudaEfiError::Cuda)?;
         }
-        unsafe { (*(self as *const _ as *mut CudaEfi)).last_batch = Some(BatchKernelSelected::Plain { block_x }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaEfi)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
         self.maybe_log_batch_debug();
         Ok(())
     }
@@ -538,12 +582,13 @@ impl CudaEfi {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEfiError> {
-        // Prefer optimized row-major kernel; fall back to legacy symbol
         let func = self
             .module
             .get_function("efi_one_series_many_params_from_diff_rm_f32")
             .or_else(|_| self.module.get_function("efi_batch_from_diff_f32"))
-            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_batch_from_diff_f32" })?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol {
+                name: "efi_batch_from_diff_f32",
+            })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -592,13 +637,15 @@ impl CudaEfi {
         let func = self
             .module
             .get_function("efi_many_series_one_param_f32")
-            .map_err(|_| CudaEfiError::MissingKernelSymbol { name: "efi_many_series_one_param_f32" })?;
+            .map_err(|_| CudaEfiError::MissingKernelSymbol {
+                name: "efi_many_series_one_param_f32",
+            })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
             ManySeriesKernelPolicy::Auto => 256,
         };
-        // One thread per series across grid
+
         let grid_x = ((num_series + block_x as usize - 1) / block_x as usize) as u32;
         let grid = GridSize::x(grid_x);
         let block = BlockSize::x(block_x);
@@ -628,8 +675,6 @@ impl CudaEfi {
         Ok(())
     }
 
-    // ---------- Prep helpers ----------
-
     fn prepare_batch_inputs(
         prices_f32: &[f32],
         volumes_f32: &[f32],
@@ -642,7 +687,7 @@ impl CudaEfi {
         }
         let series_len = prices_f32.len();
         let mut warm = None;
-        // find first index t >= 1 where p[t], p[t-1], v[t] are finite
+
         for t in 1..series_len {
             if prices_f32[t].is_finite()
                 && prices_f32[t - 1].is_finite()
@@ -693,9 +738,7 @@ impl CudaEfi {
         let expected = num_series
             .checked_mul(series_len)
             .ok_or_else(|| CudaEfiError::InvalidInput("num_series*series_len overflow".into()))?;
-        if prices_tm_f32.len() != volumes_tm_f32.len()
-            || prices_tm_f32.len() != expected
-        {
+        if prices_tm_f32.len() != volumes_tm_f32.len() || prices_tm_f32.len() != expected {
             return Err(CudaEfiError::InvalidInput(
                 "time-major price/volume length mismatch".into(),
             ));
@@ -707,7 +750,6 @@ impl CudaEfi {
         }
         let alpha = 2.0f32 / (period as f32 + 1.0f32);
 
-        // Build first_valid_diff per series
         let mut first_valids_diff = vec![0i32; num_series];
         for s in 0..num_series {
             let mut found = None;
@@ -734,7 +776,6 @@ impl CudaEfi {
         })
     }
 
-    // ---------- VRAM helpers ----------
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -743,17 +784,27 @@ impl CudaEfi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEfiError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaEfiError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaEfiError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
@@ -810,12 +861,37 @@ struct PreparedEfiManySeries {
 
 fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
     fn axis_u((s, e, st): (usize, usize, usize)) -> Vec<usize> {
-        if st == 0 || s == e { return vec![s]; }
+        if st == 0 || s == e {
+            return vec![s];
+        }
         let mut v = Vec::new();
         if s < e {
-            let mut x = s; while x <= e { v.push(x); match x.checked_add(st) { Some(n) => { if n == x { break; } x = n; }, None => break } }
+            let mut x = s;
+            while x <= e {
+                v.push(x);
+                match x.checked_add(st) {
+                    Some(n) => {
+                        if n == x {
+                            break;
+                        }
+                        x = n;
+                    }
+                    None => break,
+                }
+            }
         } else {
-            let mut x = s; loop { v.push(x); if x <= e { break; } let n = x.saturating_sub(st); if n == x { break; } x = n; }
+            let mut x = s;
+            loop {
+                v.push(x);
+                if x <= e {
+                    break;
+                }
+                let n = x.saturating_sub(st);
+                if n == x {
+                    break;
+                }
+                x = n;
+            }
         }
         v
     }
@@ -836,8 +912,7 @@ pub mod benches {
 
     fn bytes_batch() -> usize {
         let diffs_bytes = BATCH_LEN * std::mem::size_of::<f32>();
-        let params_bytes =
-            BATCH_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
+        let params_bytes = BATCH_SWEEP * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = BATCH_LEN * BATCH_SWEEP * std::mem::size_of::<f32>();
         diffs_bytes + params_bytes + out_bytes + 32 * 1024 * 1024
     }
@@ -892,8 +967,7 @@ pub mod benches {
             period: (8, 8 + BATCH_SWEEP - 1, 1),
         };
 
-        let prepared =
-            CudaEfi::prepare_batch_inputs(&prices, &volumes, &sweep).expect("efi prep");
+        let prepared = CudaEfi::prepare_batch_inputs(&prices, &volumes, &sweep).expect("efi prep");
 
         let mut diffs = vec![f32::NAN; prepared.series_len];
         for t in prepared.warm..prepared.series_len {
@@ -970,9 +1044,8 @@ pub mod benches {
             }
         }
         let prm = EfiParams { period: Some(13) };
-        let prepared =
-            CudaEfi::prepare_many_series_inputs(&tm_p, &tm_v, cols, rows, &prm)
-                .expect("efi prep many");
+        let prepared = CudaEfi::prepare_many_series_inputs(&tm_p, &tm_v, cols, rows, &prm)
+            .expect("efi prep many");
 
         let d_prices_tm = DeviceBuffer::from_slice(&tm_p).expect("d_prices_tm");
         let d_volumes_tm = DeviceBuffer::from_slice(&tm_v).expect("d_volumes_tm");
@@ -1021,100 +1094,103 @@ pub mod benches {
 
 #[cfg(any())]
 
-// ---------- Benches ----------
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
-        // Batch: one-series × many-params
-        v.push(CudaBenchScenario::new(
-            "efi",
-            "one_series_many_params",
-            "efi_cuda_batch_dev",
-            "100k_x_64",
-            || {
-                struct State {
-                    cuda: CudaEfi,
-                    prices: Vec<f32>,
-                    volumes: Vec<f32>,
-                    sweep: EfiBatchRange,
-                }
-                impl CudaBenchState for State {
-                    fn launch(&mut self) {
-                        let _ = self
-                            .cuda
-                            .efi_batch_dev(&self.prices, &self.volumes, &self.sweep);
+
+        v.push(
+            CudaBenchScenario::new(
+                "efi",
+                "one_series_many_params",
+                "efi_cuda_batch_dev",
+                "100k_x_64",
+                || {
+                    struct State {
+                        cuda: CudaEfi,
+                        prices: Vec<f32>,
+                        volumes: Vec<f32>,
+                        sweep: EfiBatchRange,
                     }
-                }
-                let n = 100_000usize;
-                let mut p = vec![f32::NAN; n];
-                let mut vv = vec![f32::NAN; n];
-                for i in 1..n {
-                    let x = i as f32;
-                    p[i] = (x * 0.00123).sin() + 0.00017 * x;
-                    vv[i] = (x * 0.00077).cos().abs() + 0.5;
-                }
-                let sweep = EfiBatchRange {
-                    period: (8, 8 + 63, 1),
-                };
-                let cuda = CudaEfi::new(0).unwrap();
-                Box::new(State {
-                    cuda,
-                    prices: p,
-                    volumes: vv,
-                    sweep,
-                })
-            },
-        )
-        .with_sample_size(10));
-        // Many-series × one-param
-        v.push(CudaBenchScenario::new(
-            "efi",
-            "many_series_one_param",
-            "efi_cuda_many_series_one_param_dev",
-            "64x4096",
-            || {
-                struct State {
-                    cuda: CudaEfi,
-                    tm_p: Vec<f32>,
-                    tm_v: Vec<f32>,
-                    cols: usize,
-                    rows: usize,
-                    prm: EfiParams,
-                }
-                impl CudaBenchState for State {
-                    fn launch(&mut self) {
-                        let _ = self.cuda.efi_many_series_one_param_time_major_dev(
-                            &self.tm_p, &self.tm_v, self.cols, self.rows, &self.prm,
-                        );
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let _ =
+                                self.cuda
+                                    .efi_batch_dev(&self.prices, &self.volumes, &self.sweep);
+                        }
                     }
-                }
-                let cols = 64usize;
-                let rows = 4096usize;
-                let mut tm_p = vec![f32::NAN; rows * cols];
-                let mut tm_v = vec![f32::NAN; rows * cols];
-                for s in 0..cols {
-                    for t in 1..rows {
-                        let x = (t as f32) + (s as f32) * 0.3;
-                        tm_p[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
-                        tm_v[t * cols + s] = (x * 0.001).cos().abs() + 0.4;
+                    let n = 100_000usize;
+                    let mut p = vec![f32::NAN; n];
+                    let mut vv = vec![f32::NAN; n];
+                    for i in 1..n {
+                        let x = i as f32;
+                        p[i] = (x * 0.00123).sin() + 0.00017 * x;
+                        vv[i] = (x * 0.00077).cos().abs() + 0.5;
                     }
-                }
-                let prm = EfiParams { period: Some(13) };
-                let cuda = CudaEfi::new(0).unwrap();
-                Box::new(State {
-                    cuda,
-                    tm_p,
-                    tm_v,
-                    cols,
-                    rows,
-                    prm,
-                })
-            },
-        )
-        .with_sample_size(10));
+                    let sweep = EfiBatchRange {
+                        period: (8, 8 + 63, 1),
+                    };
+                    let cuda = CudaEfi::new(0).unwrap();
+                    Box::new(State {
+                        cuda,
+                        prices: p,
+                        volumes: vv,
+                        sweep,
+                    })
+                },
+            )
+            .with_sample_size(10),
+        );
+
+        v.push(
+            CudaBenchScenario::new(
+                "efi",
+                "many_series_one_param",
+                "efi_cuda_many_series_one_param_dev",
+                "64x4096",
+                || {
+                    struct State {
+                        cuda: CudaEfi,
+                        tm_p: Vec<f32>,
+                        tm_v: Vec<f32>,
+                        cols: usize,
+                        rows: usize,
+                        prm: EfiParams,
+                    }
+                    impl CudaBenchState for State {
+                        fn launch(&mut self) {
+                            let _ = self.cuda.efi_many_series_one_param_time_major_dev(
+                                &self.tm_p, &self.tm_v, self.cols, self.rows, &self.prm,
+                            );
+                        }
+                    }
+                    let cols = 64usize;
+                    let rows = 4096usize;
+                    let mut tm_p = vec![f32::NAN; rows * cols];
+                    let mut tm_v = vec![f32::NAN; rows * cols];
+                    for s in 0..cols {
+                        for t in 1..rows {
+                            let x = (t as f32) + (s as f32) * 0.3;
+                            tm_p[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
+                            tm_v[t * cols + s] = (x * 0.001).cos().abs() + 0.4;
+                        }
+                    }
+                    let prm = EfiParams { period: Some(13) };
+                    let cuda = CudaEfi::new(0).unwrap();
+                    Box::new(State {
+                        cuda,
+                        tm_p,
+                        tm_v,
+                        cols,
+                        rows,
+                        prm,
+                    })
+                },
+            )
+            .with_sample_size(10),
+        );
         v
     }
 }

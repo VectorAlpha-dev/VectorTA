@@ -1,33 +1,3 @@
-//! # Average True Range (ATR)
-//!
-//! A volatility indicator that measures market volatility by calculating the average of true ranges
-//! over a specified period. True range is the greatest of: current high-low, abs(high-close[prev]),
-//! or abs(low-close[prev]). ATR uses an RMA (Running Moving Average) for smoothing.
-//!
-//! ## Parameters
-//! - **length**: Window size for RMA smoothing (defaults to 14)
-//!
-//! ## Inputs
-//! - Requires high, low, and close price arrays
-//! - Supports both raw slices and Candles data structure
-//!
-//! ## Returns
-//! - **`Ok(AtrOutput)`** containing a `Vec<f64>` matching input length
-//! - Leading values are NaN during the warmup period (length-1 values)
-//!
-//! ## Decision Log
-//! - SIMD: AVX2/AVX512 enabled; batch kernels reuse a shared TR prepass and prefix sums; scalar path kept as the reference implementation.
-//! - CUDA: time-major and batch wrappers provided via `CudaAtr`, with VRAM handles holding an `Arc<Context>` + `device_id` for safe interop lifetimes.
-//! - Python/WASM: bindings follow alma-style zero-copy patterns; CUDA interop exposes CAI v3 + DLPack with version negotiation, preserving numerical outputs.
-//!
-//! ## Developer Notes (Status)
-//! - SIMD: AVX2/AVX512 implemented; vectorizes TR while keeping sequential RMA.
-//!   - On this machine at 100k samples: AVX2/AVX512 ~2–4% faster vs scalar; at 1M, AVX512 ~4–5%.
-//!   - Scalar path optimized (~15% vs baseline) via loop‑jamming + `mul_add` + pointer access.
-//! - Batch: row‑specific optimized path shares a single TR prepass across rows; seeds via TR prefix sums.
-//! - Streaming: switched to O(1) kernel (no ring buffer/modulo), FMA update, precomputed alpha; seeds with mean(TR[0..N)).
-//! - Memory: follows alma.rs patterns (NaN warmup, zero‑copy/uninit matrix helpers, aligned buffers).
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayMethods, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
@@ -37,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -78,7 +48,10 @@ pub struct AtrOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AtrParams {
     pub length: Option<usize>,
 }
@@ -198,14 +171,22 @@ pub enum AtrError {
     #[error("atr: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("atr: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("atr: Invalid kernel type for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    
+
     #[error("Invalid length for ATR calculation (length={length}).")]
     InvalidLength { length: usize },
     #[error("Inconsistent slice lengths for ATR calculation: high={high_len}, low={low_len}, close={close_len}")]
-    InconsistentSliceLengths { high_len: usize, low_len: usize, close_len: usize },
+    InconsistentSliceLengths {
+        high_len: usize,
+        low_len: usize,
+        close_len: usize,
+    },
     #[error("atr: No candles available for ATR calculation.")]
     NoCandlesAvailable,
     #[error("Not enough data to calculate ATR: length={length}, data length={data_len}")]
@@ -217,7 +198,6 @@ fn first_valid_hlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     let len = close.len();
     let mut i = 0;
     while i < len {
-        
         if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
             break;
         }
@@ -240,7 +220,10 @@ fn atr_prepare_full<'a>(
     }
     let valid = close.len().saturating_sub(first);
     if valid < length {
-        return Err(AtrError::NotEnoughValidData { needed: length, valid });
+        return Err(AtrError::NotEnoughValidData {
+            needed: length,
+            valid,
+        });
     }
     let warmup = first + length - 1;
     Ok((high, low, close, first, warmup))
@@ -285,7 +268,10 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
         return Err(AtrError::NoCandlesAvailable);
     }
     if length > len {
-        return Err(AtrError::NotEnoughData { length, data_len: len });
+        return Err(AtrError::NotEnoughData {
+            length,
+            data_len: len,
+        });
     }
 
     let chosen = match kernel {
@@ -299,14 +285,8 @@ pub fn atr_with_kernel(input: &AtrInput, kernel: Kernel) -> Result<AtrOutput, At
     Ok(AtrOutput { values: out })
 }
 
-/// Write ATR results into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
-/// - The output slice length must equal the input length.
-/// - Uses kernel auto-detection (same as `atr()`/`atr_with_kernel`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn atr_into(input: &AtrInput, out: &mut [f64]) -> Result<(), AtrError> {
-    // Extract input slices and validate lengths/params identically to the Vec API
     let (high, low, close) = match &input.data {
         AtrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
         AtrData::Slices { high, low, close } => (*high, *low, *close),
@@ -315,26 +295,28 @@ pub fn atr_into(input: &AtrInput, out: &mut [f64]) -> Result<(), AtrError> {
     let length = input.params.length.unwrap_or(14);
     let (high, low, close, length) = atr_prepare(high, low, close, length)?;
 
-    // Compute first-valid and warmup exactly like atr_with_kernel
     let first = first_valid_hlc(high, low, close);
     let valid = close.len().saturating_sub(first);
     if valid < length {
-        return Err(AtrError::NotEnoughValidData { needed: length, valid });
+        return Err(AtrError::NotEnoughValidData {
+            needed: length,
+            valid,
+        });
     }
     let warmup = first + length - 1;
 
-    // Validate destination length matches input length; reuse existing error
     if out.len() != close.len() {
-        return Err(AtrError::OutputLengthMismatch { expected: close.len(), got: out.len() });
+        return Err(AtrError::OutputLengthMismatch {
+            expected: close.len(),
+            got: out.len(),
+        });
     }
 
-    // Prefill NaN warmup with the same quiet-NaN pattern used elsewhere
     let prefix = warmup.min(out.len());
     for v in &mut out[..prefix] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Dispatch and compute into the provided buffer
     let chosen = match Kernel::Auto {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -360,8 +342,6 @@ fn atr_compute_into_scalar(
     let alpha = 1.0 / (length as f64);
 
     unsafe {
-        // ---- Seed RMA at warm (sum TR over [first ..= warm]) ----
-        // i == first (no prev-close term)
         let mut sum_tr = *high.get_unchecked(first) - *low.get_unchecked(first);
 
         if warm > first {
@@ -371,7 +351,6 @@ fn atr_compute_into_scalar(
                 let hi = *high.get_unchecked(i);
                 let lo = *low.get_unchecked(i);
 
-                // branchless max of (hi-lo, |hi-prev_c|, |lo-prev_c|)
                 let mut tr = hi - lo;
                 let hc = (hi - prev_c).abs();
                 if hc > tr {
@@ -391,20 +370,16 @@ fn atr_compute_into_scalar(
         let mut rma = sum_tr / (length as f64);
         *out.get_unchecked_mut(warm) = rma;
 
-        // ---- Rolling RMA from warm+1 .. end (unrolled by 4) ----
         let mut i = warm + 1;
         let n = out.len();
 
-        // prev close for the first rolling step
         let mut prev_c = if i > 0 {
             *close.get_unchecked(i - 1)
         } else {
             *close.get_unchecked(0)
         };
 
-        // process 4 at a time, sequentially updating rma
         while i + 3 < n {
-            // step 0
             let (hi0, lo0) = (*high.get_unchecked(i), *low.get_unchecked(i));
             let mut tr0 = hi0 - lo0;
             let hc0 = (hi0 - prev_c).abs();
@@ -418,7 +393,6 @@ fn atr_compute_into_scalar(
             rma = (-alpha).mul_add(rma, rma) + alpha * tr0;
             *out.get_unchecked_mut(i) = rma;
 
-            // step 1
             let prev0 = *close.get_unchecked(i);
             let (hi1, lo1) = (*high.get_unchecked(i + 1), *low.get_unchecked(i + 1));
             let mut tr1 = hi1 - lo1;
@@ -433,7 +407,6 @@ fn atr_compute_into_scalar(
             rma = (-alpha).mul_add(rma, rma) + alpha * tr1;
             *out.get_unchecked_mut(i + 1) = rma;
 
-            // step 2
             let prev1 = *close.get_unchecked(i + 1);
             let (hi2, lo2) = (*high.get_unchecked(i + 2), *low.get_unchecked(i + 2));
             let mut tr2 = hi2 - lo2;
@@ -448,7 +421,6 @@ fn atr_compute_into_scalar(
             rma = (-alpha).mul_add(rma, rma) + alpha * tr2;
             *out.get_unchecked_mut(i + 2) = rma;
 
-            // step 3
             let prev2 = *close.get_unchecked(i + 2);
             let (hi3, lo3) = (*high.get_unchecked(i + 3), *low.get_unchecked(i + 3));
             let mut tr3 = hi3 - lo3;
@@ -467,7 +439,6 @@ fn atr_compute_into_scalar(
             prev_c = *close.get_unchecked(i - 1);
         }
 
-        // tail
         while i < n {
             let (hi, lo) = (*high.get_unchecked(i), *low.get_unchecked(i));
             let mut tr = hi - lo;
@@ -490,7 +461,6 @@ fn atr_compute_into_scalar(
 
 #[inline]
 pub fn atr_scalar(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
-    // default to first=0 warmup=length-1; assume caller prepared prefix
     atr_compute_into_scalar(high, low, close, length, 0, out);
 }
 
@@ -508,7 +478,6 @@ fn atr_compute_into(
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kern, Kernel::Scalar | Kernel::ScalarBatch) {
-                // keep scalar path until you add true SIMD128
                 atr_compute_into_scalar(high, low, close, length, first, out);
                 return;
             }
@@ -535,13 +504,8 @@ fn atr_compute_into(
 unsafe fn atr_simd128(high: &[f64], low: &[f64], close: &[f64], length: usize, out: &mut [f64]) {
     use core::arch::wasm32::*;
 
-    // For now, use scalar implementation as ATR's sequential nature
-    
-    
-    
     atr_scalar(high, low, close, length, out);
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
@@ -562,7 +526,6 @@ unsafe fn atr_compute_into_avx2(
     let warm = first + length - 1;
     let alpha = 1.0 / (length as f64);
 
-    
     let mut sum_tr = *high.get_unchecked(first) - *low.get_unchecked(first);
     if warm > first {
         let mut i = first + 1;
@@ -590,32 +553,26 @@ unsafe fn atr_compute_into_avx2(
     let mut rma = sum_tr / (length as f64);
     *out.get_unchecked_mut(warm) = rma;
 
-    
     let mut i = warm + 1;
     let n = out.len();
 
-    
     let mask_abs = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7fff_ffff_ffff_ffffu64 as i64));
 
-    
     while i + 3 < n {
         let v_hi = _mm256_loadu_pd(high.as_ptr().add(i));
         let v_lo = _mm256_loadu_pd(low.as_ptr().add(i));
-        
+
         let v_pc = _mm256_loadu_pd(close.as_ptr().add(i - 1));
 
-        
         let v_hl = _mm256_sub_pd(v_hi, v_lo);
-        
+
         let v_hc = _mm256_and_pd(_mm256_sub_pd(v_hi, v_pc), mask_abs);
-        
+
         let v_lc = _mm256_and_pd(_mm256_sub_pd(v_lo, v_pc), mask_abs);
 
-        
         let v_m1 = _mm256_max_pd(v_hl, v_hc);
         let v_tr = _mm256_max_pd(v_m1, v_lc);
 
-        
         let mut buf = [0.0f64; 4];
         _mm256_storeu_pd(buf.as_mut_ptr(), v_tr);
 
@@ -634,7 +591,6 @@ unsafe fn atr_compute_into_avx2(
         i += 4;
     }
 
-    
     if i < n {
         let mut prev_c = *close.get_unchecked(i - 1);
         while i < n {
@@ -677,7 +633,6 @@ unsafe fn atr_compute_into_avx512(
     let warm = first + length - 1;
     let alpha = 1.0 / (length as f64);
 
-    
     let mut sum_tr = *high.get_unchecked(first) - *low.get_unchecked(first);
     if warm > first {
         let mut i = first + 1;
@@ -705,17 +660,15 @@ unsafe fn atr_compute_into_avx512(
     let mut rma = sum_tr / (length as f64);
     *out.get_unchecked_mut(warm) = rma;
 
-    
     let mut i = warm + 1;
     let n = out.len();
 
-    
     let mask_abs = _mm512_castsi512_pd(_mm512_set1_epi64(0x7fff_ffff_ffff_ffffu64 as i64));
 
     while i + 7 < n {
         let v_hi = _mm512_loadu_pd(high.as_ptr().add(i));
         let v_lo = _mm512_loadu_pd(low.as_ptr().add(i));
-        let v_pc = _mm512_loadu_pd(close.as_ptr().add(i - 1)); 
+        let v_pc = _mm512_loadu_pd(close.as_ptr().add(i - 1));
 
         let v_hl = _mm512_sub_pd(v_hi, v_lo);
         let v_hc = _mm512_and_pd(_mm512_sub_pd(v_hi, v_pc), mask_abs);
@@ -727,7 +680,6 @@ unsafe fn atr_compute_into_avx512(
         let mut buf = [0.0f64; 8];
         _mm512_storeu_pd(buf.as_mut_ptr(), v_tr);
 
-        
         rma = (-alpha).mul_add(rma, rma) + alpha * buf[0];
         *out.get_unchecked_mut(i) = rma;
 
@@ -755,7 +707,6 @@ unsafe fn atr_compute_into_avx512(
         i += 8;
     }
 
-    
     if i < n {
         let mut prev_c = *close.get_unchecked(i - 1);
         while i < n {
@@ -814,21 +765,18 @@ pub unsafe fn atr_avx512_long(
     atr_compute_into_avx512(high, low, close, length, 0, out)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct AtrStream {
     length: usize,
-    alpha: f64,        
-    prev_close: f64,   
-    rma: f64,          
-    warm_sum: f64,     
-    warm_count: usize, 
-    seeded: bool,      
+    alpha: f64,
+    prev_close: f64,
+    rma: f64,
+    warm_sum: f64,
+    warm_count: usize,
+    seeded: bool,
 }
 
 impl AtrStream {
-    /// Decision: O(1) streaming ATR without ring buffer/modulo.
-    /// Seeds with mean of first N TRs; steady-state uses RMA with FMA form.
     #[inline(always)]
     pub fn try_new(params: AtrParams) -> Result<Self, AtrError> {
         let length = params.length.unwrap_or(14);
@@ -846,8 +794,6 @@ impl AtrStream {
         })
     }
 
-    /// Update with the next OHLC triple.
-    /// Returns Some(atr) once seeded with `length` TRs, otherwise None.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         debug_assert!(
@@ -855,10 +801,6 @@ impl AtrStream {
             "Streaming ATR assumes finite inputs; prefilter NaNs/Infs upstream if needed",
         );
 
-        
-        
-        
-        
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
@@ -875,18 +817,13 @@ impl AtrStream {
             up - dn
         };
 
-        
         self.prev_close = close;
 
-        
         if !self.seeded {
             self.warm_sum += tr;
             self.warm_count += 1;
 
             if self.warm_count == self.length {
-                
-                
-                
                 self.rma = self.warm_sum * self.alpha;
                 self.seeded = true;
                 return Some(self.rma);
@@ -894,14 +831,10 @@ impl AtrStream {
             return None;
         }
 
-        
-        
         self.rma = self.alpha.mul_add(tr - self.rma, self.rma);
         Some(self.rma)
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct AtrBatchRange {
@@ -984,7 +917,9 @@ impl AtrBatchOutput {
 fn expand_grid(r: &AtrBatchRange) -> Vec<AtrParams> {
     let (start, end, step) = r.length;
     if step == 0 || start == end {
-        return vec![AtrParams { length: Some(start) }];
+        return vec![AtrParams {
+            length: Some(start),
+        }];
     }
     if start < end {
         (start..=end)
@@ -992,7 +927,6 @@ fn expand_grid(r: &AtrBatchRange) -> Vec<AtrParams> {
             .map(|l| AtrParams { length: Some(l) })
             .collect()
     } else {
-        
         let mut v: Vec<usize> = (end..=start).step_by(step).collect();
         v.reverse();
         v.into_iter()
@@ -1063,13 +997,11 @@ fn atr_batch_inner_into(
     }
     let rows = combos.len();
     let cols = high.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(AtrError::InvalidRange {
-            start: sweep.length.0,
-            end: sweep.length.1,
-            step: sweep.length.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(AtrError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
     if out.len() != expected {
         return Err(AtrError::OutputLengthMismatch {
             expected,
@@ -1082,17 +1014,15 @@ fn atr_batch_inner_into(
         return Err(AtrError::AllValuesNaN);
     }
 
-    
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
     unsafe {
         tr.set_len(cols);
     }
-    
+
     for v in &mut tr[..] {
         *v = 0.0;
     }
 
-    
     match kern_to_simd(kern) {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => unsafe {
@@ -1107,13 +1037,12 @@ fn atr_batch_inner_into(
         }
     }
 
-    
     let mut ps = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols + 1);
     unsafe {
         ps.set_len(cols + 1);
     }
     ps[0] = 0.0;
-    
+
     for i in 0..cols {
         ps[i + 1] = ps[i] + tr[i];
     }
@@ -1121,12 +1050,11 @@ fn atr_batch_inner_into(
     let do_row = |row: usize, dst: &mut [f64]| {
         let length = combos[row].length.unwrap();
         let warm = first + length - 1;
-        
+
         for v in &mut dst[..warm] {
             *v = f64::NAN;
         }
 
-        
         let sum_tr = ps[warm + 1] - ps[first];
         let mut rma = sum_tr / (length as f64);
         dst[warm] = rma;
@@ -1191,28 +1119,22 @@ fn atr_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let first_valid = first_valid_hlc(high, low, close);
 
-    
     let warm: Vec<usize> = combos
         .iter()
-        .map(|c| first_valid + c.length.unwrap() - 1) 
+        .map(|c| first_valid + c.length.unwrap() - 1)
         .collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let mut tr = AVec::<f64>::with_capacity(CACHELINE_ALIGN, cols);
     unsafe {
         tr.set_len(cols);
@@ -1239,7 +1161,7 @@ fn atr_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| {
         let length = combos[row].length.unwrap();
         let warm = first_valid + length - 1;
-        
+
         let sum_tr = ps[warm + 1] - ps[first_valid];
         let mut rma = sum_tr / (length as f64);
         out_row[warm] = rma;
@@ -1273,7 +1195,6 @@ fn atr_batch_inner(
         }
     }
 
-    
     let final_values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1586,24 +1507,20 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_atr_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = AtrInput::with_default_candles(&candles);
 
-        
         let baseline = atr(&input)?;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
         atr_into(&input, &mut out)?;
 
         assert_eq!(baseline.values.len(), out.len());
 
-        
         fn eq_or_nan_bits(a: f64, b: f64) -> bool {
             if !a.is_finite() || !b.is_finite() {
                 a.to_bits() == b.to_bits()
@@ -1670,7 +1587,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_lengths = vec![2, 5, 10, 14, 20, 50, 100, 200];
 
         for length in test_lengths {
@@ -1724,23 +1640,18 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50)
             .prop_flat_map(|length| {
-                
                 (length..400).prop_flat_map(move |data_len| {
                     (
-                        
                         prop::collection::vec(
                             (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
                         ),
-                        
                         prop::collection::vec(
                             (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
                         ),
-                        
                         prop::collection::vec(
                             (10.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
@@ -1750,7 +1661,6 @@ mod tests {
                 })
             })
             .prop_map(|(high_raw, low_raw, close_raw, length)| {
-                
                 let len = high_raw.len();
                 assert_eq!(low_raw.len(), len);
                 assert_eq!(close_raw.len(), len);
@@ -1760,11 +1670,9 @@ mod tests {
                 let mut close = Vec::with_capacity(len);
 
                 for i in 0..len {
-                    
                     let h = high_raw[i].max(low_raw[i]);
                     let l = high_raw[i].min(low_raw[i]);
 
-                    
                     let c = close_raw[i].max(l).min(h);
 
                     high.push(h);
@@ -1783,15 +1691,11 @@ mod tests {
                 };
                 let input = AtrInput::from_slices(&high, &low, &close, params);
 
-                
                 let AtrOutput { values: out } = atr_with_kernel(&input, kernel)?;
                 let AtrOutput { values: ref_out } = atr_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
 
-                
-                
                 for i in 0..(length - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1801,7 +1705,6 @@ mod tests {
                     );
                 }
 
-                
                 for (i, &val) in out.iter().enumerate().skip(length - 1) {
                     if !val.is_nan() {
                         prop_assert!(
@@ -1813,8 +1716,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let mut max_true_range = 0.0f64;
                 for i in 0..high.len() {
                     let tr = if i == 0 {
@@ -1828,7 +1729,6 @@ mod tests {
                     max_true_range = max_true_range.max(tr);
                 }
 
-                
                 for (i, &val) in out.iter().enumerate().skip(length - 1) {
                     if !val.is_nan() && val.is_finite() {
                         prop_assert!(
@@ -1841,12 +1741,10 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert_eq!(
                             y.to_bits(),
@@ -1859,7 +1757,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -1874,16 +1771,12 @@ mod tests {
                     );
                 }
 
-                
-                
                 let first_price = high[0];
                 let is_constant = high.iter().all(|&h| (h - first_price).abs() < 1e-10)
                     && low.iter().all(|&l| (l - first_price).abs() < 1e-10)
                     && close.iter().all(|&c| (c - first_price).abs() < 1e-10);
 
                 if is_constant {
-                    
-                    
                     if out.len() >= length * 3 {
                         let last_values = &out[out.len().saturating_sub(5)..];
                         for &val in last_values {
@@ -1898,12 +1791,9 @@ mod tests {
                     }
                 }
 
-                
-                
                 if out.len() >= length + 10 {
                     for i in (length + 1)..out.len() {
                         if !out[i].is_nan() && !out[i - 1].is_nan() {
-                            
                             let tr = {
                                 let hl = high[i] - low[i];
                                 let hc = (high[i] - close[i - 1]).abs();
@@ -1911,8 +1801,6 @@ mod tests {
                                 hl.max(hc).max(lc)
                             };
 
-                            
-                            
                             let expected_change_bound = (tr - out[i - 1]).abs() / length as f64;
                             let actual_change = (out[i] - out[i - 1]).abs();
 
@@ -1927,9 +1815,7 @@ mod tests {
                     }
                 }
 
-                
                 if length == 1 {
-                    
                     for i in 0..out.len() {
                         if !out[i].is_nan() {
                             let tr = if i == 0 {
@@ -2027,14 +1913,13 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 1),    
-            (5, 25, 5),    
-            (10, 50, 10),  
-            (14, 140, 14), 
-            (50, 200, 50), 
-            (100, 100, 0), 
+            (2, 10, 1),
+            (5, 25, 5),
+            (10, 50, 10),
+            (14, 140, 14),
+            (50, 200, 50),
+            (100, 100, 0),
         ];
 
         for (start, end, step) in test_configs {
@@ -2108,11 +1993,8 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
 #[cfg(feature = "python")]
 use pyo3::create_exception;
-
 
 #[cfg(feature = "python")]
 create_exception!(atr, InvalidLengthError, PyValueError);
@@ -2141,27 +2023,34 @@ create_exception!(atr, InvalidKernelForBatchError, PyValueError);
 impl From<AtrError> for PyErr {
     fn from(err: AtrError) -> PyErr {
         match err {
-            AtrError::EmptyInputData => EmptyInputDataError::new_err("atr: Input data slice is empty."),
+            AtrError::EmptyInputData => {
+                EmptyInputDataError::new_err("atr: Input data slice is empty.")
+            }
             AtrError::AllValuesNaN => AllValuesNaNError::new_err("atr: All values are NaN."),
             AtrError::InvalidPeriod { period, data_len } => InvalidPeriodError::new_err(format!(
                 "atr: Invalid period: period = {}, data length = {}",
                 period, data_len
             )),
-            AtrError::NotEnoughValidData { needed, valid } => NotEnoughValidDataError::new_err(format!(
-                "atr: Not enough valid data: needed = {}, valid = {}",
-                needed, valid
-            )),
-            AtrError::OutputLengthMismatch { expected, got } => OutputLengthMismatchError::new_err(format!(
-                "atr: Output slice length mismatch: expected = {}, got = {}",
-                expected, got
-            )),
+            AtrError::NotEnoughValidData { needed, valid } => {
+                NotEnoughValidDataError::new_err(format!(
+                    "atr: Not enough valid data: needed = {}, valid = {}",
+                    needed, valid
+                ))
+            }
+            AtrError::OutputLengthMismatch { expected, got } => {
+                OutputLengthMismatchError::new_err(format!(
+                    "atr: Output slice length mismatch: expected = {}, got = {}",
+                    expected, got
+                ))
+            }
             AtrError::InvalidRange { start, end, step } => InvalidRangeError::new_err(format!(
                 "atr: Invalid range: start = {}, end = {}, step = {}",
                 start, end, step
             )),
-            AtrError::InvalidKernelForBatch(k) => {
-                InvalidKernelForBatchError::new_err(format!("atr: Invalid kernel type for batch operation: {:?}", k))
-            }
+            AtrError::InvalidKernelForBatch(k) => InvalidKernelForBatchError::new_err(format!(
+                "atr: Invalid kernel type for batch operation: {:?}",
+                k
+            )),
             AtrError::InvalidLength { length } => InvalidLengthError::new_err(format!(
                 "Invalid length for ATR calculation (length={}).",
                 length
@@ -2184,7 +2073,6 @@ impl From<AtrError> for PyErr {
         }
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::atr_wrapper::DeviceArrayF32Atr;
@@ -2213,12 +2101,14 @@ impl DeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted; producer assumes work is complete before exposing the handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -2231,8 +2121,7 @@ impl DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2254,7 +2143,6 @@ impl DeviceArrayF32Py {
         }
         let _ = stream;
 
-        // copy=True is not yet supported (no cross-device copy path here).
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -2264,9 +2152,8 @@ impl DeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = self.inner.rows;
         let cols = self.inner.cols;
         let ctx = self.inner.ctx.clone();
@@ -2288,7 +2175,6 @@ impl DeviceArrayF32Py {
     }
 }
 
-/// Helper function to prepare ATR calculation parameters from AtrInput
 #[inline(always)]
 fn atr_prepare_from_input<'a>(
     input: &'a AtrInput,
@@ -2304,7 +2190,6 @@ fn atr_prepare_from_input<'a>(
     Ok((high, low, close, length, warmup))
 }
 
-/// Helper function to prepare ATR calculation parameters
 #[inline(always)]
 fn atr_prepare<'a>(
     high: &'a [f64],
@@ -2312,7 +2197,6 @@ fn atr_prepare<'a>(
     close: &'a [f64],
     length: usize,
 ) -> Result<(&'a [f64], &'a [f64], &'a [f64], usize), AtrError> {
-    // Check for mismatched lengths
     if high.len() != low.len() || low.len() != close.len() {
         return Err(AtrError::InconsistentSliceLengths {
             high_len: high.len(),
@@ -2321,19 +2205,19 @@ fn atr_prepare<'a>(
         });
     }
 
-    // Check for empty data
     if close.is_empty() {
         return Err(AtrError::NoCandlesAvailable);
     }
 
-    // Check for zero length
     if length == 0 {
         return Err(AtrError::InvalidLength { length });
     }
 
-    // Check if we have enough total data
     if length > close.len() {
-        return Err(AtrError::NotEnoughData { length, data_len: close.len() });
+        return Err(AtrError::NotEnoughData {
+            length,
+            data_len: close.len(),
+        });
     }
 
     Ok((high, low, close, length))
@@ -2352,26 +2236,21 @@ pub fn atr_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    // Validate kernel outside allow_threads
     let kernel_enum = validate_kernel(kernel, false)?;
 
-    // Get slices from numpy arrays - zero copy
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
 
-    // Create ATR input
     let params = AtrParams {
         length: Some(length),
     };
     let input = AtrInput::from_slices(high_slice, low_slice, close_slice, params);
 
-    // Compute ATR and get Vec<f64> result
     let result_vec: Vec<f64> = py
         .allow_threads(|| atr_with_kernel(&input, kernel_enum).map(|output| output.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy array
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2409,7 +2288,7 @@ pub fn atr_batch_py<'py>(
 ) -> PyResult<Bound<'py, PyDict>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    let k = validate_kernel(kernel, true)?; // batch
+    let k = validate_kernel(kernel, true)?;
     let hs = high.as_slice()?;
     let ls = low.as_slice()?;
     let cs = close.as_slice()?;
@@ -2424,7 +2303,6 @@ pub fn atr_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("atr_batch: rows*cols overflow"))?;
 
-    // flat 1D buffer like ALMA, then reshape without copy
     let out_arr = unsafe { numpy::PyArray1::<f64>::new(py, [total], false) };
     let buf = unsafe { out_arr.as_slice_mut()? };
 
@@ -2463,7 +2341,6 @@ pub fn atr_batch_py<'py>(
     Ok(dict.into())
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "atr_cuda_batch_dev")]
 #[pyo3(signature = (high, low, close, length_range, device_id=0))]
@@ -2528,10 +2405,7 @@ pub fn atr_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32Py { inner })
 }
 
-// ============= WASM Bindings =============
-
-/// Write directly to output slice - no allocations
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub fn atr_into_slice(dst: &mut [f64], input: &AtrInput, kern: Kernel) -> Result<(), AtrError> {
     let (high, low, close) = match &input.data {
         AtrData::Candles { candles } => (&candles.high[..], &candles.low[..], &candles.close[..]),
@@ -2543,15 +2417,20 @@ pub fn atr_into_slice(dst: &mut [f64], input: &AtrInput, kern: Kernel) -> Result
     let first = first_valid_hlc(high, low, close);
     let valid = close.len().saturating_sub(first);
     if valid < length {
-        return Err(AtrError::NotEnoughValidData { needed: length, valid });
+        return Err(AtrError::NotEnoughValidData {
+            needed: length,
+            valid,
+        });
     }
     let warm = first + length - 1;
 
     if dst.len() != close.len() {
-        return Err(AtrError::OutputLengthMismatch { expected: close.len(), got: dst.len() });
+        return Err(AtrError::OutputLengthMismatch {
+            expected: close.len(),
+            got: dst.len(),
+        });
     }
 
-    // only once: set prefix NaNs
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
@@ -2564,7 +2443,7 @@ pub fn atr_into_slice(dst: &mut [f64], input: &AtrInput, kern: Kernel) -> Result
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "atr")]
 pub fn atr_js(
     high: &[f64],
@@ -2577,13 +2456,13 @@ pub fn atr_js(
     };
     let input = AtrInput::from_slices(high, low, close, params);
 
-    let mut output = vec![0.0; high.len()]; // Single allocation
+    let mut output = vec![0.0; high.len()];
     atr_into_slice(&mut output, &input, Kernel::Auto).map_err(|e| JsError::new(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "atrBatch")]
 pub fn atr_batch_js(
     high: &[f64],
@@ -2601,7 +2480,7 @@ pub fn atr_batch_js(
     Ok(output.values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "atrBatchMetadata")]
 pub fn atr_batch_metadata_js(
     length_start: usize,
@@ -2613,14 +2492,13 @@ pub fn atr_batch_metadata_js(
     };
     let combos = expand_grid(&range);
 
-    // Return flat array of lengths
     combos
         .iter()
         .map(|p| p.length.unwrap_or(14) as f64)
         .collect()
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "atr_batch", skip_jsdoc)]
 pub fn atr_batch_unified_js(
     high: &[f64],
@@ -2665,8 +2543,7 @@ pub fn atr_batch_unified_js(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
 }
 
-// Zero-copy API for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn atr_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2675,7 +2552,7 @@ pub fn atr_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn atr_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2683,7 +2560,7 @@ pub fn atr_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn atr_into(
     high_ptr: *const f64,
@@ -2707,16 +2584,13 @@ pub fn atr_into(
         };
         let input = AtrInput::from_slices(high, low, close, params);
 
-        // CRITICAL: Check for aliasing - any input could be the same as output
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
-            // Use temporary buffer if there's aliasing
             let mut temp = vec![0.0; len];
             atr_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsError::new(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             atr_into_slice(out, &input, Kernel::Auto).map_err(|e| JsError::new(&e.to_string()))?;
         }
@@ -2724,7 +2598,7 @@ pub fn atr_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn atr_batch_into(
     high_ptr: *const f64,
@@ -2749,7 +2623,6 @@ pub fn atr_batch_into(
             length: (length_start, length_end, length_step),
         };
 
-        
         let combos = expand_grid(&range);
         let rows = combos.len();
         let cols = len;
@@ -2757,18 +2630,14 @@ pub fn atr_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsError::new("atr_batch_into: rows*cols overflow"))?;
 
-        
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
-            
             let output = atr_batch_with_kernel(high, low, close, &range, Kernel::Auto)
                 .map_err(|e| JsError::new(&e.to_string()))?;
             let out_slice = std::slice::from_raw_parts_mut(out_ptr, output_size);
             out_slice.copy_from_slice(&output.values);
         } else {
-            
             let out_slice = std::slice::from_raw_parts_mut(out_ptr, output_size);
 
-            
             let kernel = match detect_best_batch_kernel() {
                 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                 Kernel::Avx512Batch => Kernel::Avx512,
@@ -2778,7 +2647,6 @@ pub fn atr_batch_into(
                 _ => Kernel::Scalar,
             };
 
-            
             atr_batch_inner_into(high, low, close, &range, kernel, false, out_slice)
                 .map_err(|e| JsError::new(&e.to_string()))?;
         }
@@ -2787,8 +2655,7 @@ pub fn atr_batch_into(
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2798,7 +2665,7 @@ pub struct AtrContext {
     stream: AtrStream,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl AtrContext {
@@ -2830,8 +2697,6 @@ impl AtrContext {
         Ok(())
     }
 }
-
-
 
 #[cfg(feature = "python")]
 pub fn register_atr_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {

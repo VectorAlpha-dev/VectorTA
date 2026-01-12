@@ -1,13 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Ease of Movement (EMV).
-//!
-//! Parity points with ALMA/CWMA wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/emv_kernel.ptx"))
-//! - Stream NON_BLOCKING and simple OneD policies with introspection
-//! - VRAM checks and bounds guards; warmup/NaN semantics match scalar
-//! - Public device entry points that return VRAM-resident DeviceArrayF32
-
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
@@ -21,14 +13,17 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
-
-const H2D_PINNED_THRESHOLD_BYTES: usize = 128 * 1024 * 1024; 
+const H2D_PINNED_THRESHOLD_BYTES: usize = 128 * 1024 * 1024;
 
 #[inline]
 fn round_block_x_to_warp(x: u32) -> u32 {
     const WARP: u32 = 32;
     let y = (x / WARP) * WARP;
-    if y == 0 { WARP } else { y.min(1024) }
+    if y == 0 {
+        WARP
+    } else {
+        y.min(1024)
+    }
 }
 
 #[inline]
@@ -41,7 +36,11 @@ pub enum CudaEmvError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -49,13 +48,19 @@ pub enum CudaEmvError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -76,7 +81,10 @@ pub struct CudaEmvPolicy {
 }
 impl Default for CudaEmvPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 
@@ -116,8 +124,7 @@ impl CudaEmv {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -126,7 +133,6 @@ impl CudaEmv {
             }
         };
 
-        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -169,28 +175,38 @@ impl CudaEmv {
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EMV batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEmv)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static GLOBAL_ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
-                let per_scenario = std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
+                let per_scenario =
+                    std::env::var("BENCH_DEBUG_SCOPE").ok().as_deref() == Some("scenario");
                 if per_scenario || !GLOBAL_ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] EMV many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaEmv)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -203,7 +219,9 @@ impl CudaEmv {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -227,7 +245,8 @@ impl CudaEmv {
             Ok(DeviceBuffer::from_slice(host)?)
         } else {
             let pinned = LockedBuffer::from_slice(host)?;
-            let mut dev = unsafe { DeviceBuffer::<f32>::uninitialized_async(host.len(), &self.stream) }?;
+            let mut dev =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(host.len(), &self.stream) }?;
             unsafe {
                 dev.async_copy_from(&pinned, &self.stream)?;
             }
@@ -240,16 +259,19 @@ impl CudaEmv {
         unsafe {
             let mut dev: i32 = -1;
             cust::sys::cuCtxGetDevice(&mut dev);
-            if dev < 0 { return Ok(()); }
+            if dev < 0 {
+                return Ok(());
+            }
             let cur = dev as u32;
             if cur != self.device_id {
-                return Err(CudaEmvError::DeviceMismatch { buf: self.device_id, current: cur });
+                return Err(CudaEmvError::DeviceMismatch {
+                    buf: self.device_id,
+                    current: cur,
+                });
             }
         }
         Ok(())
     }
-
-    
 
     fn validate_batch_inputs(
         high: &[f32],
@@ -261,13 +283,18 @@ impl CudaEmv {
         }
         let len = high.len();
         if low.len() != len || volume.len() != len {
-            return Err(CudaEmvError::InvalidInput("input slice length mismatch".into()));
+            return Err(CudaEmvError::InvalidInput(
+                "input slice length mismatch".into(),
+            ));
         }
-        let first = (0..len).find(|&i| is_triplet_valid(high[i], low[i], volume[i]))
+        let first = (0..len)
+            .find(|&i| is_triplet_valid(high[i], low[i], volume[i]))
             .ok_or_else(|| CudaEmvError::InvalidInput("all values are NaN".into()))?;
         let has_second = (first + 1..len).any(|i| is_triplet_valid(high[i], low[i], volume[i]));
         if !has_second {
-            return Err(CudaEmvError::InvalidInput("not enough valid data: need at least 2".into()));
+            return Err(CudaEmvError::InvalidInput(
+                "not enough valid data: need at least 2".into(),
+            ));
         }
         Ok((first, len))
     }
@@ -282,14 +309,14 @@ impl CudaEmv {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEmvError> {
-        let mut func: Function = self
-            .module
-            .get_function("emv_batch_f32")
-            .map_err(|_| CudaEmvError::MissingKernelSymbol { name: "emv_batch_f32" })?;
+        let mut func: Function = self.module.get_function("emv_batch_f32").map_err(|_| {
+            CudaEmvError::MissingKernelSymbol {
+                name: "emv_batch_f32",
+            }
+        })?;
 
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        
         let mut block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min_grid, suggested) = func
@@ -304,7 +331,14 @@ impl CudaEmv {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         if block_x > 1024 || grid_x == 0 {
-            return Err(CudaEmvError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaEmvError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -327,7 +361,6 @@ impl CudaEmv {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        
         unsafe {
             let this = self as *const _ as *mut CudaEmv;
             (*this).last_batch = Some(BatchKernelSelected::OneD { block_x });
@@ -346,7 +379,6 @@ impl CudaEmv {
         let (first, len) = Self::validate_batch_inputs(high, low, volume)?;
         let _ = self.assert_current_device();
 
-        
         let elem = std::mem::size_of::<f32>();
         let in_elems = len
             .checked_mul(3)
@@ -355,7 +387,7 @@ impl CudaEmv {
         let bytes = in_elems
             .checked_mul(elem)
             .ok_or_else(|| CudaEmvError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaEmvError::OutOfMemory {
@@ -370,21 +402,21 @@ impl CudaEmv {
             }
         }
 
-        
         let d_high = self.copy_to_device_adaptive_f32(high)?;
-        let d_low  = self.copy_to_device_adaptive_f32(low)?;
-        let d_vol  = self.copy_to_device_adaptive_f32(volume)?;
+        let d_low = self.copy_to_device_adaptive_f32(low)?;
+        let d_vol = self.copy_to_device_adaptive_f32(volume)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
 
         self.launch_batch_kernel(&d_high, &d_low, &d_vol, len, 1, first, &mut d_out)?;
 
         self.stream.synchronize()?;
-        
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
-
-    
 
     fn prepare_first_valids_hlv_tm(
         high_tm: &[f32],
@@ -405,7 +437,6 @@ impl CudaEmv {
             return Err(CudaEmvError::InvalidInput("matrix shape mismatch".into()));
         }
 
-        
         let mut first = vec![-1i32; cols];
         let mut have_second = vec![false; cols];
         let mut remaining_first = cols;
@@ -414,7 +445,9 @@ impl CudaEmv {
         'rowsweep: for r in 0..rows {
             let base = r * cols;
             for s in 0..cols {
-                if first[s] >= 0 && have_second[s] { continue; }
+                if first[s] >= 0 && have_second[s] {
+                    continue;
+                }
                 let idx = base + s;
                 if is_triplet_valid(high_tm[idx], low_tm[idx], vol_tm[idx]) {
                     if first[s] < 0 {
@@ -426,11 +459,23 @@ impl CudaEmv {
                     }
                 }
             }
-            if remaining_first == 0 && remaining_second == 0 { break 'rowsweep; }
+            if remaining_first == 0 && remaining_second == 0 {
+                break 'rowsweep;
+            }
         }
         for s in 0..cols {
-            if first[s] < 0 { return Err(CudaEmvError::InvalidInput(format!("all NaN in series {}", s))); }
-            if !have_second[s] { return Err(CudaEmvError::InvalidInput(format!("not enough valid data in series {}: need >=2", s))); }
+            if first[s] < 0 {
+                return Err(CudaEmvError::InvalidInput(format!(
+                    "all NaN in series {}",
+                    s
+                )));
+            }
+            if !have_second[s] {
+                return Err(CudaEmvError::InvalidInput(format!(
+                    "not enough valid data in series {}: need >=2",
+                    s
+                )));
+            }
         }
         Ok(first)
     }
@@ -448,12 +493,12 @@ impl CudaEmv {
         let mut func: Function = self
             .module
             .get_function("emv_many_series_one_param_f32")
-            .map_err(|_| CudaEmvError::MissingKernelSymbol { name: "emv_many_series_one_param_f32" })?;
+            .map_err(|_| CudaEmvError::MissingKernelSymbol {
+                name: "emv_many_series_one_param_f32",
+            })?;
 
-        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        
         let mut block_x: u32 = match std::env::var("EMV_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
                 let (_min_grid, suggested) = func
@@ -468,7 +513,14 @@ impl CudaEmv {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         if block_x > 1024 || grid_x == 0 {
-            return Err(CudaEmvError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaEmvError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -490,7 +542,7 @@ impl CudaEmv {
             ];
             self.stream.launch(&func, grid, block, 0, args)?;
         }
-        
+
         unsafe {
             let this = self as *const _ as *mut CudaEmv;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -509,7 +561,6 @@ impl CudaEmv {
     ) -> Result<DeviceArrayF32, CudaEmvError> {
         let first_valids = Self::prepare_first_valids_hlv_tm(high_tm, low_tm, vol_tm, cols, rows)?;
 
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaEmvError::InvalidInput("rows*cols overflow".into()))?;
@@ -543,10 +594,11 @@ impl CudaEmv {
         }
 
         let d_high_tm = self.copy_to_device_adaptive_f32(high_tm)?;
-        let d_low_tm  = self.copy_to_device_adaptive_f32(low_tm)?;
-        let d_vol_tm  = self.copy_to_device_adaptive_f32(vol_tm)?;
-        let d_first   = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let d_low_tm = self.copy_to_device_adaptive_f32(low_tm)?;
+        let d_vol_tm = self.copy_to_device_adaptive_f32(vol_tm)?;
+        let d_first = DeviceBuffer::from_slice(&first_valids)?;
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_high_tm,
@@ -567,7 +619,6 @@ impl CudaEmv {
             &mut d_out_tm,
         )?;
         self.stream.synchronize()?;
-        
 
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -576,7 +627,6 @@ impl CudaEmv {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -663,8 +713,8 @@ pub mod benches {
             unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
         let d_vol = unsafe { DeviceBuffer::from_slice_async(&vol, &cuda.stream) }.expect("d_vol");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }
-            .expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }.expect("d_out");
         cuda.synchronize().expect("sync after prep");
         Box::new(BatchDeviceState {
             cuda,

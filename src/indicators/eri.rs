@@ -1,22 +1,3 @@
-//! # Elder Ray Index (ERI)
-//!
-//! Measures bullish and bearish pressure using a moving average as baseline.
-//! Calculates bull power (high - MA) and bear power (low - MA).
-//!
-//! ## Parameters
-//! - **period**: MA window size (default: 13)
-//! - **ma_type**: Moving average type (default: "ema")
-//!
-//! ## Returns
-//! - **`Ok(EriOutput)`** on success (`bull` and `bear` vectors of length matching input)
-//! - **`Err(EriError)`** on failure
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2 and AVX512 implemented (single-series + row variants)
-//! - **Streaming**: O(1) SMA/EMA/RMA/DEMA/TEMA/WMA; Generic fallback is O(n)
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-//! - Decision log: Scalar path is the reference; SIMD enabled (AVX2/AVX512) and >5% faster at 100k. CUDA wrapper present and synchronized before returning handles; Python interop via CAI v3 + DLPack. Typed errors added; range-expansion and size arithmetic now checked.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -26,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -216,7 +197,11 @@ pub enum EriError {
     #[error("eri: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("eri: Invalid range expansion: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("eri: Invalid kernel for batch operation. Got {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -277,7 +262,6 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
     let mut bull = alloc_with_nan_prefix(source_data.len(), warmup_period);
     let mut bear = alloc_with_nan_prefix(source_data.len(), warmup_period);
 
-    
     if ma_type == "sma" || ma_type == "SMA" {
         unsafe {
             eri_scalar_classic_sma(
@@ -306,7 +290,6 @@ pub fn eri_with_kernel(input: &EriInput, kernel: Kernel) -> Result<EriOutput, Er
         return Ok(EriOutput { bull, bear });
     }
 
-    
     let full_ma = ma(&ma_type, MaData::Slice(&source_data), period)
         .map_err(|e| EriError::MaCalculationError(e.to_string()))?;
 
@@ -369,7 +352,6 @@ pub fn eri_scalar(
         return;
     }
 
-    
     while i + 4 <= n {
         let m0 = ma[i + 0];
         bull[i + 0] = high[i + 0] - m0;
@@ -432,7 +414,6 @@ pub fn eri_avx2(
     bull: &mut [f64],
     bear: &mut [f64],
 ) {
-    
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     unsafe {
         return eri_avx2_core(high, low, ma, period, first_valid, bull, bear);
@@ -761,7 +742,7 @@ impl EriBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EriBatchRange) -> Result<Vec<EriParams>, EriError> {
     let (start, end, step) = r.period;
-    
+
     if step == 0 {
         return Ok(vec![EriParams {
             period: Some(start),
@@ -787,32 +768,39 @@ fn expand_grid(r: &EriBatchRange) -> Result<Vec<EriParams>, EriError> {
             });
             match p.checked_add(step) {
                 Some(next) => {
-                    if next == p { break; }
+                    if next == p {
+                        break;
+                    }
                     p = next;
                 }
                 None => return Err(EriError::InvalidRange { start, end, step }),
             }
         }
     } else {
-        
         let mut p = start;
         while p >= end {
             out.push(EriParams {
                 period: Some(p),
                 ma_type: Some(r.ma_type.clone()),
             });
-            
-            if p < step { break; }
+
+            if p < step {
+                break;
+            }
             p -= step;
-            if p == usize::MAX { break; }
+            if p == usize::MAX {
+                break;
+            }
         }
-        
+
         if out.is_empty() {
             return Err(EriError::InvalidRange { start, end, step });
         }
     }
 
-    if out.is_empty() { return Err(EriError::InvalidRange { start, end, step }); }
+    if out.is_empty() {
+        return Err(EriError::InvalidRange { start, end, step });
+    }
     Ok(out)
 }
 
@@ -848,7 +836,7 @@ fn eri_batch_inner(
     parallel: bool,
 ) -> Result<EriBatchOutput, EriError> {
     let combos = expand_grid(sweep)?;
-    
+
     let first = high
         .iter()
         .zip(low.iter())
@@ -864,15 +852,15 @@ fn eri_batch_inner(
     }
     let rows = combos.len();
     let cols = source.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(EriError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let total = rows.checked_mul(cols).ok_or(EriError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    
     let mut buf_bull = make_uninit_matrix(rows, cols);
     let mut buf_bear = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -880,17 +868,13 @@ fn eri_batch_inner(
     init_matrix_prefixes(&mut buf_bull, cols, &warmup_periods);
     init_matrix_prefixes(&mut buf_bear, cols, &warmup_periods);
 
-    
     let mut buf_bull_guard = std::mem::ManuallyDrop::new(buf_bull);
     let mut buf_bear_guard = std::mem::ManuallyDrop::new(buf_bear);
 
-    
-    let mut bull = unsafe {
-        std::slice::from_raw_parts_mut(buf_bull_guard.as_mut_ptr() as *mut f64, total)
-    };
-    let mut bear = unsafe {
-        std::slice::from_raw_parts_mut(buf_bear_guard.as_mut_ptr() as *mut f64, total)
-    };
+    let mut bull =
+        unsafe { std::slice::from_raw_parts_mut(buf_bull_guard.as_mut_ptr() as *mut f64, total) };
+    let mut bear =
+        unsafe { std::slice::from_raw_parts_mut(buf_bear_guard.as_mut_ptr() as *mut f64, total) };
 
     let do_row = |row: usize, bull_row: &mut [f64], bear_row: &mut [f64]| -> Result<(), EriError> {
         let period = combos[row].period.unwrap();
@@ -940,22 +924,10 @@ fn eri_batch_inner(
         }
     }
 
-    
-    
-    let bull_vec = unsafe {
-        Vec::from_raw_parts(
-            buf_bull_guard.as_mut_ptr() as *mut f64,
-            total,
-            total,
-        )
-    };
-    let bear_vec = unsafe {
-        Vec::from_raw_parts(
-            buf_bear_guard.as_mut_ptr() as *mut f64,
-            total,
-            total,
-        )
-    };
+    let bull_vec =
+        unsafe { Vec::from_raw_parts(buf_bull_guard.as_mut_ptr() as *mut f64, total, total) };
+    let bear_vec =
+        unsafe { Vec::from_raw_parts(buf_bear_guard.as_mut_ptr() as *mut f64, total, total) };
 
     Ok(EriBatchOutput {
         bull: bull_vec,
@@ -978,7 +950,7 @@ pub fn eri_batch_inner_into(
     bear_out: &mut [f64],
 ) -> Result<Vec<EriParams>, EriError> {
     let combos = expand_grid(sweep)?;
-    
+
     let first = high
         .iter()
         .zip(low.iter())
@@ -996,12 +968,16 @@ pub fn eri_batch_inner_into(
     let rows = combos.len();
     let cols = source.len();
 
-    
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(EriError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let expected = rows.checked_mul(cols).ok_or(EriError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if bull_out.len() != expected || bear_out.len() != expected {
-        return Err(EriError::OutputLengthMismatch { expected, got: bull_out.len().max(bear_out.len()) });
+        return Err(EriError::OutputLengthMismatch {
+            expected,
+            got: bull_out.len().max(bear_out.len()),
+        });
     }
 
     let do_row = |row: usize, bull_row: &mut [f64], bear_row: &mut [f64]| -> Result<(), EriError> {
@@ -1186,7 +1162,6 @@ unsafe fn eri_row_avx512_long(
     eri_avx512_core(high, low, ma, period, first, bull, bear)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct EriStream {
     period: usize,
@@ -1220,7 +1195,7 @@ struct EmaState {
     n: usize,
     alpha: f64,
     beta: f64,
-    
+
     init_sum: f64,
     init_count: usize,
     ema: f64,
@@ -1233,8 +1208,8 @@ struct DemaState {
     beta: f64,
     init_sum: f64,
     init_count: usize,
-    e1: f64, 
-    e2: f64, 
+    e1: f64,
+    e2: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1244,20 +1219,20 @@ struct TemaState {
     beta: f64,
     init_sum: f64,
     init_count: usize,
-    e1: f64, 
-    e2: f64, 
-    e3: f64, 
+    e1: f64,
+    e2: f64,
+    e3: f64,
 }
 
 #[derive(Debug, Clone)]
 struct WmaState {
     n: usize,
-    den_inv: f64, 
+    den_inv: f64,
     buf: Vec<f64>,
     pos: usize,
     count: usize,
-    s: f64,  
-    ws: f64, 
+    s: f64,
+    ws: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1266,7 +1241,7 @@ struct GenericState {
     buf: Vec<f64>,
     pos: usize,
     count: usize,
-    scratch: Vec<f64>, 
+    scratch: Vec<f64>,
 }
 
 impl EriStream {
@@ -1289,8 +1264,6 @@ impl EriStream {
         })
     }
 
-    /// O(1) streaming update for SMA/EMA/RMA/DEMA/TEMA/WMA.
-    /// If any input is NaN, the stream resets and returns None (matches batch "first-valid" semantics).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, source: f64) -> Option<(f64, f64)> {
         if high.is_nan() || low.is_nan() || source.is_nan() {
@@ -1514,7 +1487,6 @@ pub fn eri_py<'py>(
     let low_slice = low.as_slice()?;
     let source_slice = source.as_slice()?;
 
-    // Validate lengths match
     if high_slice.len() != low_slice.len() || high_slice.len() != source_slice.len() {
         return Err(PyValueError::new_err(
             "high, low, and source arrays must have the same length",
@@ -1532,7 +1504,6 @@ pub fn eri_py<'py>(
         .allow_threads(|| eri_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to Python
     Ok((result.bull.into_pyarray(py), result.bear.into_pyarray(py)))
 }
 
@@ -1582,7 +1553,6 @@ pub fn eri_batch_py<'py>(
     let low_slice = low.as_slice()?;
     let source_slice = source.as_slice()?;
 
-    // Validate lengths match
     if high_slice.len() != low_slice.len() || high_slice.len() != source_slice.len() {
         return Err(PyValueError::new_err(
             "high, low, and source arrays must have the same length",
@@ -1594,7 +1564,6 @@ pub fn eri_batch_py<'py>(
         ma_type: ma_type.to_string(),
     };
 
-    // 1. Expand grid once to know rows*cols
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
@@ -1602,17 +1571,12 @@ pub fn eri_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // 2. Pre-allocate uninitialized NumPy arrays (1-D, will reshape later)
-    let bull_array: Bound<'py, PyArray1<f64>> =
-        unsafe { PyArray1::<f64>::new(py, [total], false) };
-    let bear_array: Bound<'py, PyArray1<f64>> =
-        unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let bull_array: Bound<'py, PyArray1<f64>> = unsafe { PyArray1::<f64>::new(py, [total], false) };
+    let bear_array: Bound<'py, PyArray1<f64>> = unsafe { PyArray1::<f64>::new(py, [total], false) };
 
-    // 3. Get mutable slices from arrays
     let bull_slice = unsafe { bull_array.as_slice_mut()? };
     let bear_slice = unsafe { bear_array.as_slice_mut()? };
 
-    // Find first valid index based on triple validity
     let first_valid = high_slice
         .iter()
         .zip(low_slice.iter())
@@ -1620,7 +1584,6 @@ pub fn eri_batch_py<'py>(
         .position(|((h, l), s)| !h.is_nan() && !l.is_nan() && !s.is_nan())
         .unwrap_or(0);
 
-    // Initialize NaN prefixes for each row based on warmup
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let warmup = first_valid + period - 1;
@@ -1631,7 +1594,6 @@ pub fn eri_batch_py<'py>(
         }
     }
 
-    // 4. Run computation with GIL released
     let kern = validate_kernel(kernel, true)?;
     let kernel_to_use = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1659,15 +1621,12 @@ pub fn eri_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // 6. Reshape arrays to 2D
     let bull_reshaped = bull_array.reshape([rows, cols])?;
     let bear_reshaped = bear_array.reshape([rows, cols])?;
 
-    // 5. Build parameter arrays
     let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
     let ma_types: Vec<&str> = vec![ma_type; combos.len()];
 
-    // 8. Create result dictionary
     let dict = PyDict::new(py);
     dict.set_item("bull_values", bull_reshaped)?;
     dict.set_item("bear_values", bear_reshaped)?;
@@ -1677,8 +1636,6 @@ pub fn eri_batch_py<'py>(
     Ok(dict.into())
 }
 
-// Zero-copy output function - write directly to output slices
-/// Write directly to output slices - no allocations
 pub fn eri_into_slice(
     dst_bull: &mut [f64],
     dst_bear: &mut [f64],
@@ -1703,7 +1660,6 @@ pub fn eri_into_slice(
         return Err(EriError::EmptyInputData);
     }
 
-    // Verify output slices have correct length
     if dst_bull.len() != source_data.len() || dst_bear.len() != source_data.len() {
         return Err(EriError::OutputLengthMismatch {
             expected: source_data.len(),
@@ -1744,7 +1700,6 @@ pub fn eri_into_slice(
 
     let warmup_period = first_valid_idx + period - 1;
 
-    // Fill warmup with NaN
     for v in &mut dst_bull[..warmup_period] {
         *v = f64::NAN;
     }
@@ -1795,12 +1750,7 @@ pub fn eri_into_slice(
     Ok(())
 }
 
-/// Write ERI (bull and bear) directly into caller-provided output slices.
-///
-/// - Preserves the module's NaN warmup semantics (quiet-NaN prefix up to `first_valid + period - 1`).
-/// - `bull_out.len()` and `bear_out.len()` must equal the input length.
-/// - Uses `Kernel::Auto` dispatch for runtime selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn eri_into(
     input: &EriInput,
@@ -1810,15 +1760,15 @@ pub fn eri_into(
     eri_into_slice(bull_out, bear_out, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EriResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn eri_js_flat(
     high: &[f64],
@@ -1841,7 +1791,6 @@ pub fn eri_js_flat(
     eri_into_slice(&mut bull, &mut bear, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let mut values = bull;
     values.extend_from_slice(&bear);
 
@@ -1854,7 +1803,7 @@ pub fn eri_js_flat(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn eri_js(
     high: &[f64],
@@ -1863,7 +1812,6 @@ pub fn eri_js(
     period: usize,
     ma_type: &str,
 ) -> Result<Vec<f64>, JsValue> {
-    
     if high.len() != low.len() || high.len() != source.len() {
         return Err(JsValue::from_str(
             "high, low, and source arrays must have the same length",
@@ -1876,7 +1824,6 @@ pub fn eri_js(
     };
     let input = EriInput::from_slices(high, low, source, params);
 
-    
     let total = source
         .len()
         .checked_mul(2)
@@ -1889,7 +1836,6 @@ pub fn eri_js(
 
     Ok(output)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::eri_wrapper::CudaEri;
@@ -1961,7 +1907,7 @@ pub fn eri_cuda_many_series_one_param_dev_py(
     Ok((bull_dev, bear_dev))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn eri_into(
     high_ptr: *const f64,
@@ -1993,7 +1939,6 @@ pub fn eri_into(
         };
         let input = EriInput::from_slices(high, low, source, params);
 
-        
         let needs_temp = bull_ptr as *const f64 == high_ptr
             || bull_ptr as *const f64 == low_ptr
             || bull_ptr as *const f64 == source_ptr
@@ -2003,19 +1948,16 @@ pub fn eri_into(
             || bull_ptr == bear_ptr;
 
         if needs_temp {
-            
             let mut temp_bull = vec![0.0; len];
             let mut temp_bear = vec![0.0; len];
             eri_into_slice(&mut temp_bull, &mut temp_bear, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let bull_out = std::slice::from_raw_parts_mut(bull_ptr, len);
             let bear_out = std::slice::from_raw_parts_mut(bear_ptr, len);
             bull_out.copy_from_slice(&temp_bull);
             bear_out.copy_from_slice(&temp_bear);
         } else {
-            
             let bull_out = std::slice::from_raw_parts_mut(bull_ptr, len);
             let bear_out = std::slice::from_raw_parts_mut(bear_ptr, len);
             eri_into_slice(bull_out, bear_out, &input, Kernel::Auto)
@@ -2026,7 +1968,7 @@ pub fn eri_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn eri_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2035,7 +1977,7 @@ pub fn eri_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn eri_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2045,23 +1987,23 @@ pub fn eri_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EriBatchConfig {
     pub period_range: (usize, usize, usize),
     pub ma_type: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EriBatchJsOutput {
-    pub values: Vec<f64>,    
-    pub rows: usize,         
-    pub cols: usize,         
-    pub periods: Vec<usize>, 
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
+    pub periods: Vec<usize>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = eri_batch)]
 pub fn eri_batch_js(
     high: &[f64],
@@ -2069,7 +2011,6 @@ pub fn eri_batch_js(
     source: &[f64],
     config: JsValue,
 ) -> Result<JsValue, JsValue> {
-    
     if high.len() != low.len() || high.len() != source.len() {
         return Err(JsValue::from_str(
             "high, low, and source arrays must have the same length",
@@ -2093,17 +2034,16 @@ pub fn eri_batch_js(
         .ok_or_else(|| JsValue::from_str("rows overflow"))?;
     let cols = output.cols;
 
-    
     let cap = rows
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
     let mut values = Vec::with_capacity(cap);
-    
+
     for r in 0..output.rows {
         let start = r * cols;
         values.extend_from_slice(&output.bull[start..start + cols]);
     }
-    
+
     for r in 0..output.rows {
         let start = r * cols;
         values.extend_from_slice(&output.bear[start..start + cols]);
@@ -2121,7 +2061,6 @@ pub fn eri_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-/// Optimized ERI calculation with inline SMA
 #[inline]
 pub unsafe fn eri_scalar_classic_sma(
     high: &[f64],
@@ -2134,26 +2073,21 @@ pub unsafe fn eri_scalar_classic_sma(
 ) -> Result<(), EriError> {
     let start_idx = first_valid_idx + period - 1;
 
-    
     let mut sum = 0.0;
     for i in 0..period {
         sum += source[first_valid_idx + i];
     }
     let mut sma = sum / period as f64;
 
-    
     bull[start_idx] = high[start_idx] - sma;
     bear[start_idx] = low[start_idx] - sma;
 
-    
     for i in (start_idx + 1)..source.len() {
-        
         let old_val = source[i - period];
         let new_val = source[i];
         sum = sum - old_val + new_val;
         sma = sum / period as f64;
 
-        
         bull[i] = high[i] - sma;
         bear[i] = low[i] - sma;
     }
@@ -2161,7 +2095,6 @@ pub unsafe fn eri_scalar_classic_sma(
     Ok(())
 }
 
-/// Optimized ERI calculation with inline EMA
 #[inline]
 pub unsafe fn eri_scalar_classic_ema(
     high: &[f64],
@@ -2176,23 +2109,18 @@ pub unsafe fn eri_scalar_classic_ema(
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    
     let mut sum = 0.0;
     for i in 0..period {
         sum += source[first_valid_idx + i];
     }
     let mut ema = sum / period as f64;
 
-    
     bull[start_idx] = high[start_idx] - ema;
     bear[start_idx] = low[start_idx] - ema;
 
-    
     for i in (start_idx + 1)..source.len() {
-        
         ema = alpha * source[i] + beta * ema;
 
-        
         bull[i] = high[i] - ema;
         bear[i] = low[i] - ema;
     }
@@ -2490,16 +2418,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             EriParams::default(),
-            
             EriParams {
                 period: Some(2),
                 ma_type: Some("ema".to_string()),
             },
-            
             EriParams {
                 period: Some(5),
                 ma_type: Some("sma".to_string()),
@@ -2512,7 +2436,6 @@ mod tests {
                 period: Some(10),
                 ma_type: Some("wma".to_string()),
             },
-            
             EriParams {
                 period: Some(13),
                 ma_type: Some("ema".to_string()),
@@ -2525,7 +2448,6 @@ mod tests {
                 period: Some(30),
                 ma_type: Some("ema".to_string()),
             },
-            
             EriParams {
                 period: Some(50),
                 ma_type: Some("sma".to_string()),
@@ -2534,7 +2456,6 @@ mod tests {
                 period: Some(100),
                 ma_type: Some("ema".to_string()),
             },
-            
             EriParams {
                 period: Some(3),
                 ma_type: Some("hma".to_string()),
@@ -2553,15 +2474,13 @@ mod tests {
             let input = EriInput::from_candles(&candles, "close", params.clone());
             let output = eri_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.bull.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at bull index {} \
@@ -2605,15 +2524,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.bear.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at bear index {} \
@@ -2666,10 +2583,9 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
-    
     macro_rules! generate_all_eri_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2751,7 +2667,6 @@ mod tests {
 
     #[test]
     fn test_eri_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 256usize;
         let mut high = vec![0.0; len];
         let mut low = vec![0.0; len];
@@ -2763,22 +2678,22 @@ mod tests {
             low[i] = base - 1.0;
         }
 
-        let params = EriParams { period: Some(13), ma_type: Some("ema".to_string()) };
+        let params = EriParams {
+            period: Some(13),
+            ma_type: Some("ema".to_string()),
+        };
         let input = EriInput::from_slices(&high, &low, &src, params);
 
-        
         let baseline = eri(&input)?;
 
-        
         let mut bull = vec![0.0; len];
         let mut bear = vec![0.0; len];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             eri_into(&input, &mut bull, &mut bear)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             eri_into_slice(&mut bull, &mut bear, &input, Kernel::Auto)?;
         }
 
@@ -2818,16 +2733,14 @@ mod tests {
         let low = c.select_candle_field("low").unwrap();
         let src = c.select_candle_field("close").unwrap();
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),   
-            (5, 25, 5),   
-            (30, 60, 15), 
-            (2, 5, 1),    
-            (10, 20, 2),  
-            (20, 50, 10), 
-            (13, 13, 0),  
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (20, 50, 10),
+            (13, 13, 0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2836,7 +2749,6 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_slices(high, low, src)?;
 
-            
             for (idx, &val) in output.bull.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2847,7 +2759,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.params[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2897,7 +2808,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.bear.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2908,7 +2818,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.params[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2979,38 +2888,34 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        let strat = (2usize..=50) 
+        let strat = (2usize..=50)
             .prop_flat_map(|period| {
                 (
-                    100.0f64..5000.0f64, 
-                    (period + 20)..400,  
-                    0.001f64..0.05f64,   
-                    -0.01f64..0.01f64,   
+                    100.0f64..5000.0f64,
+                    (period + 20)..400,
+                    0.001f64..0.05f64,
+                    -0.01f64..0.01f64,
                     Just(period),
-                    prop::sample::select(vec!["ema", "sma", "wma"]), 
+                    prop::sample::select(vec!["ema", "sma", "wma"]),
                 )
             })
             .prop_map(
                 |(base_price, data_len, volatility, trend, period, ma_type)| {
-                    
                     let mut high = Vec::with_capacity(data_len);
                     let mut low = Vec::with_capacity(data_len);
                     let mut close = Vec::with_capacity(data_len);
 
                     let mut price = base_price;
                     for i in 0..data_len {
-                        
                         price *= 1.0 + trend + (i as f64 * 0.0001 * trend);
                         let daily_vol = volatility * price;
 
-                        
                         let c = price + daily_vol * ((i as f64).sin() * 0.3);
                         let h = c + daily_vol * (0.5 + (i as f64 * 0.7).cos().abs() * 0.5);
                         let l = c - daily_vol * (0.5 + (i as f64 * 0.7).sin().abs() * 0.5);
 
                         high.push(h);
-                        low.push(l.min(c)); 
+                        low.push(l.min(c));
                         close.push(c);
                     }
 
@@ -3026,31 +2931,22 @@ mod tests {
                 };
                 let input = EriInput::from_slices(&high, &low, &close, params.clone());
 
-                
                 let result = match eri_with_kernel(&input, kernel) {
                     Ok(r) => r,
-                    Err(e) => {
-                        
-                        
-                        match e {
-                            EriError::MaCalculationError(msg)
-                                if msg.contains("Not enough data") =>
-                            {
-                                return Ok(())
-                            }
-                            EriError::NotEnoughValidData { .. } => return Ok(()),
-                            _ => panic!("Unexpected error type: {:?}", e),
+                    Err(e) => match e {
+                        EriError::MaCalculationError(msg) if msg.contains("Not enough data") => {
+                            return Ok(())
                         }
-                    }
+                        EriError::NotEnoughValidData { .. } => return Ok(()),
+                        _ => panic!("Unexpected error type: {:?}", e),
+                    },
                 };
 
-                
                 let reference = match eri_with_kernel(&input, Kernel::Scalar) {
                     Ok(r) => r,
-                    Err(_) => return Ok(()), 
+                    Err(_) => return Ok(()),
                 };
 
-                
                 let first_valid_idx = high
                     .iter()
                     .zip(low.iter())
@@ -3059,7 +2955,6 @@ mod tests {
                     .unwrap_or(0);
                 let warmup_period = first_valid_idx + period - 1;
 
-                
                 for i in 0..warmup_period.min(high.len()) {
                     prop_assert!(
                         result.bull[i].is_nan(),
@@ -3077,7 +2972,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup_period..high.len() {
                     if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
                         prop_assert!(
@@ -3095,7 +2989,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
                         prop_assert!(
@@ -3111,14 +3004,12 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..high.len() {
                     let bull_val = result.bull[i];
                     let bear_val = result.bear[i];
                     let ref_bull = reference.bull[i];
                     let ref_bear = reference.bear[i];
 
-                    
                     if bull_val.is_finite() && ref_bull.is_finite() {
                         let bull_diff = (bull_val - ref_bull).abs();
                         let bull_ulp = bull_val.to_bits().abs_diff(ref_bull.to_bits());
@@ -3144,7 +3035,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bear_val.is_finite() && ref_bear.is_finite() {
                         let bear_diff = (bear_val - ref_bear).abs();
                         let bear_ulp = bear_val.to_bits().abs_diff(ref_bear.to_bits());
@@ -3171,7 +3061,6 @@ mod tests {
                     }
                 }
 
-                
                 let all_high_same = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 let all_low_same = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 let all_close_same = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
@@ -3181,12 +3070,9 @@ mod tests {
                     && all_close_same
                     && high.len() > warmup_period + 2 * period
                 {
-                    
-                    
                     let expected_bull = high[0] - close[0];
                     let expected_bear = low[0] - close[0];
 
-                    
                     for i in (warmup_period + 2 * period)..high.len() {
                         if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
                             prop_assert!(
@@ -3209,9 +3095,6 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
                         let expected_diff = high[i] - low[i];
@@ -3227,12 +3110,8 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
-                        
                         if result.bull[i] < 0.0 && result.bear[i] > 0.0 {
                             prop_assert!(
 								false,
@@ -3243,13 +3122,9 @@ mod tests {
                     }
                 }
 
-                
                 if period == 1 {
-                    
-                    
                     for i in warmup_period..high.len().min(warmup_period + 10) {
                         if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
-                            
                             let expected_diff = high[i] - low[i];
                             let actual_diff = result.bull[i] - result.bear[i];
                             prop_assert!(
@@ -3264,15 +3139,12 @@ mod tests {
                     }
                 }
 
-                
-                
                 let max_price = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                 let min_price = low.iter().cloned().fold(f64::INFINITY, f64::min);
                 let price_range = max_price - min_price;
 
                 for i in warmup_period..high.len() {
                     if !result.bull[i].is_nan() && !result.bear[i].is_nan() {
-                        
                         prop_assert!(
                             result.bull[i].abs() <= price_range * 2.0,
                             "[{}] Bull {} exceeds reasonable bounds (price range: {}) at index {}",
@@ -3292,9 +3164,7 @@ mod tests {
                     }
                 }
 
-                
                 if period >= high.len() - 5 && period < high.len() {
-                    
                     let valid_count = result
                         .bull
                         .iter()

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::sar::{sar_with_kernel, SarBatchBuilder, SarInput, SarParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -52,7 +50,7 @@ fn sar_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         acceleration: (0.01, 0.05, 0.01),
         maximum: (0.1, 0.3, 0.1),
     };
-    
+
     let cpu = vector_ta::indicators::sar::sar_batch_with_kernel(
         &high,
         &low,
@@ -72,13 +70,13 @@ fn sar_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 3e-1; 
+    let tol = 3e-1;
     for idx in 0..host.len() {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
         if !approx_eq(c, g, tol) {
             eprintln!("first mismatch at {}: cpu={} gpu={}", idx, c, g);
-            
+
             let len = len;
             let r = idx / len;
             let t = idx % len;
@@ -127,7 +125,6 @@ fn sar_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let params = SarParams {
         acceleration: Some(0.02),
         maximum: Some(0.2),

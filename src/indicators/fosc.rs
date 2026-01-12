@@ -1,33 +1,3 @@
-//! # Forecast Oscillator (FOSC)
-//!
-//! The Forecast Oscillator (FOSC) measures the percentage difference between the current price
-//! and a one-step-ahead linear regression forecast. Positive values suggest the price is above
-//! its trend, while negative values indicate it's below.
-//!
-//! ## Parameters
-//! - **period**: Regression window for linear forecast (default: 5)
-//!
-//! ## Returns
-//! - **`Ok(FoscOutput)`** containing a `Vec<f64>` of oscillator values as percentages
-//!
-//! ## Developer Notes
-//! Decision log: scalar path is reference; SIMD stubs exist but `Kernel::Auto` short-circuits to Scalar for perf; CUDA wrapper + Python bindings return VRAM handles with CAI v3 + DLPack v1.x semantics.
-//! ### Implementation Status
-//! - SIMD implemented (AVX2/AVX512) with vectorized initializer and FMA in scalar loop.
-//! - Runtime selection short-circuits to Scalar for `Kernel::Auto` because SIMD underperforms on
-//!   typical CPUs at realistic sizes (latency-bound recurrence; AVX512 may downclock). Keep code
-//!   for future tuning.
-//! - Streaming Update: O(1) – efficient with incremental regression updates.
-//! - Memory Optimization: Uses `alloc_with_nan_prefix` for outputs and batch helpers per ALMA.
-//! - Batch Operations: Implemented; Auto selection maps to scalar path for stability/perf.
-//!
-//! ### TODO - Performance Improvements
-//! - [ ] Implement actual AVX2 SIMD kernel (currently stub)
-//! - [ ] Implement actual AVX512 SIMD kernel (currently stub)
-//! - [ ] Vectorize linear regression calculations
-//! - [ ] Optimize sum calculations with SIMD horizontal adds
-//! - [ ] Consider caching regression coefficients for batch operations
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -56,12 +26,10 @@ use pyo3::{
     types::{PyDict, PyDictMethods},
     Bound, PyErr, PyResult, Python,
 };
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
-// --------- Input Data & Param Structs ---------
 
 impl<'a> AsRef<[f64]> for FoscInput<'a> {
     #[inline(always)]
@@ -88,7 +56,10 @@ pub struct FoscOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct FoscParams {
     pub period: Option<usize>,
 }
@@ -132,8 +103,6 @@ impl<'a> FoscInput<'a> {
         self.params.period.unwrap_or(5)
     }
 }
-
-// --------- Builder Struct ---------
 
 #[derive(Copy, Clone, Debug)]
 pub struct FoscBuilder {
@@ -190,8 +159,6 @@ impl FoscBuilder {
     }
 }
 
-// --------- Error ---------
-
 #[derive(Debug, Error)]
 pub enum FoscError {
     #[error("fosc: Empty input data provided")]
@@ -207,10 +174,12 @@ pub enum FoscError {
     #[error("fosc: Invalid kernel for batch operation: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("fosc: Invalid range expansion: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
-
-// --------- Main Dispatchers ---------
 
 #[inline]
 pub fn fosc(input: &FoscInput) -> Result<FoscOutput, FoscError> {
@@ -244,7 +213,7 @@ pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput,
         Kernel::Auto => detect_best_kernel(),
         other => other,
     };
-    // FIX: warmup = first + period - 1
+
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
     unsafe {
         match chosen {
@@ -259,7 +228,6 @@ pub fn fosc_with_kernel(input: &FoscInput, kernel: Kernel) -> Result<FoscOutput,
     Ok(FoscOutput { values: out })
 }
 
-/// Write directly to output slice - no allocations
 #[inline]
 pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Result<(), FoscError> {
     let data: &[f64] = input.as_ref();
@@ -271,7 +239,10 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
     }
 
     if dst.len() != len {
-        return Err(FoscError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(FoscError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let first = data
@@ -307,7 +278,6 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
         }
     }
 
-    // Fill warmup with NaN
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -316,18 +286,11 @@ pub fn fosc_into_slice(dst: &mut [f64], input: &FoscInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-/// Write Forecast Oscillator (FOSC) outputs into a caller-provided buffer without allocating.
-///
-/// - Preserves the NaN warmup prefix exactly like `fosc()`/`fosc_with_kernel()`.
-/// - The output slice length must equal the input length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn fosc_into(input: &FoscInput, out: &mut [f64]) -> Result<(), FoscError> {
     fosc_into_slice(out, input, Kernel::Auto)
 }
-
-// --------- Scalar Core ---------
 
 #[inline(always)]
 unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -336,13 +299,11 @@ unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
         return;
     }
 
-    // Compute the first index we will write and bail if it exceeds len
     let begin = first + period - 1;
     if begin >= n {
         return;
     }
 
-    // Closed-form constants for 1..=p and their squares
     let p = period as f64;
     let x = 0.5 * p * (p + 1.0);
     let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
@@ -354,18 +315,15 @@ unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
     };
     let inv_p = 1.0 / p;
 
-    // Precompute b = (p*xy - x*y)/denom as: b = xy*(p/denom) - y*(x/denom)
     let p_bd = p * bd;
     let x_bd = x * bd;
-    // TSF one-step forecast at x=p+1 with x=1..p weights:
-    // mean_y + b*(p+1 - mean_x) where mean_x=(p+1)/2  => mean_y + b*(p+1)/2
+
     let tsf_coeff = 0.5 * (p + 1.0);
 
-    // Initialize running sums over window [first .. first+period-2]
     let mut y = 0.0f64;
     let mut xy = 0.0f64;
     let base = data.as_ptr().add(first);
-    let limit = period - 1; // number of elements in the partial window
+    let limit = period - 1;
     let mut k = 0usize;
     while k + 4 <= limit {
         let d0 = *base.add(k + 0);
@@ -387,7 +345,6 @@ unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
         k += 1;
     }
 
-    // Recurrence: write using previous TSF forecast
     let dp = data.as_ptr();
     let op = out.as_mut_ptr();
     let mut tsf_prev = 0.0f64;
@@ -395,22 +352,18 @@ unsafe fn fosc_core(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
     while i < n {
         let newv = *dp.add(i);
 
-        // Include the new value to form the current full window sums
         let y_plus = y + newv;
         let xy_plus = xy + newv * p;
 
-        // Oscillator w.r.t. previous forecast
         *op.add(i) = if newv != 0.0 {
             100.0 * (newv - tsf_prev) / newv
         } else {
             f64::NAN
         };
 
-        // Next-step forecast for this window
         let b = xy_plus * p_bd - y_plus * x_bd;
         tsf_prev = y_plus * inv_p + b * tsf_coeff;
 
-        // Slide window forward: drop oldest and shift weights
         let old_idx = i + 1 - period;
         let oldv = *dp.add(old_idx);
         xy = xy_plus - y_plus;
@@ -425,8 +378,6 @@ pub fn fosc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     unsafe { fosc_core(data, period, first, out) }
 }
 
-// --------- AVX2/AVX512 Routing (Stubs) ---------
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -436,7 +387,6 @@ pub unsafe fn fosc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn fosc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // AVX512 kernel stub: reuse AVX2 (unsafe scalar) implementation
     fosc_avx2(data, period, first, out)
 }
 
@@ -452,34 +402,23 @@ pub unsafe fn fosc_avx512_long(data: &[f64], period: usize, first: usize, out: &
     fosc_avx2(data, period, first, out)
 }
 
-// fosc_avx512_core removed; AVX512 maps to AVX2 (unsafe scalar) above.
-
-// --------- Streaming (Stateful) ---------
-
-// Decision: Streaming uses O(1) sliding OLS updates and the previous bar's forecast
-
-
 #[derive(Debug, Clone)]
 pub struct FoscStream {
     period: usize,
     buffer: Vec<f64>,
-    idx: usize, 
+    idx: usize,
     filled: bool,
 
-    
-    x: f64,       
-    x2: f64,      
-    inv_den: f64, 
-    inv_p: f64,   
-    p_f64: f64,   
-    p1: f64,      
+    x: f64,
+    x2: f64,
+    inv_den: f64,
+    inv_p: f64,
+    p_f64: f64,
+    p1: f64,
 
-    
-    y: f64,  
-    xy: f64, 
+    y: f64,
+    xy: f64,
 
-    
-    
     tsf: f64,
 
     count: usize,
@@ -495,9 +434,9 @@ impl FoscStream {
             });
         }
         let p = period as f64;
-        
+
         let x = 0.5 * p * (p + 1.0);
-        let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0; 
+        let x2 = (p * (p + 1.0) * (2.0 * p + 1.0)) / 6.0;
         let den = p * x2 - x * x;
         let inv_den = if den.abs() < f64::EPSILON {
             0.0
@@ -525,19 +464,13 @@ impl FoscStream {
         })
     }
 
-    /// Streaming update in O(1).
-    /// Returns None during warmup; thereafter returns the Forecast Oscillator
-    /// using the previous one-step-ahead linear regression forecast
-    /// (matches the scalar/batch semantics).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if self.count < self.period {
             self.buffer[self.idx] = value;
             self.y += value;
             self.xy += value * (self.count as f64 + 1.0);
 
-            
             self.idx += 1;
             if self.idx == self.period {
                 self.idx = 0;
@@ -547,24 +480,19 @@ impl FoscStream {
             if self.count == self.period {
                 self.filled = true;
 
-                
-                let b = (self.p_f64.mul_add(self.xy, -self.x * self.y)) * self.inv_den; 
+                let b = (self.p_f64.mul_add(self.xy, -self.x * self.y)) * self.inv_den;
                 let a = (self.y - b * self.x) * self.inv_p;
-                self.tsf = b.mul_add(self.p1, a); 
+                self.tsf = b.mul_add(self.p1, a);
             }
             return None;
         }
 
-        
-        
         let out = if value.is_finite() && value != 0.0 {
-            
             100.0 * (1.0 - self.tsf / value)
         } else {
             f64::NAN
         };
 
-        
         let old = self.buffer[self.idx];
         self.buffer[self.idx] = value;
         self.idx += 1;
@@ -572,12 +500,10 @@ impl FoscStream {
             self.idx = 0;
         }
 
-        
         let y_prev = self.y;
         self.y = y_prev - old + value;
         self.xy = self.xy - y_prev + self.p_f64 * value;
 
-        
         let b = (self.p_f64.mul_add(self.xy, -self.x * self.y)) * self.inv_den;
         let a = (self.y - b * self.x) * self.inv_p;
         self.tsf = b.mul_add(self.p1, a);
@@ -586,8 +512,6 @@ impl FoscStream {
     }
 }
 
-
-
 #[derive(Clone, Debug)]
 pub struct FoscBatchRange {
     pub period: (usize, usize, usize),
@@ -595,7 +519,9 @@ pub struct FoscBatchRange {
 
 impl Default for FoscBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -677,18 +603,23 @@ fn expand_grid(r: &FoscBatchRange) -> Result<Vec<FoscParams>, FoscError> {
                 Ok(v)
             };
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
                 v.push(cur);
-                if cur <= end { break; }
+                if cur <= end {
+                    break;
+                }
                 match cur.checked_sub(step) {
                     Some(next) => cur = next,
                     None => break,
                 }
-                if cur == usize::MAX { break; }
-                if cur <= end { break; }
+                if cur == usize::MAX {
+                    break;
+                }
+                if cur <= end {
+                    break;
+                }
             }
             if v.is_empty() {
                 Err(FoscError::InvalidRange { start, end, step })
@@ -773,21 +704,16 @@ fn fosc_batch_inner(
     let cols = data.len();
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap_or(5) - 1)
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_f64: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
-    
     let actual = match kern {
         Kernel::Auto => Kernel::ScalarBatch,
         k => k,
@@ -839,7 +765,6 @@ fn fosc_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -879,13 +804,11 @@ fn fosc_batch_inner_into(
 
     let cols = data.len();
     let rows = combos.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(FoscError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(FoscError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(FoscError::OutputLengthMismatch {
             expected,
@@ -893,12 +816,10 @@ fn fosc_batch_inner_into(
         });
     }
 
-    
     let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -925,7 +846,7 @@ fn fosc_batch_inner_into(
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        
+
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         match simd {
             Kernel::Scalar => fosc_row_scalar(data, first, period, dst),
@@ -935,7 +856,6 @@ fn fosc_batch_inner_into(
             Kernel::Avx512 => fosc_row_avx512(data, first, period, dst),
             _ => unreachable!(),
         }
-        
     };
 
     if parallel {
@@ -994,8 +914,6 @@ unsafe fn fosc_row_avx512_long(data: &[f64], first: usize, period: usize, out: &
     fosc_avx512_long(data, period, first, out)
 }
 
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "fosc")]
 #[pyo3(signature = (data, period=5, kernel=None))]
@@ -1033,17 +951,15 @@ pub fn fosc_batch_py<'py>(
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::PyDict;
 
-    let slice_in = data.as_slice()?; 
+    let slice_in = data.as_slice()?;
     let sweep = FoscBatchRange {
         period: period_range,
     };
 
-    
     let combos = expand_grid(&sweep).map_err(|e| PyErr::new::<PyValueError, _>(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyErr::new::<PyValueError, _>("rows*cols overflow in fosc_batch_py"))?;
@@ -1052,7 +968,6 @@ pub fn fosc_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = py
         .allow_threads(|| {
             let batch = match kern {
@@ -1072,9 +987,9 @@ pub fn fosc_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
-    
+
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    
+
     dict.set_item(
         "periods",
         combos
@@ -1087,7 +1002,6 @@ pub fn fosc_batch_py<'py>(
     dict.set_item("cols", cols)?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "fosc_cuda_batch_dev")]
@@ -1173,9 +1087,7 @@ impl FoscStreamPy {
     }
 }
 
-// --------- WASM Bindings ---------
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fosc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = FoscParams {
@@ -1183,14 +1095,14 @@ pub fn fosc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = FoscInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
     fosc_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fosc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1199,7 +1111,7 @@ pub fn fosc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1209,7 +1121,7 @@ pub fn fosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fosc_into(
     in_ptr: *const f64,
@@ -1234,7 +1146,6 @@ pub fn fosc_into(
         let input = FoscInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
             let mut temp = vec![0.0; len];
             fosc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1249,14 +1160,13 @@ pub fn fosc_into(
     }
 }
 
-// Batch API structures
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct FoscBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct FoscBatchJsOutput {
     pub values: Vec<f64>,
@@ -1265,7 +1175,7 @@ pub struct FoscBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = fosc_batch)]
 pub fn fosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: FoscBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1289,7 +1199,7 @@ pub fn fosc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fosc_batch_into(
     in_ptr: *const f64,
@@ -1310,11 +1220,9 @@ pub fn fosc_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Call fosc_batch_inner and copy results
         let output = fosc_batch_inner(data, &range, Kernel::Auto, false)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Copy results to output pointer
         let out = std::slice::from_raw_parts_mut(out_ptr, output.values.len());
         out.copy_from_slice(&output.values);
 
@@ -1517,24 +1425,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            // Default parameters
             FoscParams::default(),
-            // Minimum period
             FoscParams { period: Some(2) },
-            // Small periods
             FoscParams { period: Some(3) },
-            FoscParams { period: Some(5) }, // Default value
+            FoscParams { period: Some(5) },
             FoscParams { period: Some(7) },
-            // Medium periods
             FoscParams { period: Some(10) },
             FoscParams { period: Some(14) },
             FoscParams { period: Some(20) },
-            // Large periods
             FoscParams { period: Some(30) },
             FoscParams { period: Some(50) },
-            // Very large periods
             FoscParams { period: Some(100) },
             FoscParams { period: Some(200) },
         ];
@@ -1545,12 +1446,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1600,7 +1500,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1612,7 +1512,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Variable period with random price data
         let strat1 = (2usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1633,11 +1532,9 @@ mod tests {
             let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
             let FoscOutput { values: ref_out } = fosc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Property 1: Output length must match input length
             prop_assert_eq!(out.len(), data.len());
             prop_assert_eq!(ref_out.len(), data.len());
 
-            // Property 2: Warmup period correctness - first (period-1) values should be NaN
             for i in 0..(period - 1) {
                 prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
                 prop_assert!(
@@ -1647,12 +1544,10 @@ mod tests {
                 );
             }
 
-            // Property 3: Kernel consistency - all kernels should produce identical results
             for i in (period - 1)..data.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                // Both should be NaN or both should be finite
                 if r.is_nan() {
                     prop_assert!(
                         y.is_nan(),
@@ -1668,7 +1563,6 @@ mod tests {
                         r
                     );
                 } else {
-                    // Allow small tolerance for floating-point differences
                     let diff = (y - r).abs();
                     let tolerance = 1e-9 * r.abs().max(1.0);
                     prop_assert!(
@@ -1681,7 +1575,6 @@ mod tests {
                     );
                 }
 
-                // Property 4: Poison value detection
                 let y_bits = y.to_bits();
                 prop_assert_ne!(
                     y_bits,
@@ -1706,7 +1599,6 @@ mod tests {
             Ok(())
         })?;
 
-        // Strategy 2: Fixed period with varying data lengths
         let strat2 = prop::collection::vec(
             (1e-6f64..1e6f64)
                 .prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
@@ -1714,7 +1606,7 @@ mod tests {
         );
 
         proptest::test_runner::TestRunner::default().run(&strat2, |data| {
-            let period = 5; // Use default period
+            let period = 5;
             let params = FoscParams {
                 period: Some(period),
             };
@@ -1722,8 +1614,6 @@ mod tests {
 
             let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
 
-            // Check bounds - FOSC is percentage, typically -100 to +100 but can exceed
-            // We'll use a reasonable bound of -200% to +200%
             for i in (period - 1)..data.len() {
                 if !out[i].is_nan() {
                     prop_assert!(
@@ -1738,7 +1628,6 @@ mod tests {
             Ok(())
         })?;
 
-        
         let strat3 =
             (2usize..=20, 1e-6f64..10f64, 10usize..100).prop_map(|(period, start, len)| {
                 let data: Vec<f64> = (0..len).map(|i| start + (i as f64) * 0.1).collect();
@@ -1753,10 +1642,7 @@ mod tests {
 
             let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
 
-            
-            
-            
-            let start_idx = if period > 0 { period } else { period - 1 }; 
+            let start_idx = if period > 0 { period } else { period - 1 };
             let valid_fosc: Vec<f64> = out
                 .iter()
                 .skip(start_idx)
@@ -1765,12 +1651,10 @@ mod tests {
                 .collect();
 
             if valid_fosc.len() > 5 {
-                
                 for &val in &valid_fosc {
                     prop_assert!(val.abs() < 5.0, "FOSC {} too large for linear trend", val);
                 }
 
-                
                 let mean: f64 = valid_fosc.iter().sum::<f64>() / valid_fosc.len() as f64;
                 let variance: f64 = valid_fosc.iter().map(|v| (v - mean).powi(2)).sum::<f64>()
                     / valid_fosc.len() as f64;
@@ -1786,7 +1670,6 @@ mod tests {
             Ok(())
         })?;
 
-        
         let strat4 = (2usize..=20, 10usize..100).prop_map(|(period, len)| {
             let data: Vec<f64> = (0..len)
                 .map(|i| 100.0 + 10.0 * (i as f64 * 0.5).sin())
@@ -1802,7 +1685,6 @@ mod tests {
 
             let FoscOutput { values: out } = fosc_with_kernel(&input, kernel).unwrap();
 
-            
             let valid_values: Vec<f64> = out
                 .iter()
                 .skip(period - 1)
@@ -1812,7 +1694,7 @@ mod tests {
 
             if valid_values.len() > 10 {
                 let mean: f64 = valid_values.iter().sum::<f64>() / valid_values.len() as f64;
-                
+
                 prop_assert!(
                     mean.abs() < 10.0,
                     "Mean FOSC {} is too far from zero for oscillating data",
@@ -1823,7 +1705,6 @@ mod tests {
             Ok(())
         })?;
 
-        
         let strat5 = (2usize..=20, 50f64..200f64, 20usize..100).prop_flat_map(
             |(period, base_price, len)| {
                 (
@@ -1851,12 +1732,9 @@ mod tests {
 
             let FoscOutput { values: out } = result.unwrap();
 
-            
             if period == 2 {
                 for i in 1..data.len() {
                     if !out[i].is_nan() {
-                        
-                        
                         prop_assert!(
                             out[i].abs() < 100.0,
                             "FOSC {} at index {} unreasonable for period=2",
@@ -1867,7 +1745,6 @@ mod tests {
                 }
             }
 
-            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > period {
                 for i in (period - 1)..data.len() {
                     if !out[i].is_nan() {
@@ -1884,12 +1761,10 @@ mod tests {
             Ok(())
         })?;
 
-        
         let strat6 = (2usize..=10, 10usize..50).prop_flat_map(|(period, len)| {
             (
                 prop::collection::vec(
                     prop::strategy::Union::new(vec![
-                        
                         (0.9f64..1.0)
                             .prop_map(|p| {
                                 if p < 0.95 {
@@ -1923,7 +1798,6 @@ mod tests {
 
             let FoscOutput { values: out } = result.unwrap();
 
-            
             for i in (period - 1)..data.len() {
                 if data[i] == 0.0 {
                     prop_assert!(
@@ -1932,10 +1806,7 @@ mod tests {
                         i
                     );
                 } else if data[i].abs() < 1e-10 {
-                    
-                    
                     if !out[i].is_nan() {
-                        
                         prop_assert!(
                             out[i].abs() < 10000.0,
                             "FOSC {} unreasonably large for tiny price {} at index {}",
@@ -2030,7 +1901,7 @@ mod tests {
             .period_range(5, 25, 5)
             .apply_candles(&c, "close")?;
 
-        let expected_combos = 5; 
+        let expected_combos = 5;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -2045,17 +1916,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),     
-            (5, 25, 5),     
-            (30, 60, 15),   
-            (2, 5, 1),      
-            (10, 20, 2),    
-            (5, 5, 0),      
-            (5, 50, 15),    
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (5, 5, 0),
+            (5, 50, 15),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2136,31 +2005,26 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
     gen_batch_tests!(check_batch_no_poison);
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_fosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let n = 512usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
             let x = i as f64;
-            
+
             data.push(50.0 + 0.05 * x + (0.1 * x).sin() * 2.0);
         }
 
         let input = FoscInput::from_slice(&data, FoscParams::default());
 
-        
         let baseline = fosc_with_kernel(&input, Kernel::Auto)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
         fosc_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        
         #[inline]
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)

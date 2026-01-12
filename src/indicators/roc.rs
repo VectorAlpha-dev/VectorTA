@@ -1,25 +1,3 @@
-//! # Rate of Change (ROC)
-//!
-//! Measures the percentage change in price between the current value and the value `period` bars ago.
-//! Implements kernel auto-detection and AVX2/AVX512 stubs for SIMD compatibility, with a fully
-//! featured builder/batch/stream API and input validation parity with alma.rs.
-//!
-//! ## Parameters
-//! - **period**: Lookback window (defaults to 9)
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **values**: Vector of ROC percentage values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - **SIMD**: AVX2/AVX512 single-series kernels implemented; batch SIMD rows currently delegate to scalar.
-//! - **Streaming**: Implemented with O(1) update performance (circular buffer)
-//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-//! - Decision log: Scalar is the reference path; SIMD is available and benchmarked, CUDA wrapper present with VRAM-backed handles, and Python interop exposes CAI v3 + DLPack v1.x without changing numerical outputs.
-//! - Decision (streaming): Updated to match batch warmup precisely (NaN prefix = first_non_nan + period) and avoid modulus in hot path; uses mul_add for FMA where available.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -35,6 +13,8 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -45,15 +25,11 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
-
 
 #[derive(Debug, Clone)]
 pub enum RocData<'a> {
@@ -70,7 +46,10 @@ pub struct RocOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RocParams {
     pub period: Option<usize>,
 }
@@ -121,8 +100,6 @@ impl<'a> RocInput<'a> {
         self.params.period.unwrap_or(9)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct RocBuilder {
@@ -194,7 +171,11 @@ pub enum RocError {
     #[error("roc: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("roc: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("roc: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -231,8 +212,7 @@ fn roc_prepare<'a>(
             valid: len - first,
         });
     }
-    // ROC is memory-bound and sees no consistent SIMD wins across CPUs.
-    // Prefer Scalar for Auto to avoid regressions; explicit SIMD remains for benchmarking.
+
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -263,24 +243,17 @@ fn roc_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
 
 pub fn roc_with_kernel(input: &RocInput, kernel: Kernel) -> Result<RocOutput, RocError> {
     let (data, period, first, chosen) = roc_prepare(input, kernel)?;
-    // ROC first valid index is first + period
+
     let mut out = alloc_with_nan_prefix(data.len(), first + period);
     roc_compute_into(data, period, first, chosen, &mut out);
     Ok(RocOutput { values: out })
 }
 
-/// Write ROC values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; otherwise returns `RocError::OutputLengthMismatch`.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn roc_into(input: &RocInput, out: &mut [f64]) -> Result<(), RocError> {
-    // Delegate to the existing into-slice helper with Kernel::Auto to preserve behavior.
     roc_into_slice(out, input, Kernel::Auto)
 }
-
-// --- Indicator Functions ---
 
 #[inline(always)]
 pub unsafe fn roc_indicator(input: &RocInput) -> Result<RocOutput, RocError> {
@@ -318,13 +291,11 @@ pub unsafe fn roc_indicator_avx512_long(input: &RocInput) -> Result<RocOutput, R
     roc_with_kernel(input, Kernel::Avx512)
 }
 
-// --- Core Scalar & SIMD ---
-
 #[inline(always)]
 pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
     let start = first + period;
-    // Safe, bounds-check-minimized iteration using slice zips
+
     let dst = &mut out[start..];
     let curr = &data[start..];
     let prev = &data[first..(len - period)];
@@ -332,7 +303,6 @@ pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         if p == 0.0 || p.is_nan() {
             *d = 0.0;
         } else {
-            // Use mul_add to enable FMA where available: (c/p)*100 - 100
             *d = (c / p).mul_add(100.0, -100.0);
         }
     }
@@ -342,7 +312,6 @@ pub fn roc_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Process 4 lanes at a time using AVX2
     let len = data.len();
     let start = first + period;
     if start >= len {
@@ -363,22 +332,18 @@ pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         let c = _mm256_loadu_pd(base_curr.add(i));
         let p = _mm256_loadu_pd(base_prev.add(i));
 
-        // invalid when p == 0.0 or p is NaN
         let mask_zero = _mm256_cmp_pd(p, v_zero, _CMP_EQ_OQ);
         let mask_nan = _mm256_cmp_pd(p, p, _CMP_UNORD_Q);
         let mask_invalid = _mm256_or_pd(mask_zero, mask_nan);
 
-        // r = (c / p)*100 - 100, using FMA for the mul-add part
         let div = _mm256_div_pd(c, p);
         let res = _mm256_fmadd_pd(div, v_100, v_m100);
 
-        // Blend: if invalid -> 0.0 else res
         let blended = _mm256_blendv_pd(res, v_zero, mask_invalid);
         _mm256_storeu_pd(base_out.add(i), blended);
         i += 4;
     }
 
-    // Scalar tail
     while i < n {
         let p = *base_prev.add(i);
         let c = *base_curr.add(i);
@@ -394,7 +359,6 @@ pub unsafe fn roc_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
 #[target_feature(enable = "avx512f,fma")]
 #[inline]
 pub unsafe fn roc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Process 8 lanes at a time using AVX-512
     let len = data.len();
     let start = first + period;
     if start >= len {
@@ -415,22 +379,18 @@ pub unsafe fn roc_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
         let c = _mm512_loadu_pd(base_curr.add(i));
         let p = _mm512_loadu_pd(base_prev.add(i));
 
-        // invalid when p == 0.0 or p is NaN
         let k_zero = _mm512_cmp_pd_mask(p, v_zero, _CMP_EQ_OQ);
         let k_nan = _mm512_cmp_pd_mask(p, p, _CMP_UNORD_Q);
         let k_invalid = k_zero | k_nan;
 
-        // r = (c / p)*100 - 100
         let div = _mm512_div_pd(c, p);
         let res = _mm512_fmadd_pd(div, v_100, v_m100);
 
-        // zero for invalid lanes
         let blended = _mm512_mask_mov_pd(res, k_invalid, v_zero);
         _mm512_storeu_pd(base_out.add(i), blended);
         i += 8;
     }
 
-    // Scalar tail
     while i < n {
         let p = *base_prev.add(i);
         let c = *base_curr.add(i);
@@ -453,8 +413,6 @@ pub unsafe fn roc_avx512_long(data: &[f64], period: usize, first: usize, out: &m
     roc_scalar(data, period, first, out)
 }
 
-// --- Row/Batch Parity ---
-
 #[inline(always)]
 pub unsafe fn roc_row_scalar(
     data: &[f64],
@@ -465,7 +423,6 @@ pub unsafe fn roc_row_scalar(
     _inv_n: f64,
     out: &mut [f64],
 ) {
-    // Optimized row kernel mirroring roc_scalar semantics with pointer arithmetic.
     let len = data.len();
     let start = first + period;
     if start >= len {
@@ -480,7 +437,6 @@ pub unsafe fn roc_row_scalar(
     let n = len - start;
     let mut i = 0usize;
 
-    // Unroll by 4
     while i + 4 <= n {
         let p0 = *prev_ptr.add(i + 0);
         let p1 = *prev_ptr.add(i + 1);
@@ -516,7 +472,6 @@ pub unsafe fn roc_row_scalar(
         i += 4;
     }
 
-    // Tail
     while i < n {
         let p = *prev_ptr.add(i);
         let c = *curr_ptr.add(i);
@@ -581,8 +536,6 @@ pub unsafe fn roc_row_avx512_long(
     roc_row_scalar(data, first, period, _stride, _weights, _inv_n, out)
 }
 
-// --- Stream API ---
-
 #[derive(Debug, Clone)]
 pub struct RocStream {
     period: usize,
@@ -612,24 +565,22 @@ impl RocStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // 1) Defer until we see the first finite sample so that warmup is (first + period)
         if !self.filled {
             if value.is_nan() {
-                return None; // still in the leading-NaN prelude
+                return None;
             }
-            // First finite sample: start the ring from a clean point
+
             self.buffer[self.head] = value;
-            // wrap head without %
+
             self.head += 1;
             if self.head == self.period {
                 self.head = 0;
             }
             self.filled = true;
-            self.count = 1; // counts samples since the first finite
-            return None; // needs 'period' more before first output
+            self.count = 1;
+            return None;
         }
 
-        // 2) Warm up the ring with exactly 'period' values after first finite
         if self.count < self.period {
             self.buffer[self.head] = value;
             self.head += 1;
@@ -640,7 +591,6 @@ impl RocStream {
             return None;
         }
 
-        // 3) Steady-state O(1): compare against the value 'period' updates ago
         let old_value = self.buffer[self.head];
         self.buffer[self.head] = value;
 
@@ -652,13 +602,10 @@ impl RocStream {
         if old_value == 0.0 || old_value.is_nan() {
             Some(0.0)
         } else {
-            // Accurate default: ((value / old) * 100) - 100, fused when available
             Some((value / old_value).mul_add(100.0, -100.0))
         }
     }
 }
-
-// --- Batch API ---
 
 #[derive(Clone, Debug)]
 pub struct RocBatchRange {
@@ -790,11 +737,7 @@ pub(crate) fn expand_grid(r: &RocBatchRange) -> Result<Vec<RocParams>, RocError>
             }
         }
         if out.is_empty() {
-            return Err(RocError::InvalidRange {
-                start,
-                end,
-                step,
-            });
+            return Err(RocError::InvalidRange { start, end, step });
         }
         Ok(out)
     }
@@ -844,18 +787,14 @@ fn roc_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(RocError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(RocError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    // Use uninitialized memory for better performance
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each row
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
@@ -900,7 +839,6 @@ fn roc_batch_inner(
         }
     }
 
-    // Convert uninitialized memory to Vec
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -940,13 +878,11 @@ fn roc_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(RocError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(RocError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(RocError::OutputLengthMismatch {
             expected,
@@ -954,14 +890,12 @@ fn roc_batch_inner_into(
         });
     }
 
-    // 1) View output as uninitialized and write NaN warm prefixes via helper
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // 2) Row worker: write valid region only
     let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let dst: &mut [f64] =
@@ -976,7 +910,6 @@ fn roc_batch_inner_into(
         }
     };
 
-    // 3) Iterate rows
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -999,8 +932,6 @@ fn roc_batch_inner_into(
 
     Ok(combos)
 }
-
-// --- Python Bindings ---
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "roc")]
@@ -1112,7 +1043,6 @@ impl RocStreamPy {
     }
 }
 
-// ----- Python device array with CAI v3 + DLPack v1.x (ROC) -----
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct RocDeviceArrayF32Py {
@@ -1138,7 +1068,7 @@ impl RocDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (row_stride, itemsize))?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1160,7 +1090,6 @@ impl RocDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1174,16 +1103,13 @@ impl RocDeviceArrayF32Py {
                             "device copy not implemented for __dlpack__",
                         ));
                     } else {
-                        return Err(PyValueError::new_err(
-                            "dl_device mismatch for __dlpack__",
-                        ));
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                     }
                 }
             }
         }
         let _ = stream;
 
-        
         let inner = self
             .inner
             .take()
@@ -1199,9 +1125,6 @@ impl RocDeviceArrayF32Py {
     }
 }
 
-
-
-/// Write ROC values directly to output slice - no allocations
 #[inline]
 pub fn roc_into_slice(dst: &mut [f64], input: &RocInput, kern: Kernel) -> Result<(), RocError> {
     let (data, period, first, chosen) = roc_prepare(input, kern)?;
@@ -1219,7 +1142,7 @@ pub fn roc_into_slice(dst: &mut [f64], input: &RocInput, kern: Kernel) -> Result
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn roc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = RocParams {
@@ -1235,7 +1158,7 @@ pub fn roc_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn roc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1244,7 +1167,7 @@ pub fn roc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn roc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1254,7 +1177,7 @@ pub fn roc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn roc_into(
     in_ptr: *const f64,
@@ -1274,7 +1197,6 @@ pub fn roc_into(
         let input = RocInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             roc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1288,7 +1210,6 @@ pub fn roc_into(
         Ok(())
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -1348,13 +1269,13 @@ pub fn roc_cuda_many_series_one_param_dev_py(
     Ok(RocDeviceArrayF32Py { inner: Some(inner) })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RocBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RocBatchJsOutput {
     pub values: Vec<f64>,
@@ -1363,7 +1284,7 @@ pub struct RocBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn roc_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: RocBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1387,8 +1308,6 @@ pub fn roc_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,31 +1317,25 @@ mod tests {
 
     #[test]
     fn test_roc_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let params = RocParams { period: Some(10) };
         let input = RocInput::from_candles(&candles, "close", params);
 
-        
         let baseline = roc(&input)?.values;
 
-        
         let mut out = vec![0.0; candles.close.len()];
         roc_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        
         for (i, (a, b)) in baseline.iter().zip(out.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12);
             assert!(
                 equal,
                 "roc_into parity mismatch at idx {}: api={} into={}",
-                i,
-                a,
-                b
+                i, a, b
             );
         }
         Ok(())
@@ -1636,19 +1549,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            RocParams::default(),            
-            RocParams { period: Some(2) },   
-            RocParams { period: Some(5) },   
-            RocParams { period: Some(7) },   
-            RocParams { period: Some(9) },   
-            RocParams { period: Some(14) },  
-            RocParams { period: Some(20) },  
-            RocParams { period: Some(30) },  
-            RocParams { period: Some(50) },  
-            RocParams { period: Some(100) }, 
-            RocParams { period: Some(200) }, 
+            RocParams::default(),
+            RocParams { period: Some(2) },
+            RocParams { period: Some(5) },
+            RocParams { period: Some(7) },
+            RocParams { period: Some(9) },
+            RocParams { period: Some(14) },
+            RocParams { period: Some(20) },
+            RocParams { period: Some(30) },
+            RocParams { period: Some(50) },
+            RocParams { period: Some(100) },
+            RocParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1657,12 +1569,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1709,7 +1620,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_roc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1718,10 +1629,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100).prop_flat_map(|period| {
             prop_oneof![
-                
                 (
                     prop::collection::vec(
                         (1f64..1e6f64)
@@ -1730,31 +1639,28 @@ mod tests {
                     ),
                     Just(period),
                 ),
-                
                 (
                     prop::collection::vec(
                         prop_oneof![
                             (1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
-                            Just(100.0), 
+                            Just(100.0),
                         ],
                         period..400,
                     ),
                     Just(period),
                 ),
-                
                 (
                     (100f64..10000f64, 0.01f64..0.1f64).prop_map(move |(start, step)| {
-                        let len = period + (400 - period) / 2; 
+                        let len = period + (400 - period) / 2;
                         (0..len)
                             .map(|i| start + (i as f64) * step)
                             .collect::<Vec<_>>()
                     }),
                     Just(period),
                 ),
-                
                 (
                     (10000f64..100000f64, 0.01f64..0.1f64).prop_map(move |(start, step)| {
-                        let len = period + (400 - period) / 2; 
+                        let len = period + (400 - period) / 2;
                         (0..len)
                             .map(|i| start - (i as f64) * step)
                             .collect::<Vec<_>>()
@@ -1773,10 +1679,8 @@ mod tests {
             let RocOutput { values: out } = roc_with_kernel(&input, kernel)?;
             let RocOutput { values: ref_out } = roc_with_kernel(&input, Kernel::Scalar)?;
 
-            
             prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-            
             for i in 0..period {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1786,20 +1690,17 @@ mod tests {
                 );
             }
 
-            
             for i in period..data.len() {
                 let current = data[i];
                 let previous = data[i - period];
                 let roc_val = out[i];
 
-                
                 let expected_roc = if previous == 0.0 || previous.is_nan() {
                     0.0
                 } else {
                     ((current / previous) - 1.0) * 100.0
                 };
 
-                
                 if !roc_val.is_nan() {
                     prop_assert!(
 							(roc_val - expected_roc).abs() < 1e-9,
@@ -1807,7 +1708,6 @@ mod tests {
 							i, roc_val, expected_roc, current, previous
 						);
 
-                    
                     if current > previous && previous > 0.0 {
                         prop_assert!(
 								roc_val > -1e-9,
@@ -1832,7 +1732,6 @@ mod tests {
                 }
             }
 
-            
             let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
             if is_constant && data.len() > period {
                 for i in period..data.len() {
@@ -1847,12 +1746,10 @@ mod tests {
                 }
             }
 
-            
             let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0]);
             let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
             if is_monotonic_increasing && !is_constant {
-                
                 for i in period..data.len() {
                     if !out[i].is_nan() && data[i] > data[i - period] {
                         prop_assert!(
@@ -1866,7 +1763,6 @@ mod tests {
             }
 
             if is_monotonic_decreasing && !is_constant {
-                
                 for i in period..data.len() {
                     if !out[i].is_nan() && data[i] < data[i - period] {
                         prop_assert!(
@@ -1879,7 +1775,6 @@ mod tests {
                 }
             }
 
-            
             prop_assert_eq!(out.len(), ref_out.len(), "Kernel output length mismatch");
 
             for i in 0..out.len() {
@@ -1907,7 +1802,6 @@ mod tests {
                 }
             }
 
-            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in out.iter().enumerate() {
@@ -1987,7 +1881,7 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let output = RocBatchBuilder::new()
-            .period_static(10) 
+            .period_static(10)
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 
@@ -2022,15 +1916,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),   
-            (5, 25, 5),   
-            (30, 60, 15), 
-            (2, 5, 1),    
-            (9, 9, 0),    
-            (14, 21, 7),  
-            (10, 50, 10), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (9, 9, 0),
+            (14, 21, 7),
+            (10, 50, 10),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2049,7 +1942,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2102,7 +1994,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {

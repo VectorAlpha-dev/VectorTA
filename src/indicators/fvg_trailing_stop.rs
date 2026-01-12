@@ -1,35 +1,3 @@
-//! # FVG Trailing Stop
-//!
-//! FVG Trailing Stop is a trend-following indicator that identifies Fair Value Gaps (FVGs) in price action
-//! and uses them to create dynamic trailing stop levels. It combines FVG detection with smoothed channel
-//! extremes to generate adaptive support and resistance levels.
-//!
-//! ## Parameters
-//! - **unmitigated_fvg_lookback**: Number of FVGs to track in lookback window (default: 5)
-//! - **smoothing_length**: Period for SMA smoothing of levels (default: 9)
-//! - **reset_on_cross**: Whether to reset trailing stop on cross (default: false)
-//!
-//! ## Returns
-//! - **`Ok(FvgTrailingStopOutput)`** containing:
-//!   - `upper`: Upper channel boundary (NaN when lower is active)
-//!   - `lower`: Lower channel boundary (NaN when upper is active)
-//!   - `upper_ts`: Upper trailing stop (NaN when lower is active)
-//!   - `lower_ts`: Lower trailing stop (NaN when upper is active)
-//!
-//! ## Developer Notes
-//! ### Implementation Status
-//! - Decision: SIMD disabled for single-series; scalar is faster and stateful/time-dependent across bars.
-//! - AVX2/AVX512 stubs short-circuit to scalar at runtime; nightly tests still cover them.
-//! - Scalar path optimized: removed VecDeque sums/retains and O(w) smoothing loops; now O(1) ring updates.
-//! - Batch uses the same scalar kernel per row (Rayon-parallel); row-specific shared-precompute left for future work.
-//! - CUDA wrapper enabled on `feature = \"cuda\"`; returns VRAM handles with CAI v3 + DLPack v1.x interop via shared helpers; kernels mirror scalar semantics.
-//!
-//! ### TODO - Performance Improvements
-//! - [ ] Row-specific batch: precompute FVG candidates and close prefix sums if/when needed.
-//! - [ ] Revisit SIMD only if structure changes make it beneficial.
-
-
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -39,12 +7,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -55,14 +21,10 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-
-
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct FvgTrailingStopOutput {
     pub upper: Vec<f64>,
@@ -71,9 +33,11 @@ pub struct FvgTrailingStopOutput {
     pub lower_ts: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct FvgTrailingStopParams {
     pub unmitigated_fvg_lookback: Option<usize>,
     pub smoothing_length: Option<usize>,
@@ -90,7 +54,6 @@ impl Default for FvgTrailingStopParams {
     }
 }
 
-/// Data source for FVG Trailing Stop - either Candles or direct slices
 #[derive(Debug, Clone)]
 pub enum FvgTrailingStopData<'a> {
     Candles(&'a Candles),
@@ -101,7 +64,6 @@ pub enum FvgTrailingStopData<'a> {
     },
 }
 
-/// Helper function to find first valid OHLC data point
 #[inline]
 fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     for i in 0..high.len() {
@@ -112,7 +74,6 @@ fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     usize::MAX
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct FvgTrailingStopInput<'a> {
     pub data: FvgTrailingStopData<'a>,
@@ -163,7 +124,6 @@ impl<'a> FvgTrailingStopInput<'a> {
     }
 }
 
-// ==================== ERROR HANDLING ====================
 #[derive(Debug, Error)]
 pub enum FvgTrailingStopError {
     #[error("fvg_trailing_stop: Input data slice is empty.")]
@@ -188,13 +148,16 @@ pub enum FvgTrailingStopError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("fvg_trailing_stop: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("fvg_trailing_stop: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
 
-// ==================== KERNEL IMPLEMENTATIONS ====================
 #[inline]
 fn fvg_ts_scalar(
     high: &[f64],
@@ -208,7 +171,6 @@ fn fvg_ts_scalar(
     upper_ts: &mut [f64],
     lower_ts: &mut [f64],
 ) {
-    // Safety: all slices are validated by the caller (same length, non-null).
     let len = high.len();
     debug_assert_eq!(len, low.len());
     debug_assert_eq!(len, close.len());
@@ -217,17 +179,14 @@ fn fvg_ts_scalar(
     debug_assert_eq!(len, upper_ts.len());
     debug_assert_eq!(len, lower_ts.len());
 
-    // FVG level buffers (small: O(lookback))
     let mut bull_buf = vec![0.0f64; lookback];
     let mut bear_buf = vec![0.0f64; lookback];
     let mut bull_len: usize = 0;
     let mut bear_len: usize = 0;
 
-    // Last index where bull/bear average was non-NaN
     let mut last_bull_non_na: Option<usize> = None;
     let mut last_bear_non_na: Option<usize> = None;
 
-    // Fixed-window smoothing over x-series with O(1) updates via ring buffers
     let w = smoothing_len;
     let mut bull_ring_vals = vec![0.0f64; w];
     let mut bull_ring_nan = vec![false; w];
@@ -243,20 +202,17 @@ fn fvg_ts_scalar(
     let mut bull_ring_idx = 0usize;
     let mut bear_ring_idx = 0usize;
 
-    // OS/TS state
-    let mut os: Option<i8> = None; // -1 (short), 1 (long)
-    let mut ts: Option<f64> = None; // trailing stop value
+    let mut os: Option<i8> = None;
+    let mut ts: Option<f64> = None;
     let mut ts_prev: Option<f64> = None;
 
     for i in 0..len {
-        // ---------- FVG detection (needs i >= 2) ----------
         if i >= 2 && !high[i - 2].is_nan() && !low[i - 2].is_nan() && !close[i - 1].is_nan() {
             if low[i] > high[i - 2] && close[i - 1] > high[i - 2] {
                 if bull_len < lookback {
                     bull_buf[bull_len] = high[i - 2];
                     bull_len += 1;
                 } else {
-                    // shift-left by 1 (lookback is small)
                     for k in 1..lookback {
                         bull_buf[k - 1] = bull_buf[k];
                     }
@@ -276,7 +232,6 @@ fn fvg_ts_scalar(
             }
         }
 
-        // ---------- Mitigation: retain only levels passing the condition ----------
         let c = close[i];
 
         let mut new_bull_len = 0usize;
@@ -303,7 +258,6 @@ fn fvg_ts_scalar(
         }
         bear_len = new_bear_len;
 
-        // Fast averages (or NaN if empty)
         let bull_avg = if bull_len > 0 {
             bull_acc / (bull_len as f64)
         } else {
@@ -322,7 +276,6 @@ fn fvg_ts_scalar(
             last_bear_non_na = Some(i);
         }
 
-        // ---------- Progressive SMA fallbacks over `close` ----------
         let bull_bs = if bull_avg.is_nan() {
             match last_bull_non_na {
                 Some(last) => ((i - last).max(1)).min(w),
@@ -361,7 +314,6 @@ fn fvg_ts_scalar(
             f64::NAN
         };
 
-        // x-series inputs to smoothing
         let x_bull = if !bull_avg.is_nan() {
             bull_avg
         } else {
@@ -373,8 +325,6 @@ fn fvg_ts_scalar(
             bear_sma
         };
 
-        // ---------- Fixed-window SMA over x-series via O(1) ring update ----------
-        // Update bull ring
         if bull_ring_count < w {
             let is_nan = x_bull.is_nan();
             bull_ring_nan[bull_ring_count] = is_nan;
@@ -404,7 +354,6 @@ fn fvg_ts_scalar(
             bull_ring_idx = if idx + 1 == w { 0 } else { idx + 1 };
         }
 
-        // Update bear ring
         if bear_ring_count < w {
             let is_nan = x_bear.is_nan();
             bear_ring_nan[bear_ring_count] = is_nan;
@@ -445,7 +394,6 @@ fn fvg_ts_scalar(
             f64::NAN
         };
 
-        // ---------- OS/TS updates ----------
         let prev_os = os;
         let next_os = if !bear_disp.is_nan() && c > bear_disp {
             Some(1)
@@ -503,7 +451,6 @@ fn fvg_ts_scalar(
             }
         }
 
-        // ---------- Output write ----------
         let show = ts.is_some() || ts_prev.is_some();
         let ts_nz = if ts.is_some() { ts } else { ts_prev };
 
@@ -528,7 +475,6 @@ fn fvg_ts_scalar(
     }
 }
 
-// Stub for AVX2 implementation (fallback to scalar)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn fvg_ts_avx2(
@@ -543,8 +489,6 @@ unsafe fn fvg_ts_avx2(
     upper_ts: &mut [f64],
     lower_ts: &mut [f64],
 ) {
-    // Future optimization: implement AVX2 version
-    // For now, fallback to scalar
     fvg_ts_scalar(
         high,
         low,
@@ -559,7 +503,6 @@ unsafe fn fvg_ts_avx2(
     );
 }
 
-// Stub for AVX512 implementation (fallback to scalar)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
 unsafe fn fvg_ts_avx512(
@@ -574,8 +517,6 @@ unsafe fn fvg_ts_avx512(
     upper_ts: &mut [f64],
     lower_ts: &mut [f64],
 ) {
-    // Future optimization: implement AVX512 version
-    // For now, fallback to scalar
     fvg_ts_scalar(
         high,
         low,
@@ -590,7 +531,6 @@ unsafe fn fvg_ts_avx512(
     );
 }
 
-// Stub for WASM SIMD128 implementation
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn fvg_ts_simd128(
@@ -605,8 +545,6 @@ unsafe fn fvg_ts_simd128(
     upper_ts: &mut [f64],
     lower_ts: &mut [f64],
 ) {
-    // Future optimization: implement SIMD128 version
-    // For now, fallback to scalar
     fvg_ts_scalar(
         high,
         low,
@@ -621,7 +559,6 @@ unsafe fn fvg_ts_simd128(
     );
 }
 
-// ==================== CORE COMPUTATION ====================
 #[inline]
 fn fvg_ts_prepare<'a>(
     input: &'a FvgTrailingStopInput,
@@ -644,7 +581,6 @@ fn fvg_ts_prepare<'a>(
     let lookback = input.get_lookback();
     let smoothing_len = input.get_smoothing();
 
-    
     if lookback == 0 {
         return Err(FvgTrailingStopError::InvalidLookback { lookback });
     }
@@ -654,7 +590,6 @@ fn fvg_ts_prepare<'a>(
         });
     }
 
-    
     let need = 2 + smoothing_len.saturating_sub(1);
     if len - first < need {
         return Err(FvgTrailingStopError::NotEnoughValidData {
@@ -759,7 +694,6 @@ fn fvg_ts_compute_into(
     }
 }
 
-
 #[inline]
 pub fn fvg_trailing_stop(
     input: &FvgTrailingStopInput,
@@ -807,11 +741,6 @@ pub fn fvg_trailing_stop_with_kernel(
     })
 }
 
-/// Write FVG Trailing Stop outputs into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (prefix filled with NaN).
-/// - All output slice lengths must equal the input length.
-/// - Uses `Kernel::Auto` runtime dispatch.
 #[inline]
 pub fn fvg_trailing_stop_into(
     input: &FvgTrailingStopInput,
@@ -838,7 +767,14 @@ pub fn fvg_trailing_stop_into_slices(
         .iter()
         .any(|&n| n != len)
     {
-        return Err(FvgTrailingStopError::OutputLengthMismatch { expected: len, got: upper.len().min(lower.len()).min(upper_ts.len()).min(lower_ts.len()) });
+        return Err(FvgTrailingStopError::OutputLengthMismatch {
+            expected: len,
+            got: upper
+                .len()
+                .min(lower.len())
+                .min(upper_ts.len())
+                .min(lower_ts.len()),
+        });
     }
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
@@ -859,7 +795,6 @@ pub fn fvg_trailing_stop_into_slices(
         chosen,
     );
 
-    
     let warm = (first + 2 + smoothing_len.saturating_sub(1)).min(len);
     for dst in [upper, lower, upper_ts, lower_ts] {
         for v in &mut dst[..warm] {
@@ -868,7 +803,6 @@ pub fn fvg_trailing_stop_into_slices(
     }
     Ok(())
 }
-
 
 #[derive(Clone, Debug)]
 pub struct FvgTsBatchRange {
@@ -896,7 +830,6 @@ pub struct FvgTsBatchOutput {
 }
 
 impl FvgTsBatchOutput {
-    /// Find combo row index for given params (combo index, not per-series index).
     pub fn row_for_params(&self, p: &FvgTrailingStopParams) -> Option<usize> {
         self.combos.iter().position(|c| {
             c.unmitigated_fvg_lookback.unwrap_or(5) == p.unmitigated_fvg_lookback.unwrap_or(5)
@@ -905,8 +838,6 @@ impl FvgTsBatchOutput {
         })
     }
 
-    /// Return the 4 output slices (upper, lower, upper_ts, lower_ts) for a combo.
-    /// Layout: for combo r, values block starts at r*4*cols.
     pub fn values_for(
         &self,
         p: &FvgTrailingStopParams,
@@ -941,7 +872,6 @@ fn expand_axis_usize(
             }
         }
     } else {
-        
         let mut v = start;
         loop {
             if v < end {
@@ -961,15 +891,19 @@ fn expand_axis_usize(
 }
 
 #[inline]
-fn expand_grid_ts(
-    r: &FvgTsBatchRange,
-) -> Result<Vec<FvgTrailingStopParams>, FvgTrailingStopError> {
+fn expand_grid_ts(r: &FvgTsBatchRange) -> Result<Vec<FvgTrailingStopParams>, FvgTrailingStopError> {
     let looks = expand_axis_usize(r.lookback)?;
     let smooths = expand_axis_usize(r.smoothing)?;
     let mut resets = Vec::new();
-    if r.reset_on_cross.0 { resets.push(false); }
-    if r.reset_on_cross.1 { resets.push(true); }
-    if resets.is_empty() { resets.push(false); }
+    if r.reset_on_cross.0 {
+        resets.push(false);
+    }
+    if r.reset_on_cross.1 {
+        resets.push(true);
+    }
+    if resets.is_empty() {
+        resets.push(false);
+    }
 
     let mut v = Vec::with_capacity(
         looks
@@ -980,7 +914,11 @@ fn expand_grid_ts(
     for &lb in &looks {
         for &sm in &smooths {
             for &rs in &resets {
-                v.push(FvgTrailingStopParams { unmitigated_fvg_lookback: Some(lb), smoothing_length: Some(sm), reset_on_cross: Some(rs) });
+                v.push(FvgTrailingStopParams {
+                    unmitigated_fvg_lookback: Some(lb),
+                    smoothing_length: Some(sm),
+                    reset_on_cross: Some(rs),
+                });
             }
         }
     }
@@ -1002,7 +940,7 @@ pub fn fvg_ts_batch_inner_into(
     sweep: &FvgTsBatchRange,
     kern: Kernel,
     parallel: bool,
-    out: &mut [f64], 
+    out: &mut [f64],
 ) -> Result<Vec<FvgTrailingStopParams>, FvgTrailingStopError> {
     if !matches!(
         kern,
@@ -1028,9 +966,16 @@ pub fn fvg_ts_batch_inner_into(
     let expected = rows
         .checked_mul(4)
         .and_then(|x| x.checked_mul(cols))
-        .ok_or_else(|| FvgTrailingStopError::InvalidRange { start: rows, end: cols, step: 4 })?;
+        .ok_or_else(|| FvgTrailingStopError::InvalidRange {
+            start: rows,
+            end: cols,
+            step: 4,
+        })?;
     if out.len() != expected {
-        return Err(FvgTrailingStopError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(FvgTrailingStopError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
     let first = first_valid_ohlc(h, l, c);
@@ -1038,7 +983,6 @@ pub fn fvg_ts_batch_inner_into(
         return Err(FvgTrailingStopError::AllValuesNaN);
     }
 
-    
     let mut max_sm = 0usize;
     for prm in &combos {
         let look = prm.unmitigated_fvg_lookback.unwrap_or(5);
@@ -1066,8 +1010,6 @@ pub fn fvg_ts_batch_inner_into(
         k => k,
     };
 
-    
-    
     let mut bull_cand = vec![f64::NAN; len];
     let mut bear_cand = vec![f64::NAN; len];
     if len >= 3 {
@@ -1088,8 +1030,6 @@ pub fn fvg_ts_batch_inner_into(
         }
     }
 
-    
-    
     let mut pref_sum_close = vec![0.0f64; len + 1];
     let mut pref_nan_count = vec![0usize; len + 1];
     for i in 0..len {
@@ -1107,7 +1047,6 @@ pub fn fvg_ts_batch_inner_into(
         let (l_block, rest) = rest.split_at_mut(cols);
         let (uts_block, lts_block) = rest.split_at_mut(cols);
 
-        
         let mut bull_buf = vec![0.0f64; look];
         let mut bear_buf = vec![0.0f64; look];
         let mut bull_len = 0usize;
@@ -1133,7 +1072,6 @@ pub fn fvg_ts_batch_inner_into(
         let mut ts_prev: Option<f64> = None;
 
         for i in 0..cols {
-            
             let bc = bull_cand[i];
             if !bc.is_nan() {
                 if bull_len < look {
@@ -1159,7 +1097,6 @@ pub fn fvg_ts_batch_inner_into(
                 }
             }
 
-            
             let price = c[i];
             let mut new_bull_len = 0usize;
             let mut bull_acc = 0.0f64;
@@ -1202,7 +1139,6 @@ pub fn fvg_ts_batch_inner_into(
                 last_bear_non_na = Some(i);
             }
 
-            
             let bull_bs = if bull_avg.is_nan() {
                 match last_bull_non_na {
                     Some(last) => ((i - last).max(1)).min(sm),
@@ -1254,7 +1190,6 @@ pub fn fvg_ts_batch_inner_into(
                 bear_sma
             };
 
-            
             if bull_ring_count < sm {
                 let is_nan = x_bull.is_nan();
                 bull_ring_nan[bull_ring_count] = is_nan;
@@ -1324,7 +1259,6 @@ pub fn fvg_ts_batch_inner_into(
                 f64::NAN
             };
 
-            
             let prev_os = os;
             let next_os = if !bear_disp.is_nan() && price > bear_disp {
                 Some(1)
@@ -1382,7 +1316,6 @@ pub fn fvg_ts_batch_inner_into(
                 }
             }
 
-            
             let show = ts.is_some() || ts_prev.is_some();
             let ts_nz = if ts.is_some() { ts } else { ts_prev };
             if os == Some(1) && show {
@@ -1404,7 +1337,6 @@ pub fn fvg_ts_batch_inner_into(
             ts_prev = ts;
         }
 
-        
         for buf in [u_block, l_block, uts_block, lts_block] {
             for v in &mut buf[..warm] {
                 *v = f64::NAN;
@@ -1412,7 +1344,6 @@ pub fn fvg_ts_batch_inner_into(
         }
     };
 
-    
     #[cfg(not(target_arch = "wasm32"))]
     if parallel {
         use rayon::prelude::*;
@@ -1450,7 +1381,10 @@ pub fn fvg_trailing_stop_batch_with_kernel(
             data_len: len,
         });
     }
-    if !matches!(kernel, Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+    if !matches!(
+        kernel,
+        Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch
+    ) {
         return Err(FvgTrailingStopError::InvalidKernelForBatch(kernel));
     }
 
@@ -1458,7 +1392,6 @@ pub fn fvg_trailing_stop_batch_with_kernel(
     let rows = combos.len();
     let cols = len;
 
-    
     let first = first_valid_ohlc(high, low, close);
     if first == usize::MAX {
         return Err(FvgTrailingStopError::AllValuesNaN);
@@ -1488,14 +1421,18 @@ pub fn fvg_trailing_stop_batch_with_kernel(
         });
     }
 
-    let rows4 = rows.checked_mul(4).ok_or_else(|| FvgTrailingStopError::InvalidRange { start: rows, end: 4, step: 1 })?;
+    let rows4 = rows
+        .checked_mul(4)
+        .ok_or_else(|| FvgTrailingStopError::InvalidRange {
+            start: rows,
+            end: 4,
+            step: 1,
+        })?;
     let mut buf_mu = make_uninit_matrix(rows4, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    
-    let flat: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
-    };
+    let flat: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len()) };
     let used = fvg_ts_batch_inner_into(high, low, close, sweep, kernel, true, flat)?;
 
     let values = unsafe {
@@ -1514,7 +1451,6 @@ pub fn fvg_trailing_stop_batch_with_kernel(
         cols,
     })
 }
-
 
 #[derive(Clone, Debug, Default)]
 pub struct FvgTsBatchBuilder {
@@ -1577,16 +1513,12 @@ impl FvgTsBatchBuilder {
     }
 }
 
-
-
-
 use core::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
 #[inline]
 fn f64_to_bits_pos(v: f64) -> u64 {
-    
     debug_assert!(v.is_finite() && v >= 0.0);
     v.to_bits()
 }
@@ -1600,15 +1532,14 @@ struct Slot {
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 struct HeapItem {
-    bits: u64,  
-    slot: u32,  
-    stamp: u32, 
-    seq: u32,   
+    bits: u64,
+    slot: u32,
+    stamp: u32,
+    seq: u32,
 }
 impl Ord for HeapItem {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
-        
         self.bits
             .cmp(&other.bits)
             .then(self.seq.cmp(&other.seq))
@@ -1627,16 +1558,14 @@ pub struct FvgTrailingStopStream {
     smoothing_len: usize,
     reset_on_cross: bool,
 
-    
-    bull_slots: Vec<Slot>,           
-    bull_head: usize,                
-    bull_occ: usize,                 
-    bull_sum: f64,                   
-    bull_cnt: u32,                   
-    bull_heap: BinaryHeap<HeapItem>, 
-    bull_seq: u32,                   
+    bull_slots: Vec<Slot>,
+    bull_head: usize,
+    bull_occ: usize,
+    bull_sum: f64,
+    bull_cnt: u32,
+    bull_heap: BinaryHeap<HeapItem>,
+    bull_seq: u32,
 
-    
     bear_slots: Vec<Slot>,
     bear_head: usize,
     bear_occ: usize,
@@ -1645,12 +1574,10 @@ pub struct FvgTrailingStopStream {
     bear_heap: BinaryHeap<Reverse<HeapItem>>,
     bear_seq: u32,
 
-    
     last_bull_non_na: Option<usize>,
     last_bear_non_na: Option<usize>,
 
-    
-    xbull_vals: Vec<f64>, 
+    xbull_vals: Vec<f64>,
     xbull_idx: usize,
     xbull_filled: usize,
     xbull_sum: f64,
@@ -1662,29 +1589,24 @@ pub struct FvgTrailingStopStream {
     xbear_sum: f64,
     xbear_nan: u32,
 
-    
-    
-    pref_sum_ring: Vec<f64>, 
-    pref_nan_ring: Vec<u32>, 
-    pref_idx: usize,         
-    pref_sum_total: f64,     
-    pref_nan_total: u32,     
+    pref_sum_ring: Vec<f64>,
+    pref_nan_ring: Vec<u32>,
+    pref_idx: usize,
+    pref_sum_total: f64,
+    pref_nan_total: u32,
 
-    
     os: Option<i8>,
     ts: Option<f64>,
     ts_prev: Option<f64>,
     bar_count: usize,
 
-    
-    
     hi_m2: f64,
     hi_m1: f64,
     lo_m2: f64,
     lo_m1: f64,
     cl_m1: f64,
 
-    inv_w: f64, 
+    inv_w: f64,
 }
 
 impl FvgTrailingStopStream {
@@ -1700,7 +1622,6 @@ impl FvgTrailingStopStream {
             });
         }
 
-        
         let mut bull_slots = Vec::with_capacity(lookback);
         bull_slots.resize(
             lookback,
@@ -1725,7 +1646,6 @@ impl FvgTrailingStopStream {
         let mut xbear_vals = Vec::with_capacity(smoothing_len);
         xbear_vals.resize(smoothing_len, f64::NAN);
 
-        
         let mut pref_sum_ring = Vec::with_capacity(smoothing_len + 1);
         pref_sum_ring.resize(smoothing_len + 1, 0.0);
         let mut pref_nan_ring = Vec::with_capacity(smoothing_len + 1);
@@ -1769,7 +1689,7 @@ impl FvgTrailingStopStream {
 
             pref_sum_ring,
             pref_nan_ring,
-            pref_idx: 0, 
+            pref_idx: 0,
             pref_sum_total: 0.0,
             pref_nan_total: 0,
 
@@ -1795,7 +1715,6 @@ impl FvgTrailingStopStream {
         }
         let idx = self.bull_head;
         if self.bull_occ == self.lookback {
-            
             let s = &mut self.bull_slots[idx];
             if s.alive {
                 self.bull_sum -= s.val;
@@ -1833,7 +1752,6 @@ impl FvgTrailingStopStream {
         }
         let idx = self.bear_head;
         if self.bear_occ == self.lookback {
-            
             let s = &mut self.bear_slots[idx];
             if s.alive {
                 self.bear_sum -= s.val;
@@ -1867,7 +1785,6 @@ impl FvgTrailingStopStream {
 
     #[inline(always)]
     fn bull_sweep(&mut self, close: f64) {
-        
         while let Some(top) = self.bull_heap.peek().copied() {
             let v = f64::from_bits(top.bits);
             if !(v > close) {
@@ -1888,7 +1805,6 @@ impl FvgTrailingStopStream {
 
     #[inline(always)]
     fn bear_sweep(&mut self, close: f64) {
-        
         while let Some(Reverse(top)) = self.bear_heap.peek().copied() {
             let v = f64::from_bits(top.bits);
             if !(v < close) {
@@ -1921,7 +1837,6 @@ impl FvgTrailingStopStream {
         let pos = *idx;
 
         if *filled == w {
-            
             let old = vals[pos];
             if old.is_nan() {
                 *nan -= 1;
@@ -1958,13 +1873,11 @@ impl FvgTrailingStopStream {
         w: usize,
         close: f64,
     ) {
-        
         let add = if close.is_nan() { 0.0 } else { close };
         let add_nan = if close.is_nan() { 1 } else { 0 };
         *pref_sum_total += add;
         *pref_nan_total += add_nan;
 
-        
         let ring_len = w + 1;
         let next = if *pref_idx + 1 == ring_len {
             0
@@ -1984,7 +1897,6 @@ impl FvgTrailingStopStream {
         w: usize,
         bs: usize,
     ) -> (f64, u32) {
-        
         debug_assert!(bs >= 1 && bs <= w);
         let ring_len = w + 1;
         let prev = (pref_idx + ring_len - bs) % ring_len;
@@ -1994,7 +1906,6 @@ impl FvgTrailingStopStream {
     }
 
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64, f64)> {
-        
         Self::prefix_add_close(
             &mut self.pref_sum_ring,
             &mut self.pref_nan_ring,
@@ -2005,9 +1916,6 @@ impl FvgTrailingStopStream {
             close,
         );
 
-        
-        
-        
         if self.bar_count >= 2
             && self.hi_m2.is_finite()
             && self.lo_m2.is_finite()
@@ -2021,11 +1929,9 @@ impl FvgTrailingStopStream {
             }
         }
 
-        
-        self.bull_sweep(close); 
-        self.bear_sweep(close); 
+        self.bull_sweep(close);
+        self.bear_sweep(close);
 
-        
         let bull_avg = if self.bull_cnt > 0 {
             self.bull_sum / (self.bull_cnt as f64)
         } else {
@@ -2043,7 +1949,6 @@ impl FvgTrailingStopStream {
             self.last_bear_non_na = Some(self.bar_count);
         }
 
-        
         let bull_bs = if bull_avg.is_nan() {
             match self.last_bull_non_na {
                 Some(last) => ((self.bar_count - last).max(1)).min(self.smoothing_len),
@@ -2105,7 +2010,6 @@ impl FvgTrailingStopStream {
             bear_sma
         };
 
-        
         let bull_disp = Self::push_x_and_smooth(
             &mut self.xbull_vals,
             &mut self.xbull_idx,
@@ -2127,7 +2031,6 @@ impl FvgTrailingStopStream {
             x_bear,
         );
 
-        
         let prev_os = self.os;
         let next_os = if !bear_disp.is_nan() && close > bear_disp {
             Some(1)
@@ -2185,7 +2088,6 @@ impl FvgTrailingStopStream {
             }
         }
 
-        
         let show = self.ts.is_some() || self.ts_prev.is_some();
         let ts_nz = self.ts.or(self.ts_prev);
 
@@ -2202,8 +2104,6 @@ impl FvgTrailingStopStream {
 
         self.ts_prev = self.ts;
 
-        
-        
         self.hi_m2 = self.hi_m1;
         self.hi_m1 = high;
         self.lo_m2 = self.lo_m1;
@@ -2219,7 +2119,6 @@ impl FvgTrailingStopStream {
         }
     }
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "fvg_trailing_stop")]
@@ -2259,11 +2158,9 @@ pub fn fvg_trailing_stop_py<'py>(
     ))
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyReadonlyArray1 already in scope elsewhere when needed.
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "fvg_trailing_stop_cuda_batch_dev")]
 #[pyo3(signature = (high, low, close, lookback_range, smoothing_range, reset_toggle, device_id=0))]
@@ -2304,12 +2201,7 @@ pub fn fvg_trailing_stop_cuda_batch_dev_py(
     let lower_dev = make_device_array_py(device_id, lwr)?;
     let upper_ts_dev = make_device_array_py(device_id, uts)?;
     let lower_ts_dev = make_device_array_py(device_id, lts)?;
-    Ok((
-        upper_dev,
-        lower_dev,
-        upper_ts_dev,
-        lower_ts_dev,
-    ))
+    Ok((upper_dev, lower_dev, upper_ts_dev, lower_ts_dev))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2361,12 +2253,7 @@ pub fn fvg_trailing_stop_cuda_many_series_one_param_dev_py(
     let lower_dev = make_device_array_py(device_id, lw)?;
     let upper_ts_dev = make_device_array_py(device_id, uts)?;
     let lower_ts_dev = make_device_array_py(device_id, lts)?;
-    Ok((
-        upper_dev,
-        lower_dev,
-        upper_ts_dev,
-        lower_ts_dev,
-    ))
+    Ok((upper_dev, lower_dev, upper_ts_dev, lower_ts_dev))
 }
 
 #[cfg(feature = "python")]
@@ -2392,7 +2279,6 @@ pub fn fvg_trailing_stop_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // compute combos count to size flat buffer once
     let combos = expand_grid_ts(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = h.len();
@@ -2403,7 +2289,6 @@ pub fn fvg_trailing_stop_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*4*cols overflow"))?;
 
-    // flat buffer: (rows*4*cols), filled in one pass
     let flat = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let flat_mut = unsafe { flat.as_slice_mut()? };
 
@@ -2411,7 +2296,7 @@ pub fn fvg_trailing_stop_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
-    // expose a single 2D view like alma.rs does
+
     dict.set_item("values", flat.reshape((rows4, cols))?)?;
     dict.set_item(
         "lookbacks",
@@ -2470,8 +2355,7 @@ impl FvgTrailingStopStreamPy {
     }
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fvg_ts_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2480,7 +2364,7 @@ pub fn fvg_ts_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fvg_ts_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2488,7 +2372,7 @@ pub fn fvg_ts_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct FvgTsJsOutput {
     pub values: Vec<f64>,
@@ -2496,16 +2380,16 @@ pub struct FvgTsJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct FvgTsBatchJsOutput {
-    pub values: Vec<f64>, // row-major: rows*4 by cols
+    pub values: Vec<f64>,
     pub combos: Vec<FvgTrailingStopParams>,
-    pub rows: usize, // number of combos (not multiplied by 4)
+    pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "fvgTrailingStop")]
 pub fn fvg_trailing_stop_js(
     high: &[f64],
@@ -2515,7 +2399,6 @@ pub fn fvg_trailing_stop_js(
     smoothing_length: usize,
     reset_on_cross: bool,
 ) -> Result<JsValue, JsValue> {
-    // Check for empty arrays first
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(JsValue::from_str(
             "fvg_trailing_stop: Input data slice is empty.",
@@ -2536,15 +2419,26 @@ pub fn fvg_trailing_stop_js(
 
     let mut buf_mu = make_uninit_matrix(4, len);
     init_matrix_prefixes(&mut buf_mu, len, &[warm, warm, warm, warm]);
-    let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
-    };
+    let out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len()) };
     let (first_half, second_half) = out.split_at_mut(2 * len);
     let (u, l) = first_half.split_at_mut(len);
     let (uts, lts) = second_half.split_at_mut(len);
 
     let chosen = Kernel::Scalar;
-    fvg_ts_compute_into(h, low_in, c, lookback, smoothing_len, reset, u, l, uts, lts, chosen);
+    fvg_ts_compute_into(
+        h,
+        low_in,
+        c,
+        lookback,
+        smoothing_len,
+        reset,
+        u,
+        l,
+        uts,
+        lts,
+        chosen,
+    );
     for v in &mut u[..warm] {
         *v = f64::NAN;
     }
@@ -2558,7 +2452,6 @@ pub fn fvg_trailing_stop_js(
         *v = f64::NAN;
     }
 
-    // Create JS object with named properties
     let obj = js_sys::Object::new();
     let upper_arr = js_sys::Array::from_iter(u.iter().map(|&v| JsValue::from_f64(v)));
     let lower_arr = js_sys::Array::from_iter(l.iter().map(|&v| JsValue::from_f64(v)));
@@ -2573,7 +2466,7 @@ pub fn fvg_trailing_stop_js(
     Ok(obj.into())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn fvg_trailing_stop_into_flat(
     high_ptr: *const f64,
@@ -2616,7 +2509,7 @@ pub fn fvg_trailing_stop_into_flat(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "fvgTrailingStopBatch")]
 pub fn fvg_trailing_stop_batch_js(
     high: &[f64],
@@ -2690,9 +2583,8 @@ pub fn fvg_trailing_stop_batch_js(
     }
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    let flat: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len())
-    };
+    let flat: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(buf_mu.as_mut_ptr() as *mut f64, buf_mu.len()) };
     fvg_ts_batch_inner_into(
         high,
         low,
@@ -2723,16 +2615,16 @@ pub fn fvg_trailing_stop_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "fvgTrailingStopAlloc")]
 pub fn fvg_trailing_stop_alloc_js(size: usize) -> *mut f64 {
-    let mut vec = Vec::<f64>::with_capacity(size * 4); // 4 outputs
+    let mut vec = Vec::<f64>::with_capacity(size * 4);
     let ptr = vec.as_mut_ptr();
     std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "fvgTrailingStopFree")]
 pub fn fvg_trailing_stop_free_js(ptr: *mut f64, size: usize) {
     unsafe {
@@ -2740,7 +2632,7 @@ pub fn fvg_trailing_stop_free_js(ptr: *mut f64, size: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "fvgTrailingStopZeroCopy")]
 pub fn fvg_trailing_stop_zero_copy_js(
     high: &[f64],
@@ -2756,7 +2648,6 @@ pub fn fvg_trailing_stop_zero_copy_js(
     }
     let len = high.len();
 
-    // Create slices from raw pointer
     let (upper, lower, upper_ts, lower_ts) = unsafe {
         (
             std::slice::from_raw_parts_mut(ptr, len),
@@ -2766,7 +2657,6 @@ pub fn fvg_trailing_stop_zero_copy_js(
         )
     };
 
-    // Initialize with NaN
     for i in 0..len {
         upper[i] = f64::NAN;
         lower[i] = f64::NAN;
@@ -2774,7 +2664,6 @@ pub fn fvg_trailing_stop_zero_copy_js(
         lower_ts[i] = f64::NAN;
     }
 
-    // Compute indicator
     let params = FvgTrailingStopParams {
         unmitigated_fvg_lookback: Some(unmitigated_fvg_lookback),
         smoothing_length: Some(smoothing_length),
@@ -2786,17 +2675,9 @@ pub fn fvg_trailing_stop_zero_copy_js(
         params,
     };
 
-    fvg_trailing_stop_into_slices(
-        upper,
-        lower,
-        upper_ts,
-        lower_ts,
-        &input,
-        Kernel::Auto,
-    )
-    .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    fvg_trailing_stop_into_slices(upper, lower, upper_ts, lower_ts, &input, Kernel::Auto)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return object with references to the arrays
     let obj = js_sys::Object::new();
     let upper_arr = unsafe { js_sys::Float64Array::view(upper) };
     let lower_arr = unsafe { js_sys::Float64Array::view(lower) };
@@ -2811,7 +2692,6 @@ pub fn fvg_trailing_stop_zero_copy_js(
     Ok(obj.into())
 }
 
-// ==================== BUILDER PATTERN ====================
 #[derive(Copy, Clone, Debug)]
 pub struct FvgTrailingStopBuilder {
     unmitigated_fvg_lookback: Option<usize>,
@@ -2891,13 +2771,11 @@ impl FvgTrailingStopBuilder {
     }
 }
 
-// ==================== TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
 
-    // Helper macro to skip unsupported kernels
     macro_rules! skip_if_unsupported {
         ($kernel:expr, $test_name:expr) => {
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -2924,15 +2802,12 @@ mod tests {
         let input = FvgTrailingStopInput::from_candles(&candles, params);
         let result = fvg_trailing_stop_with_kernel(&input, kernel)?;
 
-        // Reference values from actual Rust computation
-        // Lower: 55,643.00, Lower TS: 60,223.33333333
         let expected_lower = 55643.00;
         let expected_lower_ts = 60223.33333333;
-        let tolerance = 0.01; // 0.01 tolerance for floating point comparison
+        let tolerance = 0.01;
 
         let n = result.lower.len();
         if n >= 5 {
-            // Check last 5 values match expected reference values
             for i in (n - 5)..n {
                 if !result.lower[i].is_nan() {
                     let diff = (result.lower[i] - expected_lower).abs();
@@ -3012,7 +2887,6 @@ mod tests {
         let mut low = vec![95.0; 50];
         let mut close = vec![97.0; 50];
 
-        // Add some NaN values
         for i in 10..20 {
             high[i] = f64::NAN;
             low[i] = f64::NAN;
@@ -3032,7 +2906,6 @@ mod tests {
         let params = FvgTrailingStopParams::default();
         let mut stream = FvgTrailingStopStream::try_new(params)?;
 
-        // Feed some data points
         let test_data = vec![
             (100.0, 95.0, 97.0),
             (101.0, 96.0, 98.0),
@@ -3052,7 +2925,6 @@ mod tests {
             stream.update(h, l, c);
         }
 
-        // Stream should work after enough bars
         Ok(())
     }
 
@@ -3108,9 +2980,8 @@ mod tests {
             .kernel(kernel)
             .apply_candles(&candles)?;
 
-        // Should have default params row
         assert_eq!(output.combos.len(), 1);
-        assert_eq!(output.rows, 1); // number of combos
+        assert_eq!(output.rows, 1);
         assert_eq!(output.cols, candles.close.len());
 
         Ok(())
@@ -3128,9 +2999,8 @@ mod tests {
             .reset_toggle(true, true)
             .apply_candles(&candles)?;
 
-        // 3 lookback values (3, 5, 7) * 2 smoothing (5, 10) * 2 reset (false, true) = 12 combos
         assert_eq!(output.combos.len(), 12);
-        assert_eq!(output.rows, 12); // number of combos
+        assert_eq!(output.rows, 12);
         assert_eq!(output.cols, candles.close.len());
 
         Ok(())
@@ -3179,13 +3049,11 @@ mod tests {
         let mut uts = u.clone();
         let mut lts = u.clone();
 
-        // Get smoothing length before calling into_slices
         let smoothing_len = input.get_smoothing();
 
         fvg_trailing_stop_into_slices(&mut u, &mut d, &mut uts, &mut lts, &input, kernel)?;
 
-        // prefix must be NaN
-        let expected_warm = 2 + smoothing_len - 1; // first is 0, so warm = 0 + 2 + 9 - 1 = 10
+        let expected_warm = 2 + smoothing_len - 1;
         for v in [&u, &d, &uts, &lts] {
             for i in 0..expected_warm.min(h.len()) {
                 assert!(
@@ -3268,7 +3136,6 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate all test variants
     macro_rules! generate_all_fvg_ts_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3319,13 +3186,11 @@ mod tests {
 
     #[test]
     fn test_fvg_trailing_stop_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare small but non-trivial OHLC data
         let n = 128usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
         let mut close = Vec::with_capacity(n);
         for i in 0..n {
-            // simple rising series with mild variation to trigger some FVGs
             let base = 100.0 + i as f64 * 0.5;
             high.push(base + 1.0 + (i % 3) as f64 * 0.1);
             low.push(base - 1.0 - (i % 2) as f64 * 0.1);
@@ -3335,17 +3200,14 @@ mod tests {
         let params = FvgTrailingStopParams::default();
         let input = FvgTrailingStopInput::from_slices(&high, &low, &close, params);
 
-        // Baseline via Vec-returning API (Kernel::Auto)
         let base = fvg_trailing_stop(&input)?;
 
-        // Preallocate outputs and compute via new into API
         let mut u = vec![0.0; n];
         let mut d = vec![0.0; n];
         let mut uts = vec![0.0; n];
         let mut lts = vec![0.0; n];
         fvg_trailing_stop_into(&input, &mut u, &mut d, &mut uts, &mut lts)?;
 
-        // Helper: NaN == NaN, else exact or tight epsilon
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -3356,10 +3218,34 @@ mod tests {
         assert_eq!(lts.len(), base.lower_ts.len());
 
         for i in 0..n {
-            assert!(eq_or_both_nan(u[i], base.upper[i]), "upper mismatch at {}: {} vs {}", i, u[i], base.upper[i]);
-            assert!(eq_or_both_nan(d[i], base.lower[i]), "lower mismatch at {}: {} vs {}", i, d[i], base.lower[i]);
-            assert!(eq_or_both_nan(uts[i], base.upper_ts[i]), "upper_ts mismatch at {}: {} vs {}", i, uts[i], base.upper_ts[i]);
-            assert!(eq_or_both_nan(lts[i], base.lower_ts[i]), "lower_ts mismatch at {}: {} vs {}", i, lts[i], base.lower_ts[i]);
+            assert!(
+                eq_or_both_nan(u[i], base.upper[i]),
+                "upper mismatch at {}: {} vs {}",
+                i,
+                u[i],
+                base.upper[i]
+            );
+            assert!(
+                eq_or_both_nan(d[i], base.lower[i]),
+                "lower mismatch at {}: {} vs {}",
+                i,
+                d[i],
+                base.lower[i]
+            );
+            assert!(
+                eq_or_both_nan(uts[i], base.upper_ts[i]),
+                "upper_ts mismatch at {}: {} vs {}",
+                i,
+                uts[i],
+                base.upper_ts[i]
+            );
+            assert!(
+                eq_or_both_nan(lts[i], base.lower_ts[i]),
+                "lower_ts mismatch at {}: {} vs {}",
+                i,
+                lts[i],
+                base.lower_ts[i]
+            );
         }
 
         Ok(())

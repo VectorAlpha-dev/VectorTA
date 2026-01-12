@@ -43,14 +43,13 @@ fn mfi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         vol[i] = ((x * 0.9).cos().abs() + 1.1) * 1_000.0;
     }
     let sweep = MfiBatchRange { period: (5, 60, 5) };
-    
+
     let tp32: Vec<f32> = tp.iter().map(|&v| v as f32).collect();
     let vol32: Vec<f32> = vol.iter().map(|&v| v as f32).collect();
     let tp_cpu: Vec<f64> = tp32.iter().map(|&v| v as f64).collect();
     let vol_cpu: Vec<f64> = vol32.iter().map(|&v| v as f64).collect();
     let cpu = mfi_batch_with_kernel(&tp_cpu, &vol_cpu, &sweep, Kernel::ScalarBatch)?;
 
-    
     let cuda = CudaMfi::new(0).expect("CudaMfi::new");
     let (dev, combos) = cuda
         .mfi_batch_dev(&tp32, &vol32, &sweep)
@@ -86,8 +85,8 @@ fn mfi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[mfi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 16usize; 
-    let rows = 4096usize; 
+    let cols = 16usize;
+    let rows = 4096usize;
     let mut tp_tm = vec![f64::NAN; cols * rows];
     let mut vol_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -99,7 +98,6 @@ fn mfi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 25usize;
 
-    
     let mut cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut tp = vec![f64::NAN; rows];

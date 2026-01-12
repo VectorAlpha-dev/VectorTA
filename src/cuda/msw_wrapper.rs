@@ -1,14 +1,3 @@
-//! CUDA wrapper for Mesa Sine Wave (MSW).
-//!
-//! Parity with ALMA/CWMA wrappers:
-//! - PTX load via DetermineTargetFromContext + OptLevel O2 with simpler fallbacks.
-//! - NON_BLOCKING stream.
-//! - Policy enums for batch and many-series; selection recorded and optionally logged once
-//!   when BENCH_DEBUG=1.
-//! - VRAM checks with ~64MB headroom and grid.y chunking (≤ 65_535) for batch.
-//! - Outputs stacked: batch rows = 2 * n_combos (row0=sine, row1=lead per combo),
-//!   many-series cols = 2 * num_series (col0..N-1 sine, colN..2N-1 lead).
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
@@ -22,10 +11,9 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
-
 
 const MSW_CHUNK_PER_THREAD: u32 = 8;
 
@@ -34,7 +22,11 @@ pub enum CudaMswError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -42,7 +34,14 @@ pub enum CudaMswError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -112,7 +111,6 @@ impl CudaMsw {
         })
     }
 
-    
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
         self.policy_batch = p;
     }
@@ -178,7 +176,6 @@ impl CudaMsw {
         }
     }
 
-    
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
@@ -202,8 +199,6 @@ impl CudaMsw {
             }
             Ok(())
         } else {
-            
-            
             Ok(())
         }
     }
@@ -246,7 +241,7 @@ impl CudaMsw {
                 }
                 return Ok(out);
             }
-            
+
             let mut out = Vec::new();
             let mut v = start;
             loop {
@@ -287,8 +282,6 @@ impl CudaMsw {
             .collect())
     }
 
-    
-    
     #[inline]
     fn dyn_smem_floats(period: usize, block_x: u32) -> usize {
         let t = (block_x as usize) * (MSW_CHUNK_PER_THREAD as usize);
@@ -333,7 +326,7 @@ impl CudaMsw {
                 return Ok((bx, need_bytes));
             }
         }
-        
+
         let bx = 64u32.min(max_threads);
         let need_bytes = Self::dyn_smem_floats(period, bx) * std::mem::size_of::<f32>();
         let avail = func
@@ -348,7 +341,6 @@ impl CudaMsw {
         Ok((bx, need_bytes))
     }
 
-    
     fn launch_batch_chunk(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -362,12 +354,11 @@ impl CudaMsw {
         shared_bytes: usize,
         func: &Function,
     ) -> Result<(), CudaMswError> {
-        
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let grid_y = chunk_rows as u32;
         let grid: GridSize = (grid_x.max(1), grid_y, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev
             .get_attribute(DeviceAttribute::MaxBlockDimX)
@@ -390,7 +381,7 @@ impl CudaMsw {
             let mut len_i = series_len as i32;
             let mut combos_i = chunk_rows as i32;
             let mut first_valid_i = first_valid as i32;
-            
+
             let mut out_ptr = d_out.as_device_ptr().as_raw()
                 + ((2 * base_row * series_len) * std::mem::size_of::<f32>()) as u64;
             let args: &mut [*mut c_void] = &mut [
@@ -401,7 +392,8 @@ impl CudaMsw {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(func, grid, block, shared_bytes as u32, args)?;
+            self.stream
+                .launch(func, grid, block, shared_bytes as u32, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaMsw)).last_batch =
@@ -447,7 +439,6 @@ impl CudaMsw {
             periods_i32.push(p as i32);
         }
 
-        
         let rows = combos.len();
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
@@ -470,18 +461,16 @@ impl CudaMsw {
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(req, headroom)?;
 
-        
         let d_prices = unsafe { DeviceBuffer::from_slice_async(prices_f32, &self.stream) }?;
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        
-        
-        let func = self
-            .module
-            .get_function("msw_batch_f32")
-            .map_err(|_| CudaMswError::MissingKernelSymbol { name: "msw_batch_f32" })?;
+        let func = self.module.get_function("msw_batch_f32").map_err(|_| {
+            CudaMswError::MissingKernelSymbol {
+                name: "msw_batch_f32",
+            }
+        })?;
         let (block_x, shared_bytes) = self.try_pick_block_x(
             &func,
             max_p,
@@ -491,12 +480,22 @@ impl CudaMsw {
             },
         )?;
 
-        
         let mut base = 0usize;
         const MAX_Y: usize = 65_535;
         while base < combos.len() {
             let take = (combos.len() - base).min(MAX_Y);
-            self.launch_batch_chunk(&d_prices, &d_periods, len, first_valid, take, base, &mut d_out, block_x, shared_bytes, &func)?;
+            self.launch_batch_chunk(
+                &d_prices,
+                &d_periods,
+                len,
+                first_valid,
+                take,
+                base,
+                &mut d_out,
+                block_x,
+                shared_bytes,
+                &func,
+            )?;
             base += take;
         }
         self.stream.synchronize()?;
@@ -511,7 +510,6 @@ impl CudaMsw {
         ))
     }
 
-    
     pub fn msw_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -535,7 +533,6 @@ impl CudaMsw {
             return Err(CudaMswError::InvalidInput("period must be >= 1".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -559,7 +556,6 @@ impl CudaMsw {
             first_valids[s] = found;
         }
 
-        
         let prices_bytes = expected_elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMswError::InvalidInput("input size overflow".into()))?;
@@ -590,8 +586,15 @@ impl CudaMsw {
             .map_err(|_| CudaMswError::MissingKernelSymbol {
                 name: "msw_many_series_one_param_time_major_f32",
             })?;
-        let (block_x, shared_bytes) = self.try_pick_block_x(&func, period, match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })?;
-        
+        let (block_x, shared_bytes) = self.try_pick_block_x(
+            &func,
+            period,
+            match self.policy_many {
+                ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
+                _ => None,
+            },
+        )?;
+
         let t_per_block = block_x * MSW_CHUNK_PER_THREAD;
         let grid_x = ((rows as u32) + t_per_block - 1) / t_per_block;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
@@ -640,10 +643,13 @@ impl CudaMsw {
         self.maybe_log_many_debug();
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols: 2 * cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: 2 * cols,
+        })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -769,7 +775,8 @@ pub mod benches {
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
         let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
         let out_elems = 2 * combos.len() * ONE_SERIES_LEN;
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
         let func = cuda
             .module
             .get_function("msw_batch_f32")
@@ -778,8 +785,9 @@ pub mod benches {
             BatchKernelPolicy::Plain { block_x } => Some(block_x),
             _ => None,
         };
-        let (block_x, shared_bytes) =
-            cuda.try_pick_block_x(&func, max_p, pinned).expect("try_pick_block_x");
+        let (block_x, shared_bytes) = cuda
+            .try_pick_block_x(&func, max_p, pinned)
+            .expect("try_pick_block_x");
         cuda.stream.synchronize().expect("sync after prep");
         Box::new(BatchState {
             cuda,
@@ -819,8 +827,9 @@ pub mod benches {
             ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
             _ => None,
         };
-        let (block_x, shared_bytes) =
-            cuda.try_pick_block_x(&func, period, pinned).expect("try_pick_block_x");
+        let (block_x, shared_bytes) = cuda
+            .try_pick_block_x(&func, period, pinned)
+            .expect("try_pick_block_x");
         cuda.stream.synchronize().expect("sync after prep");
         Box::new(ManyState {
             cuda,

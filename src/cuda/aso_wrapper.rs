@@ -1,17 +1,8 @@
-//! CUDA support for the Average Sentiment Oscillator (ASO).
-//!
-//! Parity goals with ALMA wrapper:
-//! - Batch and many-series entry points
-//! - JIT options (DetermineTargetFromContext, OptLevel O2) and NON_BLOCKING stream
-//! - Light kernel policy enums (kept simple for now; Auto → plain launches)
-//! - VRAM estimation with a small safety headroom and graceful errors
-//! - Warmup/NaN semantics identical to scalar (prefix NaNs of length first_valid+period-1)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::aso::{AsoBatchRange, AsoParams};
-use crate::indicators::willr::build_willr_gpu_tables; 
+use crate::indicators::willr::build_willr_gpu_tables;
 use cust::context::{CacheConfig, Context};
 use cust::device::{Device, DeviceAttribute};
 use cust::error::CudaError;
@@ -30,11 +21,27 @@ use cust::sys;
 pub enum CudaAsoError {
     Cuda(CudaError),
     InvalidInput(String),
-    MissingKernelSymbol { name: &'static str },
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     InvalidPolicy(&'static str),
-    DeviceMismatch { buf: u32, current: u32 },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 
@@ -43,18 +50,41 @@ impl fmt::Display for CudaAsoError {
         match self {
             CudaAsoError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaAsoError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaAsoError::MissingKernelSymbol { name } => write!(f, "Missing kernel symbol: {}", name),
-            CudaAsoError::OutOfMemory { required, free, headroom } => write!(f, "Out of memory on device: required={}B, free={}B, headroom={}B", required, free, headroom),
-            CudaAsoError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(f, "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"),
+            CudaAsoError::MissingKernelSymbol { name } => {
+                write!(f, "Missing kernel symbol: {}", name)
+            }
+            CudaAsoError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
+                f,
+                "Out of memory on device: required={}B, free={}B, headroom={}B",
+                required, free, headroom
+            ),
+            CudaAsoError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
+                f,
+                "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
+            ),
             CudaAsoError::InvalidPolicy(p) => write!(f, "Invalid policy: {}", p),
-            CudaAsoError::DeviceMismatch { buf, current } => write!(f, "Device mismatch for buffer (buf device={} current={})", buf, current),
+            CudaAsoError::DeviceMismatch { buf, current } => write!(
+                f,
+                "Device mismatch for buffer (buf device={} current={})",
+                buf, current
+            ),
             CudaAsoError::NotImplemented => write!(f, "Not implemented"),
         }
     }
 }
 impl std::error::Error for CudaAsoError {}
 
-// Kernel policy enums (kept for API parity; currently only Auto/Plain used)
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
@@ -103,9 +133,13 @@ impl CudaAso {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -116,12 +150,18 @@ impl CudaAso {
     }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaAsoError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Ok((free, _)) = mem_get_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaAsoError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaAsoError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -129,22 +169,45 @@ impl CudaAso {
     }
 
     #[inline]
-    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaAsoError> {
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaAsoError> {
         let dev = Device::get_device(self.device_id).map_err(CudaAsoError::Cuda)?;
-        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX).map_err(CudaAsoError::Cuda)? as u32;
-        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY).map_err(CudaAsoError::Cuda)? as u32;
-        let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ).map_err(CudaAsoError::Cuda)? as u32;
-        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaAsoError::Cuda)? as u32;
-        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY).map_err(CudaAsoError::Cuda)? as u32;
-        let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ).map_err(CudaAsoError::Cuda)? as u32;
-        let (gx, gy, gz) = grid; let (bx, by, bz) = block;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaAsoError::Cuda)? as u32;
+        let max_by = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimY)
+            .map_err(CudaAsoError::Cuda)? as u32;
+        let max_bz = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimZ)
+            .map_err(CudaAsoError::Cuda)? as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaAsoError::Cuda)? as u32;
+        let max_gy = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .map_err(CudaAsoError::Cuda)? as u32;
+        let max_gz = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .map_err(CudaAsoError::Cuda)? as u32;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
         if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
-            return Err(CudaAsoError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaAsoError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
 
-    // ---- Batch: one-series × many-params ----
     pub fn aso_batch_dev(
         &self,
         open_f32: &[f32],
@@ -161,7 +224,6 @@ impl CudaAso {
 
         let tables = build_willr_gpu_tables(high_f32, low_f32);
 
-        // VRAM estimate (inputs + params + tables + outputs)
         let in_bytes = 4usize
             .checked_mul(series_len)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -170,9 +232,20 @@ impl CudaAso {
             .checked_mul(n_combos)
             .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
             .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
-        let table_bytes = tables.st_max.len()
-            .checked_mul(4).and_then(|a| a.checked_add(tables.st_min.len().checked_mul(4).unwrap_or(usize::MAX)))
-            .and_then(|a| a.checked_add(tables.level_offsets.len().checked_mul(4).unwrap_or(usize::MAX)))
+        let table_bytes = tables
+            .st_max
+            .len()
+            .checked_mul(4)
+            .and_then(|a| a.checked_add(tables.st_min.len().checked_mul(4).unwrap_or(usize::MAX)))
+            .and_then(|a| {
+                a.checked_add(
+                    tables
+                        .level_offsets
+                        .len()
+                        .checked_mul(4)
+                        .unwrap_or(usize::MAX),
+                )
+            })
             .and_then(|a| a.checked_add(tables.log2.len().checked_mul(4).unwrap_or(usize::MAX)))
             .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
         let out_bytes = 2usize
@@ -187,7 +260,6 @@ impl CudaAso {
             .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Upload
         let d_open = DeviceBuffer::from_slice(open_f32).map_err(CudaAsoError::Cuda)?;
         let d_high = DeviceBuffer::from_slice(high_f32).map_err(CudaAsoError::Cuda)?;
         let d_low = DeviceBuffer::from_slice(low_f32).map_err(CudaAsoError::Cuda)?;
@@ -195,18 +267,17 @@ impl CudaAso {
         let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaAsoError::Cuda)?;
         let d_modes = DeviceBuffer::from_slice(&modes).map_err(CudaAsoError::Cuda)?;
         let d_log2 = DeviceBuffer::from_slice(&tables.log2).map_err(CudaAsoError::Cuda)?;
-        let d_offsets = DeviceBuffer::from_slice(&tables.level_offsets).map_err(CudaAsoError::Cuda)?;
+        let d_offsets =
+            DeviceBuffer::from_slice(&tables.level_offsets).map_err(CudaAsoError::Cuda)?;
         let d_st_max = DeviceBuffer::from_slice(&tables.st_max).map_err(CudaAsoError::Cuda)?;
         let d_st_min = DeviceBuffer::from_slice(&tables.st_min).map_err(CudaAsoError::Cuda)?;
-        // Stream-pooled async allocations; ordered before the kernel in this stream
-        let mut d_bulls: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
-        }
-        .map_err(CudaAsoError::Cuda)?;
-        let mut d_bears: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream)
-        }
-        .map_err(CudaAsoError::Cuda)?;
+
+        let mut d_bulls: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+                .map_err(CudaAsoError::Cuda)?;
+        let mut d_bears: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }
+                .map_err(CudaAsoError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_open,
@@ -226,11 +297,19 @@ impl CudaAso {
             &mut d_bulls,
             &mut d_bears,
         )?;
-        // Ensure producing stream is synchronized before handing out device buffers
+
         self.stream.synchronize().map_err(CudaAsoError::Cuda)?;
         Ok((
-            DeviceArrayF32 { buf: d_bulls, rows: n_combos, cols: series_len },
-            DeviceArrayF32 { buf: d_bears, rows: n_combos, cols: series_len },
+            DeviceArrayF32 {
+                buf: d_bulls,
+                rows: n_combos,
+                cols: series_len,
+            },
+            DeviceArrayF32 {
+                buf: d_bears,
+                rows: n_combos,
+                cols: series_len,
+            },
         ))
     }
 
@@ -254,9 +333,14 @@ impl CudaAso {
         d_bulls: &mut DeviceBuffer<f32>,
         d_bears: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAsoError> {
-        if n_combos == 0 || series_len == 0 { return Ok(()); }
-        let mut func = self.module.get_function("aso_batch_f32")
-            .map_err(|_| CudaAsoError::MissingKernelSymbol { name: "aso_batch_f32" })?;
+        if n_combos == 0 || series_len == 0 {
+            return Ok(());
+        }
+        let mut func = self.module.get_function("aso_batch_f32").map_err(|_| {
+            CudaAsoError::MissingKernelSymbol {
+                name: "aso_batch_f32",
+            }
+        })?;
         let block_x = match self.batch_policy {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => 256,
@@ -266,9 +350,11 @@ impl CudaAso {
         let smem_bytes_usize = 2usize
             .checked_mul(max_period)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or(CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
+            .ok_or(CudaAsoError::InvalidInput(
+                "shared memory size overflow".into(),
+            ))?;
         let smem_bytes = smem_bytes_usize.min(u32::MAX as usize) as u32;
-        // Opt-in to larger dynamic shared memory and set cache preference heuristics
+
         set_kernel_smem_prefs(&mut func, smem_bytes)?;
 
         self.validate_launch((n_combos as u32, 1, 1), (block_x, 1, 1))?;
@@ -307,12 +393,13 @@ impl CudaAso {
                 &mut bulls_ptr as *mut _ as *mut c_void,
                 &mut bears_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, smem_bytes, args).map_err(CudaAsoError::Cuda)?;
+            self.stream
+                .launch(&func, grid, block, smem_bytes, args)
+                .map_err(CudaAsoError::Cuda)?;
         }
         Ok(())
     }
 
-    // ---- Many series × one param (time-major) ----
     pub fn aso_many_series_one_param_time_major_dev(
         &self,
         open_tm_f32: &[f32],
@@ -327,7 +414,9 @@ impl CudaAso {
         if cols == 0 || rows == 0 || period == 0 {
             return Err(CudaAsoError::InvalidInput("invalid shape or period".into()));
         }
-        let expected = cols.checked_mul(rows).ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or(CudaAsoError::InvalidInput("size overflow".into()))?;
         if open_tm_f32.len() != expected
             || high_tm_f32.len() != expected
             || low_tm_f32.len() != expected
@@ -339,7 +428,6 @@ impl CudaAso {
             return Err(CudaAsoError::InvalidInput("invalid mode".into()));
         }
 
-        // first_valid per series
         let mut first_valids: Vec<i32> = vec![0; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -385,14 +473,12 @@ impl CudaAso {
         let d_low = DeviceBuffer::from_slice(low_tm_f32).map_err(CudaAsoError::Cuda)?;
         let d_close = DeviceBuffer::from_slice(close_tm_f32).map_err(CudaAsoError::Cuda)?;
         let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaAsoError::Cuda)?;
-        let mut d_bulls: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(expected, &self.stream)
-        }
-        .map_err(CudaAsoError::Cuda)?;
-        let mut d_bears: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(expected, &self.stream)
-        }
-        .map_err(CudaAsoError::Cuda)?;
+        let mut d_bulls: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
+                .map_err(CudaAsoError::Cuda)?;
+        let mut d_bears: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(expected, &self.stream) }
+                .map_err(CudaAsoError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_open,
@@ -409,8 +495,16 @@ impl CudaAso {
         )?;
         self.stream.synchronize().map_err(CudaAsoError::Cuda)?;
         Ok((
-            DeviceArrayF32 { buf: d_bulls, rows, cols },
-            DeviceArrayF32 { buf: d_bears, rows, cols },
+            DeviceArrayF32 {
+                buf: d_bulls,
+                rows,
+                cols,
+            },
+            DeviceArrayF32 {
+                buf: d_bears,
+                rows,
+                cols,
+            },
         ))
     }
 
@@ -428,16 +522,22 @@ impl CudaAso {
         d_bulls: &mut DeviceBuffer<f32>,
         d_bears: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAsoError> {
-        if cols == 0 || rows == 0 { return Ok(()); }
-        let mut func = self.module.get_function("aso_many_series_one_param_f32")
-            .map_err(|_| CudaAsoError::MissingKernelSymbol { name: "aso_many_series_one_param_f32" })?;
+        if cols == 0 || rows == 0 {
+            return Ok(());
+        }
+        let mut func = self
+            .module
+            .get_function("aso_many_series_one_param_f32")
+            .map_err(|_| CudaAsoError::MissingKernelSymbol {
+                name: "aso_many_series_one_param_f32",
+            })?;
         let block_x = match self.many_policy {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 128,
         };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // shared: ring_b/e (2*period*f32) + dq_min_idx/dq_max_idx (2*period*i32)
+
         let elems = 2usize
             .checked_mul(period)
             .ok_or_else(|| CudaAsoError::InvalidInput("shared memory size overflow".into()))?;
@@ -478,26 +578,25 @@ impl CudaAso {
                 &mut out_b_ptr as *mut _ as *mut c_void,
                 &mut out_e_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, smem_bytes, args).map_err(CudaAsoError::Cuda)?;
+            self.stream
+                .launch(&func, grid, block, smem_bytes, args)
+                .map_err(CudaAsoError::Cuda)?;
         }
         Ok(())
     }
 }
 
-// ---- Helpers ----
-// Best-effort: opt-in to larger dynamic shared memory per block and hint cache config
 #[inline(always)]
 fn set_kernel_smem_prefs(func: &mut Function, smem_bytes: u32) -> Result<(), CudaAsoError> {
     unsafe {
         let raw = func.to_raw();
-        // Request up to smem_bytes of dynamic shared memory per block
+
         let _ = sys::cuFuncSetAttribute(
             raw,
             sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
             smem_bytes as i32,
         );
         if smem_bytes > 48 * 1024 {
-            // Prefer shared-memory carve-out when using lots of dynamic smem
             let _ = sys::cuFuncSetAttribute(
                 raw,
                 sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
@@ -513,22 +612,50 @@ fn set_kernel_smem_prefs(func: &mut Function, smem_bytes: u32) -> Result<(), Cud
 
 fn expand_params(range: &AsoBatchRange) -> Result<Vec<AsoParams>, CudaAsoError> {
     fn axis((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, CudaAsoError> {
-        if st == 0 || s == e { return Ok(vec![s]); }
+        if st == 0 || s == e {
+            return Ok(vec![s]);
+        }
         let mut v = Vec::new();
         if s < e {
             let mut cur = s;
-            while cur <= e { v.push(cur); let next = cur.saturating_add(st); if next == cur { break; } cur = next; }
+            while cur <= e {
+                v.push(cur);
+                let next = cur.saturating_add(st);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+            }
         } else {
             let mut cur = s;
-            while cur >= e { v.push(cur); let next = cur.saturating_sub(st); if next == cur { break; } cur = next; if cur == 0 && e > 0 { break; } }
+            while cur >= e {
+                v.push(cur);
+                let next = cur.saturating_sub(st);
+                if next == cur {
+                    break;
+                }
+                cur = next;
+                if cur == 0 && e > 0 {
+                    break;
+                }
+            }
         }
-        if v.is_empty() { return Err(CudaAsoError::InvalidInput("empty usize range".into())); }
+        if v.is_empty() {
+            return Err(CudaAsoError::InvalidInput("empty usize range".into()));
+        }
         Ok(v)
     }
     let ps = axis(range.period)?;
     let ms = axis(range.mode)?;
     let mut v = Vec::with_capacity(ps.len().saturating_mul(ms.len()));
-    for &p in &ps { for &m in &ms { v.push(AsoParams { period: Some(p), mode: Some(m) }); } }
+    for &p in &ps {
+        for &m in &ms {
+            v.push(AsoParams {
+                period: Some(p),
+                mode: Some(m),
+            });
+        }
+    }
     Ok(v)
 }
 
@@ -556,7 +683,6 @@ fn prepare_batch_inputs(
     Ok((combos, first_valid, len, max_period))
 }
 
-// ---------- Bench profiles ----------
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -566,7 +692,7 @@ pub mod benches {
     const PARAMS: usize = 200;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = 4 * N * 4; // open/high/low/close
+        let in_bytes = 4 * N * 4;
         let out_bytes = 2 * N * PARAMS * 4;
         in_bytes + out_bytes + 64 * 1024 * 1024
     }

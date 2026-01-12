@@ -1,44 +1,8 @@
-//! # Empirical Mode Decomposition (EMD)
-//!
-//! Decision log:
-//! - Scalar path optimized: single tight loop, constant-time ring updates, cached prior prices; ~30–55% faster at 100k.
-//! - Single-series SIMD kept as stubs: second-order IIR recursion is loop-carried, so AVX2/AVX512 across time is not beneficial.
-//! - Batch path: precompute mid-price once and reuse across rows; cross-row SIMD deferred; runtime selection remains scalar.
-//! - CUDA path: batch and many-series kernels enabled; PTX wrapper matches scalar within f32 tolerance and exposes Python interop via CUDA Array Interface v3 + DLPack v1.x using the shared helpers in `utilities::dlpack_cuda`.
-//!
-//! Implements the Empirical Mode Decomposition indicator with band-pass filtering and moving averages,
-//! yielding upperband, middleband, and lowerband outputs.
-//!
-//! ## Parameters
-//! - **period**: Window for the band-pass filter (default: 20)
-//! - **delta**: Band-pass phase parameter (default: 0.5)
-//! - **fraction**: Peak/valley scaling factor (default: 0.1)
-//!
-//! ## Inputs
-//! - **high**: High prices
-//! - **low**: Low prices
-//! - **close**: Close prices (primary input for filtering)
-//! - **volume**: Volume data (used in some calculations)
-//!
-//! ## Returns
-//! - **`Ok(EmdOutput)`** containing:
-//!   - `upperband`: Upper band values (Vec<f64>)
-//!   - `middleband`: Middle band values (Vec<f64>)
-//!   - `lowerband`: Lower band values (Vec<f64>)
-//! - Output lengths match input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation (lines 459-469)
-//! - **AVX512 kernel**: STUB - calls scalar implementation (lines 491-501, 505-514)
-//! - **Streaming**: Implemented O(1) ring updates; no modulo in hot path; precomputed reciprocals and coefficients.
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for all three outputs (lines 339-341, 444-446)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaEmd, CudaEmdBatchResult, DeviceArrayF32Triple};
+use crate::utilities::data_loader::{source_type, Candles};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
-use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -94,7 +58,10 @@ pub struct EmdOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct EmdParams {
     pub period: Option<usize>,
     pub delta: Option<f64>,
@@ -274,9 +241,12 @@ pub enum EmdError {
     #[error("emd: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
 
-    
     #[error("emd: Invalid range (usize): start={start}, end={end}, step={step}")]
-    InvalidRangeU { start: usize, end: usize, step: usize },
+    InvalidRangeU {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("emd: Invalid range (float): start={start}, end={end}, step={step}")]
     InvalidRangeF { start: f64, end: f64, step: f64 },
@@ -343,7 +313,10 @@ fn emd_prepare<'a>(
         return Err(EmdError::EmptyInputData);
     }
     if low.len() != len {
-        return Err(EmdError::InvalidInputLength { expected: len, actual: low.len() });
+        return Err(EmdError::InvalidInputLength {
+            expected: len,
+            actual: low.len(),
+        });
     }
 
     let period = input.get_period();
@@ -375,7 +348,6 @@ fn emd_prepare<'a>(
     }
 
     let chosen = match kernel {
-        // SIMD kernels are stubs that delegate to scalar; avoid dispatch overhead.
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -443,10 +415,7 @@ pub fn emd_with_kernel(input: &EmdInput, kernel: Kernel) -> Result<EmdOutput, Em
     })
 }
 
-/// Compute EMD into caller-provided buffers (no allocations).
-/// Preserves NaN warmups exactly like the Vec-returning API and writes results in-place.
-/// All output slices must have length equal to the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn emd_into(
     input: &EmdInput,
     upperband_out: &mut [f64],
@@ -468,7 +437,6 @@ pub fn emd_into(
         });
     }
 
-    // Prefill warmup prefixes with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let up_low_warm = first + 50 - 1;
     let mid_warm = first + 2 * period - 1;
@@ -486,7 +454,6 @@ pub fn emd_into(
         *v = qnan;
     }
 
-    // Compute into provided buffers using the selected kernel
     emd_compute_into(
         high,
         low,
@@ -521,13 +488,11 @@ pub unsafe fn emd_scalar_into(
     debug_assert_eq!(mb.len(), len);
     debug_assert_eq!(lb.len(), len);
 
-    // --- constants ---
     let per_up_low = 50usize;
     let per_mid = 2 * period;
     let inv_up_low = 1.0 / (per_up_low as f64);
     let inv_mid = 1.0 / (per_mid as f64);
 
-    // Ehlers band-pass coefficients
     let two_pi = core::f64::consts::PI * 2.0;
     let beta = (two_pi / (period as f64)).cos();
     let gamma = 1.0 / ((two_pi * 2.0 * delta / (period as f64)).cos());
@@ -535,7 +500,6 @@ pub unsafe fn emd_scalar_into(
     let half_one_minus_alpha = 0.5 * (1.0 - alpha);
     let beta_times_one_plus_alpha = beta * (1.0 + alpha);
 
-    // --- ring state ---
     let mut sp_ring = vec![0.0f64; per_up_low];
     let mut sv_ring = vec![0.0f64; per_up_low];
     let mut bp_ring = vec![0.0f64; per_mid];
@@ -547,24 +511,20 @@ pub unsafe fn emd_scalar_into(
     let mut sum_low = 0.0f64;
     let mut sum_mb = 0.0f64;
 
-    // --- recursive filter & extrema state ---
     let mut bp_prev1 = 0.0f64;
     let mut bp_prev2 = 0.0f64;
     let mut peak_prev = 0.0f64;
     let mut valley_prev = 0.0f64;
 
-    // keep prior raw prices to avoid reloading (i-2)
     let mut price_prev1 = 0.0f64;
     let mut price_prev2 = 0.0f64;
 
-    // pointers for unchecked access
     let hi_ptr = high.as_ptr();
     let lo_ptr = low.as_ptr();
     let ub_ptr = ub.as_mut_ptr();
     let mb_ptr = mb.as_mut_ptr();
     let lb_ptr = lb.as_mut_ptr();
 
-    // initialize state from the first valid bar
     let mut i = first;
     if i < len {
         let p0 = ((*hi_ptr.add(i)) + (*lo_ptr.add(i))) * 0.5;
@@ -576,14 +536,11 @@ pub unsafe fn emd_scalar_into(
         price_prev2 = p0;
     }
 
-    // number of processed bars since `first`
     let mut count = 0usize;
 
     while i < len {
-        // --- price midpoint ---
         let price = ((*hi_ptr.add(i)) + (*lo_ptr.add(i))) * 0.5;
 
-        // --- band-pass recursion (order-2 resonator) ---
         let bp_curr = if count >= 2 {
             half_one_minus_alpha * (price - price_prev2) + beta_times_one_plus_alpha * bp_prev1
                 - alpha * bp_prev2
@@ -591,7 +548,6 @@ pub unsafe fn emd_scalar_into(
             price
         };
 
-        // --- peak / valley detection at previous sample (local extrema) ---
         let mut peak_curr = peak_prev;
         let mut valley_curr = valley_prev;
         if count >= 2 {
@@ -603,11 +559,9 @@ pub unsafe fn emd_scalar_into(
             }
         }
 
-        // --- scaled peaks/valleys (fixed 50-sample MA) ---
         let sp = peak_curr * fraction;
         let sv = valley_curr * fraction;
 
-        // --- constant-time ring updates: sum += new - old ---
         let old_sp = *sp_ring.get_unchecked(idx_ul);
         let old_sv = *sv_ring.get_unchecked(idx_ul);
         let old_bp = *bp_ring.get_unchecked(idx_mid);
@@ -620,7 +574,6 @@ pub unsafe fn emd_scalar_into(
         sum_low += sv - old_sv;
         sum_mb += bp_curr - old_bp;
 
-        // advance ring indices
         idx_ul += 1;
         if idx_ul == per_up_low {
             idx_ul = 0;
@@ -630,7 +583,6 @@ pub unsafe fn emd_scalar_into(
             idx_mid = 0;
         }
 
-        // --- write outputs once windows are full ---
         let filled = count + 1;
         if filled >= per_up_low {
             *ub_ptr.add(i) = sum_up * inv_up_low;
@@ -640,7 +592,6 @@ pub unsafe fn emd_scalar_into(
             *mb_ptr.add(i) = sum_mb * inv_mid;
         }
 
-        // --- shift state ---
         bp_prev2 = bp_prev1;
         bp_prev1 = bp_curr;
         peak_prev = peak_curr;
@@ -811,7 +762,6 @@ unsafe fn emd_scalar_prices_into(
     }
 }
 
-// Keep the wrapper for backward compatibility
 #[inline]
 pub unsafe fn emd_scalar(
     high: &[f64],
@@ -986,7 +936,7 @@ pub struct EmdStream {
     fraction: f64,
     per_up_low: usize,
     per_mid: usize,
-    // reciprocals to avoid per-update division
+
     inv_up_low: f64,
     inv_mid: f64,
     sum_up: f64,
@@ -1005,7 +955,7 @@ pub struct EmdStream {
     price_prev2: f64,
     alpha: f64,
     beta: f64,
-    // precomputed to avoid redundant ops each tick
+
     beta_times_one_plus_alpha: f64,
     half_one_minus_alpha: f64,
     initialized: bool,
@@ -1031,10 +981,9 @@ impl EmdStream {
             return Err(EmdError::InvalidFraction { fraction });
         }
 
-        // Precompute constants for performance (Ehlers coefficients)
         let two_pi_over_p = 2.0 * std::f64::consts::PI / (period as f64);
         let beta = (two_pi_over_p).cos();
-        let gamma = 1.0 / ((2.0 * delta * two_pi_over_p).cos()); // = 1 / cos(4π·δ/p)
+        let gamma = 1.0 / ((2.0 * delta * two_pi_over_p).cos());
         let alpha = gamma - (gamma * gamma - 1.0).sqrt();
         let half_one_minus_alpha = 0.5 * (1.0 - alpha);
         let beta_times_one_plus_alpha = beta * (1.0 + alpha);
@@ -1086,7 +1035,6 @@ impl EmdStream {
             self.initialized = true;
         }
         let bp_curr = if self.count >= 2 {
-            // .5*(1-α)*(p[i]-p[i-2]) + β*(1+α)*bp[i-1] - α*bp[i-2]
             self.half_one_minus_alpha * (price - self.price_prev2)
                 + self
                     .beta_times_one_plus_alpha
@@ -1107,7 +1055,6 @@ impl EmdStream {
         let sp = peak_curr * self.fraction;
         let sv = valley_curr * self.fraction;
 
-        // constant-time ring maintenance: sum += new - old
         let old_sp = self.sp_ring[self.idx_up_low];
         let old_sv = self.sv_ring[self.idx_up_low];
         let old_bp = self.bp_ring[self.idx_mid];
@@ -1118,7 +1065,6 @@ impl EmdStream {
         self.sv_ring[self.idx_up_low] = sv;
         self.bp_ring[self.idx_mid] = bp_curr;
 
-        // wrap without modulo in the hot path
         self.idx_up_low += 1;
         if self.idx_up_low == self.per_up_low {
             self.idx_up_low = 0;
@@ -1148,7 +1094,6 @@ impl EmdStream {
     }
 }
 
-// Batch struct/logic
 #[derive(Clone, Debug)]
 pub struct EmdBatchRange {
     pub period: (usize, usize, usize),
@@ -1246,7 +1191,6 @@ pub fn emd_batch_with_kernel(
     k: Kernel,
 ) -> Result<EmdBatchOutput, EmdError> {
     let kernel = match k {
-        // SIMD batch kernels are stubs that delegate to scalar; avoid dispatch overhead.
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -1277,17 +1221,26 @@ fn expand_grid(r: &EmdBatchRange) -> Result<Vec<EmdParams>, EmdError> {
             let mut cur = start;
             while cur <= end {
                 v.push(cur);
-                cur = match cur.checked_add(step) { Some(n) => n, None => break };
+                cur = match cur.checked_add(step) {
+                    Some(n) => n,
+                    None => break,
+                };
             }
         } else {
-            // reversed bounds supported
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
-                match cur.checked_sub(step) { Some(n) => cur = n, None => break }
+                match cur.checked_sub(step) {
+                    Some(n) => cur = n,
+                    None => break,
+                }
             }
         }
-        if v.is_empty() { Err(EmdError::InvalidRangeU { start, end, step }) } else { Ok(v) }
+        if v.is_empty() {
+            Err(EmdError::InvalidRangeU { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, EmdError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
@@ -1299,17 +1252,25 @@ fn expand_grid(r: &EmdBatchRange) -> Result<Vec<EmdParams>, EmdError> {
             while x <= end + 1e-12 {
                 v.push(x);
                 x += step;
-                if !x.is_finite() { break; }
+                if !x.is_finite() {
+                    break;
+                }
             }
         } else {
             let mut x = start;
             while x >= end - 1e-12 {
                 v.push(x);
                 x -= step.abs();
-                if !x.is_finite() { break; }
+                if !x.is_finite() {
+                    break;
+                }
             }
         }
-        if v.is_empty() { Err(EmdError::InvalidRangeF { start, end, step }) } else { Ok(v) }
+        if v.is_empty() {
+            Err(EmdError::InvalidRangeF { start, end, step })
+        } else {
+            Ok(v)
+        }
     }
 
     let periods = axis_usize(r.period)?;
@@ -1320,12 +1281,20 @@ fn expand_grid(r: &EmdBatchRange) -> Result<Vec<EmdParams>, EmdError> {
         .len()
         .checked_mul(deltas.len())
         .and_then(|t| t.checked_mul(fractions.len()))
-        .ok_or(EmdError::InvalidRangeU { start: 0, end: 0, step: 0 })?;
+        .ok_or(EmdError::InvalidRangeU {
+            start: 0,
+            end: 0,
+            step: 0,
+        })?;
     let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &d in &deltas {
             for &f in &fractions {
-                out.push(EmdParams { period: Some(p), delta: Some(d), fraction: Some(f) });
+                out.push(EmdParams {
+                    period: Some(p),
+                    delta: Some(d),
+                    fraction: Some(f),
+                });
             }
         }
     }
@@ -1368,7 +1337,11 @@ fn emd_batch_inner(
 ) -> Result<EmdBatchOutput, EmdError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(EmdError::InvalidRangeU { start: 0, end: 0, step: 0 });
+        return Err(EmdError::InvalidRangeU {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
 
     let len = high.len();
@@ -1393,27 +1366,22 @@ fn emd_batch_inner(
 
     let rows = combos.len();
     let cols = len;
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(EmdError::InvalidRangeU {
-            start: rows,
-            end: cols,
-            step: usize::MAX,
-        })?;
+    let total = rows.checked_mul(cols).ok_or(EmdError::InvalidRangeU {
+        start: rows,
+        end: cols,
+        step: usize::MAX,
+    })?;
 
-    // Precompute midpoint prices once for all rows to avoid redundant work.
     let prices: Vec<f64> = high
         .iter()
         .zip(low.iter())
         .map(|(&h, &l)| (h + l) * 0.5)
         .collect();
 
-    // allocate uninit matrices
     let mut ub_mu = make_uninit_matrix(rows, cols);
     let mut mb_mu = make_uninit_matrix(rows, cols);
     let mut lb_mu = make_uninit_matrix(rows, cols);
 
-    // warmup prefixes
     let warm_up_low: Vec<usize> = combos.iter().map(|_| first + 50 - 1).collect();
     let warm_mid: Vec<usize> = combos
         .iter()
@@ -1424,7 +1392,6 @@ fn emd_batch_inner(
     init_matrix_prefixes(&mut mb_mu, cols, &warm_mid);
     init_matrix_prefixes(&mut lb_mu, cols, &warm_up_low);
 
-    // Convert to raw parts for parallel access
     let ub_ptr = ub_mu.as_mut_ptr() as *mut f64 as usize;
     let mb_ptr = mb_mu.as_mut_ptr() as *mut f64 as usize;
     let lb_ptr = lb_mu.as_mut_ptr() as *mut f64 as usize;
@@ -1464,12 +1431,9 @@ fn emd_batch_inner(
         });
         #[cfg(target_arch = "wasm32")]
         {
-            let ub_rows =
-                unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, total) };
-            let mb_rows =
-                unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, total) };
-            let lb_rows =
-                unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, total) };
+            let ub_rows = unsafe { std::slice::from_raw_parts_mut(ub_ptr as *mut f64, total) };
+            let mb_rows = unsafe { std::slice::from_raw_parts_mut(mb_ptr as *mut f64, total) };
+            let lb_rows = unsafe { std::slice::from_raw_parts_mut(lb_ptr as *mut f64, total) };
             for row in 0..rows {
                 let prm = &combos[row];
                 let p = prm.period.unwrap();
@@ -1501,12 +1465,9 @@ fn emd_batch_inner(
         }
     }
 
-    let upperband =
-        unsafe { Vec::from_raw_parts(ub_mu.as_mut_ptr() as *mut f64, total, total) };
-    let middleband =
-        unsafe { Vec::from_raw_parts(mb_mu.as_mut_ptr() as *mut f64, total, total) };
-    let lowerband =
-        unsafe { Vec::from_raw_parts(lb_mu.as_mut_ptr() as *mut f64, total, total) };
+    let upperband = unsafe { Vec::from_raw_parts(ub_mu.as_mut_ptr() as *mut f64, total, total) };
+    let middleband = unsafe { Vec::from_raw_parts(mb_mu.as_mut_ptr() as *mut f64, total, total) };
+    let lowerband = unsafe { Vec::from_raw_parts(lb_mu.as_mut_ptr() as *mut f64, total, total) };
 
     std::mem::forget(ub_mu);
     std::mem::forget(mb_mu);
@@ -1535,7 +1496,11 @@ fn emd_batch_inner_into(
 ) -> Result<Vec<EmdParams>, EmdError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(EmdError::InvalidRangeU { start: 0, end: 0, step: 0 });
+        return Err(EmdError::InvalidRangeU {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let len = high.len();
     if low.len() != len {
@@ -1547,13 +1512,11 @@ fn emd_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(EmdError::InvalidRangeU {
-            start: rows,
-            end: cols,
-            step: usize::MAX,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(EmdError::InvalidRangeU {
+        start: rows,
+        end: cols,
+        step: usize::MAX,
+    })?;
     if upperband_out.len() != expected
         || middleband_out.len() != expected
         || lowerband_out.len() != expected
@@ -1579,7 +1542,6 @@ fn emd_batch_inner_into(
         });
     }
 
-    // init NaN prefixes in-place
     {
         let mut ub_mu = unsafe {
             std::slice::from_raw_parts_mut(
@@ -1611,7 +1573,6 @@ fn emd_batch_inner_into(
         init_matrix_prefixes(&mut lb_mu, cols, &warm_up_low);
     }
 
-    // Get raw pointers as usize for parallel access
     let ub_ptr = upperband_out.as_mut_ptr() as usize;
     let mb_ptr = middleband_out.as_mut_ptr() as usize;
     let lb_ptr = lowerband_out.as_mut_ptr() as usize;
@@ -1680,7 +1641,6 @@ fn emd_batch_inner_into(
     Ok(combos)
 }
 
-// API parity: this is required for batch indicator discovery/row mapping
 impl EmdBatchOutput {
     pub fn row_for_params(&self, p: &EmdParams) -> Option<usize> {
         self.combos.iter().position(|c| {
@@ -1708,39 +1668,34 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     fn test_emd_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial OHLC-like input
-        let n = 256usize; // >= max(50, 2*default_period)
+        let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
         for i in 0..n {
-            let base = 100.0 + (i as f64 * 0.01)
+            let base = 100.0
+                + (i as f64 * 0.01)
                 + (2.0 * std::f64::consts::PI * (i as f64) / 17.0).sin() * 3.0
                 + (2.0 * std::f64::consts::PI * (i as f64) / 49.0).cos() * 2.0;
             high.push(base + 1.25);
             low.push(base - 1.10);
         }
 
-        // Default params (period=20, delta=0.5, fraction=0.1)
         let params = EmdParams::default();
         let input = EmdInput::from_slices(&high, &low, &[], &[], params);
 
-        // Baseline via Vec-returning API
         let baseline = emd(&input)?;
 
-        // Preallocate output buffers and compute via into()
         let mut ub = vec![0.0; n];
         let mut mb = vec![0.0; n];
         let mut lb = vec![0.0; n];
         emd_into(&input, &mut ub, &mut mb, &mut lb)?;
 
-        // Helper: NaN-equal comparator
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
 
-        // Length and element-wise equality (NaN == NaN)
         assert_eq!(baseline.upperband.len(), ub.len());
         assert_eq!(baseline.middleband.len(), mb.len());
         assert_eq!(baseline.lowerband.len(), lb.len());
@@ -1904,7 +1859,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Variable period with random price data
         let strat1 = (2usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1917,14 +1871,12 @@ mod tests {
             )
         });
 
-        // Strategy 2: Fixed period with varying data lengths
         let strat2 = prop::collection::vec(
             (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
             100..500,
         )
         .prop_map(|data| (data, 20usize, 0.5f64, 0.1f64));
 
-        // Strategy 3: Trending data (monotonic)
         let strat3 = (100usize..400, prop::bool::ANY).prop_map(|(len, increasing)| {
             let mut data = Vec::with_capacity(len);
             let mut val = 100.0;
@@ -1935,7 +1887,6 @@ mod tests {
             (data, 14usize, 0.5f64, 0.1f64)
         });
 
-        // Strategy 4: Oscillating data (sine-wave patterns)
         let strat4 = (100usize..400, 5usize..50).prop_map(|(len, period_wave)| {
             let mut data = Vec::with_capacity(len);
             for i in 0..len {
@@ -1946,7 +1897,6 @@ mod tests {
             (data, 20usize, 0.5f64, 0.1f64)
         });
 
-        // Strategy 5: Real-world-like OHLC data with proper constraints
         let strat5 = (2usize..=30).prop_flat_map(|period| {
             let min_len = (2 * period).max(50);
             prop::collection::vec(
@@ -1963,7 +1913,7 @@ mod tests {
                             let close = base + range * close_offset;
                             let high = open.max(close) + range * high_extra;
                             let low = open.min(close) - range * low_extra;
-                            (high, low, close, base * 1000.0) // volume
+                            (high, low, close, base * 1000.0)
                         },
                     ),
                 min_len..300,
@@ -1975,7 +1925,6 @@ mod tests {
             })
         });
 
-        // Helper closure to unzip4
         trait Unzip4<A, B, C, D> {
             fn unzip4(self) -> (Vec<A>, Vec<B>, Vec<C>, Vec<D>);
         }
@@ -1993,7 +1942,6 @@ mod tests {
             }
         }
 
-        // Combine all strategies
         let combined_strat = prop_oneof![
             strat1.prop_map(|(data, period, delta, fraction)| {
                 let high = data.clone();
@@ -2029,7 +1977,6 @@ mod tests {
         proptest::test_runner::TestRunner::default().run(
             &combined_strat,
             |(high, low, close, volume, period, delta, fraction)| {
-                // Validate input constraints
                 for i in 0..high.len() {
                     prop_assert!(
                         high[i] >= low[i],
@@ -2047,27 +1994,20 @@ mod tests {
                 };
                 let input = EmdInput::from_slices(&high, &low, &close, &volume, params);
 
-                // Test with specified kernel
                 let result = emd_with_kernel(&input, kernel).unwrap();
                 let upperband = &result.upperband;
                 let middleband = &result.middleband;
                 let lowerband = &result.lowerband;
 
-                // Test with scalar kernel for comparison
                 let ref_result = emd_with_kernel(&input, Kernel::Scalar).unwrap();
                 let ref_upperband = &ref_result.upperband;
                 let ref_middleband = &ref_result.middleband;
                 let ref_lowerband = &ref_result.lowerband;
 
-                // Property 1: Output length matches input
                 prop_assert_eq!(upperband.len(), high.len());
                 prop_assert_eq!(middleband.len(), high.len());
                 prop_assert_eq!(lowerband.len(), high.len());
 
-                // Property 2: Warmup period handling
-                // Actual warmup calculation from emd_scalar:
-                // upperband_warmup = first + per_up_low - 1 = 0 + 50 - 1 = 49
-                // middleband_warmup = first + per_mid - 1 = 0 + 2*period - 1
                 let upperband_warmup = (50 - 1).min(high.len());
                 let middleband_warmup = ((2 * period) - 1).min(high.len());
 
@@ -2092,10 +2032,8 @@ mod tests {
                     );
                 }
 
-                // Property 3: Band values should be reasonable (after warmup)
                 let start_idx = upperband_warmup.max(middleband_warmup) + 1;
                 if start_idx < high.len() {
-                    // Calculate input data range for bounds checking
                     let input_min = high[start_idx..]
                         .iter()
                         .chain(low[start_idx..].iter())
@@ -2114,9 +2052,8 @@ mod tests {
                     if input_min.is_finite() && input_max.is_finite() {
                         let range = input_max - input_min;
                         let center = (input_max + input_min) / 2.0;
-                        // Bands should be within reasonable bounds of input data
-                        // EMD bands can extend beyond input range due to filtering, but not excessively
-                        let bounds_factor = 3.0; // Allow bands to be within 3x range from center
+
+                        let bounds_factor = 3.0;
                         let lower_bound = center - bounds_factor * range.max(1.0);
                         let upper_bound = center + bounds_factor * range.max(1.0);
 
@@ -2125,7 +2062,6 @@ mod tests {
                                 && !middleband[i].is_nan()
                                 && !lowerband[i].is_nan()
                             {
-                                // All bands should be finite
                                 prop_assert!(
                                     upperband[i].is_finite(),
                                     "Upperband should be finite at index {}",
@@ -2142,7 +2078,6 @@ mod tests {
                                     i
                                 );
 
-                                // Bands should be within reasonable bounds
                                 prop_assert!(
                                     upperband[i] >= lower_bound && upperband[i] <= upper_bound,
                                     "Upperband {} at index {} outside reasonable bounds [{}, {}]",
@@ -2172,8 +2107,6 @@ mod tests {
                     }
                 }
 
-                // Property 4: Kernel consistency
-                // Use more reasonable tolerance for floating-point comparison across SIMD implementations
                 let tolerance = 1e-10;
                 for i in 0..high.len() {
                     let ub_diff = (upperband[i] - ref_upperband[i]).abs();
@@ -2212,7 +2145,6 @@ mod tests {
                     }
                 }
 
-                // Property 5: Check for poison values
                 for i in 0..high.len() {
                     let ub_bits = upperband[i].to_bits();
                     let mb_bits = middleband[i].to_bits();
@@ -2276,10 +2208,8 @@ mod tests {
                     );
                 }
 
-                // Property 6: Edge case - period = 2 (minimum viable)
                 if period == 2 {
-                    // Should still produce valid output after warmup
-                    let min_warmup = (2 * 2).max(50); // max(4, 50) = 50
+                    let min_warmup = (2 * 2).max(50);
                     if high.len() > min_warmup {
                         prop_assert!(
                             middleband[min_warmup].is_finite() || middleband[min_warmup].is_nan(),
@@ -2288,12 +2218,10 @@ mod tests {
                     }
                 }
 
-                // Property 7: Constant data should produce stable output
                 if high.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                     && low.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                     && close.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                 {
-                    // For constant input, bands should stabilize after warmup
                     let check_start = start_idx + period;
                     if check_start + 5 < high.len() {
                         let ub_stable = &upperband[check_start..check_start + 5];
@@ -2327,15 +2255,10 @@ mod tests {
                     }
                 }
 
-                // Property 8: Fraction parameter effect
-                // When fraction is very small, upper and lower bands should be close to 0 after warmup
                 if fraction < 0.01 && start_idx < high.len() {
-                    // Check a few values after warmup
                     let check_end = (start_idx + 10).min(high.len());
                     for i in start_idx..check_end {
                         if !upperband[i].is_nan() && !lowerband[i].is_nan() {
-                            // With very small fraction, bands should be near zero
-                            // (since they're fraction * peak/valley averages)
                             prop_assert!(
                                 upperband[i].abs() < 10.0,
                                 "With fraction={}, upperband should be small, got {} at index {}",
@@ -2400,17 +2323,13 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             EmdParams::default(),
-            
             EmdParams {
                 period: Some(2),
                 delta: Some(0.1),
                 fraction: Some(0.05),
             },
-            
             EmdParams {
                 period: Some(5),
                 delta: Some(0.3),
@@ -2421,7 +2340,6 @@ mod tests {
                 delta: Some(0.5),
                 fraction: Some(0.15),
             },
-            
             EmdParams {
                 period: Some(20),
                 delta: Some(0.4),
@@ -2432,7 +2350,6 @@ mod tests {
                 delta: Some(0.6),
                 fraction: Some(0.2),
             },
-            
             EmdParams {
                 period: Some(50),
                 delta: Some(0.7),
@@ -2443,7 +2360,6 @@ mod tests {
                 delta: Some(0.8),
                 fraction: Some(0.3),
             },
-            
             EmdParams {
                 period: Some(15),
                 delta: Some(0.1),
@@ -2454,7 +2370,6 @@ mod tests {
                 delta: Some(0.9),
                 fraction: Some(0.1),
             },
-            
             EmdParams {
                 period: Some(25),
                 delta: Some(0.5),
@@ -2465,7 +2380,6 @@ mod tests {
                 delta: Some(0.5),
                 fraction: Some(0.5),
             },
-            
             EmdParams {
                 period: Some(40),
                 delta: Some(0.65),
@@ -2482,15 +2396,13 @@ mod tests {
             let input = EmdInput::from_candles(&candles, params.clone());
             let output = emd_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.upperband.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in upperband \
@@ -2528,15 +2440,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.middleband.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in middleband \
@@ -2574,15 +2484,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.lowerband.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in lowerband \
@@ -2626,7 +2534,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_emd_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     generate_all_emd_tests!(
@@ -2663,7 +2571,6 @@ mod tests {
             assert_eq!(mb.len(), c.close.len(), "Middleband length mismatch");
             assert_eq!(lb.len(), c.close.len(), "Lowerband length mismatch");
 
-            
             let expected_last_five_upper = [
                 50.33760237677157,
                 50.28850695686447,
@@ -2716,7 +2623,6 @@ mod tests {
             let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
             let c = read_candles_from_csv(file)?;
 
-            
             let output = EmdBatchBuilder::new()
                 .kernel(kernel)
                 .period_range(20, 22, 2)
@@ -2731,7 +2637,6 @@ mod tests {
             );
             assert_eq!(output.cols, c.close.len());
 
-            
             for params in &output.combos {
                 let (ub, mb, lb) = output
                     .bands_for(params)
@@ -2772,22 +2677,13 @@ mod tests {
             let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
             let c = read_candles_from_csv(file)?;
 
-            
             let test_configs = vec![
-                
-                
                 (5, 15, 5, 0.1, 0.5, 0.2, 0.05, 0.15, 0.05),
-                
                 (10, 30, 10, 0.3, 0.7, 0.2, 0.1, 0.2, 0.05),
-                
                 (20, 50, 15, 0.5, 0.8, 0.15, 0.15, 0.3, 0.075),
-                
                 (8, 12, 1, 0.4, 0.6, 0.1, 0.08, 0.12, 0.02),
-                
                 (20, 20, 0, 0.5, 0.5, 0.0, 0.1, 0.1, 0.0),
-                
                 (5, 40, 5, 0.2, 0.8, 0.1, 0.05, 0.25, 0.05),
-                
                 (2, 6, 2, 0.1, 0.9, 0.4, 0.01, 0.5, 0.245),
             ];
 
@@ -2803,7 +2699,6 @@ mod tests {
                     .fraction_range(f_start, f_end, f_step)
                     .apply_candles(&c)?;
 
-                
                 for (idx, &val) in output.upperband.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -2814,7 +2709,6 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in upperband \
@@ -2849,7 +2743,6 @@ mod tests {
                     }
                 }
 
-                
                 for (idx, &val) in output.middleband.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -2860,7 +2753,6 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in middleband \
@@ -2895,7 +2787,6 @@ mod tests {
                     }
                 }
 
-                
                 for (idx, &val) in output.lowerband.iter().enumerate() {
                     if val.is_nan() {
                         continue;
@@ -2906,7 +2797,6 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in lowerband \
@@ -2947,7 +2837,7 @@ mod tests {
 
         #[cfg(not(debug_assertions))]
         fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-            Ok(()) 
+            Ok(())
         }
 
         gen_batch_tests!(check_batch_default_row);
@@ -2955,7 +2845,6 @@ mod tests {
         gen_batch_tests!(check_batch_no_poison);
     }
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "emd")]
@@ -2984,7 +2873,7 @@ pub fn emd_py<'py>(
         delta: Some(delta),
         fraction: Some(fraction),
     };
-    let inp = EmdInput::from_slices(hi, lo, &[], &[], params); // close/volume unused
+    let inp = EmdInput::from_slices(hi, lo, &[], &[], params);
     let kern = validate_kernel(kernel, false)?;
 
     let ub = unsafe { PyArray1::<f64>::new(py, [hi.len()], false) };
@@ -3116,7 +3005,6 @@ pub fn emd_batch_py<'py>(
     Ok(d)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "emd_cuda_batch_dev")]
 #[pyo3(signature = (high, low, period_range, delta_range, fraction_range, device_id=0))]
@@ -3163,7 +3051,7 @@ pub fn emd_cuda_batch_dev_py<'py>(
     dict.set_item("middleband", Py::new(py, middle_dev)?)?;
     let lower_dev = make_device_array_py(dev_id as usize, lower)?;
     dict.set_item("lowerband", Py::new(py, lower_dev)?)?;
-    // Flatten parameters
+
     let periods: Vec<usize> = combos.iter().map(|c| c.period.unwrap()).collect();
     let deltas: Vec<f64> = combos.iter().map(|c| c.delta.unwrap()).collect();
     let fractions: Vec<f64> = combos.iter().map(|c| c.fraction.unwrap()).collect();
@@ -3198,7 +3086,6 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
     let cols = shape[1];
     let flat = data_tm_f32.as_slice()?;
 
-    // Per-series first_valid indices
     let mut first_valids = vec![0i32; cols];
     for s in 0..cols {
         let mut fv: Option<i32> = None;
@@ -3221,8 +3108,7 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
     let (outputs, dev_id) = py.allow_threads(|| {
         let cuda = CudaEmd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
-        cuda
-            .emd_many_series_one_param_time_major_dev(flat, cols, rows, &params, &first_valids)
+        cuda.emd_many_series_one_param_time_major_dev(flat, cols, rows, &params, &first_valids)
             .map(|o| (o, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -3246,24 +3132,20 @@ pub fn emd_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-// ############################################
-// WASM Bindings
-// ############################################
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EmdJsOutput {
-    pub values: Vec<f64>, // [upper..., middle..., lower...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "emd_js")]
 pub fn emd_js(
     high: &[f64],
@@ -3299,7 +3181,7 @@ pub fn emd_js(
     serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emd_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3308,7 +3190,7 @@ pub fn emd_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emd_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3318,13 +3200,13 @@ pub fn emd_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emd_into(
     high_ptr: *const f64,
     low_ptr: *const f64,
-    _close_ptr: *const f64,  // unused but kept for API compatibility
-    _volume_ptr: *const f64, // unused but kept for API compatibility
+    _close_ptr: *const f64,
+    _volume_ptr: *const f64,
     upper_ptr: *mut f64,
     middle_ptr: *mut f64,
     lower_ptr: *mut f64,
@@ -3342,14 +3224,12 @@ pub fn emd_into(
         return Err(JsValue::from_str("null pointer"));
     }
     unsafe {
-        // Check for aliasing - if high_ptr == upper_ptr, we need to copy the data first
         let hi_aliased = high_ptr as *const f64 == upper_ptr as *const f64;
         let lo_aliased = low_ptr as *const f64 == upper_ptr as *const f64
             || low_ptr as *const f64 == middle_ptr as *const f64
             || low_ptr as *const f64 == lower_ptr as *const f64;
 
         if hi_aliased || lo_aliased {
-            // Handle aliasing by computing to temporary buffers first
             let hi = std::slice::from_raw_parts(high_ptr, len);
             let lo = std::slice::from_raw_parts(low_ptr, len);
 
@@ -3362,7 +3242,6 @@ pub fn emd_into(
             let output = emd_with_kernel(&input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results to output pointers
             let ub = std::slice::from_raw_parts_mut(upper_ptr, len);
             let mb = std::slice::from_raw_parts_mut(middle_ptr, len);
             let lb = std::slice::from_raw_parts_mut(lower_ptr, len);
@@ -3370,7 +3249,6 @@ pub fn emd_into(
             mb.copy_from_slice(&output.middleband);
             lb.copy_from_slice(&output.lowerband);
         } else {
-            // No aliasing, can write directly
             let hi = std::slice::from_raw_parts(high_ptr, len);
             let lo = std::slice::from_raw_parts(low_ptr, len);
             let ub = std::slice::from_raw_parts_mut(upper_ptr, len);
@@ -3389,7 +3267,7 @@ pub fn emd_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EmdBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -3397,18 +3275,18 @@ pub struct EmdBatchConfig {
     pub fraction_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EmdBatchJsOutput {
-    pub upperband: Vec<f64>,    // flattened rows * cols
-    pub middleband: Vec<f64>,   // flattened rows * cols
-    pub lowerband: Vec<f64>,    // flattened rows * cols
-    pub combos: Vec<EmdParams>, // same shape as Rust
-    pub rows: usize,            // combos.len()
-    pub cols: usize,            // len
+    pub upperband: Vec<f64>,
+    pub middleband: Vec<f64>,
+    pub lowerband: Vec<f64>,
+    pub combos: Vec<EmdParams>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "emd_batch")]
 pub fn emd_batch_unified_js(
     high: &[f64],
@@ -3435,7 +3313,6 @@ pub fn emd_batch_unified_js(
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows * cols overflow in emd_batch_unified_js"))?;
 
-    // allocate three planes
     let mut ub = vec![f64::NAN; total];
     let mut mb = vec![f64::NAN; total];
     let mut lb = vec![f64::NAN; total];
@@ -3464,7 +3341,7 @@ pub fn emd_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emd_batch_into(
     high_ptr: *const f64,
@@ -3506,7 +3383,6 @@ pub fn emd_batch_into(
             fraction: (fraction_start, fraction_end, fraction_step),
         };
 
-        // Calculate dimensions
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
@@ -3514,12 +3390,10 @@ pub fn emd_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("rows * cols overflow in emd_batch_into"))?;
 
-        // Get output buffer slices
         let upper_slice = std::slice::from_raw_parts_mut(upper_ptr, total_len);
         let middle_slice = std::slice::from_raw_parts_mut(middle_ptr, total_len);
         let lower_slice = std::slice::from_raw_parts_mut(lower_ptr, total_len);
 
-        // Use the optimized _inner_into function for zero-copy operation
         emd_batch_inner_into(
             high,
             low,

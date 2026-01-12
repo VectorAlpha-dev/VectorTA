@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::supersmoother_3_pole::{
     supersmoother_3_pole_batch_with_kernel, supersmoother_3_pole_with_kernel,
     SuperSmoother3PoleBatchRange, SuperSmoother3PoleInput, SuperSmoother3PoleParams,

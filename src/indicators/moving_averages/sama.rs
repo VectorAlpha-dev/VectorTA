@@ -1,33 +1,3 @@
-//! # Slope Adaptive Moving Average (SAMA)
-//!
-//! SAMA is an adaptive moving average that adjusts its smoothing factor based on the
-//! price range within a specified period. It uses the difference between highest and
-//! lowest values to determine how much weight to give to recent price changes.
-//!
-//! ## Parameters
-//! - **length**: Period for finding highest and lowest values (default: 200)
-//! - **maj_length**: Major length for slower alpha calculation (default: 14)
-//! - **min_length**: Minor length for faster alpha calculation (default: 6)
-//!
-//! ## Errors
-//! - **EmptyInputData**: sama: Input data slice is empty.
-//! - **AllValuesNaN**: sama: All input values are `NaN`.
-//! - **InvalidPeriod**: sama: Period is zero or exceeds data length.
-//! - **NotEnoughValidData**: sama: Not enough valid data points for calculation.
-//!
-//! ## Returns
-//! - **`Ok(SamaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(SamaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - Scalar: optimized with O(1) amortized rolling high/low via monotonic deques; updates use `mul_add`.
-//! - Allocation: uses `alloc_with_nan_prefix` (NaN prefix only; no O(N) full init).
-//! - SIMD (AVX2/AVX512): kept as stubs delegating to scalar. Loop-carried dependency and deque maintenance
-//!   make time-domain SIMD ineffective vs. the algorithmic win.
-//! - Batch: row-specific optimization precomputes rolling highs/lows once per unique `length` and
-//!   reuses them across rows; each row performs only the adaptive EMA step.
-//! - Rationale: SIMD disabled by default due to negligible gains after deque optimization.
-
 #[cfg(feature = "python")]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -39,20 +9,18 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::{cuda_available, moving_averages::CudaSama};
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::sama_wrapper::DeviceArrayF32Sama;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
+use crate::cuda::{cuda_available, moving_averages::CudaSama};
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -60,6 +28,8 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
@@ -97,7 +67,10 @@ pub struct SamaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SamaParams {
     pub length: Option<usize>,
     pub maj_length: Option<usize>,
@@ -261,7 +234,11 @@ pub enum SamaError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("sama: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("sama: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -276,8 +253,6 @@ pub fn sama(input: &SamaInput) -> Result<SamaOutput, SamaError> {
 pub fn sama_with_kernel(input: &SamaInput, kernel: Kernel) -> Result<SamaOutput, SamaError> {
     let (data, length, maj_length, min_length, first, chosen) = sama_prepare(input, kernel)?;
 
-    
-    
     let mut out = alloc_with_nan_prefix(data.len(), first);
     sama_compute_into(
         data, length, maj_length, min_length, first, chosen, &mut out,
@@ -285,16 +260,9 @@ pub fn sama_with_kernel(input: &SamaInput, kernel: Kernel) -> Result<SamaOutput,
     Ok(SamaOutput { values: out })
 }
 
-/// Compute SAMA directly into a caller-provided buffer without allocations.
-///
-/// - Preserves the module's warmup semantics: fills the NaN prefix up to the
-///   first finite input value using the same quiet-NaN pattern as `alloc_with_nan_prefix`.
-/// - Writes results in-place for the remaining entries via the selected kernel (Auto).
-/// - `out.len()` must equal the input length; returns the existing length/period error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn sama_into(input: &SamaInput, out: &mut [f64]) -> Result<(), SamaError> {
-    let (data, length, maj_length, min_length, first, chosen) =
-        sama_prepare(input, Kernel::Auto)?;
+    let (data, length, maj_length, min_length, first, chosen) = sama_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
         return Err(SamaError::OutputLengthMismatch {
@@ -303,16 +271,12 @@ pub fn sama_into(input: &SamaInput, out: &mut [f64]) -> Result<(), SamaError> {
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by Vec API
     let warm = first.min(out.len());
     for i in 0..warm {
         out[i] = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute writes values from `first` onward
-    sama_compute_into(
-        data, length, maj_length, min_length, first, chosen, out,
-    );
+    sama_compute_into(data, length, maj_length, min_length, first, chosen, out);
 
     Ok(())
 }
@@ -328,9 +292,8 @@ pub fn sama_into_slice(dst: &mut [f64], input: &SamaInput, kern: Kernel) -> Resu
         });
     }
 
-    // Compute writes values from `first` onward
     sama_compute_into(data, length, maj_length, min_length, first, chosen, dst);
-    // Prefix is NaN by convention
+
     for v in &mut dst[..first] {
         *v = f64::NAN;
     }
@@ -358,7 +321,6 @@ fn sama_prepare<'a>(
     let maj_length = input.get_maj_length();
     let min_length = input.get_min_length();
 
-    
     if length + 1 > n || length == 0 {
         return Err(SamaError::InvalidPeriod {
             period: length,
@@ -374,7 +336,7 @@ fn sama_prepare<'a>(
     }
 
     let valid = n - first;
-    
+
     if valid < 1 {
         return Err(SamaError::NotEnoughValidData { needed: 1, valid });
     }
@@ -440,13 +402,10 @@ pub fn sama_scalar(
         return;
     }
 
-    
     let maj_alpha = 2.0 / (maj_length as f64 + 1.0);
     let min_alpha = 2.0 / (min_length as f64 + 1.0);
     let delta = min_alpha - maj_alpha;
 
-    
-    
     let cap = length + 1;
     let mut max_idx = vec![0usize; cap];
     let mut min_idx = vec![0usize; cap];
@@ -460,14 +419,12 @@ pub fn sama_scalar(
     for i in first..n {
         let p = data[i];
         if p.is_nan() {
-            
             out[i] = f64::NAN;
             continue;
         }
 
         let wstart = i.saturating_sub(length);
 
-        
         while max_len > 0 {
             let idx = max_idx[max_head];
             if idx >= wstart {
@@ -479,7 +436,7 @@ pub fn sama_scalar(
             }
             max_len -= 1;
         }
-        
+
         while min_len > 0 {
             let idx = min_idx[min_head];
             if idx >= wstart {
@@ -492,7 +449,6 @@ pub fn sama_scalar(
             min_len -= 1;
         }
 
-        
         while max_len > 0 {
             let mut last_pos = max_head + max_len - 1;
             if last_pos >= cap {
@@ -513,7 +469,6 @@ pub fn sama_scalar(
         max_idx[ins_pos_max] = i;
         max_len += 1;
 
-        
         while min_len > 0 {
             let mut last_pos = min_head + min_len - 1;
             if last_pos >= cap {
@@ -534,21 +489,17 @@ pub fn sama_scalar(
         min_idx[ins_pos_min] = i;
         min_len += 1;
 
-        
         let hh = data[max_idx[max_head]];
         let ll = data[min_idx[min_head]];
 
-        
         let denom = hh - ll;
         let c = (p + p) - (hh + ll);
         let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
 
-        
         let a = mult.mul_add(delta, maj_alpha);
         let alpha = a * a;
 
         if sama_val.is_nan() {
-            
             sama_val = p;
         } else {
             let diff = p - sama_val;
@@ -569,8 +520,6 @@ pub fn sama_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    
-    
     sama_scalar(data, length, maj_length, min_length, first, out);
 }
 
@@ -584,8 +533,6 @@ pub fn sama_avx512(
     first: usize,
     out: &mut [f64],
 ) {
-    
-    
     sama_scalar(data, length, maj_length, min_length, first, out);
 }
 
@@ -599,23 +546,19 @@ pub fn sama_simd128(
     first: usize,
     out: &mut [f64],
 ) {
-    
-    
     sama_scalar(data, length, maj_length, min_length, first, out);
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct SamaBatchRange {
-    pub length: (usize, usize, usize),     
-    pub maj_length: (usize, usize, usize), 
-    pub min_length: (usize, usize, usize), 
+    pub length: (usize, usize, usize),
+    pub maj_length: (usize, usize, usize),
+    pub min_length: (usize, usize, usize),
 }
 
 #[derive(Debug, Clone)]
 pub struct SamaBatchOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<SamaParams>,
     pub rows: usize,
     pub cols: usize,
@@ -730,7 +673,9 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, S
         return Ok(vec![start]);
     }
     if start < end {
-        if step == 0 { return Ok(vec![start]); }
+        if step == 0 {
+            return Ok(vec![start]);
+        }
         let mut v = Vec::new();
         let mut x = start;
         while x <= end {
@@ -740,23 +685,38 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, S
                 None => break,
             }
         }
-        if v.is_empty() { return Err(SamaError::InvalidRange { start, end, step }); }
+        if v.is_empty() {
+            return Err(SamaError::InvalidRange { start, end, step });
+        }
         Ok(v)
     } else {
-        
-        if step == 0 { return Ok(vec![start]); }
+        if step == 0 {
+            return Ok(vec![start]);
+        }
         let mut v = Vec::new();
         let mut x = start;
         loop {
             v.push(x);
-            if x <= end { break; }
+            if x <= end {
+                break;
+            }
             x = x.saturating_sub(step);
-            if x == 0 && end > 0 && x < end { break; }
-            if v.len() > 1 && *v.last().unwrap() == x { break; }
-            if x == 0 && end == 0 { break; }
-            if x < end { break; }
+            if x == 0 && end > 0 && x < end {
+                break;
+            }
+            if v.len() > 1 && *v.last().unwrap() == x {
+                break;
+            }
+            if x == 0 && end == 0 {
+                break;
+            }
+            if x < end {
+                break;
+            }
         }
-        if v.is_empty() { return Err(SamaError::InvalidRange { start, end, step }); }
+        if v.is_empty() {
+            return Err(SamaError::InvalidRange { start, end, step });
+        }
         Ok(v)
     }
 }
@@ -773,7 +733,11 @@ fn expand_grid_sama(r: &SamaBatchRange) -> Result<Vec<SamaParams>, SamaError> {
             step: 0,
         });
     }
-    let mut out = Vec::with_capacity(lens.len().saturating_mul(maj.len()).saturating_mul(min.len()));
+    let mut out = Vec::with_capacity(
+        lens.len()
+            .saturating_mul(maj.len())
+            .saturating_mul(min.len()),
+    );
     for &l in &lens {
         for &j in &maj {
             for &m in &min {
@@ -796,12 +760,9 @@ pub fn sama_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        other => {
-            return Err(SamaError::InvalidKernelForBatch(other))
-        }
+        other => return Err(SamaError::InvalidKernelForBatch(other)),
     };
 
-    
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -844,39 +805,27 @@ fn sama_batch_inner(
         return Err(SamaError::EmptyInputData);
     }
 
-    
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(SamaError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 0,
-        })?;
+    let total = rows.checked_mul(cols).ok_or(SamaError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(SamaError::AllValuesNaN)?;
-    let warm: Vec<usize> = combos
-        .iter()
-        .map(|_| first) 
-        .collect();
+    let warm: Vec<usize> = combos.iter().map(|_| first).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len())
-    };
+    let out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     sama_batch_inner_into(data, &combos, first, kern, parallel, out)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -909,7 +858,6 @@ fn sama_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     if cols - first < 1 {
         return Err(SamaError::NotEnoughValidData {
             needed: 1,
@@ -917,9 +865,6 @@ fn sama_batch_inner_into(
         });
     }
 
-    
-    
-    
     use std::collections::HashMap;
     let mut uniq_lengths: Vec<usize> = Vec::new();
     uniq_lengths.reserve(combos.len());
@@ -930,7 +875,6 @@ fn sama_batch_inner_into(
         }
     }
 
-    
     fn build_rolling_extrema(data: &[f64], length: usize) -> (Vec<f64>, Vec<f64>) {
         let n = data.len();
         let cap = length + 1;
@@ -947,7 +891,6 @@ fn sama_batch_inner_into(
             let p = data[i];
             let wstart = i.saturating_sub(length);
 
-            
             while max_len > 0 {
                 let idx = max_idx[max_head];
                 if idx >= wstart {
@@ -971,7 +914,6 @@ fn sama_batch_inner_into(
                 min_len -= 1;
             }
 
-            
             if !p.is_nan() {
                 while max_len > 0 {
                     let last_pos = (max_head + max_len - 1) % cap;
@@ -1008,7 +950,6 @@ fn sama_batch_inner_into(
         (hh, ll)
     }
 
-    
     let mut hh_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(uniq_lengths.len());
     let mut ll_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(uniq_lengths.len());
     for &l in &uniq_lengths {
@@ -1017,7 +958,6 @@ fn sama_batch_inner_into(
         ll_map.insert(l, ll);
     }
 
-    
     let do_row = |row: usize, row_dst: &mut [f64]| {
         let prm = &combos[row];
         let length = prm.length.unwrap_or(200);
@@ -1081,37 +1021,28 @@ fn sama_batch_inner_into(
     Ok(())
 }
 
-
-
-
 #[derive(Debug, Clone)]
 pub struct SamaStream {
-    
     length: usize,
     maj_length: usize,
     min_length: usize,
 
-    
     maj_alpha: f64,
     min_alpha: f64,
-    delta: f64, 
+    delta: f64,
 
-    
-    cap: usize, 
+    cap: usize,
     buf: Vec<f64>,
-    head: usize, 
-    tick: usize, 
+    head: usize,
+    tick: usize,
 
-    
-    
-    max_idx: Vec<usize>, 
-    min_idx: Vec<usize>, 
+    max_idx: Vec<usize>,
+    min_idx: Vec<usize>,
     max_head: usize,
     min_head: usize,
     max_len: usize,
     min_len: usize,
 
-    
     sama_val: f64,
 }
 
@@ -1156,16 +1087,11 @@ impl SamaStream {
         })
     }
 
-    /// Amortized O(1) update via monotonic deques.
-    /// - Advances time even on NaN input (window slides), but does not update the EMA state in that case.
-    /// - Returns the new SAMA value or NaN if the input is NaN.
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let t = self.tick;
         let cap = self.cap;
 
-        
-        
         let oldest = t.saturating_sub(self.length);
 
         while self.max_len > 0 {
@@ -1191,10 +1117,8 @@ impl SamaStream {
             self.min_len -= 1;
         }
 
-        
         self.buf[self.head] = value;
 
-        
         if value.is_nan() {
             self.head += 1;
             if self.head == cap {
@@ -1204,7 +1128,6 @@ impl SamaStream {
             return Some(f64::NAN);
         }
 
-        
         while self.max_len > 0 {
             let back_pos = (self.max_head + self.max_len - 1) % cap;
             let back_idx = self.max_idx[back_pos];
@@ -1219,7 +1142,6 @@ impl SamaStream {
         self.max_idx[ins_pos_max] = t;
         self.max_len += 1;
 
-        
         while self.min_len > 0 {
             let back_pos = (self.min_head + self.min_len - 1) % cap;
             let back_idx = self.min_idx[back_pos];
@@ -1234,20 +1156,16 @@ impl SamaStream {
         self.min_idx[ins_pos_min] = t;
         self.min_len += 1;
 
-        
         let hh = self.buf[self.max_idx[self.max_head] % cap];
         let ll = self.buf[self.min_idx[self.min_head] % cap];
 
-        
         let denom = hh - ll;
         let c = (value + value) - (hh + ll);
         let mult = if denom > 0.0 { c.abs() / denom } else { 0.0 };
 
-        
         let a = mult.mul_add(self.delta, self.maj_alpha);
         let alpha = a * a;
 
-        
         if self.sama_val.is_nan() {
             self.sama_val = value;
         } else {
@@ -1255,7 +1173,6 @@ impl SamaStream {
             self.sama_val = diff.mul_add(alpha, self.sama_val);
         }
 
-        
         self.head += 1;
         if self.head == cap {
             self.head = 0;
@@ -1282,8 +1199,6 @@ impl SamaStream {
         self.sama_val = f64::NAN;
     }
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "sama")]
@@ -1331,19 +1246,15 @@ pub fn sama_batch_py<'py>(
         min_length: min_length_range,
     };
 
-    
-    let combos = expand_grid_sama(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_sama(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = py
         .allow_threads(|| {
             let mapped = match kern {
@@ -1356,7 +1267,7 @@ pub fn sama_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => Kernel::Scalar,
             };
-            
+
             let first = slice_in
                 .iter()
                 .position(|x| !x.is_nan())
@@ -1490,9 +1401,7 @@ impl SamaStreamPy {
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sama_js(
     data: &[f64],
@@ -1512,7 +1421,7 @@ pub fn sama_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SamaBatchConfig {
     pub length_range: (usize, usize, usize),
@@ -1520,7 +1429,7 @@ pub struct SamaBatchConfig {
     pub min_length_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SamaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1529,7 +1438,7 @@ pub struct SamaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = sama_batch)]
 pub fn sama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: SamaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1550,8 +1459,7 @@ pub fn sama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sama_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1560,7 +1468,7 @@ pub fn sama_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sama_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1568,7 +1476,7 @@ pub fn sama_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sama_into(
     in_ptr: *const f64,
@@ -1599,7 +1507,7 @@ pub fn sama_into(
             out.copy_from_slice(&tmp);
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
-            
+
             sama_into_slice(out, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
@@ -1607,7 +1515,7 @@ pub fn sama_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sama_batch_into(
     in_ptr: *const f64,
@@ -1633,7 +1541,7 @@ pub fn sama_batch_into(
             maj_length: (maj_start, maj_end, maj_step),
             min_length: (min_start, min_end, min_step),
         };
-    let combos = expand_grid_sama(&sweep).map_err(|_| JsValue::from_str("Invalid range"))?;
+        let combos = expand_grid_sama(&sweep).map_err(|_| JsValue::from_str("Invalid range"))?;
         let rows = combos.len();
         let cols = len;
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
@@ -1662,11 +1570,8 @@ mod tests {
         let input = SamaInput::from_candles(&candles, "close", SamaParams::default());
         let result = sama_with_kernel(&input, kernel)?;
 
-        
-        
         assert_eq!(result.values.len(), candles.close.len());
 
-        
         let valid_count = result.values.iter().filter(|&&v| !v.is_nan()).count();
         assert!(
             valid_count > 0,
@@ -1677,16 +1582,14 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_sama_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(256);
         for _ in 0..5 {
             data.push(f64::NAN);
         }
         for i in 0..251 {
-            
             let x = (i as f64).sin() * 0.12345 + 50.0 + ((i % 11) as f64) * 0.001;
             data.push(x);
         }
@@ -1865,11 +1768,9 @@ mod tests {
         let input = SamaInput::from_candles(&candles, "close", params);
         let output = sama_with_kernel(&input, kernel)?;
 
-        
         let first_valid = candles.close.iter().position(|x| !x.is_nan()).unwrap_or(0);
         let warmup = first_valid + input.get_length();
 
-        
         for (i, &val) in output
             .values
             .iter()
@@ -1893,11 +1794,9 @@ mod tests {
 
         let params = SamaParams::default();
 
-        
         let batch_input = SamaInput::from_candles(&candles, "close", params.clone());
         let batch_result = sama_with_kernel(&batch_input, kernel)?;
 
-        
         let mut stream = SamaStream::try_new(params)?;
         let mut stream_results = Vec::with_capacity(candles.close.len());
         for &price in &candles.close {
@@ -1906,7 +1805,6 @@ mod tests {
 
         assert_eq!(batch_result.values.len(), stream_results.len());
 
-        
         for (i, (&batch_val, &stream_val)) in batch_result
             .values
             .iter()
@@ -1932,7 +1830,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_batch_sweep(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1946,7 +1843,6 @@ mod tests {
 
         let output = sama_batch_with_kernel(&candles.close, &range, kernel)?;
 
-        
         let expected_count = 21 * 5 * 5;
         assert_eq!(
             output.rows, expected_count,
@@ -1986,7 +1882,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_sama_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2049,7 +1944,6 @@ mod tests {
         };
     }
 
-    
     generate_all_sama_tests!(
         check_sama_accuracy,
         check_sama_partial_params,
@@ -2108,7 +2002,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[test]
     fn test_sama_simd128_correctness() {
@@ -2116,7 +2009,7 @@ mod tests {
         let params = SamaParams::default();
         let input = SamaInput::from_slice(&data, params);
         let scalar = sama_with_kernel(&input, Kernel::Scalar).unwrap();
-        let simd = sama_with_kernel(&input, Kernel::Scalar).unwrap(); 
+        let simd = sama_with_kernel(&input, Kernel::Scalar).unwrap();
         assert_eq!(scalar.values.len(), simd.values.len());
         for (a, b) in scalar.values.iter().zip(simd.values.iter()) {
             assert!((a - b).abs() < 1e-10);
@@ -2137,7 +2030,7 @@ mod tests {
                 continue;
             }
             let b = v.to_bits();
-            
+
             assert_ne!(
                 b, 0x11111111_11111111,
                 "Found poison value 0x11111111_11111111"
@@ -2183,7 +2076,6 @@ mod tests {
             }
         }
 
-        
         assert!(
             !results.is_empty(),
             "Stream should produce results immediately"
@@ -2194,26 +2086,20 @@ mod tests {
 
     #[test]
     fn sama_pine_parity_head_start() -> Result<(), Box<dyn Error>> {
-        
         let mut long = vec![0.0; 5000];
         for i in 0..long.len() {
             long[i] = (i as f64).sin() + (i as f64 * 0.01).cos();
         }
 
-        
         let pine_params = SamaParams::default();
         let pine_out = SamaInput::from_slice(&long, pine_params.clone());
         let a = sama_with_kernel(&pine_out, Kernel::Scalar)?.values;
 
-        
         let tail = &long[2000..];
         let pine_like_tail = SamaInput::from_slice(tail, pine_params);
         let b = sama_with_kernel(&pine_like_tail, Kernel::Scalar)?.values;
 
-        
-        
-        
-        let tol = 0.1; 
+        let tol = 0.1;
         for (i, (&x, &y)) in a[2000..].iter().zip(b.iter()).enumerate().skip(100) {
             if x.is_finite() && y.is_finite() {
                 assert!((x - y).abs() < tol, "i={}, |Δ|={}", i, (x - y).abs());
@@ -2229,15 +2115,14 @@ mod prop_tests {
     use super::*;
     use proptest::prelude::*;
 
-    
     proptest! {
         #[test]
         fn sama_properties(data in prop::collection::vec(-1e6f64..1e6, 5..400),
                            len in 2usize..64,
                            maj in 2usize..64,
                            min in 2usize..64) {
-            
-            
+
+
             if data.len() <= len {
                 return Ok(());
             }
@@ -2250,7 +2135,7 @@ mod prop_tests {
             let input = SamaInput::from_slice(&data, params);
             let SamaOutput { values: out } = sama_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            
+
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warm = first + len;
             for i in warm..data.len() {
@@ -2258,9 +2143,9 @@ mod prop_tests {
                 let window = &data[wstart..=i];
                 if window.iter().all(|v| v.is_finite()) {
                     let y = out[i];
-                    
-                    
-                    
+
+
+
                     prop_assert!(
                         y.is_finite(),
                         "Output {} at index {} is not finite",
@@ -2286,7 +2171,7 @@ impl DeviceArrayF32SamaPy {
         let d = PyDict::new(py);
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
-        // Strides in BYTES per CAI v3 (explicit even if contiguous)
+
         d.set_item(
             "strides",
             (
@@ -2294,21 +2179,20 @@ impl DeviceArrayF32SamaPy {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        // For zero-size arrays, pointer must be 0 per spec
-        let len = self
-            .inner
-            .rows
-            .checked_mul(self.inner.cols)
-            .unwrap_or(0);
-        let ptr_usize = if len == 0 { 0usize } else { self.inner.device_ptr() as usize };
+
+        let len = self.inner.rows.checked_mul(self.inner.cols).unwrap_or(0);
+        let ptr_usize = if len == 0 {
+            0usize
+        } else {
+            self.inner.device_ptr() as usize
+        };
         d.set_item("data", (ptr_usize, false))?;
-        // Producing stream is synchronized before return, so omit 'stream'
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA per DLPack
         (2, self.inner.device_id as i32)
     }
 
@@ -2321,8 +2205,7 @@ impl DeviceArrayF32SamaPy {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device and validate optional `dl_device` hint.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2341,13 +2224,10 @@ impl DeviceArrayF32SamaPy {
             }
         }
 
-        // Producing kernels synchronize their stream before returning this handle;
-        // accept the Array API `stream` argument but do not act on it.
         let _ = stream;
 
-        // Move VRAM buffer out of this handle; the DLPack capsule owns it after this call.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let device_id = self.inner.device_id;
         let ctx = self.inner.ctx.clone();
         let inner = std::mem::replace(
@@ -2365,7 +2245,6 @@ impl DeviceArrayF32SamaPy {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Negotiate version; helper expects an optional bound object.
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::dti::{DtiBatchBuilder, DtiBatchRange, DtiParams};
 
 #[cfg(feature = "cuda")]
@@ -37,7 +35,7 @@ fn dti_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut low = vec![f64::NAN; len];
     for i in 1..len {
         let x = i as f64;
-        
+
         high[i] = (x * 0.00123).sin() + 0.00021 * x + 100.0;
         low[i] = high[i] - (0.9 + (x * 0.00077).cos().abs());
     }
@@ -48,7 +46,6 @@ fn dti_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let cpu = {
-        
         let mut rows_vals = Vec::new();
         let combos = {
             let rr = axis_usize(sweep.r);
@@ -93,7 +90,7 @@ fn dti_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             let mut e1r = 0f32;
             let mut e1s = 0f32;
             let mut e1u = 0f32;
-            
+
             for i in 0..start {
                 rows_vals[row * cols + i] = f64::NAN;
             }
@@ -141,7 +138,7 @@ fn dti_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 1e-3; 
+    let tol = 1e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -170,7 +167,6 @@ fn dti_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut low_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s % 3)..rows {
-            
             let x = (t as f64) + (s as f64) * 0.17;
             high_tm[t * cols + s] = (x * 0.0021).sin() + 0.00029 * x + 100.0 + s as f64 * 0.01;
             low_tm[t * cols + s] = high_tm[t * cols + s] - (1.0 + (x * 0.0011).cos().abs());
@@ -181,7 +177,6 @@ fn dti_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let s = 10usize;
     let u = 5usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     let (ar, as_, au) = (
         2.0 / (r as f32 + 1.0),
@@ -192,7 +187,6 @@ fn dti_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let hf: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let lf: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     for series in 0..cols {
-        
         let mut fv = rows;
         for t in 0..rows {
             let h = hf[t * cols + series];
@@ -209,7 +203,7 @@ fn dti_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         let mut e1r = 0f32;
         let mut e1s = 0f32;
         let mut e1u = 0f32;
-        
+
         for t in 0..start.min(rows) {
             cpu_tm[t * cols + series] = f64::NAN;
         }

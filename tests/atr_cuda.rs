@@ -99,8 +99,8 @@ fn atr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -123,7 +123,7 @@ fn atr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
 
     let period = 14usize;
-    
+
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

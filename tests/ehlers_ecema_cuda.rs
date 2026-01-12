@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehlers_ecema::{
     ehlers_ecema_batch_with_kernel, ehlers_ecema_with_kernel, EhlersEcemaBatchRange,
     EhlersEcemaInput, EhlersEcemaParams,
@@ -68,7 +66,6 @@ fn ehlers_ecema_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error
     let mut gpu_host = vec![0f32; handle.len()];
     handle.buf.copy_to(&mut gpu_host)?;
 
-    
     let tol = 1e-4;
     for idx in 0..gpu_host.len() {
         let cpu_v = cpu.values[idx];
@@ -108,7 +105,6 @@ fn ehlers_ecema_cuda_batch_pine_confirmed_matches_cpu() -> Result<(), Box<dyn st
         gain_limit: (20, 40, 10),
     };
 
-    
     let lengths: Vec<usize> = (sweep.length.0..=sweep.length.1)
         .step_by(sweep.length.2.max(1))
         .collect();
@@ -206,7 +202,6 @@ fn ehlers_ecema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn s
             confirmed_only: Some(confirmed),
         };
 
-        
         let mut cpu_tm = vec![f64::NAN; cols * rows];
         for series in 0..cols {
             let mut series_data = vec![f64::NAN; rows];

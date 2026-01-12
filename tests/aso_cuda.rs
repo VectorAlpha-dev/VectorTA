@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::aso::{aso_batch_with_kernel, AsoBatchRange, AsoParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -32,7 +30,7 @@ fn aso_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[aso_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    
+
     let len = 1024usize;
     let mut open = vec![f64::NAN; len];
     let mut high = vec![f64::NAN; len];
@@ -73,7 +71,7 @@ fn aso_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_bulls.buf.copy_to(&mut gb)?;
     dev_bears.buf.copy_to(&mut ge)?;
 
-    let tol = 7e-3; 
+    let tol = 7e-3;
     for i in 0..gb.len() {
         assert!(
             approx_eq(cpu.bulls[i], gb[i] as f64, tol),
@@ -115,7 +113,7 @@ fn aso_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             c_tm[idx] = base + 0.015;
         }
     }
-    
+
     let mut cpu_b = vec![f64::NAN; cols * rows];
     let mut cpu_e = vec![f64::NAN; cols * rows];
     for s in 0..cols {

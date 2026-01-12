@@ -1,20 +1,11 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Vortex Indicator (VI)
-//!
-//! Mirrors ALMA/CWMA patterns:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/vi_kernel.ptx")) with DetermineTargetFromContext + O2 and fallbacks
-//! - NON_BLOCKING stream
-//! - Batch (one series × many params) uses host-precomputed prefix sums (TR/VP/VM), shared across rows
-//! - Many-series (time-major, one param) also uses host-precomputed prefix sums per series
-//! - Warmup/NaN and first_valid semantics match scalar exactly
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::vi::{ViBatchRange, ViParams};
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
 use cust::function::{BlockSize, Function, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, DeviceCopy};
+use cust::memory::{mem_get_info, DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -30,35 +21,47 @@ pub enum CudaViError {
     Cuda(#[from] cust::error::CudaError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
-    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-
 pub struct DeviceArrayF32Pair {
     pub a: DeviceArrayF32,
     pub b: DeviceArrayF32,
 }
-    impl DeviceArrayF32Pair {
-        #[inline]
-        pub fn rows(&self) -> usize {
-            self.a.rows
-        }
-        #[inline]
-        pub fn cols(&self) -> usize {
-            self.a.cols
-        }
+impl DeviceArrayF32Pair {
+    #[inline]
+    pub fn rows(&self) -> usize {
+        self.a.rows
     }
+    #[inline]
+    pub fn cols(&self) -> usize {
+        self.a.cols
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -127,9 +130,13 @@ impl CudaVi {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -155,14 +162,11 @@ impl CudaVi {
         mem_get_info().ok()
     }
 
-    /// Heuristic: prefer pinned host memory for >= 1 MiB transfers
     #[inline(always)]
-    fn use_pinned(bytes: usize) -> bool { bytes >= (1 << 20) }
+    fn use_pinned(bytes: usize) -> bool {
+        bytes >= (1 << 20)
+    }
 
-    /// Upload a host slice to device with a safe and fast path:
-    /// - small: DeviceBuffer::from_slice (synchronous)
-    /// - large: LockedBuffer (pinned) + DeviceBuffer::uninitialized + copy_from (synchronous)
-    /// Keeps bandwidth benefits of pinned memory without async lifetime hazards.
     fn h2d_upload<T: DeviceCopy>(&self, src: &[T]) -> Result<DeviceBuffer<T>, CudaViError> {
         let bytes = src.len() * std::mem::size_of::<T>();
         if Self::use_pinned(bytes) {
@@ -175,9 +179,12 @@ impl CudaVi {
         }
     }
 
-    /// Ask the driver for an occupancy-friendly (grid, block), then clamp to work size.
     #[inline]
-    fn choose_launch_1d(&self, func: &Function, n_items: usize) -> Result<(GridSize, BlockSize), CudaViError> {
+    fn choose_launch_1d(
+        &self,
+        func: &Function,
+        n_items: usize,
+    ) -> Result<(GridSize, BlockSize), CudaViError> {
         let (min_grid_suggest, block_suggest) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .unwrap_or((0, 256));
@@ -187,10 +194,9 @@ impl CudaVi {
             grid_x = grid_x.max(min_grid_suggest);
         }
         let gx = grid_x.max(1);
-        
+
         if let Ok(device) = Device::get_device(self.device_id) {
-            if let Ok(max_grid_x) =
-                device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            if let Ok(max_grid_x) = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
             {
                 if gx > max_grid_x as u32 {
                     return Err(CudaViError::LaunchConfigTooLarge {
@@ -221,7 +227,6 @@ impl CudaVi {
         Ok(((gx, 1, 1).into(), (block_x, 1, 1).into()))
     }
 
-    
     fn build_prefix_single(
         &self,
         high: &[f32],
@@ -239,11 +244,10 @@ impl CudaVi {
             .find(|&i| high[i].is_finite() && low[i].is_finite() && close[i].is_finite())
             .ok_or_else(|| CudaViError::InvalidInput("all values NaN".into()))?;
 
-        
         let mut pfx_tr64 = vec![0.0f64; n];
         let mut pfx_vp64 = vec![0.0f64; n];
         let mut pfx_vm64 = vec![0.0f64; n];
-        
+
         pfx_tr64[first] = (high[first] - low[first]) as f64;
         pfx_vp64[first] = 0.0;
         pfx_vm64[first] = 0.0;
@@ -272,7 +276,6 @@ impl CudaVi {
         Ok((first, pfx_tr, pfx_vp, pfx_vm))
     }
 
-    
     fn build_prefix_time_major(
         &self,
         high_tm: &[f32],
@@ -299,7 +302,6 @@ impl CudaVi {
         let mut pfx_vm64 = vec![0.0f64; cols * rows];
 
         for s in 0..cols {
-            
             let mut first = None;
             for r in 0..rows {
                 let idx = r * cols + s;
@@ -313,7 +315,7 @@ impl CudaVi {
             }
             if let Some(fv) = first {
                 first_valids[s] = fv as i32;
-                
+
                 let base = fv * cols + s;
                 pfx_tr64[base] = (high_tm[base] - low_tm[base]) as f64;
                 pfx_vp64[base] = 0.0;
@@ -339,7 +341,6 @@ impl CudaVi {
                     prev_c = close_tm[idx];
                 }
             } else {
-                
                 first_valids[s] = -1;
             }
         }
@@ -361,11 +362,11 @@ impl CudaVi {
         d_plus: &mut DeviceBuffer<f32>,
         d_minus: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaViError> {
-        
-        let mut func: Function = self
-            .module
-            .get_function("vi_batch_f32")
-            .map_err(|_| CudaViError::MissingKernelSymbol { name: "vi_batch_f32" })?;
+        let mut func: Function = self.module.get_function("vi_batch_f32").map_err(|_| {
+            CudaViError::MissingKernelSymbol {
+                name: "vi_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let (min_grid_suggest, block_suggest) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
@@ -375,14 +376,12 @@ impl CudaVi {
             _ => block_suggest.clamp(64, 1024),
         };
 
-        
         let mut gx = ((len as u32) + bx - 1) / bx;
         if min_grid_suggest > 0 {
             gx = gx.max(min_grid_suggest);
         }
         let mut gy = rows as u32;
 
-        
         if let Ok(device) = Device::get_device(self.device_id) {
             if let Ok(max_block_x) =
                 device.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)
@@ -398,11 +397,9 @@ impl CudaVi {
                     });
                 }
             }
-            if let Ok(max_grid_y) =
-                device.get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
+            if let Ok(max_grid_y) = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimY)
             {
                 if gy > max_grid_y as u32 {
-                    
                     let total = rows
                         .checked_mul(len)
                         .ok_or_else(|| CudaViError::InvalidInput("rows*len overflow".into()))?;
@@ -414,8 +411,7 @@ impl CudaVi {
                     gy = 1;
                 }
             }
-            if let Ok(max_grid_x) =
-                device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
+            if let Ok(max_grid_x) = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)
             {
                 if gx > max_grid_x as u32 {
                     return Err(CudaViError::LaunchConfigTooLarge {
@@ -472,7 +468,6 @@ impl CudaVi {
         d_plus: &mut DeviceBuffer<f32>,
         d_minus: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaViError> {
-        
         let mut func: Function = self
             .module
             .get_function("vi_many_series_one_param_f32")
@@ -527,7 +522,6 @@ impl CudaVi {
         Ok(())
     }
 
-    
     pub fn vi_batch_dev(
         &self,
         high_f32: &[f32],
@@ -546,7 +540,9 @@ impl CudaVi {
         fn expand_grid_local(r: &ViBatchRange) -> Vec<ViParams> {
             let (start, end, step) = r.period;
             if step == 0 || start == end {
-                return vec![ViParams { period: Some(start) }];
+                return vec![ViParams {
+                    period: Some(start),
+                }];
             }
             if start < end {
                 return (start..=end)
@@ -587,7 +583,6 @@ impl CudaVi {
             ));
         }
 
-        
         let rows = combos.len();
         let bytes = 3usize
             .checked_mul(len)
@@ -620,7 +615,6 @@ impl CudaVi {
             }
         }
 
-        
         let d_tr = self.h2d_upload(&pfx_tr)?;
         let d_vp = self.h2d_upload(&pfx_vp)?;
         let d_vm = self.h2d_upload(&pfx_vm)?;
@@ -628,7 +622,6 @@ impl CudaVi {
         let periods_host: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = self.h2d_upload(&periods_host)?;
 
-        
         let total = rows
             .checked_mul(len)
             .ok_or_else(|| CudaViError::InvalidInput("rows*len overflow".into()))?;
@@ -647,7 +640,6 @@ impl CudaVi {
             &mut d_minus,
         )?;
 
-        
         self.stream.synchronize()?;
 
         Ok((
@@ -667,7 +659,6 @@ impl CudaVi {
         ))
     }
 
-    
     pub fn vi_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -693,9 +684,7 @@ impl CudaVi {
 
         let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
             self.build_prefix_time_major(high_tm_f32, low_tm_f32, close_tm_f32, cols, rows)?;
-        
 
-        
         let n = rows
             .checked_mul(cols)
             .ok_or_else(|| CudaViError::InvalidInput("rows*cols overflow".into()))?;
@@ -729,13 +718,11 @@ impl CudaVi {
             }
         }
 
-        
         let d_tr = self.h2d_upload(&pfx_tr)?;
         let d_vp = self.h2d_upload(&pfx_vp)?;
         let d_vm = self.h2d_upload(&pfx_vm)?;
         let d_first = self.h2d_upload(&first_valids)?;
 
-        
         let mut d_plus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
         let mut d_minus = unsafe { DeviceBuffer::<f32>::uninitialized(n) }?;
 
@@ -751,16 +738,22 @@ impl CudaVi {
             &mut d_minus,
         )?;
 
-        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Pair {
-            a: DeviceArrayF32 { buf: d_plus, rows, cols },
-            b: DeviceArrayF32 { buf: d_minus, rows, cols },
+            a: DeviceArrayF32 {
+                buf: d_plus,
+                rows,
+                cols,
+            },
+            b: DeviceArrayF32 {
+                buf: d_minus,
+                rows,
+                cols,
+            },
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -825,7 +818,6 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        
         let mut v = Vec::new();
         v.push(CudaBenchScenario::new(
             "vi",
@@ -916,8 +908,9 @@ pub mod benches {
                     }
                 }
                 let cuda = CudaVi::new(0).unwrap();
-                let (first_valids, pfx_tr, pfx_vp, pfx_vm) =
-                    cuda.build_prefix_time_major(&h, &l, &c, cols, rows).unwrap();
+                let (first_valids, pfx_tr, pfx_vp, pfx_vm) = cuda
+                    .build_prefix_time_major(&h, &l, &c, cols, rows)
+                    .unwrap();
                 let d_tr = cuda.h2d_upload(&pfx_tr).unwrap();
                 let d_vp = cuda.h2d_upload(&pfx_vp).unwrap();
                 let d_vm = cuda.h2d_upload(&pfx_vm).unwrap();

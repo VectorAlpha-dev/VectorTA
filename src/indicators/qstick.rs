@@ -1,23 +1,3 @@
-//! # Qstick
-//!
-//! Qstick measures the average difference between the Close and Open over a specified period.
-//! A positive Qstick indicates that, on average, the market closes above its open, while a
-//! negative Qstick indicates the opposite.
-//! Decision log: SIMD enabled (AVX2/AVX512) for initial sums; CUDA batch/many-series wrappers present with VRAM handles and Python CAI v3 + DLPack v1.x; scalar path remains the reference and numerical outputs stay unchanged.
-//!
-//! ## Parameters
-//! - **period**: The window size (number of data points). Defaults to 5.
-//!
-//! ## Returns
-//! - **`Ok(QstickOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(QstickError)`** on failure
-//!
-//! ## Developer Notes
-//! - SIMD enabled for initial window sum (AVX2/AVX512); rolling update stays scalar and unrolled.
-//! - Scalar path is optimized, safe, and warmup-compatible (no temporaries, single pass).
-//! - Batch (Avx2/Avx512) uses shared prefix of (close - open) across rows to remove redundant work.
-//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -33,9 +13,9 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -57,7 +37,10 @@ pub struct QstickOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct QstickParams {
     pub period: Option<usize>,
 }
@@ -188,7 +171,11 @@ pub enum QstickError {
     #[error("qstick: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("qstick: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("qstick: invalid input: {0}")]
     InvalidInput(String),
 }
@@ -228,7 +215,6 @@ pub fn qstick_with_kernel(
         });
     }
 
-    
     let mut first = 0;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -277,14 +263,7 @@ pub fn qstick_with_kernel(
     Ok(QstickOutput { values: out })
 }
 
-/// Write Qstick values into the provided output buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (alloc_with_nan_prefix):
-///   fills the warmup prefix with quiet-NaNs and writes the first finite value at index
-///   `first_valid + period - 1`.
-/// - The output slice length must equal the input length (min of open/close lengths for slices).
-/// - Uses `Kernel::Auto` to dispatch to the best available compute path.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickError> {
     let (open, close) = match &input.data {
         QstickData::Candles {
@@ -302,7 +281,6 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
     let len = open.len().min(close.len());
     let period = input.get_period();
 
-    
     if len == 0 {
         return Err(QstickError::EmptyInputData);
     }
@@ -319,7 +297,6 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
         });
     }
 
-    
     let mut first = 0usize;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -338,7 +315,6 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
         });
     }
 
-    
     let warm = first
         .checked_add(period)
         .and_then(|v| v.checked_sub(1))
@@ -348,7 +324,6 @@ pub fn qstick_into(input: &QstickInput, out: &mut [f64]) -> Result<(), QstickErr
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     let chosen = match Kernel::Auto {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -376,7 +351,6 @@ pub fn qstick_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
     let len = open.len().min(close.len());
     if len == 0 {
         return;
@@ -386,10 +360,9 @@ pub fn qstick_scalar(
     let warm = start + period - 1;
     let inv_p = 1.0 / (period as f64);
 
-    
     if period == 1 {
         let mut i = start;
-        
+
         while i + 3 < len {
             out[i] = close[i] - open[i];
             out[i + 1] = close[i + 1] - open[i + 1];
@@ -404,11 +377,10 @@ pub fn qstick_scalar(
         return;
     }
 
-    
     let mut sum = 0.0f64;
     let end_init = start + period;
     let mut k = start;
-    
+
     let end_unroll = start + ((period) & !3usize);
     while k < end_unroll {
         sum += (close[k] - open[k])
@@ -424,20 +396,18 @@ pub fn qstick_scalar(
 
     out[warm] = sum * inv_p;
 
-    
     let mut i_new = warm + 1;
     let mut i_old = start;
     while i_new + 3 < len {
-        
         sum = (sum + (close[i_new] - open[i_new])) - (close[i_old] - open[i_old]);
         out[i_new] = sum * inv_p;
-        
+
         sum = (sum + (close[i_new + 1] - open[i_new + 1])) - (close[i_old + 1] - open[i_old + 1]);
         out[i_new + 1] = sum * inv_p;
-        
+
         sum = (sum + (close[i_new + 2] - open[i_new + 2])) - (close[i_old + 2] - open[i_old + 2]);
         out[i_new + 2] = sum * inv_p;
-        
+
         sum = (sum + (close[i_new + 3] - open[i_new + 3])) - (close[i_old + 3] - open[i_old + 3]);
         out[i_new + 3] = sum * inv_p;
 
@@ -517,7 +487,6 @@ unsafe fn qstick_avx2_impl(
     let warm = start + period - 1;
     let inv_p = 1.0 / (period as f64);
 
-    
     if period == 1 {
         let mut i = start;
         while i + 3 < len {
@@ -534,10 +503,9 @@ unsafe fn qstick_avx2_impl(
         return;
     }
 
-    
     let mut v_sum = _mm256_setzero_pd();
     let mut k = 0usize;
-    let vec_end = period & !3usize; 
+    let vec_end = period & !3usize;
     while k < vec_end {
         let idx = start + k;
         let c = _mm256_loadu_pd(close.as_ptr().add(idx));
@@ -546,7 +514,7 @@ unsafe fn qstick_avx2_impl(
         v_sum = _mm256_add_pd(v_sum, d);
         k += 4;
     }
-    
+
     let hi = _mm256_extractf128_pd(v_sum, 1);
     let lo = _mm256_castpd256_pd128(v_sum);
     let s2 = _mm_add_pd(lo, hi);
@@ -561,23 +529,21 @@ unsafe fn qstick_avx2_impl(
 
     *out.get_unchecked_mut(warm) = sum * inv_p;
 
-    
     let mut i_new = warm + 1;
     let mut i_old = start;
     while i_new + 3 < len {
-        
         sum = (sum + (*close.get_unchecked(i_new) - *open.get_unchecked(i_new)))
             - (*close.get_unchecked(i_old) - *open.get_unchecked(i_old));
         *out.get_unchecked_mut(i_new) = sum * inv_p;
-        
+
         sum = (sum + (*close.get_unchecked(i_new + 1) - *open.get_unchecked(i_new + 1)))
             - (*close.get_unchecked(i_old + 1) - *open.get_unchecked(i_old + 1));
         *out.get_unchecked_mut(i_new + 1) = sum * inv_p;
-        
+
         sum = (sum + (*close.get_unchecked(i_new + 2) - *open.get_unchecked(i_new + 2)))
             - (*close.get_unchecked(i_old + 2) - *open.get_unchecked(i_old + 2));
         *out.get_unchecked_mut(i_new + 2) = sum * inv_p;
-        
+
         sum = (sum + (*close.get_unchecked(i_new + 3) - *open.get_unchecked(i_new + 3)))
             - (*close.get_unchecked(i_old + 3) - *open.get_unchecked(i_old + 3));
         *out.get_unchecked_mut(i_new + 3) = sum * inv_p;
@@ -611,7 +577,6 @@ unsafe fn qstick_avx512_impl(
     let warm = start + period - 1;
     let inv_p = 1.0 / (period as f64);
 
-    
     if period == 1 {
         let mut i = start;
         while i + 7 < len {
@@ -628,10 +593,9 @@ unsafe fn qstick_avx512_impl(
         return;
     }
 
-    
     let mut v_sum = _mm512_setzero_pd();
     let mut k = 0usize;
-    let vec_end = period & !7usize; 
+    let vec_end = period & !7usize;
     while k < vec_end {
         let idx = start + k;
         let c = _mm512_loadu_pd(close.as_ptr().add(idx));
@@ -640,7 +604,7 @@ unsafe fn qstick_avx512_impl(
         v_sum = _mm512_add_pd(v_sum, d);
         k += 8;
     }
-    
+
     let lo256 = _mm512_castpd512_pd256(v_sum);
     let hi256 = _mm512_extractf64x4_pd(v_sum, 1);
     let lo_hi128 = _mm256_extractf128_pd(lo256, 1);
@@ -664,7 +628,6 @@ unsafe fn qstick_avx512_impl(
 
     *out.get_unchecked_mut(warm) = sum * inv_p;
 
-    
     let mut i_new = warm + 1;
     let mut i_old = start;
     while i_new + 3 < len {
@@ -706,9 +669,7 @@ pub fn qstick_batch_with_kernel(
     let kern = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(QstickError::InvalidKernelForBatch(kernel))
-        }
+        _ => return Err(QstickError::InvalidKernelForBatch(kernel)),
     };
     let simd = match kern {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -802,9 +763,7 @@ impl QstickBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &QstickBatchRange) -> Result<Vec<QstickParams>, QstickError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, QstickError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, QstickError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -882,7 +841,6 @@ fn qstick_batch_inner(
         return Err(QstickError::EmptyInputData);
     }
 
-    
     let mut first = 0;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -908,10 +866,8 @@ fn qstick_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| QstickError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -923,7 +879,6 @@ fn qstick_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -931,7 +886,6 @@ fn qstick_batch_inner(
 
     qstick_batch_inner_into(open, close, sweep, kern, parallel, out)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -965,7 +919,6 @@ fn qstick_batch_inner_into(
     }
     let cols = len;
 
-    
     let first = (0..len)
         .find(|&i| !open[i].is_nan() && !close[i].is_nan())
         .ok_or(QstickError::AllValuesNaN)?;
@@ -978,7 +931,6 @@ fn qstick_batch_inner_into(
         });
     }
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first
             .checked_add(combo.period.unwrap_or(0))
@@ -992,8 +944,6 @@ fn qstick_batch_inner_into(
         }
     }
 
-    
-    
     match kern {
         Kernel::Avx2Batch | Kernel::Avx512Batch => {
             qstick_batch_shared_prefix_into(open, close, &combos, first, cols, out);
@@ -1002,14 +952,13 @@ fn qstick_batch_inner_into(
         _ => {}
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        
+
         let dst: &mut [f64] =
             std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1063,14 +1012,12 @@ fn qstick_batch_shared_prefix_into(
     if len == 0 {
         return;
     }
-    
-    let cap = len
-        .checked_add(1)
-        .unwrap_or(len);
+
+    let cap = len.checked_add(1).unwrap_or(len);
     let mut prefix = Vec::with_capacity(cap);
     prefix.push(0.0);
     let mut acc = 0.0f64;
-    
+
     let mut i = 0usize;
     while i < first && i < len {
         prefix.push(acc);
@@ -1097,7 +1044,6 @@ fn qstick_batch_shared_prefix_into(
         i += 1;
     }
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let p = combo.period.unwrap_or(5);
         let warm = first
@@ -1107,9 +1053,7 @@ fn qstick_batch_shared_prefix_into(
         if warm >= len {
             continue;
         }
-        let row_start = row
-            .checked_mul(cols)
-            .unwrap_or(0);
+        let row_start = row.checked_mul(cols).unwrap_or(0);
         let inv_p = 1.0 / (p as f64);
         let mut j = warm;
         while j + 3 < len {
@@ -1192,15 +1136,13 @@ unsafe fn qstick_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct QstickStream {
-    /// Decision: streaming kernel uses O(1) ring buffer with length counter and reciprocal.
-    /// Same warmup semantics; avoids NaN sentinel and uses bitmask wrap when period is power-of-two.
     period: usize,
-    inv_p: f64,       
-    buffer: Vec<f64>, 
-    head: usize,      
-    len: usize,       
-    sum: f64,         
-    mask: usize,      
+    inv_p: f64,
+    buffer: Vec<f64>,
+    head: usize,
+    len: usize,
+    sum: f64,
+    mask: usize,
 }
 
 impl QstickStream {
@@ -1221,7 +1163,7 @@ impl QstickStream {
         Ok(Self {
             period,
             inv_p: 1.0 / (period as f64),
-            buffer: vec![0.0; period], 
+            buffer: vec![0.0; period],
             head: 0,
             len: 0,
             sum: 0.0,
@@ -1229,15 +1171,12 @@ impl QstickStream {
         })
     }
 
-    /// O(1) update: add newest (close - open), subtract the element we overwrite (once full).
-    /// Warmup: returns None until `period` samples have been seen, then always returns Some(avg).
     #[inline(always)]
     pub fn update(&mut self, open: f64, close: f64) -> Option<f64> {
         let diff = close - open;
         let h = self.head;
 
         if self.len < self.period {
-            
             self.buffer[h] = diff;
             self.sum += diff;
             self.head = if self.mask != 0 {
@@ -1254,7 +1193,6 @@ impl QstickStream {
                 None
             }
         } else {
-            
             let old = self.buffer[h];
             self.sum += diff - old;
             self.buffer[h] = diff;
@@ -1269,7 +1207,6 @@ impl QstickStream {
         }
     }
 
-    /// Optional helper: reset without reallocating. Keeps buffer contents; len=0 disables subtraction until refilled.
     #[inline(always)]
     pub fn reset(&mut self) {
         self.head = 0;
@@ -1277,7 +1214,6 @@ impl QstickStream {
         self.sum = 0.0;
     }
 
-    /// Optional fast path if you already have (close - open) upstream.
     #[inline(always)]
     pub fn update_diff(&mut self, diff: f64) -> Option<f64> {
         let h = self.head;
@@ -1324,18 +1260,15 @@ mod tests {
 
     #[test]
     fn test_qstick_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let params = QstickParams { period: Some(5) }; 
+        let params = QstickParams { period: Some(5) };
         let input = QstickInput::from_candles(&candles, "open", "close", params);
 
-        
         let baseline = qstick(&input)?.values;
 
-        
         let mut into_out = vec![0.0; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         qstick_into(&input, &mut into_out)?;
 
         assert_eq!(baseline.len(), into_out.len());
@@ -1479,17 +1412,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            QstickParams::default(),            
-            QstickParams { period: Some(2) },   
-            QstickParams { period: Some(3) },   
-            QstickParams { period: Some(7) },   
-            QstickParams { period: Some(10) },  
-            QstickParams { period: Some(20) },  
-            QstickParams { period: Some(30) },  
-            QstickParams { period: Some(50) },  
-            QstickParams { period: Some(100) }, 
+            QstickParams::default(),
+            QstickParams { period: Some(2) },
+            QstickParams { period: Some(3) },
+            QstickParams { period: Some(7) },
+            QstickParams { period: Some(10) },
+            QstickParams { period: Some(20) },
+            QstickParams { period: Some(30) },
+            QstickParams { period: Some(50) },
+            QstickParams { period: Some(100) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1498,12 +1430,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1550,7 +1481,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_qstick_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1562,16 +1493,13 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (period..=400usize).prop_flat_map(move |len| {
                 (
-                    
                     prop::collection::vec(
                         (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
-                    
                     prop::collection::vec(
                         (-100.0f64..100.0f64).prop_filter("finite", |x| x.is_finite()),
                         len,
@@ -1583,7 +1511,6 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(open_prices, close_deltas, period)| {
-                
                 let close_prices: Vec<f64> = open_prices
                     .iter()
                     .zip(close_deltas.iter())
@@ -1599,7 +1526,6 @@ mod tests {
                 let QstickOutput { values: ref_out } =
                     qstick_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1609,17 +1535,14 @@ mod tests {
                     );
                 }
 
-                
                 for i in (period - 1)..open_prices.len() {
                     let window_start = i + 1 - period;
                     let window_end = i + 1;
 
-                    
                     let diffs: Vec<f64> = (window_start..window_end)
                         .map(|j| close_prices[j] - open_prices[j])
                         .collect();
 
-                    
                     let min_diff = diffs.iter().cloned().fold(f64::INFINITY, f64::min);
                     let max_diff = diffs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let y = out[i];
@@ -1633,7 +1556,6 @@ mod tests {
                         max_diff
                     );
 
-                    
                     if period == 1 {
                         let expected = close_prices[i] - open_prices[i];
                         prop_assert!(
@@ -1645,7 +1567,6 @@ mod tests {
                         );
                     }
 
-                    
                     if diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                         let expected = diffs[0];
                         prop_assert!(
@@ -1657,7 +1578,6 @@ mod tests {
                         );
                     }
 
-                    
                     if diffs.iter().all(|&d| d.abs() < 1e-10) {
                         prop_assert!(
                             y.abs() <= 1e-9,
@@ -1667,7 +1587,6 @@ mod tests {
                         );
                     }
 
-                    
                     let expected_qstick = diffs.iter().sum::<f64>() / (period as f64);
                     prop_assert!(
                         (y - expected_qstick).abs() <= 1e-9,
@@ -1677,7 +1596,6 @@ mod tests {
                         i
                     );
 
-                    
                     let r = ref_out[i];
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
@@ -1693,7 +1611,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                     prop_assert!(
                         (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1776,15 +1693,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),   
-            (5, 25, 5),   
-            (30, 60, 15), 
-            (2, 5, 1),    
-            (10, 50, 10), 
-            (15, 30, 5),  
-            (2, 100, 20), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 50, 10),
+            (15, 30, 5),
+            (2, 100, 20),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1803,7 +1719,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1856,7 +1771,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -1884,13 +1799,13 @@ mod tests {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(name = "QstickDeviceArrayF32Py")]
@@ -1924,7 +1839,7 @@ impl QstickDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producing stream is synchronized before return; omit the 'stream' key
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1942,8 +1857,6 @@ impl QstickDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided,
-        // matching the shared DLPack CUDA helpers.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2056,8 +1969,7 @@ pub fn qstick_batch_py<'py>(
         period: period_range,
     };
 
-    let combos =
-        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = open_slice.len();
 
@@ -2077,7 +1989,6 @@ pub fn qstick_batch_py<'py>(
                 _ => kernel,
             };
 
-            // Use the optimized batch_inner_into function
             qstick_batch_inner_into(open_slice, close_slice, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2116,7 +2027,6 @@ pub fn register_qstick_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<
     Ok(())
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "qstick_cuda_batch_dev")]
 #[pyo3(signature = (open_f32, close_f32, period_range, device_id=0))]
@@ -2128,8 +2038,8 @@ pub fn qstick_cuda_batch_dev_py(
     device_id: usize,
 ) -> PyResult<QstickDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    use crate::cuda::CudaQstick;
     use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+    use crate::cuda::CudaQstick;
     use cust::context::Context;
     use cust::memory::DeviceBuffer;
     use std::sync::Arc;
@@ -2170,8 +2080,8 @@ pub fn qstick_cuda_many_series_one_param_dev_py(
     device_id: usize,
 ) -> PyResult<QstickDeviceArrayF32Py> {
     use crate::cuda::cuda_available;
-    use crate::cuda::CudaQstick;
     use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+    use crate::cuda::CudaQstick;
     use cust::context::Context;
     use cust::memory::DeviceBuffer;
     use numpy::PyUntypedArrayMethods;
@@ -2205,7 +2115,6 @@ pub fn qstick_cuda_many_series_one_param_dev_py(
     })
 }
 
-/// Write qstick directly to output slice - no allocations
 pub fn qstick_into_slice(
     dst: &mut [f64],
     open: &[f64],
@@ -2213,7 +2122,6 @@ pub fn qstick_into_slice(
     period: usize,
     kern: Kernel,
 ) -> Result<(), QstickError> {
-    
     let len = open.len().min(close.len());
     if len == 0 {
         return Err(QstickError::InvalidPeriod {
@@ -2234,7 +2142,6 @@ pub fn qstick_into_slice(
         });
     }
 
-    
     let mut first_valid = 0;
     for i in 0..len {
         if !open[i].is_nan() && !close[i].is_nan() {
@@ -2246,7 +2153,6 @@ pub fn qstick_into_slice(
         }
     }
 
-    
     if len - first_valid < period {
         return Err(QstickError::NotEnoughValidData {
             needed: period,
@@ -2254,7 +2160,6 @@ pub fn qstick_into_slice(
         });
     }
 
-    
     let kernel = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -2273,7 +2178,6 @@ pub fn qstick_into_slice(
         _ => unreachable!(),
     }
 
-    
     let warmup_end = first_valid + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2282,10 +2186,9 @@ pub fn qstick_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn qstick_js(open: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-    
     let len = open.len();
     if len != close.len() {
         return Err(JsValue::from_str(
@@ -2293,7 +2196,6 @@ pub fn qstick_js(open: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>,
         ));
     }
 
-    
     let mut output = vec![0.0; len];
 
     qstick_into_slice(&mut output, open, close, period, Kernel::Auto)
@@ -2302,7 +2204,7 @@ pub fn qstick_js(open: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>,
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn qstick_into(
     open_ptr: *const f64,
@@ -2319,8 +2221,6 @@ pub fn qstick_into(
         let open = std::slice::from_raw_parts(open_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        
-        
         if open_ptr == out_ptr || close_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             qstick_into_slice(&mut temp, open, close, period, Kernel::Auto)
@@ -2336,7 +2236,7 @@ pub fn qstick_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn qstick_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2345,7 +2245,7 @@ pub fn qstick_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn qstick_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2355,13 +2255,13 @@ pub fn qstick_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct QstickBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct QstickBatchJsOutput {
     pub values: Vec<f64>,
@@ -2370,7 +2270,7 @@ pub struct QstickBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = qstick_batch)]
 pub fn qstick_batch_unified_js(
     open: &[f64],
@@ -2405,7 +2305,7 @@ pub fn qstick_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn qstick_batch_into(
     open_ptr: *const f64,
@@ -2428,15 +2328,12 @@ pub fn qstick_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total_size = rows
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("size overflow"))?;
 
-        
-        
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
         qstick_batch_inner_into(open, close, &sweep, Kernel::Auto, false, out)

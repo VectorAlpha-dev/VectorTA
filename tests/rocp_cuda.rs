@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::rocp::{
     rocp_batch_with_kernel, rocp_with_kernel, RocpBatchRange, RocpInput, RocpParams,
 };
@@ -13,9 +11,10 @@ use vector_ta::cuda::cuda_available;
 use vector_ta::cuda::oscillators::CudaRocp;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
-    if a.is_nan() && b.is_nan() { return true; }
+    if a.is_nan() && b.is_nan() {
+        return true;
+    }
     if a.is_infinite() || b.is_infinite() {
-        
         return a.is_infinite() && b.is_infinite() && a.is_sign_positive() == b.is_sign_positive();
     }
     (a - b).abs() <= tol
@@ -61,7 +60,7 @@ fn rocp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu)?;
 
-    let tol = 1e-4; 
+    let tol = 1e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         assert!(
             approx_eq(cpu.values[idx], gpu[idx] as f64, tol),
@@ -80,8 +79,8 @@ fn rocp_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 16usize; 
-    let rows = 4096usize; 
+    let cols = 16usize;
+    let rows = 4096usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -91,7 +90,6 @@ fn rocp_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

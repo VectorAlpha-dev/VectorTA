@@ -1,35 +1,10 @@
-//! # Williams' %R (WILLR)
-//!
-//! Williams' %R is a momentum oscillator that shows the relationship between the current close
-//! and the high-low range over a period, indicating overbought/oversold conditions (-20 to -80).
-//!
-//! ## Parameters
-//! - **period**: Lookback period for range calculation. Defaults to 14.
-//!
-//! ## Returns
-//! - **`Ok(WillrOutput)`** containing a `Vec<f64>` of %R values (-100 to 0) matching input length.
-//! - **`Err(WillrError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - **Scalar kernel**: Hybrid selection
-//!   - Small periods (<= 64): naive O(period) scan (fastest for common WILLR periods like 14)
-//!   - Large periods  (> 64): monotonic-deque O(1) sliding window for high/low
-//! - **SIMD status**: AVX2 enabled for small windows (vectorized naive path);
-//!   AVX512 currently delegates to AVX2 due to typical downclock/underperformance
-//!   vs AVX2 on common CPUs. Large windows use the scalar deque path.
-//! - **Streaming Performance**: O(1) update API (ring buffers) available via `WillrStream`
-//! - **Memory Optimization**: ✓ Uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batching
-//! - **Batch Support**: ✓ Row-specific optimized batch via sparse tables (shared across rows)
-//! - **TODO**: Only enable SIMD selection once kernels beat scalar by >5% at 10k/100k.
-//! - **Decision log**: AVX2 scalar/SIMD enabled; AVX512 delegates to AVX2; CUDA wrapper returns VRAM handles with CAI v3 + DLPack v1.x; scalar path remains the reference for correctness.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaWillr;
+use crate::utilities::data_loader::{source_type, Candles};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -46,8 +21,6 @@ use std::error::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum WillrData<'a> {
@@ -67,7 +40,10 @@ pub struct WillrOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct WillrParams {
     pub period: Option<usize>,
 }
@@ -183,12 +159,14 @@ pub enum WillrError {
     #[error("willr: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("willr: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("willr: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
-
-
 
 #[inline(always)]
 fn willr_compute_into(
@@ -203,7 +181,6 @@ fn willr_compute_into(
     unsafe {
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
-            
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
                 willr_scalar(high, low, close, period, first_valid, out);
                 return;
@@ -279,13 +256,7 @@ pub fn willr_with_kernel(input: &WillrInput, kernel: Kernel) -> Result<WillrOutp
     Ok(WillrOutput { values: out })
 }
 
-/// In-place WILLR that writes into a caller-provided buffer (no allocation).
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API: all indices prior to
-///   `first_valid + period - 1` are set to NaN.
-/// - The output slice length must equal the input length; otherwise, returns
-///   `WillrError::OutputLengthMismatch` (or other existing errors from validation).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn willr_into(dst: &mut [f64], input: &WillrInput) -> Result<(), WillrError> {
     willr_into_slice(dst, input, Kernel::Auto)
@@ -344,7 +315,6 @@ pub fn willr_into_slice(
 
     willr_compute_into(high, low, close, period, first_valid, chosen, dst);
 
-    
     let warmup_end = first_valid + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -352,8 +322,6 @@ pub fn willr_into_slice(
 
     Ok(())
 }
-
-
 
 #[inline]
 pub fn willr_scalar(
@@ -364,7 +332,6 @@ pub fn willr_scalar(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
     let n = high.len();
     if n == 0 {
         return;
@@ -374,13 +341,10 @@ pub fn willr_scalar(
         return;
     }
 
-    
-    
     const DEQUE_SWITCH: usize = 32;
 
     unsafe {
         if period <= DEQUE_SWITCH {
-            
             for i in start_i..n {
                 let c = *close.get_unchecked(i);
                 if c != c {
@@ -481,10 +445,8 @@ pub fn willr_scalar(
             return;
         }
 
-        
         let cap = period;
 
-        
         let mut dq_max: Vec<usize> = Vec::with_capacity(cap);
         dq_max.set_len(cap);
         let mut dq_min: Vec<usize> = Vec::with_capacity(cap);
@@ -497,13 +459,11 @@ pub fn willr_scalar(
         let mut tail_min = 0usize;
         let mut len_min = 0usize;
 
-        
         let mut nan_ring: Vec<u8> = Vec::with_capacity(cap);
         nan_ring.set_len(cap);
         let mut ring_pos = 0usize;
         let mut nan_count: usize = 0;
 
-        
         let l0 = start_i + 1 - period;
         let mut j = l0;
         while j <= start_i {
@@ -519,7 +479,6 @@ pub fn willr_scalar(
             }
 
             if is_nan == 0 {
-                
                 while len_max != 0 {
                     let back_pos = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
                     let back_idx = *dq_max.get_unchecked(back_pos);
@@ -537,7 +496,6 @@ pub fn willr_scalar(
                 }
                 len_max += 1;
 
-                
                 while len_min != 0 {
                     let back_pos = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
                     let back_idx = *dq_min.get_unchecked(back_pos);
@@ -558,7 +516,6 @@ pub fn willr_scalar(
             j += 1;
         }
 
-        
         for i in start_i..n {
             let c = *close.get_unchecked(i);
 
@@ -583,12 +540,10 @@ pub fn willr_scalar(
                 }
             }
 
-            
             let next = i + 1;
             if next < n {
                 let cutoff = next - period;
 
-                
                 while len_max != 0 {
                     let f_idx = *dq_max.get_unchecked(head_max);
                     if f_idx <= cutoff {
@@ -614,7 +569,6 @@ pub fn willr_scalar(
                     }
                 }
 
-                
                 let hj = *high.get_unchecked(next);
                 let lj = *low.get_unchecked(next);
                 let new_nan = ((hj != hj) | (lj != lj)) as u8;
@@ -627,7 +581,6 @@ pub fn willr_scalar(
                 }
 
                 if new_nan == 0 {
-                    
                     while len_max != 0 {
                         let back_pos = if tail_max == 0 { cap - 1 } else { tail_max - 1 };
                         let back_idx = *dq_max.get_unchecked(back_pos);
@@ -645,7 +598,6 @@ pub fn willr_scalar(
                     }
                     len_max += 1;
 
-                    
                     while len_min != 0 {
                         let back_pos = if tail_min == 0 { cap - 1 } else { tail_min - 1 };
                         let back_idx = *dq_min.get_unchecked(back_pos);
@@ -726,15 +678,13 @@ fn willr_scalar_deque(
         return;
     }
 
-    
     let start_i = first_valid + period - 1;
     if start_i >= n {
         return;
     }
 
-    let cap = period; 
+    let cap = period;
 
-    
     let mut dq_max = vec![0usize; cap];
     let mut head_max = 0usize;
     let mut len_max = 0usize;
@@ -743,12 +693,10 @@ fn willr_scalar_deque(
     let mut head_min = 0usize;
     let mut len_min = 0usize;
 
-    
     let mut nan_ring = vec![0u8; cap];
     let mut ring_pos = 0usize;
     let mut nan_count: usize = 0;
 
-    
     let l0 = start_i + 1 - period;
     for j in l0..=start_i {
         let hj = high[j];
@@ -763,7 +711,6 @@ fn willr_scalar_deque(
         }
 
         if is_nan == 0 {
-            
             while len_max != 0 {
                 let back_pos = (head_max + len_max - 1) % cap;
                 let back_idx = dq_max[back_pos];
@@ -777,7 +724,6 @@ fn willr_scalar_deque(
             dq_max[ins_pos] = j;
             len_max += 1;
 
-            
             while len_min != 0 {
                 let back_pos = (head_min + len_min - 1) % cap;
                 let back_idx = dq_min[back_pos];
@@ -793,14 +739,12 @@ fn willr_scalar_deque(
         }
     }
 
-    
     for i in start_i..n {
         let c = close[i];
 
         if c.is_nan() || nan_count != 0 || len_max == 0 || len_min == 0 {
             out[i] = f64::NAN;
         } else {
-            
             let h_idx = dq_max[head_max];
             let l_idx = dq_min[head_min];
             let h = high[h_idx];
@@ -818,10 +762,8 @@ fn willr_scalar_deque(
             }
         }
 
-        
         let next = i + 1;
         if next < n {
-            
             let cutoff = next - period;
 
             while len_max != 0 {
@@ -849,12 +791,10 @@ fn willr_scalar_deque(
                 }
             }
 
-            
             let hj = high[next];
             let lj = low[next];
             let new_nan = (hj.is_nan() || lj.is_nan()) as u8;
 
-            
             let old_nan = nan_ring[ring_pos] as usize;
             nan_count = nan_count + (new_nan as usize) - old_nan;
             nan_ring[ring_pos] = new_nan;
@@ -864,7 +804,6 @@ fn willr_scalar_deque(
             }
 
             if new_nan == 0 {
-                
                 while len_max != 0 {
                     let back_pos = (head_max + len_max - 1) % cap;
                     let back_idx = dq_max[back_pos];
@@ -878,7 +817,6 @@ fn willr_scalar_deque(
                 dq_max[ins_pos] = next;
                 len_max += 1;
 
-                
                 while len_min != 0 {
                     let back_pos = (head_min + len_min - 1) % cap;
                     let back_idx = dq_min[back_pos];
@@ -916,7 +854,6 @@ pub unsafe fn willr_avx2(
         return;
     }
 
-    
     const VEC_SWITCH: usize = 64;
     if period > VEC_SWITCH {
         willr_scalar(high, low, close, period, first_valid, out);
@@ -956,7 +893,6 @@ pub unsafe fn willr_avx2(
             continue;
         }
 
-        
         let vhi_max: __m128d = _mm256_extractf128_pd(vmax, 1);
         let vlo_max: __m128d = _mm256_castpd256_pd128(vmax);
         let v128_max = _mm_max_pd(vlo_max, vhi_max);
@@ -1010,8 +946,6 @@ pub unsafe fn willr_avx512(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
-    
     willr_avx2(high, low, close, period, first_valid, out)
 }
 
@@ -1067,7 +1001,6 @@ pub unsafe fn willr_avx512_short(
             continue;
         }
 
-        
         let vmax_lo256 = _mm512_castpd512_pd256(vmax512);
         let vmax_hi256 = _mm512_extractf64x4_pd(vmax512, 1);
         let vmax256 = _mm256_max_pd(vmax_lo256, vmax_hi256);
@@ -1130,8 +1063,6 @@ pub unsafe fn willr_avx512_long(
     willr_scalar(high, low, close, period, first_valid, out)
 }
 
-
-
 #[derive(Clone, Debug)]
 pub struct WillrBatchRange {
     pub period: (usize, usize, usize),
@@ -1193,7 +1124,6 @@ pub fn willr_batch_with_kernel(
     k: Kernel,
 ) -> Result<WillrBatchOutput, WillrError> {
     let kernel = match k {
-        
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx2Batch,
             other => other,
@@ -1234,10 +1164,7 @@ impl WillrBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &WillrBatchRange) -> Result<Vec<WillrParams>, WillrError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, WillrError> {
-        
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, WillrError> {
         if step == 0 {
             return Ok(vec![start]);
         }
@@ -1260,7 +1187,6 @@ fn expand_grid(r: &WillrBatchRange) -> Result<Vec<WillrParams>, WillrError> {
                 }
             }
         } else {
-            
             let mut v = start;
             while v >= end {
                 vals.push(v);
@@ -1593,15 +1519,12 @@ fn willr_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    rows
-        .checked_mul(cols)
-        .ok_or(WillrError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    rows.checked_mul(cols).ok_or(WillrError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warmup_periods: Vec<usize> = combos
         .iter()
@@ -1609,7 +1532,6 @@ fn willr_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let mut values = unsafe {
         Vec::from_raw_parts(
@@ -1732,32 +1654,17 @@ pub unsafe fn willr_row_avx512_long(
     willr_scalar(high, low, close, period, first_valid, out)
 }
 
-
-
-
-
-/// Williams %R streaming evaluator with O(1) amortized updates.
-/// Strategy:
-/// - Keep a ring of the last `period` highs/lows so we can read values by index.
-/// - Maintain two monotone deques of global indices:
-///     * dq_max: decreasing by high -> front is window max
-///     * dq_min: increasing by low  -> front is window min
-/// - Track a rolling NaN count for (high|low) over the active window via a small ring of u8.
-/// - `close` NaNs never enter state; they only affect the returned value (NaN if NaN).
 pub struct WillrStream {
     period: usize,
 
-    
     high_ring: Vec<f64>,
     low_ring: Vec<f64>,
 
-    
     nan_ring: Vec<u8>,
     nan_count: usize,
 
-    
-    dq_max: Vec<usize>, 
-    dq_min: Vec<usize>, 
+    dq_max: Vec<usize>,
+    dq_min: Vec<usize>,
     head_max: usize,
     tail_max: usize,
     len_max: usize,
@@ -1765,7 +1672,6 @@ pub struct WillrStream {
     tail_min: usize,
     len_min: usize,
 
-    
     count: usize,
 }
 
@@ -1799,31 +1705,23 @@ impl WillrStream {
         })
     }
 
-    /// O(1) amortized update. Returns:
-    /// - `None` during warmup (< period samples)
-    /// - `Some(NaN)` if `close` is NaN or the window contains NaNs in high/low
-    /// - `Some(value)` otherwise ([-100, 0], 0.0 when high==low)
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         let cap = self.period;
-        let t = self.count; 
-        let pos = t % cap; 
+        let t = self.count;
+        let pos = t % cap;
 
-        
         let new_nan = (high.is_nan() || low.is_nan()) as u8;
         let old_nan = self.nan_ring[pos] as usize;
         self.nan_ring[pos] = new_nan;
         self.nan_count = self.nan_count + (new_nan as usize) - old_nan;
 
-        
         self.high_ring[pos] = high;
         self.low_ring[pos] = low;
 
-        
         if t + 1 > cap {
             let cutoff = t + 1 - cap;
 
-            
             while self.len_max != 0 {
                 let front_idx = self.dq_max[self.head_max];
                 if front_idx < cutoff {
@@ -1836,7 +1734,7 @@ impl WillrStream {
                     break;
                 }
             }
-            
+
             while self.len_min != 0 {
                 let front_idx = self.dq_min[self.head_min];
                 if front_idx < cutoff {
@@ -1851,9 +1749,7 @@ impl WillrStream {
             }
         }
 
-        
         if new_nan == 0 {
-            
             while self.len_max != 0 {
                 let back_pos = if self.tail_max == 0 {
                     cap - 1
@@ -1876,7 +1772,6 @@ impl WillrStream {
             }
             self.len_max += 1;
 
-            
             while self.len_min != 0 {
                 let back_pos = if self.tail_min == 0 {
                     cap - 1
@@ -1900,13 +1795,11 @@ impl WillrStream {
             self.len_min += 1;
         }
 
-        
         self.count = t + 1;
         if self.count < cap {
-            return None; 
+            return None;
         }
 
-        
         if close.is_nan() || self.nan_count != 0 || self.len_max == 0 || self.len_min == 0 {
             return Some(f64::NAN);
         }
@@ -1924,7 +1817,6 @@ impl WillrStream {
         if denom == 0.0 {
             Some(0.0)
         } else {
-            
             let ratio = (h - close) / denom;
             Some((-100.0f64).mul_add(ratio, 0.0))
         }
@@ -1957,14 +1849,11 @@ fn willr_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(WillrError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(WillrError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     if out.len() != expected {
         return Err(WillrError::OutputLengthMismatch {
@@ -1985,8 +1874,6 @@ fn willr_batch_inner_into(
         });
     }
 
-    
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first_valid + c.period.unwrap() - 1)
@@ -2051,25 +1938,21 @@ mod tests {
 
     #[test]
     fn test_willr_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        let params = WillrParams::default(); 
+        let params = WillrParams::default();
         let input = WillrInput::from_candles(&candles, params);
 
-        
         let baseline = willr(&input)?.values;
 
-        
         let mut out = vec![0.0f64; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             willr_into(&mut out, &input)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             willr_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -2234,17 +2117,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            WillrParams::default(),            
-            WillrParams { period: Some(2) },   
-            WillrParams { period: Some(5) },   
-            WillrParams { period: Some(10) },  
-            WillrParams { period: Some(20) },  
-            WillrParams { period: Some(30) },  
-            WillrParams { period: Some(50) },  
-            WillrParams { period: Some(100) }, 
-            WillrParams { period: Some(200) }, 
+            WillrParams::default(),
+            WillrParams { period: Some(2) },
+            WillrParams { period: Some(5) },
+            WillrParams { period: Some(10) },
+            WillrParams { period: Some(20) },
+            WillrParams { period: Some(30) },
+            WillrParams { period: Some(50) },
+            WillrParams { period: Some(100) },
+            WillrParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2253,12 +2135,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2305,7 +2186,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_willr_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2317,20 +2198,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                
                 prop::collection::vec(
-                    
-                    (1.0f64..1000.0f64).prop_flat_map(|low| {
-                        (
-                            Just(low),
-                            0.0f64..100.0f64, 
-                            0.0f64..=1.0f64,  
-                        )
-                    }),
+                    (1.0f64..1000.0f64)
+                        .prop_flat_map(|low| (Just(low), 0.0f64..100.0f64, 0.0f64..=1.0f64)),
                     period..400,
                 ),
                 Just(period),
@@ -2338,7 +2210,6 @@ mod tests {
         });
 
         proptest::test_runner::TestRunner::default().run(&strat, |(price_data, period)| {
-            
             let mut high = Vec::with_capacity(price_data.len());
             let mut low = Vec::with_capacity(price_data.len());
             let mut close = Vec::with_capacity(price_data.len());
@@ -2356,14 +2227,11 @@ mod tests {
             };
             let input = WillrInput::from_slices(&high, &low, &close, params.clone());
 
-            
             let WillrOutput { values: out } = willr_with_kernel(&input, kernel).unwrap();
 
-            
             let WillrOutput { values: ref_out } =
                 willr_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            
             for i in 0..(period - 1) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -2373,18 +2241,15 @@ mod tests {
                 );
             }
 
-            
             for i in (period - 1)..high.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
                 if y.is_nan() {
-                    
                     prop_assert!(r.is_nan(), "NaN mismatch at index {}", i);
                     continue;
                 }
 
-                
                 prop_assert!(
                     y >= -100.0 - 1e-9 && y <= 0.0 + 1e-9,
                     "Output bounds violation at index {}: {} not in [-100, 0]",
@@ -2392,7 +2257,6 @@ mod tests {
                     y
                 );
 
-                
                 let window_start = i + 1 - period;
                 let window_high = high[window_start..=i]
                     .iter()
@@ -2403,7 +2267,6 @@ mod tests {
                     .cloned()
                     .fold(f64::INFINITY, f64::min);
 
-                
                 if (close[i] - window_high).abs() < 1e-10 {
                     prop_assert!(
                         y.abs() < 1e-6,
@@ -2413,7 +2276,6 @@ mod tests {
                     );
                 }
 
-                
                 if (close[i] - window_low).abs() < 1e-10 {
                     prop_assert!(
                         (y + 100.0).abs() < 1e-6,
@@ -2423,10 +2285,9 @@ mod tests {
                     );
                 }
 
-                
                 if period == 1 {
                     let expected = if high[i] == low[i] {
-                        0.0 
+                        0.0
                     } else {
                         (high[i] - close[i]) / (high[i] - low[i]) * -100.0
                     };
@@ -2439,7 +2300,6 @@ mod tests {
                     );
                 }
 
-                
                 let window_highs = &high[window_start..=i];
                 let window_lows = &low[window_start..=i];
                 let window_closes = &close[window_start..=i];
@@ -2460,7 +2320,6 @@ mod tests {
                     );
                 }
 
-                
                 if !r.is_finite() {
                     prop_assert!(
                         y.to_bits() == r.to_bits(),
@@ -2482,14 +2341,10 @@ mod tests {
                     );
                 }
 
-                
-                
-                
-                
                 let range = window_high - window_low;
                 if range > 1e-10 {
                     let theoretical_value = (window_high - close[i]) / range * -100.0;
-                    
+
                     prop_assert!(
                         (y - theoretical_value).abs() < 1e-6,
                         "Mathematical formula mismatch at index {}: expected {}, got {}",
@@ -2572,16 +2427,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),     
-            (5, 25, 5),     
-            (10, 50, 10),   
-            (2, 5, 1),      
-            (14, 14, 0),    
-            (30, 60, 15),   
-            (50, 100, 25),  
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (10, 50, 10),
+            (2, 5, 1),
+            (14, 14, 0),
+            (30, 60, 15),
+            (50, 100, 25),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -2600,7 +2454,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2660,8 +2513,8 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -2670,8 +2523,6 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "willr")]
@@ -2725,11 +2576,13 @@ impl WillrStreamPy {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "WillrDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "WillrDeviceArrayF32",
+    unsendable
+)]
 pub struct WillrDeviceArrayF32Py {
-    
     pub(crate) inner: Option<DeviceArrayF32>,
     pub(crate) _ctx: Arc<Context>,
     pub(crate) device_id: u32,
@@ -2755,7 +2608,7 @@ impl WillrDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Producer synchronizes before returning, so no stream key is required per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2782,8 +2635,6 @@ impl WillrDeviceArrayF32Py {
         (2, device_ordinal)
     }
 
-    // DLPack producer with v1.x negotiation and legacy fallback.
-    // Array API stream semantics are accepted but ignored here since the stream is synchronized.
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -2793,7 +2644,6 @@ impl WillrDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<pyo3::PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2814,7 +2664,6 @@ impl WillrDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let inner = self
             .inner
             .take()
@@ -2849,19 +2698,16 @@ pub fn willr_batch_py<'py>(
         period: period_range,
     };
 
-    let combos_host =
-        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos_host = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos_host.len();
     let cols = high_slice.len();
 
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "willr: rows*cols overflow: rows={}, cols={}",
-                rows, cols
-            ))
-        })?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "willr: rows*cols overflow: rows={}, cols={}",
+            rows, cols
+        ))
+    })?;
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
@@ -2942,8 +2788,7 @@ pub fn willr_cuda_batch_dev_py(
     };
 
     let (inner, ctx, dev_id_u32) = py.allow_threads(|| {
-        let cuda = CudaWillr::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context();
         let dev_id_u32 = cuda.device_id();
         let inner = cuda
@@ -2983,8 +2828,7 @@ pub fn willr_cuda_many_series_one_param_dev_py(
     let close_slice = close_tm.as_slice()?;
 
     let (inner, ctx, dev_id_u32) = py.allow_threads(|| {
-        let cuda = CudaWillr::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaWillr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context();
         let dev_id_u32 = cuda.device_id();
         let inner = cuda
@@ -3007,14 +2851,12 @@ pub fn willr_cuda_many_series_one_param_dev_py(
     })
 }
 
-// --- WASM bindings ---
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn willr_js(
     high: &[f64],
@@ -3035,13 +2877,13 @@ pub fn willr_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WillrBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WillrBatchJsOutput {
     pub values: Vec<f64>,
@@ -3050,7 +2892,7 @@ pub struct WillrBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = willr_batch)]
 pub fn willr_batch_unified_js(
     high: &[f64],
@@ -3077,8 +2919,7 @@ pub fn willr_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// raw buffer helpers
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn willr_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -3087,7 +2928,7 @@ pub fn willr_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn willr_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -3095,8 +2936,7 @@ pub fn willr_free(ptr: *mut f64, len: usize) {
     }
 }
 
-// in-place compute with separate H/L/C pointers
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn willr_into(
     high_ptr: *const f64,
@@ -3110,8 +2950,6 @@ pub fn willr_into(
         return Err(JsValue::from_str("null pointer passed to willr_into"));
     }
     unsafe {
-        // Support exact in-place output (out_ptr == any input ptr) by computing into a
-        // temporary buffer and copying back once, avoiding partial-overwrite hazards.
         if out_ptr == high_ptr as *mut f64
             || out_ptr == low_ptr as *mut f64
             || out_ptr == close_ptr as *mut f64
@@ -3146,7 +2984,7 @@ pub fn willr_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = willr_batch_into)]
 pub fn willr_batch_into_js(
     high_ptr: *const f64,
@@ -3169,8 +3007,7 @@ pub fn willr_batch_into_js(
         let sweep = WillrBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 

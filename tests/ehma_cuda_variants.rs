@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehma::{
     ehma_batch_with_kernel, EhmaBatchRange, EhmaBuilder, EhmaParams,
 };
@@ -43,7 +41,6 @@ fn gen_time_major_f64(cols: usize, rows: usize) -> Vec<f64> {
     let mut v = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         for t in j..rows {
-            
             let x = t as f64 + j as f64 * 0.1;
             v[t * cols + j] = (x * 0.003).cos() + 0.001 * x;
         }
@@ -81,7 +78,6 @@ fn compare_batch(
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host).expect("copy D2H");
 
-    
     let (atol, rtol) = (1.0e-4, 1.0e-4);
     for i in 0..host.len() {
         let a = cpu.values[i];
@@ -108,7 +104,6 @@ fn compare_many_series(policy: CudaEhmaPolicy, cols: usize, rows: usize, period:
         period: Some(period),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
@@ -147,8 +142,6 @@ fn compare_many_series(policy: CudaEhmaPolicy, cols: usize, rows: usize, period:
         );
     }
 }
-
-
 
 #[cfg(feature = "cuda")]
 #[test]

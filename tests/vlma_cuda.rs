@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::vlma::{
     vlma_batch_with_kernel, vlma_with_kernel, VlmaBatchBuilder, VlmaBatchRange, VlmaBuilder,
     VlmaInput, VlmaParams,
@@ -43,7 +41,6 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
 
-    
     let sweep = VlmaBatchRange {
         min_period: (5, 7, 1),
         max_period: (20, 28, 4),
@@ -65,7 +62,7 @@ fn vlma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-3; 
+    let tol = 2e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -88,8 +85,8 @@ fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 6usize; 
-    let rows = 1200usize; 
+    let cols = 6usize;
+    let rows = 1200usize;
     let mut tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         for t in s..rows {
@@ -100,7 +97,6 @@ fn vlma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let min_p = 5usize;
     let max_p = 27usize;
 
-    
     let mut cpu = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

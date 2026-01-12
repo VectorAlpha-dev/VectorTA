@@ -1,31 +1,5 @@
-//! # Linear Regression (LINREG)
-//!
-//! Fits a straight line (y = a + b·x) to recent data over a rolling window and forecasts the next value.
-//! Supports kernels (scalar, AVX2, AVX512), streaming, batch grid, custom input sources, error reporting, and parameter builders.
-//!
-//! ## Parameters
-//! - **period**: Look-back window size (default: 14).
-//!
-//! ## Errors
-//! - **AllValuesNaN**: linreg: All input data values are `NaN`.
-//! - **InvalidPeriod**: linreg: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: linreg: Not enough valid data points for the requested `period`.
-//!
-//! ## Returns
-//! - **`Ok(LinRegOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(LinRegError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **AVX2/AVX512 kernels**: Implemented but disabled by default (Auto short-circuits to Scalar). On typical CPUs, AVX downclocks and the small one-time init SIMD gives net slower results at 100k. Revisit with prefix sums-based row kernels.
-//! - **Streaming update**: ⚠️ O(n) - `dot_ring()` recalculates regression over full buffer
-//! - **Memory optimization**: ✅ Uses `alloc_with_nan_prefix` for zero-copy output allocation
-//! - **Current status**: Functional with efficient scalar implementation but missing SIMD optimizations
-//! - **Optimization opportunities**:
-//!   - Implement AVX2 kernel for vectorized sum calculations
-//!   - Implement AVX512 kernel for wider vector processing
-//!   - Streaming update could potentially maintain incremental sums for O(1) updates
-//!   - Linear regression calculations are well-suited for SIMD parallelization
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::{CudaLinreg, DeviceArrayF32};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -34,29 +8,23 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::{
-    cuda::moving_averages::{CudaLinreg, DeviceArrayF32},
-};
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum LinRegData<'a> {
@@ -73,7 +41,10 @@ pub struct LinRegOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct LinRegParams {
     pub period: Option<usize>,
 }
@@ -127,8 +98,6 @@ impl<'a> LinRegInput<'a> {
         self.params.period.unwrap_or(14)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct LinRegBuilder {
@@ -185,8 +154,6 @@ impl LinRegBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum LinRegError {
     #[error("linreg: No data provided (All values are NaN).")]
@@ -200,38 +167,27 @@ pub enum LinRegError {
     #[error("linreg: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("linreg: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("linreg: Invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("linreg: arithmetic overflow when computing {what}")]
     ArithmeticOverflow { what: &'static str },
 }
 
-// --- INDICATOR API ---
-
 #[inline]
 pub fn linreg(input: &LinRegInput) -> Result<LinRegOutput, LinRegError> {
     linreg_with_kernel(input, Kernel::Auto)
 }
 
-/// Prepare LinReg computation parameters (zero-copy pattern)
 #[inline(always)]
 fn linreg_prepare<'a>(
     input: &'a LinRegInput,
     kernel: Kernel,
-) -> Result<
-    (
-        // data
-        &'a [f64],
-        
-        usize,
-        
-        usize,
-        
-        Kernel,
-    ),
-    LinRegError,
-> {
+) -> Result<(&'a [f64], usize, usize, Kernel), LinRegError> {
     let data: &[f64] = input.as_ref();
     if data.is_empty() {
         return Err(LinRegError::EmptyInputData);
@@ -257,7 +213,6 @@ fn linreg_prepare<'a>(
     }
 
     let chosen = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -288,20 +243,12 @@ pub fn linreg_with_kernel(
     Ok(LinRegOutput { values: out })
 }
 
-/// LinReg zero-allocation API: writes results into the caller-provided buffer.
-///
-/// - Preserves NaN warmups exactly like `linreg()` (Auto short-circuits to Scalar).
-/// - The output slice length must equal the input length.
-/// - Returns `Ok(())` on success, or the same errors as the Vec-returning API on failure.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn linreg_into(input: &LinRegInput, out: &mut [f64]) -> Result<(), LinRegError> {
-    
-    
     linreg_compute_into(input, Kernel::Scalar, out)
 }
 
-/// Compute LinReg directly into pre-allocated output slice (zero-copy)
 pub fn linreg_compute_into(
     input: &LinRegInput,
     kernel: Kernel,
@@ -331,7 +278,10 @@ pub fn linreg_compute_into(
         });
     }
     if out.len() != len {
-        return Err(LinRegError::OutputLengthMismatch { expected: len, got: out.len() });
+        return Err(LinRegError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
     }
 
     let chosen = match kernel {
@@ -340,7 +290,7 @@ pub fn linreg_compute_into(
     };
 
     let warm = first + period;
-    
+
     out[..warm].fill(f64::NAN);
 
     unsafe {
@@ -359,14 +309,12 @@ pub fn linreg_compute_into(
 
 #[inline(always)]
 fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     let period_f = period as f64;
-    let x_sum = ((period * (period + 1)) / 2) as f64; 
-    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; 
-    let denom_inv = 1.0 / (period_f * x2_sum - x_sum * x_sum); 
+    let x_sum = ((period * (period + 1)) / 2) as f64;
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
+    let denom_inv = 1.0 / (period_f * x2_sum - x_sum * x_sum);
     let inv_period = 1.0 / period_f;
 
-    
     let mut y_sum = 0.0;
     let mut xy_sum = 0.0;
     let init_slice = &data[first..first + period - 1];
@@ -377,24 +325,21 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         k += 1;
     }
 
-    
     let len = data.len();
-    let mut idx = first + period - 1; 
-    let mut old_idx = first; 
+    let mut idx = first + period - 1;
+    let mut old_idx = first;
     unsafe {
         while idx < len {
             let new_val = *data.get_unchecked(idx);
-            y_sum += new_val; 
-            xy_sum += new_val * period_f; 
+            y_sum += new_val;
+            xy_sum += new_val * period_f;
 
-            
             let b = (period_f * xy_sum - x_sum * y_sum) * denom_inv;
             let a = (y_sum - b * x_sum) * inv_period;
-            *out.get_unchecked_mut(idx) = a + b * period_f; 
+            *out.get_unchecked_mut(idx) = a + b * period_f;
 
-            
-            xy_sum -= y_sum; 
-            y_sum -= *data.get_unchecked(old_idx); 
+            xy_sum -= y_sum;
+            y_sum -= *data.get_unchecked(old_idx);
 
             idx += 1;
             old_idx += 1;
@@ -407,21 +352,18 @@ fn linreg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     use core::arch::x86_64::*;
 
-    
     let pf = period as f64;
-    let x_sum = ((period * (period + 1)) / 2) as f64; 
-    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; 
+    let x_sum = ((period * (period + 1)) / 2) as f64;
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
     let denom_inv = 1.0 / (pf * x2_sum - x_sum * x_sum);
     let inv_pf = 1.0 / pf;
 
-    
     let mut y_sum = 0.0f64;
     let mut xy_sum = 0.0f64;
 
     let init_len = period.saturating_sub(1);
     let mut p = data.as_ptr().add(first);
 
-    
     let vec_blocks = init_len / 4;
     if vec_blocks > 0 {
         let base = _mm256_setr_pd(1.0, 2.0, 3.0, 4.0);
@@ -438,7 +380,6 @@ pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [
             off += 4.0;
         }
 
-        
         let mut buf = [0.0f64; 4];
         _mm256_storeu_pd(buf.as_mut_ptr(), y_acc);
         y_sum += buf.iter().sum::<f64>();
@@ -446,9 +387,8 @@ pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [
         xy_sum += buf.iter().sum::<f64>();
     }
 
-    
     let tail = init_len & 3;
-    let mut k_off = (vec_blocks * 4 + 1) as f64; 
+    let mut k_off = (vec_blocks * 4 + 1) as f64;
     for _ in 0..tail {
         let v = *p;
         y_sum += v;
@@ -457,7 +397,6 @@ pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [
         p = p.add(1);
     }
 
-    
     let len = data.len();
     let mut idx = first + period - 1;
     let mut old_idx = first;
@@ -482,21 +421,18 @@ pub unsafe fn linreg_avx2(data: &[f64], period: usize, first: usize, out: &mut [
 pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     use core::arch::x86_64::*;
 
-    
     let pf = period as f64;
-    let x_sum = ((period * (period + 1)) / 2) as f64; 
-    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; 
+    let x_sum = ((period * (period + 1)) / 2) as f64;
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
     let denom_inv = 1.0 / (pf * x2_sum - x_sum * x_sum);
     let inv_pf = 1.0 / pf;
 
-    
     let mut y_sum = 0.0f64;
     let mut xy_sum = 0.0f64;
 
     let init_len = period.saturating_sub(1);
     let mut p = data.as_ptr().add(first);
 
-    
     let vec_blocks = init_len / 8;
     if vec_blocks > 0 {
         let base = _mm512_setr_pd(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0);
@@ -513,7 +449,6 @@ pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut
             off += 8.0;
         }
 
-        
         let mut buf = [0.0f64; 8];
         _mm512_storeu_pd(buf.as_mut_ptr(), y_acc);
         y_sum += buf.iter().sum::<f64>();
@@ -521,9 +456,8 @@ pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut
         xy_sum += buf.iter().sum::<f64>();
     }
 
-    
     let tail = init_len & 7;
-    let mut k_off = (vec_blocks * 8 + 1) as f64; 
+    let mut k_off = (vec_blocks * 8 + 1) as f64;
     for _ in 0..tail {
         let v = *p;
         y_sum += v;
@@ -532,7 +466,6 @@ pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut
         p = p.add(1);
     }
 
-    
     let len = data.len();
     let mut idx = first + period - 1;
     let mut old_idx = first;
@@ -551,8 +484,6 @@ pub unsafe fn linreg_avx512(data: &[f64], period: usize, first: usize, out: &mut
         old_idx += 1;
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct LinRegBatchRange {
@@ -607,7 +538,10 @@ impl LinRegBatchBuilder {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct LinRegBatchOutput {
     pub values: Vec<f64>,
     pub combos: Vec<LinRegParams>,
@@ -629,15 +563,12 @@ impl LinRegBatchOutput {
     }
 }
 
-
-
 pub fn linreg_batch_with_kernel(
     data: &[f64],
     sweep: &LinRegBatchRange,
     k: Kernel,
 ) -> Result<LinRegBatchOutput, LinRegError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => return Err(LinRegError::InvalidKernelForBatch(k)),
@@ -676,11 +607,14 @@ fn linreg_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<LinRegBatchOutput, LinRegError> {
-    
     let combos = expand_grid_linreg(sweep);
     if combos.is_empty() {
         let (s, e, t) = sweep.period;
-        return Err(LinRegError::InvalidRange { start: s, end: e, step: t });
+        return Err(LinRegError::InvalidRange {
+            start: s,
+            end: e,
+            step: t,
+        });
     }
     let first = data
         .iter()
@@ -694,25 +628,20 @@ fn linreg_batch_inner(
         });
     }
 
-    
     let rows = combos.len();
     let cols = data.len();
     let _ = rows
         .checked_mul(cols)
         .ok_or(LinRegError::ArithmeticOverflow { what: "rows*cols" })?;
 
-    
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -726,7 +655,6 @@ fn linreg_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -747,7 +675,6 @@ fn linreg_batch_inner(
         }
     }
 
-    
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
 
     Ok(LinRegBatchOutput {
@@ -758,7 +685,6 @@ fn linreg_batch_inner(
     })
 }
 
-/// Batch compute LinReg directly into pre-allocated output slice (zero-copy)
 pub fn linreg_batch_inner_into(
     data: &[f64],
     sweep: &LinRegBatchRange,
@@ -766,11 +692,14 @@ pub fn linreg_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<LinRegParams>, LinRegError> {
-    
     let combos = expand_grid_linreg(sweep);
     if combos.is_empty() {
         let (s, e, t) = sweep.period;
-        return Err(LinRegError::InvalidRange { start: s, end: e, step: t });
+        return Err(LinRegError::InvalidRange {
+            start: s,
+            end: e,
+            step: t,
+        });
     }
     let first = data
         .iter()
@@ -789,38 +718,29 @@ pub fn linreg_batch_inner_into(
     let expected = rows
         .checked_mul(cols)
         .ok_or(LinRegError::ArithmeticOverflow { what: "rows*cols" })?;
-    
+
     if out.len() != expected {
-        return Err(LinRegError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(LinRegError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    
-    
-    
-    
-    
-
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            
             Kernel::Scalar => linreg_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => linreg_row_avx2(data, first, period, out_row),
@@ -830,7 +750,6 @@ pub fn linreg_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -855,7 +774,6 @@ pub fn linreg_batch_inner_into(
     Ok(combos)
 }
 
-
 #[inline(always)]
 unsafe fn linreg_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     linreg_scalar(data, period, first, out)
@@ -872,18 +790,16 @@ unsafe fn linreg_row_prefix_sums_scalar(
 ) {
     let len = data.len();
     let pf = period as f64;
-    let x_sum = ((period * (period + 1)) / 2) as f64; 
-    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64; 
+    let x_sum = ((period * (period + 1)) / 2) as f64;
+    let x2_sum = ((period * (period + 1) * (2 * period + 1)) / 6) as f64;
     let denom_inv = 1.0 / (pf * x2_sum - x_sum * x_sum);
     let inv_pf = 1.0 / pf;
 
-    
     let mut idx = first + period - 1;
     while idx < len {
-        
         let pos = idx - first + 1;
         let y_sum = s.get_unchecked(pos) - s.get_unchecked(pos - period);
-        
+
         let xy_sum = (sp.get_unchecked(pos) - sp.get_unchecked(pos - period))
             - ((pos - period) as f64) * y_sum;
 
@@ -906,8 +822,6 @@ unsafe fn linreg_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [
 unsafe fn linreg_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     linreg_avx512(data, period, first, out)
 }
-
-
 
 #[derive(Debug, Clone)]
 pub struct LinRegStream {
@@ -976,14 +890,10 @@ impl LinRegStream {
     }
 }
 
-
-
 #[inline(always)]
 fn round_up8(x: usize) -> usize {
     (x + 7) & !7
 }
-
-
 
 #[inline(always)]
 pub fn expand_grid_linreg(r: &LinRegBatchRange) -> Vec<LinRegParams> {
@@ -991,7 +901,11 @@ pub fn expand_grid_linreg(r: &LinRegBatchRange) -> Vec<LinRegParams> {
         if step == 0 || start == end {
             return vec![start];
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let mut v = Vec::new();
         let mut x = lo;
         while x <= hi {
@@ -1010,8 +924,6 @@ pub fn expand_grid_linreg(r: &LinRegBatchRange) -> Vec<LinRegParams> {
     }
     out
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1078,34 +990,42 @@ mod tests {
 
     #[test]
     fn test_linreg_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(5 + 256);
         for _ in 0..5 {
             data.push(f64::NAN);
         }
         for i in 0..256u32 {
             let x = i as f64;
-            let v = (x * 0.137).sin() * 3.0 + x * 0.25; 
+            let v = (x * 0.137).sin() * 3.0 + x * 0.25;
             data.push(v);
         }
 
         let params = LinRegParams { period: Some(14) };
         let input = LinRegInput::from_slice(&data, params);
 
-        
         let baseline = linreg(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
         linreg_into(&input, &mut out)?;
 
         assert_eq!(out.len(), baseline.len());
         for (i, (&a, &b)) in out.iter().zip(baseline.iter()).enumerate() {
             if a.is_nan() || b.is_nan() {
-                assert!(a.is_nan() && b.is_nan(), "NaN parity mismatch at index {}", i);
+                assert!(
+                    a.is_nan() && b.is_nan(),
+                    "NaN parity mismatch at index {}",
+                    i
+                );
             } else {
                 let diff = (a - b).abs();
-                assert!(diff <= 1e-12, "Value mismatch at index {}: {} vs {} (diff={})", i, a, b, diff);
+                assert!(
+                    diff <= 1e-12,
+                    "Value mismatch at index {}: {} vs {} (diff={})",
+                    i,
+                    a,
+                    b,
+                    diff
+                );
             }
         }
         Ok(())
@@ -1248,7 +1168,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_linreg_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1256,7 +1175,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_periods = vec![2, 5, 10, 14, 20, 30, 50, 100, 200];
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
@@ -1271,16 +1189,13 @@ mod tests {
                 );
                 let output = linreg_with_kernel(&input, kernel)?;
 
-                
                 for (i, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1288,7 +1203,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1296,7 +1210,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1310,7 +1223,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_linreg_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1324,24 +1236,21 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let close_data = &candles.close;
 
-        
         let strat = (
-            2usize..=50, 
-            0usize..close_data.len().saturating_sub(200), 
-            100usize..=200, 
+            2usize..=50,
+            0usize..close_data.len().saturating_sub(200),
+            100usize..=200,
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(period, start_idx, slice_len)| {
-                
                 let end_idx = (start_idx + slice_len).min(close_data.len());
                 if end_idx <= start_idx || end_idx - start_idx < period + 10 {
-                    return Ok(()); 
+                    return Ok(());
                 }
 
                 let data_slice = &close_data[start_idx..end_idx];
@@ -1350,27 +1259,20 @@ mod tests {
                 };
                 let input = LinRegInput::from_slice(data_slice, params.clone());
 
-                
                 let result = linreg_with_kernel(&input, kernel);
 
-                
                 let scalar_result = linreg_with_kernel(&input, Kernel::Scalar);
 
-                
                 match (result, scalar_result) {
                     (Ok(LinRegOutput { values: out }), Ok(LinRegOutput { values: ref_out })) => {
-                        
                         prop_assert_eq!(out.len(), data_slice.len());
                         prop_assert_eq!(ref_out.len(), data_slice.len());
 
-                        
                         let first = data_slice.iter().position(|x| !x.is_nan()).unwrap_or(0);
                         let expected_warmup = first + period;
 
-                        
                         let first_valid = out.iter().position(|x| !x.is_nan());
                         if let Some(first_idx) = first_valid {
-                            
                             prop_assert_eq!(
                                 first_idx,
                                 expected_warmup,
@@ -1379,7 +1281,6 @@ mod tests {
                                 expected_warmup
                             );
 
-                            
                             for i in 0..first_idx {
                                 prop_assert!(
                                     out[i].is_nan(),
@@ -1390,12 +1291,10 @@ mod tests {
                             }
                         }
 
-                        
                         for i in 0..out.len() {
                             let y = out[i];
                             let r = ref_out[i];
 
-                            
                             if y.is_nan() {
                                 prop_assert!(
                                     r.is_nan(),
@@ -1407,10 +1306,8 @@ mod tests {
                                 continue;
                             }
 
-                            
                             prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
 
-                            
                             let ulps_diff = if y == r {
                                 0
                             } else {
@@ -1430,22 +1327,19 @@ mod tests {
                             );
                         }
 
-                        
                         if first_valid.is_some() {
-                            
                             let mut linear_data = vec![0.0; period + 5];
                             for i in 0..linear_data.len() {
-                                linear_data[i] = 100.0 + i as f64 * 2.0; 
+                                linear_data[i] = 100.0 + i as f64 * 2.0;
                             }
                             let linear_input =
                                 LinRegInput::from_slice(&linear_data, params.clone());
                             if let Ok(LinRegOutput { values: linear_out }) =
                                 linreg_with_kernel(&linear_input, kernel)
                             {
-                                
                                 for i in period..linear_data.len() {
                                     if !linear_out[i].is_nan() {
-                                        let expected = 100.0 + (i + 1) as f64 * 2.0; 
+                                        let expected = 100.0 + (i + 1) as f64 * 2.0;
                                         prop_assert!(
                                             (linear_out[i] - expected).abs() < 1e-6,
                                             "Linear prediction error at {}: got {} expected {}",
@@ -1457,14 +1351,12 @@ mod tests {
                                 }
                             }
 
-                            
                             let constant_val = 42.0;
                             let constant_data = vec![constant_val; period + 5];
                             let const_input = LinRegInput::from_slice(&constant_data, params);
                             if let Ok(LinRegOutput { values: const_out }) =
                                 linreg_with_kernel(&const_input, kernel)
                             {
-                                
                                 for i in period..constant_data.len() {
                                     if !const_out[i].is_nan() {
                                         prop_assert!(
@@ -1478,10 +1370,8 @@ mod tests {
                                 }
                             }
 
-                            
                             for i in expected_warmup..out.len() {
                                 if !out[i].is_nan() {
-                                    
                                     let window_start = i + 1 - period;
                                     let window_end = i + 1;
                                     let window = &data_slice[window_start..window_end];
@@ -1491,8 +1381,6 @@ mod tests {
                                     let max_val =
                                         window.iter().copied().fold(f64::NEG_INFINITY, f64::max);
 
-                                    
-                                    
                                     let range = max_val - min_val;
                                     let lower_bound = min_val - range;
                                     let upper_bound = max_val + range;
@@ -1512,7 +1400,6 @@ mod tests {
                         Ok(())
                     }
                     (Err(e1), Err(e2)) => {
-                        
                         prop_assert_eq!(
                             std::mem::discriminant(&e1),
                             std::mem::discriminant(&e2),
@@ -1584,7 +1471,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1592,19 +1478,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
         for source in &test_sources {
-            
             let output = LinRegBatchBuilder::new()
                 .kernel(kernel)
-                .period_range(2, 200, 3) 
+                .period_range(2, 200, 3)
                 .apply_candles(&c, source)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1613,7 +1495,6 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1621,7 +1502,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1629,7 +1509,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1639,7 +1518,6 @@ mod tests {
             }
         }
 
-        
         let edge_case_ranges = vec![(2, 5, 1), (190, 200, 2), (50, 100, 10)];
         for (start, end, step) in edge_case_ranges {
             let output = LinRegBatchBuilder::new()
@@ -1671,7 +1549,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1680,7 +1557,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 }
-
 
 #[cfg(feature = "python")]
 use numpy::{PyArray1, PyArrayMethods, PyReadonlyArray1};
@@ -1737,19 +1613,15 @@ pub fn linreg_batch_py<'py>(
         period: period_range,
     };
 
-    
     let combos = expand_grid_linreg(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1765,7 +1637,6 @@ pub fn linreg_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -1854,9 +1725,12 @@ pub fn linreg_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32LinregPy::new(inner, ctx, dev_id))
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Linreg", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "DeviceArrayF32Linreg",
+    unsendable
+)]
 pub struct DeviceArrayF32LinregPy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -1868,7 +1742,9 @@ pub struct DeviceArrayF32LinregPy {
 impl DeviceArrayF32LinregPy {
     #[new]
     fn py_new() -> PyResult<Self> {
-        Err(pyo3::exceptions::PyTypeError::new_err("use factory methods from CUDA functions"))
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory methods from CUDA functions",
+        ))
     }
 
     #[getter]
@@ -1879,14 +1755,17 @@ impl DeviceArrayF32LinregPy {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let size = self.inner.rows.saturating_mul(self.inner.cols);
-        let ptr_val: usize = if size == 0 { 0 } else { self.inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            self.inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // Return the allocation device id tracked by the wrapper (kDLCUDA = 2)
         (2, self._device_id as i32)
     }
 
@@ -1901,8 +1780,7 @@ impl DeviceArrayF32LinregPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1922,12 +1800,15 @@ impl DeviceArrayF32LinregPy {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -1943,7 +1824,11 @@ impl DeviceArrayF32LinregPy {
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32LinregPy {
     pub fn new(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
     }
 }
 
@@ -1972,8 +1857,6 @@ impl LinRegStreamPy {
     }
 }
 
-/// Computes LinReg directly into a provided output slice, avoiding allocation.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn linreg_into_slice(
     dst: &mut [f64],
@@ -1982,20 +1865,20 @@ pub fn linreg_into_slice(
 ) -> Result<(), LinRegError> {
     let data: &[f64] = input.as_ref();
 
-    // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(LinRegError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(LinRegError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
-    // Use the existing compute_into function
     linreg_compute_into(input, kern, dst)
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linreg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = LinRegParams {
@@ -2003,23 +1886,21 @@ pub fn linreg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = LinRegInput::from_slice(data, params);
 
-    // Allocate output buffer once
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
     linreg_into_slice(&mut output, &input, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LinRegBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = linreg_batch)]
 pub fn linreg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: LinRegBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2029,8 +1910,6 @@ pub fn linreg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         period: config.period_range,
     };
 
-    // For WASM, we need to use Kernel::Scalar instead of Auto
-    // since WASM doesn't support AVX instructions
     let output = linreg_batch_slice(data, &sweep, Kernel::Scalar)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2038,22 +1917,18 @@ pub fn linreg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linreg_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linreg_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2061,7 +1936,7 @@ pub fn linreg_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linreg_into(
     in_ptr: *const f64,
@@ -2069,38 +1944,30 @@ pub fn linreg_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to linreg_into"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        
         let params = LinRegParams {
             period: Some(period),
         };
         let input = LinRegInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             linreg_into_slice(&mut temp, &input, Kernel::Scalar)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             linreg_into_slice(out, &input, Kernel::Scalar)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2110,9 +1977,7 @@ pub fn linreg_into(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linreg_batch_into(
     in_ptr: *const f64,
@@ -2141,7 +2006,6 @@ pub fn linreg_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         linreg_batch_inner_into(data, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

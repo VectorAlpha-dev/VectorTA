@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    
+
     let gpu_enabled = env::var_os("CARGO_FEATURE_GPU").is_some();
     if !gpu_enabled { return; }
 

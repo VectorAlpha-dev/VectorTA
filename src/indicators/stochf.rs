@@ -1,39 +1,3 @@
-//! # Stochastic Fast (StochF)
-//!
-//! A fast variant of the stochastic oscillator with minimal smoothing for more responsive signals.
-//! Compares closing price to high-low range over a shorter period than standard stochastic.
-//!
-//! ## Parameters
-//! - **fastk_period**: Lookback period for highest high/lowest low (default: 5)
-//! - **fastd_period**: Period for moving average of %K to get %D (default: 3)
-//! - **fastd_matype**: MA type - currently only SMA (0) supported (default: 0)
-//!
-//! ## Inputs
-//! - High, low, and close price series (or candles)
-//! - All series must have the same length
-//!
-//! ## Returns
-//! - **k**: Fast %K line as `Vec<f64>` (length matches input, range 0-100)
-//! - **d**: Fast %D line as `Vec<f64>` (length matches input, range 0-100)
-//!
-//! ## Developer Notes
-//! - Scalar: optimized O(n) via ring-indexed monotonic deques; small-window path uses tight direct scans with unrolling; %K and %D (SMA) computed in one pass.
-//! - SIMD: AVX2/AVX512 implemented only for small windows; benches show underperformance vs scalar at 100k (default params). Runtime `Auto` short-circuits to `Scalar`.
-//! - Batch: per-row kernel mirrors scalar optimizations; no cross-row sharing (window-dependent extrema).
-//! - Streaming: O(1) amortized via ring-indexed monotonic deques for %K and a running-sum ring for %D (SMA).
-//! - Memory: follows ALMA patterns (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes). %D supports SMA (matype=0).
-//! - Decision log: SIMD remains short-circuited to the scalar path for performance; CUDA wrapper includes typed errors + VRAM checks and feeds shared `DeviceArrayF32Py` (CAI v3 + DLPack v1.x) without changing numerical outputs.
-//!
-//! Binding test status (Oct 29, 2025):
-//! - WASM: all stochf binding tests pass (accuracy last-5 match Rust refs at abs tol 1e-4).
-//! - Python: one failure in streaming API test:
-//!   - tests/python/test_stochf.py::TestStochFStream::test_stochf_stream_basic
-//!     expects first value at the 5th update (fastk=5) to yield a finite %K.
-//!     Observed: %K is NaN. Likely cause: StochfStream deque state treats a full
-//!     window as empty when `head == tail` (no size tracking), making HH/LL fall
-//!     back to ±INF and producing NaN. This is an implementation issue, not a
-//!     bindings test setup problem. No changes made to kernels pending review.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(feature = "python")]
@@ -45,9 +9,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -87,7 +51,10 @@ pub struct StochfOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct StochfParams {
     pub fastk_period: Option<usize>,
     pub fastd_period: Option<usize>,
@@ -251,7 +218,11 @@ pub enum StochfError {
         d_got: usize,
     },
     #[error("stochf: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("stochf: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -261,21 +232,13 @@ pub fn stochf(input: &StochfInput) -> Result<StochfOutput, StochfError> {
     stochf_with_kernel(input, Kernel::Auto)
 }
 
-/// Write StochF outputs into caller-provided buffers without allocations.
-///
-/// Preserves NaN warmups exactly like the Vec-returning API: the first
-/// `first_valid + fastk - 1` values of %K and the first
-/// `first_valid + fastk + fastd - 2` values of %D are prefilled with
-/// quiet-NaNs. All slice lengths must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn stochf_into(
     input: &StochfInput,
     out_k: &mut [f64],
     out_d: &mut [f64],
-    
 ) -> Result<(), StochfError> {
-    
     let (high, low, close) = match &input.data {
         StochfData::Candles { candles } => {
             let high = candles
@@ -318,7 +281,6 @@ pub fn stochf_into(
         });
     }
 
-    
     let first = (0..len)
         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .ok_or(StochfError::AllValuesNaN)?;
@@ -329,7 +291,6 @@ pub fn stochf_into(
         });
     }
 
-    
     let k_warm = first + fastk - 1;
     let d_warm = first + fastk + fastd - 2;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -340,7 +301,6 @@ pub fn stochf_into(
         *v = qnan;
     }
 
-    
     stochf_into_slice(out_k, out_d, input, Kernel::Auto)
 }
 
@@ -403,8 +363,6 @@ pub fn stochf_into_slice(
         });
     }
 
-    
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -451,7 +409,6 @@ pub fn stochf_into_slice(
         }
     }
 
-    
     let k_warmup = (first_valid_idx + fastk_period - 1).min(len);
     let d_warmup = (first_valid_idx + fastk_period + fastd_period - 2).min(len);
     for v in &mut dst_k[..k_warmup] {
@@ -518,7 +475,6 @@ pub fn stochf_with_kernel(
     let mut k_vals = alloc_with_nan_prefix(len, k_warmup.min(len));
     let mut d_vals = alloc_with_nan_prefix(len, d_warmup.min(len));
 
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -599,7 +555,6 @@ pub unsafe fn stochf_scalar(
 
     let k_start = first_valid_idx + fastk_period - 1;
 
-    
     if fastk_period <= 16 {
         let use_sma_d = matype == 0;
         let mut d_sum: f64 = 0.0;
@@ -706,7 +661,6 @@ pub unsafe fn stochf_scalar(
         return;
     }
 
-    
     let cap = fastk_period;
     let mut qh = vec![0usize; cap];
     let mut ql = vec![0usize; cap];
@@ -845,7 +799,6 @@ pub unsafe fn stochf_avx2(
     k_vals: &mut [f64],
     d_vals: &mut [f64],
 ) {
-    
     if fastk_period <= 32 {
         let len = high.len();
         let start_i = first_valid_idx + fastk_period - 1;
@@ -877,7 +830,6 @@ pub unsafe fn stochf_avx2(
                 j += 4;
             }
 
-            
             let vmax_lo = _mm256_castpd256_pd128(vmax);
             let vmax_hi = _mm256_extractf128_pd(vmax, 1);
             let vmax_128 = _mm_max_pd(vmax_lo, vmax_hi);
@@ -902,7 +854,6 @@ pub unsafe fn stochf_avx2(
                 j += 1;
             }
 
-            
             let c = *close.get_unchecked(i);
             let denom = hh - ll;
             let kv = if denom == 0.0 {
@@ -917,7 +868,6 @@ pub unsafe fn stochf_avx2(
             };
             *k_vals.get_unchecked_mut(i) = kv;
 
-            
             if use_sma_d {
                 if kv.is_nan() {
                     *d_vals.get_unchecked_mut(i) = f64::NAN;
@@ -1046,42 +996,29 @@ pub unsafe fn stochf_avx512_long(
     );
 }
 
-/// Decision: Streaming uses O(1) amortized deques for %K and a running-sum ring for %D (SMA);
-/// matches offline scalar numerics post-warmup.
 #[derive(Debug, Clone)]
 pub struct StochfStream {
-    
     fastk_period: usize,
     fastd_period: usize,
     fastd_matype: usize,
 
-    
-    
     qh_idx: Vec<usize>,
     qh_val: Vec<f64>,
     qh_head: usize,
     qh_tail: usize,
 
-    
     ql_idx: Vec<usize>,
     ql_val: Vec<f64>,
     ql_head: usize,
     ql_tail: usize,
 
-    
-    
-    
-    
     cap_k: usize,
 
-    
     qh_full: bool,
     ql_full: bool,
 
-    
     t: usize,
 
-    
     k_ring: Vec<f64>,
     k_head: usize,
     k_count: usize,
@@ -1102,8 +1039,6 @@ impl StochfStream {
             });
         }
 
-        
-        
         let cap_k = fastk_period + 1;
 
         Ok(Self {
@@ -1157,7 +1092,7 @@ impl StochfStream {
             && self.qh_idx[self.qh_head] < win_start
         {
             Self::inc(&mut self.qh_head, self.cap_k);
-            
+
             self.qh_full = false;
         }
     }
@@ -1173,13 +1108,12 @@ impl StochfStream {
 
     #[inline(always)]
     fn qh_push(&mut self, idx: usize, val: f64) {
-        
         while self.qh_head != self.qh_tail || self.qh_full {
             let mut back = self.qh_tail;
             Self::dec(&mut back, self.cap_k);
             if self.qh_val[back] <= val {
                 self.qh_tail = back;
-                
+
                 self.qh_full = false;
             } else {
                 break;
@@ -1188,7 +1122,7 @@ impl StochfStream {
         self.qh_idx[self.qh_tail] = idx;
         self.qh_val[self.qh_tail] = val;
         Self::inc(&mut self.qh_tail, self.cap_k);
-        
+
         if self.qh_tail == self.qh_head {
             self.qh_full = true;
         }
@@ -1196,7 +1130,6 @@ impl StochfStream {
 
     #[inline(always)]
     fn ql_push(&mut self, idx: usize, val: f64) {
-        
         while self.ql_head != self.ql_tail || self.ql_full {
             let mut back = self.ql_tail;
             Self::dec(&mut back, self.cap_k);
@@ -1215,13 +1148,11 @@ impl StochfStream {
         }
     }
 
-    /// O(1) amortized per tick for both %K and %D (SMA).
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
         let i = self.t;
-        
+
         self.t = self.t.wrapping_add(1);
 
-        
         if high == high {
             self.qh_push(i, high);
         }
@@ -1229,18 +1160,15 @@ impl StochfStream {
             self.ql_push(i, low);
         }
 
-        
         let have_k_window = (i + 1) >= self.fastk_period;
         if have_k_window {
             let win_start = i + 1 - self.fastk_period;
             self.qh_expire(win_start);
             self.ql_expire(win_start);
         } else {
-            
             return None;
         }
 
-        
         let hh = if self.qh_head != self.qh_tail || self.qh_full {
             self.qh_val[self.qh_head]
         } else {
@@ -1252,9 +1180,6 @@ impl StochfStream {
             f64::INFINITY
         };
 
-        
-
-        
         let denom = hh - ll;
         let k = if denom == 0.0 {
             if close == hh {
@@ -1263,16 +1188,13 @@ impl StochfStream {
                 0.0
             }
         } else {
-            
             let scale = 100.0 / denom;
             close.mul_add(scale, (-ll) * scale)
         };
 
-        
         let d = if self.fastd_matype != 0 {
-            f64::NAN 
+            f64::NAN
         } else if self.k_count < self.fastd_period {
-            
             self.k_ring[self.k_head] = k;
             self.d_sma_sum += k;
             self.k_count += 1;
@@ -1284,7 +1206,6 @@ impl StochfStream {
                 f64::NAN
             }
         } else {
-            
             let old = self.k_ring[self.k_head];
             self.k_ring[self.k_head] = k;
             StochfStream::inc(&mut self.k_head, self.fastd_period);
@@ -1426,9 +1347,7 @@ impl StochfBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &StochfBatchRange) -> Vec<StochfParams> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, StochfError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, StochfError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1448,7 +1367,7 @@ fn expand_grid(r: &StochfBatchRange) -> Vec<StochfParams> {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -1535,14 +1454,11 @@ pub fn stochf_batch_inner_into(
     let rows = combos.len();
     let cols = high.len();
 
-    
-    let expected_size = rows
-        .checked_mul(cols)
-        .ok_or(StochfError::InvalidRange {
-            start: sweep.fastk_period.0,
-            end: sweep.fastk_period.1,
-            step: sweep.fastk_period.2,
-        })?;
+    let expected_size = rows.checked_mul(cols).ok_or(StochfError::InvalidRange {
+        start: sweep.fastk_period.0,
+        end: sweep.fastk_period.1,
+        step: sweep.fastk_period.2,
+    })?;
     if k_out.len() != expected_size || d_out.len() != expected_size {
         return Err(StochfError::OutputLengthMismatch {
             expected: expected_size,
@@ -1551,19 +1467,16 @@ pub fn stochf_batch_inner_into(
         });
     }
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let k_warmup = (first + combo.fastk_period.unwrap() - 1).min(cols);
         let d_warmup =
             (first + combo.fastk_period.unwrap() + combo.fastd_period.unwrap() - 2).min(cols);
         let row_start = row * cols;
 
-        
         for i in 0..k_warmup {
             k_out[row_start + i] = f64::NAN;
         }
 
-        
         for i in 0..d_warmup {
             d_out[row_start + i] = f64::NAN;
         }
@@ -1680,20 +1593,15 @@ fn stochf_batch_inner(
     let rows = combos.len();
     let cols = high.len();
 
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(StochfError::InvalidRange {
-            start: sweep.fastk_period.0,
-            end: sweep.fastk_period.1,
-            step: sweep.fastk_period.2,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(StochfError::InvalidRange {
+        start: sweep.fastk_period.0,
+        end: sweep.fastk_period.1,
+        step: sweep.fastk_period.2,
+    })?;
 
-    
     let mut k_buf = make_uninit_matrix(rows, cols);
     let mut d_buf = make_uninit_matrix(rows, cols);
 
-    
     let k_warmups: Vec<usize> = combos
         .iter()
         .map(|c| (first + c.fastk_period.unwrap() - 1).min(cols))
@@ -1703,11 +1611,9 @@ fn stochf_batch_inner(
         .map(|c| (first + c.fastk_period.unwrap() + c.fastd_period.unwrap() - 2).min(cols))
         .collect();
 
-    
     init_matrix_prefixes(&mut k_buf, cols, &k_warmups);
     init_matrix_prefixes(&mut d_buf, cols, &d_warmups);
 
-    
     let k_buf_len = k_buf.len();
     let d_buf_len = d_buf.len();
     let k_buf_cap = k_buf.capacity();
@@ -1792,7 +1698,6 @@ fn stochf_batch_inner(
         }
     }
 
-    
     let k_vec = unsafe { Vec::from_raw_parts(k_ptr as *mut f64, k_buf_len, k_buf_cap) };
     let d_vec = unsafe { Vec::from_raw_parts(d_ptr as *mut f64, d_buf_len, d_buf_cap) };
 
@@ -1931,7 +1836,6 @@ unsafe fn stochf_row_scalar(
         return;
     }
 
-    
     let cap = fastk_period;
     let mut qh = vec![0usize; cap];
     let mut ql = vec![0usize; cap];
@@ -2198,7 +2102,6 @@ pub fn stochf_py<'py>(
     let close_slice = close.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    // Validate lengths match
     if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
         return Err(PyValueError::new_err(
             "Input arrays must have the same length",
@@ -2264,7 +2167,6 @@ pub fn stochf_batch_py<'py>(
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
 
-    // Validate lengths match
     if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
         return Err(PyValueError::new_err(
             "Input arrays must have the same length",
@@ -2288,7 +2190,6 @@ pub fn stochf_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("stochf: rows*cols overflow"))?;
 
-    // Pre-allocate output arrays for batch
     let k_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let d_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let k_slice = unsafe { k_arr.as_slice_mut()? };
@@ -2344,7 +2245,6 @@ pub fn stochf_batch_py<'py>(
     Ok(dict)
 }
 
-// ---- CUDA Python bindings (DeviceArrayF32Py handles) ----
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaStochf};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2389,8 +2289,16 @@ pub fn stochf_cuda_batch_dev_py(
         Ok::<_, PyErr>((pair, ctx, dev_id))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.a, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: pair.b, _ctx: Some(ctx), device_id: Some(dev_id) },
+        DeviceArrayF32Py {
+            inner: pair.a,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: pair.b,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     ))
 }
 
@@ -2430,8 +2338,16 @@ pub fn stochf_cuda_many_series_one_param_dev_py(
         Ok::<_, PyErr>((k, d, ctx, dev_id))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: k, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: d, _ctx: Some(ctx), device_id: Some(dev_id) },
+        DeviceArrayF32Py {
+            inner: k,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: d,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     ))
 }
 
@@ -2583,51 +2499,50 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            StochfParams::default(), // fastk: 5, fastd: 3, matype: 0
+            StochfParams::default(),
             StochfParams {
-                fastk_period: Some(2), // minimum viable
+                fastk_period: Some(2),
                 fastd_period: Some(1),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(3), // small
+                fastk_period: Some(3),
                 fastd_period: Some(2),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(5), // default fastk with different fastd
+                fastk_period: Some(5),
                 fastd_period: Some(5),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(10), // medium
+                fastk_period: Some(10),
                 fastd_period: Some(3),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(14), // standard RSI-like period
+                fastk_period: Some(14),
                 fastd_period: Some(3),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(20), // large
+                fastk_period: Some(20),
                 fastd_period: Some(5),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(50), // very large
+                fastk_period: Some(50),
                 fastd_period: Some(10),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(100), // extreme
+                fastk_period: Some(100),
                 fastd_period: Some(20),
                 fastd_matype: Some(0),
             },
             StochfParams {
-                fastk_period: Some(8), // edge case: fastd > fastk/2
+                fastk_period: Some(8),
                 fastd_period: Some(7),
                 fastd_matype: Some(0),
             },
@@ -2637,15 +2552,13 @@ mod tests {
             let input = StochfInput::from_candles(&candles, params.clone());
             let output = stochf_with_kernel(&input, kernel)?;
 
-            // Check K values
             for (i, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at K index {} \
@@ -2686,15 +2599,13 @@ mod tests {
                 }
             }
 
-            // Check D values
             for (i, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at D index {} \
@@ -2741,7 +2652,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_stochf_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! generate_all_stochf_tests {
@@ -2802,17 +2713,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
         let test_configs = vec![
-            // (fastk_start, fastk_end, fastk_step, fastd_start, fastd_end, fastd_step)
-            (2, 10, 2, 1, 5, 1),       // Small periods
-            (5, 25, 5, 3, 3, 0),       // Medium periods with static fastd
-            (30, 60, 15, 5, 15, 5),    // Large periods
-            (2, 5, 1, 1, 3, 1),        // Dense small range
-            (10, 20, 2, 3, 9, 3),      // Medium range with varying fastd
-            (14, 14, 0, 1, 7, 2),      // Static fastk with varying fastd
-            (3, 12, 3, 2, 2, 0),       // Small to medium with static fastd
-            (50, 100, 25, 10, 20, 10), // Very large periods
+            (2, 10, 2, 1, 5, 1),
+            (5, 25, 5, 3, 3, 0),
+            (30, 60, 15, 5, 15, 5),
+            (2, 5, 1, 1, 3, 1),
+            (10, 20, 2, 3, 9, 3),
+            (14, 14, 0, 1, 7, 2),
+            (3, 12, 3, 2, 2, 0),
+            (50, 100, 25, 10, 20, 10),
         ];
 
         for (cfg_idx, &(fk_start, fk_end, fk_step, fd_start, fd_end, fd_step)) in
@@ -2824,7 +2733,6 @@ mod tests {
                 .fastd_range(fd_start, fd_end, fd_step)
                 .apply_candles(&c)?;
 
-            // Check K values
             for (idx, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2835,7 +2743,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2888,7 +2795,6 @@ mod tests {
                 }
             }
 
-            // Check D values
             for (idx, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2899,7 +2805,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2958,7 +2863,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2970,31 +2875,23 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate valid OHLC data where high >= close >= low
-        let strat = (2usize..=50) // fastk_period range
-            .prop_flat_map(|fastk_period| {
-                (
-                    // Generate base prices and close positions
-                    prop::collection::vec(
-                        (1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
-                        fastk_period + 50..400, // Ensure enough data
-                    ),
-                    // Generate random close position within [low, high] for each price
-                    prop::collection::vec(
-                        0.0f64..=1.0f64, // Position within [low, high] range
-                        fastk_period + 50..400,
-                    ),
-                    Just(fastk_period),
-                    1usize..=10,      // fastd_period range
-                    0.001f64..0.1f64, // volatility factor for generating high/low spread
-                )
-            });
+        let strat = (2usize..=50).prop_flat_map(|fastk_period| {
+            (
+                prop::collection::vec(
+                    (1.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
+                    fastk_period + 50..400,
+                ),
+                prop::collection::vec(0.0f64..=1.0f64, fastk_period + 50..400),
+                Just(fastk_period),
+                1usize..=10,
+                0.001f64..0.1f64,
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(
                 &strat,
                 |(base_prices, close_positions, fastk_period, fastd_period, volatility)| {
-                    // Generate realistic OHLC data from base prices
                     let len = base_prices.len().min(close_positions.len());
                     let mut high = Vec::with_capacity(len);
                     let mut low = Vec::with_capacity(len);
@@ -3005,8 +2902,8 @@ mod tests {
                         let spread = base * volatility;
                         let h = base + spread * 0.5;
                         let l = base - spread * 0.5;
-                        // Close is randomly positioned between low and high
-                        let c = l + (h - l) * close_positions[i]; // Random position within range
+
+                        let c = l + (h - l) * close_positions[i];
 
                         high.push(h);
                         low.push(l);
@@ -3023,7 +2920,6 @@ mod tests {
                     let output = stochf_with_kernel(&input, kernel).unwrap();
                     let ref_output = stochf_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Property 1: K values must be in [0, 100] range
                     for (i, &k_val) in output.k.iter().enumerate() {
                         if !k_val.is_nan() {
                             prop_assert!(
@@ -3035,7 +2931,6 @@ mod tests {
                         }
                     }
 
-                    // Property 2: D values must be in [0, 100] range
                     for (i, &d_val) in output.d.iter().enumerate() {
                         if !d_val.is_nan() {
                             prop_assert!(
@@ -3047,7 +2942,6 @@ mod tests {
                         }
                     }
 
-                    // Property 3: Warmup period handling
                     let k_warmup = fastk_period - 1;
                     let d_warmup = fastk_period - 1 + fastd_period - 1;
 
@@ -3069,7 +2963,6 @@ mod tests {
                         );
                     }
 
-                    // Property 4: Kernel consistency - all kernels should produce same results
                     for i in 0..len {
                         let k_val = output.k[i];
                         let k_ref = ref_output.k[i];
@@ -3099,8 +2992,6 @@ mod tests {
                         }
                     }
 
-                    // Property 5: K value formula verification
-                    // K = 100 * (close - lowest_low) / (highest_high - lowest_low)
                     for i in k_warmup..len {
                         let start = i + 1 - fastk_period;
                         let window_high = &high[start..=i];
@@ -3133,7 +3024,6 @@ mod tests {
                         );
                     }
 
-                    // Property 6: D is simple moving average of K
                     for i in d_warmup..len {
                         let start = i + 1 - fastd_period;
                         let k_window = &output.k[start..=i];
@@ -3150,9 +3040,6 @@ mod tests {
                         );
                     }
 
-                    // Property 7: Special case - when high == low == close (constant price)
-                    // Test with a small constant price window
-                    // Ensure we have enough data for both fastk and fastd periods
                     let const_len = (fastk_period + fastd_period) * 2;
                     if len > const_len {
                         let const_price = 100.0;
@@ -3168,7 +3055,6 @@ mod tests {
                         );
                         let const_output = stochf_with_kernel(&const_input, kernel).unwrap();
 
-                        // When all prices are equal, K should be 100 (since close == high)
                         for i in k_warmup..const_high.len() {
                             prop_assert!(
                                 (const_output.k[i] - 100.0).abs() <= 1e-9,
@@ -3179,14 +3065,11 @@ mod tests {
                         }
                     }
 
-                    // Property 8: Extreme cases - close at boundaries
-                    // Test when close is consistently at low (K should be near 0) or high (K should be near 100)
                     let extreme_len = (fastk_period + fastd_period) * 2;
                     if len > extreme_len {
-                        // Test 1: Close at low boundary with constant prices
-                        let low_close_high = vec![100.0; extreme_len]; // Constant high
-                        let low_close_low = vec![90.0; extreme_len]; // Constant low
-                        let low_close_close = vec![90.0; extreme_len]; // Close equals low
+                        let low_close_high = vec![100.0; extreme_len];
+                        let low_close_low = vec![90.0; extreme_len];
+                        let low_close_close = vec![90.0; extreme_len];
 
                         let low_input = StochfInput::from_slices(
                             &low_close_high,
@@ -3196,7 +3079,6 @@ mod tests {
                         );
                         let low_output = stochf_with_kernel(&low_input, kernel).unwrap();
 
-                        // When close == low consistently, K should be 0
                         for i in k_warmup..low_close_high.len() {
                             prop_assert!(
                                 low_output.k[i].abs() <= 1e-9,
@@ -3206,10 +3088,9 @@ mod tests {
                             );
                         }
 
-                        // Test 2: Close at high boundary with constant prices
-                        let high_close_high = vec![100.0; extreme_len]; // Constant high
-                        let high_close_low = vec![90.0; extreme_len]; // Constant low
-                        let high_close_close = vec![100.0; extreme_len]; // Close equals high
+                        let high_close_high = vec![100.0; extreme_len];
+                        let high_close_low = vec![90.0; extreme_len];
+                        let high_close_close = vec![100.0; extreme_len];
 
                         let high_input = StochfInput::from_slices(
                             &high_close_high,
@@ -3219,7 +3100,6 @@ mod tests {
                         );
                         let high_output = stochf_with_kernel(&high_input, kernel).unwrap();
 
-                        // When close == high consistently, K should be 100
                         for i in k_warmup..high_close_high.len() {
                             prop_assert!(
                                 (high_output.k[i] - 100.0).abs() <= 1e-9,
@@ -3230,7 +3110,6 @@ mod tests {
                         }
                     }
 
-                    // Property 9: No poison values in debug mode
                     #[cfg(debug_assertions)]
                     {
                         for (i, &val) in output.k.iter().enumerate() {
@@ -3292,20 +3171,16 @@ mod tests {
             }
         };
     }
-    #[cfg(feature = "wasm")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     #[test]
     fn test_wasm_batch_warmup_initialization() {
-        // Test that WASM batch function correctly initializes warmup periods
-        // even in the aliasing case where we removed redundant initialization
         let high = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let low = vec![0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5];
         let close = vec![0.8, 1.8, 2.8, 3.8, 4.8, 5.8, 6.8, 7.8, 8.8, 9.8];
 
-        // Create output buffers
-        let mut k_out = vec![999.0; 10]; // Fill with non-NaN to verify warmup
+        let mut k_out = vec![999.0; 10];
         let mut d_out = vec![999.0; 10];
 
-        // Call the function (single parameter set for simplicity)
         let result = unsafe {
             stochf_batch_into(
                 high.as_ptr(),
@@ -3316,21 +3191,17 @@ mod tests {
                 10,
                 3,
                 3,
-                0, // fastk: single value 3
+                0,
                 2,
                 2,
-                0, // fastd: single value 2
-                0, // matype
+                0,
+                0,
             )
         };
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 1); // 1 combination
+        assert_eq!(result.unwrap(), 1);
 
-        // Verify warmup periods are NaN
-        // With first_valid_idx = 0, fastk = 3, fastd = 2:
-        // K warmup should be 0 + 3 - 1 = 2 (indices 0, 1)
-        // D warmup should be 0 + 3 + 2 - 2 = 3 (indices 0, 1, 2)
         assert!(k_out[0].is_nan(), "K[0] should be NaN");
         assert!(k_out[1].is_nan(), "K[1] should be NaN");
         assert!(!k_out[2].is_nan(), "K[2] should have a value");
@@ -3343,19 +3214,17 @@ mod tests {
 
     #[test]
     fn test_batch_invalid_output_size() {
-        // Test that OutputLengthMismatch error is properly returned
         let high = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let low = vec![5.0, 15.0, 25.0, 35.0, 45.0];
         let close = vec![7.0, 17.0, 27.0, 37.0, 47.0];
 
         let sweep = StochfBatchRange {
-            fastk_period: (3, 4, 1), // Will create 2 combinations
+            fastk_period: (3, 4, 1),
             fastd_period: (2, 2, 0),
         };
 
-        // Create output buffers with wrong sizes
-        let mut k_out = vec![0.0; 5]; // Should be 2 * 5 = 10
-        let mut d_out = vec![0.0; 5]; // Should be 2 * 5 = 10
+        let mut k_out = vec![0.0; 5];
+        let mut d_out = vec![0.0; 5];
 
         let result = stochf_batch_inner_into(
             &high,
@@ -3368,7 +3237,6 @@ mod tests {
             &mut d_out,
         );
 
-        // Should return OutputLengthMismatch error
         assert!(matches!(
             result,
             Err(StochfError::OutputLengthMismatch {
@@ -3378,9 +3246,8 @@ mod tests {
             })
         ));
 
-        // Test with correct k_out but wrong d_out
-        let mut k_out = vec![0.0; 10]; // Correct size
-        let mut d_out = vec![0.0; 8]; // Wrong size
+        let mut k_out = vec![0.0; 10];
+        let mut d_out = vec![0.0; 8];
 
         let result = stochf_batch_inner_into(
             &high,
@@ -3393,7 +3260,6 @@ mod tests {
             &mut d_out,
         );
 
-        // Should return OutputLengthMismatch error
         assert!(matches!(
             result,
             Err(StochfError::OutputLengthMismatch {
@@ -3403,9 +3269,8 @@ mod tests {
             })
         ));
 
-        // Test with correct sizes - should succeed
-        let mut k_out = vec![0.0; 10]; // Correct size
-        let mut d_out = vec![0.0; 10]; // Correct size
+        let mut k_out = vec![0.0; 10];
+        let mut d_out = vec![0.0; 10];
 
         let result = stochf_batch_inner_into(
             &high,
@@ -3418,21 +3283,17 @@ mod tests {
             &mut d_out,
         );
 
-        // Should succeed
         assert!(result.is_ok());
     }
 
-    // Parity test: into() vs Vec API
     #[test]
     fn test_stochf_into_matches_api() {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("failed to read csv");
         let input = StochfInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
         let base = stochf(&input).expect("baseline stochf failed");
 
-        // Into API with preallocated outputs
         let len = candles.close.len();
         let mut k_out = vec![0.0f64; len];
         let mut d_out = vec![0.0f64; len];
@@ -3441,7 +3302,9 @@ mod tests {
         assert_eq!(base.k.len(), k_out.len());
         assert_eq!(base.d.len(), d_out.len());
 
-        fn eq_or_nan(a: f64, b: f64) -> bool { (a.is_nan() && b.is_nan()) || (a == b) }
+        fn eq_or_nan(a: f64, b: f64) -> bool {
+            (a.is_nan() && b.is_nan()) || (a == b)
+        }
 
         for i in 0..len {
             assert!(
@@ -3465,7 +3328,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stochf_js(
     high: &[f64],
@@ -3484,7 +3347,6 @@ pub fn stochf_js(
     let out =
         stochf_with_kernel(&input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return [K..., D...] concatenated
     let mut values = Vec::with_capacity(2 * out.k.len());
     values.extend_from_slice(&out.k);
     values.extend_from_slice(&out.d);
@@ -3492,7 +3354,7 @@ pub fn stochf_js(
     Ok(values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stochf_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3501,7 +3363,7 @@ pub fn stochf_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stochf_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3511,7 +3373,7 @@ pub fn stochf_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stochf_into(
     high_ptr: *const f64,
@@ -3551,24 +3413,24 @@ pub fn stochf_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StochfBatchConfig {
     pub fastk_range: (usize, usize, usize),
     pub fastd_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StochfBatchJsOutput {
-    pub k_values: Vec<f64>, // K values for all combinations
-    pub d_values: Vec<f64>, // D values for all combinations
-    pub rows: usize,        // number of combinations
-    pub cols: usize,        // data length
+    pub k_values: Vec<f64>,
+    pub d_values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
     pub combos: Vec<StochfParams>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = stochf_batch)]
 pub fn stochf_batch_unified_js(
     high: &[f64],
@@ -3587,11 +3449,10 @@ pub fn stochf_batch_unified_js(
     let out = stochf_batch_inner(high, low, close, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Keep K and D values separate as expected by tests
     let js = StochfBatchJsOutput {
         k_values: out.k,
         d_values: out.d,
-        rows: out.rows, // Number of combinations, not doubled
+        rows: out.rows,
         cols: out.cols,
         combos: out.combos,
     };
@@ -3599,7 +3460,7 @@ pub fn stochf_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stochf_batch_into(
     in_high_ptr: *const f64,
@@ -3635,12 +3496,10 @@ pub fn stochf_batch_into(
             fastd_period: (fastd_start, fastd_end, fastd_step),
         };
 
-        // Get combos to calculate output size
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
 
-        // Check for aliasing
         let aliasing = in_high_ptr == out_k_ptr
             || in_high_ptr == out_d_ptr
             || in_low_ptr == out_k_ptr
@@ -3649,13 +3508,11 @@ pub fn stochf_batch_into(
             || in_close_ptr == out_d_ptr;
 
         if aliasing {
-            // Use temporary buffers
             let mut temp_k = vec![0.0; rows * cols];
             let mut temp_d = vec![0.0; rows * cols];
 
-            // Compute - stochf_batch_inner_into will handle NaN initialization with first_valid_idx
             let kernel = detect_best_batch_kernel();
-            // Convert batch kernel to regular kernel
+
             let simd_kernel = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -3675,20 +3532,17 @@ pub fn stochf_batch_into(
             )
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy to output
             let out_k_slice = std::slice::from_raw_parts_mut(out_k_ptr, rows * cols);
             let out_d_slice = std::slice::from_raw_parts_mut(out_d_ptr, rows * cols);
 
             out_k_slice.copy_from_slice(&temp_k);
             out_d_slice.copy_from_slice(&temp_d);
         } else {
-            // Direct write to output
             let out_k_slice = std::slice::from_raw_parts_mut(out_k_ptr, rows * cols);
             let out_d_slice = std::slice::from_raw_parts_mut(out_d_ptr, rows * cols);
 
-            // Compute - stochf_batch_inner_into now handles NaN initialization
             let kernel = detect_best_batch_kernel();
-            // Convert batch kernel to regular kernel
+
             let simd_kernel = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,

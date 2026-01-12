@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::trix::{
     trix_batch_with_kernel, TrixBatchRange, TrixData, TrixInput, TrixParams,
 };
@@ -39,10 +37,10 @@ fn trix_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut price = vec![f64::NAN; len];
     for i in 5..len {
         let x = i as f64;
-        
+
         price[i] = 2.0 + 0.01 * x + (x * 0.00123).sin().abs();
     }
-    
+
     let price32_as_f64: Vec<f64> = price.iter().map(|&v| (v as f32) as f64).collect();
     let sweep = TrixBatchRange { period: (8, 64, 7) };
     let cpu = trix_batch_with_kernel(&price32_as_f64, &sweep, Kernel::ScalarBatch)?;
@@ -59,7 +57,7 @@ fn trix_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 5e-3; 
+    let tol = 5e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -82,8 +80,8 @@ fn trix_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in 3..rows {
@@ -94,7 +92,6 @@ fn trix_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 18usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

@@ -3,8 +3,8 @@
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
-use cust::function::{BlockSize, GridSize};
 use cust::error::CudaError;
+use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
@@ -18,9 +18,22 @@ use std::sync::Arc;
 pub enum CudaAdError {
     Cuda(CudaError),
     InvalidInput(String),
-    MissingKernelSymbol { name: &'static str },
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     InvalidPolicy(&'static str),
     NotImplemented,
 }
@@ -30,13 +43,26 @@ impl fmt::Display for CudaAdError {
         match self {
             CudaAdError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaAdError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-            CudaAdError::MissingKernelSymbol { name } => write!(f, "Missing kernel symbol: {}", name),
-            CudaAdError::OutOfMemory { required, free, headroom } => write!(
+            CudaAdError::MissingKernelSymbol { name } => {
+                write!(f, "Missing kernel symbol: {}", name)
+            }
+            CudaAdError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "Out of memory on device: required={}B, free={}B, headroom={}B",
                 required, free, headroom
             ),
-            CudaAdError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaAdError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
             ),
@@ -58,8 +84,7 @@ pub struct CudaAd {
 impl CudaAd {
     pub fn new(device_id: usize) -> Result<Self, CudaAdError> {
         cust::init(CudaFlags::empty()).map_err(CudaAdError::Cuda)?;
-        let device =
-            Device::get_device(device_id as u32).map_err(CudaAdError::Cuda)?;
+        let device = Device::get_device(device_id as u32).map_err(CudaAdError::Cuda)?;
         let context = Arc::new(Context::new(device).map_err(CudaAdError::Cuda)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ad_kernel.ptx"));
@@ -73,8 +98,7 @@ impl CudaAd {
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
         .or_else(|_| Module::from_ptx(ptx, &[]))
         .map_err(CudaAdError::Cuda)?;
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .map_err(CudaAdError::Cuda)?;
+        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaAdError::Cuda)?;
 
         Ok(Self {
             module,
@@ -85,9 +109,13 @@ impl CudaAd {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -97,15 +125,23 @@ impl CudaAd {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaAdError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaAdError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaAdError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -113,7 +149,11 @@ impl CudaAd {
     }
 
     #[inline]
-    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaAdError> {
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaAdError> {
         let dev = Device::get_device(self.device_id).map_err(CudaAdError::Cuda)?;
         let max_bx = dev
             .get_attribute(DeviceAttribute::MaxBlockDimX)
@@ -122,7 +162,14 @@ impl CudaAd {
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .map_err(CudaAdError::Cuda)? as u32;
         if block.0 == 0 || block.0 > max_bx || grid.0 == 0 || grid.0 > max_gx {
-            return Err(CudaAdError::LaunchConfigTooLarge { gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+            return Err(CudaAdError::LaunchConfigTooLarge {
+                gx: grid.0,
+                gy: grid.1,
+                gz: grid.2,
+                bx: block.0,
+                by: block.1,
+                bz: block.2,
+            });
         }
         Ok(())
     }
@@ -145,7 +192,6 @@ impl CudaAd {
         Ok(n)
     }
 
-    // --- Single series (row-major kernel supports multiple, we pass n_series=1) ---
     fn launch_series_kernel(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -156,10 +202,11 @@ impl CudaAd {
         n_series: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAdError> {
-        let func = self
-            .module
-            .get_function("ad_series_f32")
-            .map_err(|_| CudaAdError::MissingKernelSymbol { name: "ad_series_f32" })?;
+        let func = self.module.get_function("ad_series_f32").map_err(|_| {
+            CudaAdError::MissingKernelSymbol {
+                name: "ad_series_f32",
+            }
+        })?;
 
         let block_x: u32 = 256;
         let grid_x = ((n_series as u32) + block_x - 1) / block_x;
@@ -204,7 +251,6 @@ impl CudaAd {
     ) -> Result<DeviceArrayF32, CudaAdError> {
         let len = Self::validate_hlcv(high, low, close, volume)?;
 
-        // Rough VRAM estimate: 4 inputs + 1 output, plus headroom
         let bytes_inputs = 4usize
             .checked_mul(len)
             .ok_or_else(|| CudaAdError::InvalidInput("size overflow".into()))?
@@ -218,29 +264,35 @@ impl CudaAd {
             .ok_or_else(|| CudaAdError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Pinned host buffers for async HtoD copies
         let h_high = LockedBuffer::from_slice(high).map_err(CudaAdError::Cuda)?;
         let h_low = LockedBuffer::from_slice(low).map_err(CudaAdError::Cuda)?;
         let h_close = LockedBuffer::from_slice(close).map_err(CudaAdError::Cuda)?;
         let h_vol = LockedBuffer::from_slice(volume).map_err(CudaAdError::Cuda)?;
 
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }
-            .map_err(CudaAdError::Cuda)?;
+        let mut d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_vol: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
 
-        // Async copies on the stream
         unsafe {
-            d_high.async_copy_from(h_high.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_low.async_copy_from(h_low.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_close.async_copy_from(h_close.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_vol.async_copy_from(h_vol.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
+            d_high
+                .async_copy_from(h_high.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_low
+                .async_copy_from(h_low.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_close
+                .async_copy_from(h_close.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_vol
+                .async_copy_from(h_vol.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
         }
 
         self.launch_series_kernel(&d_high, &d_low, &d_close, &d_vol, len, 1, &mut d_out)?;
@@ -253,7 +305,6 @@ impl CudaAd {
         })
     }
 
-    // --- Many-series, time-major ---
     fn launch_many_series_kernel(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -267,11 +318,11 @@ impl CudaAd {
         let func = self
             .module
             .get_function("ad_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaAdError::MissingKernelSymbol { name: "ad_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaAdError::MissingKernelSymbol {
+                name: "ad_many_series_one_param_time_major_f32",
+            })?;
 
-        // Time-major fast path: one thread per series with coalesced loads across a warp.
-        // Use a larger block so many threads process many series concurrently.
-        let block_x: u32 = 256; // should match/default to AD_BLOCK_SIZE_TM in the kernel
+        let block_x: u32 = 256;
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -332,7 +383,6 @@ impl CudaAd {
             ));
         }
 
-        // VRAM estimate: 4 inputs + 1 output
         let bytes_inputs = 4usize
             .checked_mul(elems)
             .ok_or_else(|| CudaAdError::InvalidInput("size overflow".into()))?
@@ -346,47 +396,52 @@ impl CudaAd {
             .ok_or_else(|| CudaAdError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Pinned host + async copies
         let h_high = LockedBuffer::from_slice(high_tm).map_err(CudaAdError::Cuda)?;
         let h_low = LockedBuffer::from_slice(low_tm).map_err(CudaAdError::Cuda)?;
         let h_close = LockedBuffer::from_slice(close_tm).map_err(CudaAdError::Cuda)?;
         let h_vol = LockedBuffer::from_slice(volume_tm).map_err(CudaAdError::Cuda)?;
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAdError::Cuda)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }
-            .map_err(CudaAdError::Cuda)?;
+        let mut d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_vol: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
 
         unsafe {
-            d_high.async_copy_from(h_high.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_low.async_copy_from(h_low.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_close.async_copy_from(h_close.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_vol.async_copy_from(h_vol.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
+            d_high
+                .async_copy_from(h_high.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_low
+                .async_copy_from(h_low.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_close
+                .async_copy_from(h_close.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_vol
+                .async_copy_from(h_vol.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
         }
 
         self.launch_many_series_kernel(&d_high, &d_low, &d_close, &d_vol, cols, rows, &mut d_out)?;
-        // Synchronize the producing stream so Python __cuda_array_interface__ can omit 'stream'.
+
         self.stream.synchronize().map_err(CudaAdError::Cuda)?;
 
         Ok(DeviceArrayF32 {
             buf: d_out,
-            rows, // time-major rows
-            cols, // number of series
+            rows,
+            cols,
         })
     }
 
-    /// Expose the internal CUDA stream for async pipelines.
     #[inline]
     pub fn stream(&self) -> &Stream {
         &self.stream
     }
 
-    /// Async variant: single-series; no forced synchronize.
     pub fn ad_series_dev_async(
         &self,
         high: &[f32],
@@ -414,17 +469,30 @@ impl CudaAd {
         let h_close = LockedBuffer::from_slice(close).map_err(CudaAdError::Cuda)?;
         let h_vol = LockedBuffer::from_slice(volume).map_err(CudaAdError::Cuda)?;
 
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
-        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_vol: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaAdError::Cuda)?;
 
         unsafe {
-            d_high.async_copy_from(h_high.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_low.async_copy_from(h_low.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_close.async_copy_from(h_close.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_vol.async_copy_from(h_vol.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
+            d_high
+                .async_copy_from(h_high.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_low
+                .async_copy_from(h_low.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_close
+                .async_copy_from(h_close.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_vol
+                .async_copy_from(h_vol.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
         }
         self.launch_series_kernel(&d_high, &d_low, &d_close, &d_vol, len, 1, &mut d_out)?;
         Ok(DeviceArrayF32 {
@@ -434,7 +502,6 @@ impl CudaAd {
         })
     }
 
-    /// Async variant: many-series time-major; no forced synchronize.
     pub fn ad_many_series_one_param_time_major_dev_async(
         &self,
         high_tm: &[f32],
@@ -479,17 +546,30 @@ impl CudaAd {
         let h_low = LockedBuffer::from_slice(low_tm).map_err(CudaAdError::Cuda)?;
         let h_close = LockedBuffer::from_slice(close_tm).map_err(CudaAdError::Cuda)?;
         let h_vol = LockedBuffer::from_slice(volume_tm).map_err(CudaAdError::Cuda)?;
-        let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
-        let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
-        let mut d_close: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
-        let mut d_vol: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_vol: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaAdError::Cuda)?;
 
         unsafe {
-            d_high.async_copy_from(h_high.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_low.async_copy_from(h_low.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_close.async_copy_from(h_close.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
-            d_vol.async_copy_from(h_vol.as_slice(), &self.stream).map_err(CudaAdError::Cuda)?;
+            d_high
+                .async_copy_from(h_high.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_low
+                .async_copy_from(h_low.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_close
+                .async_copy_from(h_close.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
+            d_vol
+                .async_copy_from(h_vol.as_slice(), &self.stream)
+                .map_err(CudaAdError::Cuda)?;
         }
         self.launch_many_series_kernel(&d_high, &d_low, &d_close, &d_vol, cols, rows, &mut d_out)?;
         Ok(DeviceArrayF32 {
@@ -499,7 +579,6 @@ impl CudaAd {
         })
     }
 
-    /// Device-to-device overload: row-major.
     pub fn ad_series_device_inplace(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -513,7 +592,6 @@ impl CudaAd {
         self.launch_series_kernel(d_high, d_low, d_close, d_volume, len, n_series, d_out)
     }
 
-    /// Device-to-device overload: time-major many-series.
     pub fn ad_many_series_one_param_time_major_device_inplace(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -536,8 +614,6 @@ impl CudaAd {
     }
 }
 
-// ---------- Bench profiles ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -548,7 +624,6 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series() -> usize {
-        // 4 inputs + 1 output
         let in_bytes = 4 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 32 * 1024 * 1024
@@ -646,7 +721,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("ad many-series kernel");
-            self.cuda.stream().synchronize().expect("ad many-series sync");
+            self.cuda
+                .stream()
+                .synchronize()
+                .expect("ad many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {

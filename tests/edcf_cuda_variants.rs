@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::edcf::{
     edcf_batch_with_kernel, EdcfBatchRange, EdcfBuilder, EdcfParams,
 };
@@ -43,7 +41,6 @@ fn gen_time_major_f64(cols: usize, rows: usize) -> Vec<f64> {
     let mut v = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         for t in (j + 1)..rows {
-            
             let x = t as f64 + j as f64 * 0.07;
             v[t * cols + j] = (x * 0.003).cos() + 0.0009 * x;
         }
@@ -64,15 +61,14 @@ fn compare_batch(
     }
 
     let data = gen_series_f64(series_len, 3);
-    
+
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let data_q: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
     let sweep = EdcfBatchRange {
         period: (start_period, end_period, 1),
     };
 
-    let cpu =
-        edcf_batch_with_kernel(&data_q, &sweep, Kernel::ScalarBatch).expect("cpu edcf batch");
+    let cpu = edcf_batch_with_kernel(&data_q, &sweep, Kernel::ScalarBatch).expect("cpu edcf batch");
 
     let mut cuda = CudaEdcf::new_with_policy(0, policy).expect("cuda edcf");
     let dev = cuda
@@ -84,7 +80,6 @@ fn compare_batch(
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host).expect("copy D2H");
 
-    
     let (atol, rtol) = (1e-2, 3e-2);
     for i in 0..host.len() {
         let a = cpu.values[i];
@@ -107,14 +102,13 @@ fn compare_many_series(policy: CudaEdcfPolicy, cols: usize, rows: usize, period:
     }
 
     let tm = gen_time_major_f64(cols, rows);
-    
+
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let tm_q: Vec<f64> = tm_f32.iter().map(|&v| v as f64).collect();
     let params = EdcfParams {
         period: Some(period),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
@@ -139,8 +133,6 @@ fn compare_many_series(policy: CudaEdcfPolicy, cols: usize, rows: usize, period:
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host).expect("copy D2H");
 
-    
-    
     let (atol, rtol) = (1e-2, 5e-2);
     for i in 0..host.len() {
         let a = cpu_tm[i];

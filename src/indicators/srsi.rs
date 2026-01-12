@@ -1,29 +1,11 @@
-//! # Stochastic RSI (SRSI)
-//!
-//! A momentum oscillator that applies the Stochastic formula to RSI values instead of price data.
-//!
-//! ## Parameters
-//! - **rsi_period**: Period for RSI calculation (default: 14).
-//! - **stoch_period**: Period for Stochastic calculation on RSI (default: 14).
-//! - **k**: Period for slow K MA (default: 3).
-//! - **d**: Period for slow D MA (default: 3).
-//! - **source**: Candle field (default: "close").
-//!
-//! ## Errors
-//! - **RsiError**: Error from RSI calculation.
-//! - **StochError**: Error from Stochastic calculation.
-//!
-//! ## Returns
-//! - **`Ok(SrsiOutput)`** on success, containing vectors `k` and `d`.
-//! - **`Err(SrsiError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **Decision log**: SIMD paths delegate to the scalar kernel; CUDA wrapper is available and returns VRAM handles consumed via CUDA Array Interface v3 and DLPack v1.x; numerical outputs match the scalar reference.
-//! - Scalar optimized: inlined Wilder RSI + O(n) min/max via block prefix/suffix scans (avoids per-iteration modulo) and rolling SMAs. Defaults (14,14,3,3) use classic path for bitwise-identical outputs.
-//! - **AVX2/AVX512 Kernels**: Delegated to scalar for now; sliding-window min/max is branchy and memory-bound, so SIMD shows no clear win. Revisit with alternative layouts if profiling warrants.
-//! - **Streaming**: Enabled O(1) per-tick kernel using Wilder RSI + monotonic deques for Stoch window and rolling SMAs for K/D; matches scalar outputs after warmup.
-//! - **Memory Optimization**: Batch mode uses RSI result caching to avoid redundant calculations across parameter combinations. Uses zero-copy helper functions for output allocation.
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -33,19 +15,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::rsi::{rsi, RsiError, RsiInput, RsiOutput, RsiParams};
@@ -95,7 +69,10 @@ pub struct SrsiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SrsiParams {
     pub rsi_period: Option<usize>,
     pub stoch_period: Option<usize>,
@@ -264,7 +241,9 @@ pub enum SrsiError {
     AllValuesNaN,
     #[error("srsi: Invalid period {period} for data length {data_len}.")]
     InvalidPeriod { period: usize, data_len: usize },
-    #[error("srsi: Not enough valid data for the requested period. needed={needed}, valid={valid}")]
+    #[error(
+        "srsi: Not enough valid data for the requested period. needed={needed}, valid={valid}"
+    )]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("srsi: Output length mismatch - destination buffers must match input data length. Expected {expected}, got k={k_len}, d={d_len}")]
     OutputLengthMismatch {
@@ -307,10 +286,7 @@ pub fn srsi_with_kernel(input: &SrsiInput, kernel: Kernel) -> Result<SrsiOutput,
     let k_len = input.get_k();
     let d_len = input.get_d();
 
-    let needed = rsi_period
-        .max(stoch_period)
-        .max(k_len)
-        .max(d_len);
+    let needed = rsi_period.max(stoch_period).max(k_len).max(d_len);
     let valid = len - first;
     if valid < needed {
         return Err(SrsiError::NotEnoughValidData { needed, valid });
@@ -347,12 +323,10 @@ pub unsafe fn srsi_scalar(
     k_period: usize,
     d_period: usize,
 ) -> Result<SrsiOutput, SrsiError> {
-    
     if rsi_period == 14 && stoch_period == 14 && k_period == 3 && d_period == 3 {
         return srsi_scalar_classic(data, rsi_period, stoch_period, k_period, d_period);
     }
 
-    
     let n = data.len();
     if n == 0 {
         return Err(SrsiError::EmptyInputData);
@@ -375,7 +349,6 @@ pub unsafe fn srsi_scalar(
         });
     }
 
-    
     let rsi_warmup = first + rsi_period;
     let stoch_warmup = rsi_warmup + stoch_period - 1;
     let k_warmup = stoch_warmup + k_period - 1;
@@ -388,12 +361,10 @@ pub unsafe fn srsi_scalar(
         });
     }
 
-    
     let mut rsi_vals = alloc_with_nan_prefix(n, rsi_warmup);
     let mut k_out = alloc_with_nan_prefix(n, k_warmup);
     let mut d_out = alloc_with_nan_prefix(n, d_warmup);
 
-    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     let mut prev = *data.get_unchecked(first);
@@ -416,7 +387,6 @@ pub unsafe fn srsi_scalar(
     avg_loss /= rp;
     let alpha = 1.0f64 / rp;
 
-    
     if rsi_warmup < n {
         rsi_vals[rsi_warmup] = if avg_loss == 0.0 {
             100.0
@@ -426,7 +396,6 @@ pub unsafe fn srsi_scalar(
         };
     }
 
-    
     prev = *data.get_unchecked(rsi_warmup);
     for i in (rsi_warmup + 1)..n {
         let cur = *data.get_unchecked(i);
@@ -446,7 +415,6 @@ pub unsafe fn srsi_scalar(
         prev = cur;
     }
 
-    
     let sp = stoch_period;
     let kp = k_period;
     let dp = d_period;
@@ -454,13 +422,11 @@ pub unsafe fn srsi_scalar(
         let m = n - rsi_warmup;
         let base = rsi_warmup;
 
-        
         let mut pref_max = vec![0.0f64; m];
         let mut suff_max = vec![0.0f64; m];
         let mut pref_min = vec![0.0f64; m];
         let mut suff_min = vec![0.0f64; m];
 
-        
         let blocks = (m + sp - 1) / sp;
         let p_pref_max = pref_max.as_mut_ptr();
         let p_pref_min = pref_min.as_mut_ptr();
@@ -486,7 +452,7 @@ pub unsafe fn srsi_scalar(
                 }
             }
         }
-        
+
         let p_suff_max = suff_max.as_mut_ptr();
         let p_suff_min = suff_min.as_mut_ptr();
         for b in 0..blocks {
@@ -513,7 +479,6 @@ pub unsafe fn srsi_scalar(
             }
         }
 
-        
         let mut sum_k = 0.0f64;
         let mut sum_d = 0.0f64;
         let mut fk_ring = vec![0.0f64; kp];
@@ -525,7 +490,7 @@ pub unsafe fn srsi_scalar(
         let mut i = i0;
         while i < n {
             let t = i - base;
-            let t_start = t + 1 - sp; 
+            let t_start = t + 1 - sp;
             let hi_l = suff_max[t_start];
             let hi_r = pref_max[t];
             let lo_l = suff_min[t_start];
@@ -626,8 +591,6 @@ pub unsafe fn srsi_avx512_long(
     srsi_scalar(data, rsi_period, stoch_period, k, d)
 }
 
-/// Classic kernel optimization for SRSI with inline RSI and Stochastic calculations
-/// Eliminates function call overhead for RSI and Stochastic operations
 #[inline]
 pub unsafe fn srsi_scalar_classic(
     data: &[f64],
@@ -645,7 +608,6 @@ pub unsafe fn srsi_scalar_classic(
         .position(|x| !x.is_nan())
         .ok_or(SrsiError::AllValuesNaN)?;
 
-    
     let rsi_warmup = first + rsi_period;
     let stoch_warmup = rsi_warmup + stoch_period - 1;
     let k_warmup = stoch_warmup + k_period - 1;
@@ -658,10 +620,8 @@ pub unsafe fn srsi_scalar_classic(
         });
     }
 
-    
     let mut rsi_values = alloc_with_nan_prefix(n, rsi_warmup);
 
-    
     let mut avg_gain = 0.0;
     let mut avg_loss = 0.0;
     let mut prev = data[first];
@@ -681,7 +641,6 @@ pub unsafe fn srsi_scalar_classic(
     avg_gain /= rsi_period as f64;
     avg_loss /= rsi_period as f64;
 
-    
     let alpha = 1.0 / rsi_period as f64;
     let alpha_1minus = 1.0 - alpha;
 
@@ -717,10 +676,8 @@ pub unsafe fn srsi_scalar_classic(
         }
     }
 
-    
     let mut fast_k = alloc_with_nan_prefix(n, stoch_warmup);
 
-    
     for i in stoch_warmup..n {
         let start = i + 1 - stoch_period;
         let mut min_rsi = f64::MAX;
@@ -736,14 +693,12 @@ pub unsafe fn srsi_scalar_classic(
         if max_rsi > min_rsi {
             fast_k[i] = 100.0 * (rsi_values[i] - min_rsi) / (max_rsi - min_rsi);
         } else {
-            fast_k[i] = 50.0; 
+            fast_k[i] = 50.0;
         }
     }
 
-    
     let mut slow_k = alloc_with_nan_prefix(n, k_warmup);
 
-    
     let mut k_sum = 0.0;
     for i in stoch_warmup..(stoch_warmup + k_period).min(n) {
         if fast_k[i].is_finite() {
@@ -754,7 +709,6 @@ pub unsafe fn srsi_scalar_classic(
     if stoch_warmup + k_period <= n {
         slow_k[stoch_warmup + k_period - 1] = k_sum / k_period as f64;
 
-        
         for i in (stoch_warmup + k_period)..n {
             if fast_k[i].is_finite() && fast_k[i - k_period].is_finite() {
                 k_sum += fast_k[i] - fast_k[i - k_period];
@@ -763,10 +717,8 @@ pub unsafe fn srsi_scalar_classic(
         }
     }
 
-    
     let mut slow_d = alloc_with_nan_prefix(n, d_warmup);
 
-    
     let mut d_sum = 0.0;
     for i in k_warmup..(k_warmup + d_period).min(n) {
         if slow_k[i].is_finite() {
@@ -777,7 +729,6 @@ pub unsafe fn srsi_scalar_classic(
     if k_warmup + d_period <= n {
         slow_d[k_warmup + d_period - 1] = d_sum / d_period as f64;
 
-        
         for i in (k_warmup + d_period)..n {
             if slow_k[i].is_finite() && slow_k[i - d_period].is_finite() {
                 d_sum += slow_k[i] - slow_k[i - d_period];
@@ -866,38 +817,32 @@ pub fn srsi_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct SrsiStream {
-    
     rsi_period: usize,
     stoch_period: usize,
     k_period: usize,
     d_period: usize,
 
-    
-    prev: f64, 
+    prev: f64,
     has_prev: bool,
-    init_count: usize, 
+    init_count: usize,
     sum_gain: f64,
     sum_loss: f64,
     avg_gain: f64,
     avg_loss: f64,
-    alpha: f64, 
+    alpha: f64,
     rsi_ready: bool,
-    rsi_index: usize, 
+    rsi_index: usize,
     last_rsi: f64,
 
-    
-    
-    max_q: VecDeque<(usize, f64)>, 
-    min_q: VecDeque<(usize, f64)>, 
+    max_q: VecDeque<(usize, f64)>,
+    min_q: VecDeque<(usize, f64)>,
 
-    
     fk_ring: Vec<f64>,
     fk_sum: f64,
     fk_pos: usize,
     fk_count: usize,
     inv_k: f64,
 
-    
     sk_ring: Vec<f64>,
     sk_sum: f64,
     sk_pos: usize,
@@ -914,10 +859,7 @@ impl SrsiStream {
 
         if rsi_period == 0 || stoch_period == 0 || k_period == 0 || d_period == 0 {
             return Err(SrsiError::InvalidPeriod {
-                period: rsi_period
-                    .max(stoch_period)
-                    .max(k_period)
-                    .max(d_period),
+                period: rsi_period.max(stoch_period).max(k_period).max(d_period),
                 data_len: 0,
             });
         }
@@ -957,7 +899,6 @@ impl SrsiStream {
         })
     }
 
-    /// Reset the streaming state (keeps parameterization).
     #[inline]
     pub fn reset(&mut self) {
         self.prev = f64::NAN;
@@ -982,28 +923,21 @@ impl SrsiStream {
         self.sk_count = 0;
     }
 
-    /// Push one price; returns Some((slow_k, slow_d)) only after full warmup,
-    /// else returns None during warmup.
-    ///
-    /// Complexity: amortized O(1) per call.
     pub fn update(&mut self, v: f64) -> Option<(f64, f64)> {
         if !v.is_finite() {
-            
             self.reset();
             return None;
         }
 
-        
         if !self.has_prev {
             self.prev = v;
             self.has_prev = true;
-            return None; 
+            return None;
         }
 
         let ch = v - self.prev;
         self.prev = v;
 
-        
         if !self.rsi_ready {
             if ch > 0.0 {
                 self.sum_gain += ch;
@@ -1013,13 +947,12 @@ impl SrsiStream {
             self.init_count += 1;
 
             if self.init_count < self.rsi_period {
-                return None; 
+                return None;
             }
-            
+
             self.avg_gain = self.sum_gain / (self.rsi_period as f64);
             self.avg_loss = self.sum_loss / (self.rsi_period as f64);
 
-            
             let rsi = if self.avg_loss == 0.0 {
                 100.0
             } else {
@@ -1030,13 +963,11 @@ impl SrsiStream {
             self.rsi_ready = true;
             self.rsi_index = 0;
 
-            
             self.push_rsi_to_deques(self.rsi_index, rsi);
-            
+
             return None;
         }
 
-        
         let gain = if ch > 0.0 { ch } else { 0.0 };
         let loss = if ch < 0.0 { -ch } else { 0.0 };
         self.avg_gain = (gain - self.avg_gain).mul_add(self.alpha, self.avg_gain);
@@ -1050,18 +981,15 @@ impl SrsiStream {
         };
         self.last_rsi = rsi;
 
-        
         self.rsi_index += 1;
         self.push_rsi_to_deques(self.rsi_index, rsi);
 
-        
         if self.rsi_index + 1 < self.stoch_period {
             return None;
         }
 
-        
         let start = self.rsi_index + 1 - self.stoch_period;
-        
+
         while let Some(&(j, _)) = self.max_q.front() {
             if j < start {
                 self.max_q.pop_front();
@@ -1081,16 +1009,13 @@ impl SrsiStream {
         let hi = self.max_q.front().unwrap().1;
         let lo = self.min_q.front().unwrap().1;
 
-        
         let fast_k = if hi > lo {
-            
             let range = hi - lo;
             ((rsi - lo) * 100.0) / range
         } else {
             50.0
         };
 
-        
         let slow_k_opt = Self::push_sma(
             fast_k,
             &mut self.fk_ring,
@@ -1102,11 +1027,10 @@ impl SrsiStream {
         );
 
         let slow_k = match slow_k_opt {
-            None => return None, 
+            None => return None,
             Some(v) => v,
         };
 
-        
         let slow_d_opt = Self::push_sma(
             slow_k,
             &mut self.sk_ring,
@@ -1122,7 +1046,6 @@ impl SrsiStream {
 
     #[inline(always)]
     fn push_rsi_to_deques(&mut self, idx: usize, rsi: f64) {
-        
         while let Some(&(_, v)) = self.max_q.back() {
             if v <= rsi {
                 self.max_q.pop_back();
@@ -1132,10 +1055,9 @@ impl SrsiStream {
         }
         if self.max_q.len() == self.stoch_period {
             self.max_q.pop_front();
-        } 
+        }
         self.max_q.push_back((idx, rsi));
 
-        
         while let Some(&(_, v)) = self.min_q.back() {
             if v >= rsi {
                 self.min_q.pop_back();
@@ -1145,7 +1067,7 @@ impl SrsiStream {
         }
         if self.min_q.len() == self.stoch_period {
             self.min_q.pop_front();
-        } 
+        }
         self.min_q.push_back((idx, rsi));
     }
 
@@ -1313,11 +1235,7 @@ fn expand_grid(r: &SrsiBatchRange) -> Result<Vec<SrsiParams>, SrsiError> {
     let ks = axis(r.k)?;
     let ds = axis(r.d)?;
 
-    if rsi_periods.is_empty()
-        || stoch_periods.is_empty()
-        || ks.is_empty()
-        || ds.is_empty()
-    {
+    if rsi_periods.is_empty() || stoch_periods.is_empty() || ks.is_empty() || ds.is_empty() {
         return Err(SrsiError::InvalidRange {
             start: r.rsi_period.0.to_string(),
             end: r.rsi_period.1.to_string(),
@@ -1325,8 +1243,7 @@ fn expand_grid(r: &SrsiBatchRange) -> Result<Vec<SrsiParams>, SrsiError> {
         });
     }
 
-    let mut out =
-        Vec::with_capacity(rsi_periods.len() * stoch_periods.len() * ks.len() * ds.len());
+    let mut out = Vec::with_capacity(rsi_periods.len() * stoch_periods.len() * ks.len() * ds.len());
     for &rsi_p in &rsi_periods {
         for &stoch_p in &stoch_periods {
             for &k in &ks {
@@ -1406,13 +1323,12 @@ fn srsi_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(SrsiError::AllValuesNaN)?;
 
-    
     use std::collections::{BTreeMap, BTreeSet};
     let mut rsi_cache: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
     let uniq_rsi: BTreeSet<usize> = combos.iter().map(|c| c.rsi_period.unwrap()).collect();
     for rp in uniq_rsi {
         let rsi_in = RsiInput::from_slice(data, RsiParams { period: Some(rp) });
-        let rsi_out = rsi(&rsi_in)?; 
+        let rsi_out = rsi(&rsi_in)?;
         rsi_cache.insert(rp, rsi_out.values);
     }
 
@@ -1437,7 +1353,6 @@ fn srsi_batch_inner_into(
 
     let cols = data.len();
 
-    
     let do_row = |row: usize, k_row: &mut [f64], d_row: &mut [f64]| -> Result<(), SrsiError> {
         let prm = &combos[row];
         let rsi_vals = rsi_cache.get(&prm.rsi_period.unwrap()).expect("cached rsi");
@@ -1455,7 +1370,7 @@ fn srsi_batch_inner_into(
                 slowd_ma_type: Some("sma".to_string()),
             },
         };
-        let st = stoch(&st_in)?; 
+        let st = stoch(&st_in)?;
         k_row.copy_from_slice(&st.k);
         d_row.copy_from_slice(&st.d);
         Ok(())
@@ -1532,13 +1447,14 @@ fn srsi_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let _ = rows.checked_mul(cols).ok_or_else(|| SrsiError::InvalidRange {
-        start: sweep.rsi_period.0.to_string(),
-        end: sweep.rsi_period.1.to_string(),
-        step: sweep.rsi_period.2.to_string(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| SrsiError::InvalidRange {
+            start: sweep.rsi_period.0.to_string(),
+            end: sweep.rsi_period.1.to_string(),
+            step: sweep.rsi_period.2.to_string(),
+        })?;
 
-    
     if rows == 1 {
         let prm = &combos[0];
         let res = unsafe {
@@ -1607,13 +1523,12 @@ fn srsi_batch_inner(
     let mut k_vals = make_uninit_matrix(rows, cols);
     let mut d_vals = make_uninit_matrix(rows, cols);
 
-    
     fn warm_for(c: &SrsiParams, first: usize) -> usize {
         let rp = c.rsi_period.unwrap();
         let sp = c.stoch_period.unwrap();
         let kp = c.k.unwrap();
         let dp = c.d.unwrap();
-        
+
         first + rp - 1 + sp - 1 + kp.max(dp) - 1
     }
 
@@ -1625,7 +1540,6 @@ fn srsi_batch_inner(
     init_matrix_prefixes(&mut k_vals, cols, &warmup_periods);
     init_matrix_prefixes(&mut d_vals, cols, &warmup_periods);
 
-    
     let mut k_guard = core::mem::ManuallyDrop::new(k_vals);
     let mut d_guard = core::mem::ManuallyDrop::new(d_vals);
     let k_out: &mut [f64] =
@@ -1633,10 +1547,8 @@ fn srsi_batch_inner(
     let d_out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
 
-    
     let combos = srsi_batch_inner_into(data, sweep, kern, parallel, k_out, d_out)?;
 
-    
     let k_values = unsafe {
         Vec::from_raw_parts(
             k_guard.as_mut_ptr() as *mut f64,
@@ -1667,7 +1579,6 @@ pub fn expand_grid_srsi(r: &SrsiBatchRange) -> Result<Vec<SrsiParams>, SrsiError
     expand_grid(r)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "SrsiDeviceArrayF32", unsendable)]
 pub struct SrsiDeviceArrayF32Py {
@@ -1687,8 +1598,7 @@ impl SrsiDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producing CUDA stream is synchronized before returning the handle,
-        // so we omit the "stream" key per CAI v3 guidance.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1706,9 +1616,6 @@ impl SrsiDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Array API stream semantics: producer work is already synchronized;
-        // we only validate obvious misuses such as `stream=0` when an integer
-        // handle is provided, then ignore the hint.
         if let Some(sobj) = stream.as_ref() {
             if let Ok(s) = sobj.extract::<usize>(py) {
                 if s == 0 {
@@ -1719,8 +1626,6 @@ impl SrsiDeviceArrayF32Py {
             }
         }
 
-        // Compute target device id and validate `dl_device` hint if provided,
-        // matching the shared CUDA DLPack helper semantics.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1742,7 +1647,6 @@ impl SrsiDeviceArrayF32Py {
             }
         }
 
-        // copy=True is not supported (no cross-device copy path here).
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -1752,15 +1656,17 @@ impl SrsiDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; after this call the capsule
-        // owns the buffer, as required by the DLPack producer contract.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = self.inner.rows;
         let cols = self.inner.cols;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let buf = inner.buf;
@@ -1807,8 +1713,7 @@ pub fn srsi_cuda_batch_dev_py<'py>(
         d: d_range,
     };
     let ((pair, combos), ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let res = cuda
@@ -1901,8 +1806,7 @@ pub fn srsi_cuda_many_series_one_param_dev_py<'py>(
         source: None,
     };
     let (pair, ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaSrsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let res = cuda
@@ -1944,7 +1848,6 @@ pub fn srsi_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    
     if matches!(rsi_period, Some(0))
         || matches!(stoch_period, Some(0))
         || matches!(k, Some(0))
@@ -2041,7 +1944,6 @@ pub fn srsi_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
@@ -2099,7 +2001,6 @@ pub fn srsi_batch_py<'py>(
     Ok(dict)
 }
 
-/// Write SRSI outputs directly to slices - no allocations
 pub fn srsi_into_slice(
     dst_k: &mut [f64],
     dst_d: &mut [f64],
@@ -2116,7 +2017,6 @@ pub fn srsi_into_slice(
         });
     }
 
-    
     let out = srsi_with_kernel(input, kern)?;
     dst_k.copy_from_slice(&out.k);
     dst_d.copy_from_slice(&out.d);
@@ -2124,18 +2024,13 @@ pub fn srsi_into_slice(
     Ok(())
 }
 
-/// Write SRSI outputs into caller-provided buffers without allocating output vectors.
-///
-/// - Preserves NaN warmup prefixes exactly like `srsi()`/`srsi_with_kernel()`.
-/// - `out_k.len()` and `out_d.len()` must equal the input length.
-/// - Uses `Kernel::Auto` for internal dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn srsi_into(input: &SrsiInput, out_k: &mut [f64], out_d: &mut [f64]) -> Result<(), SrsiError> {
     srsi_into_slice(out_k, out_d, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srsi_js(
     data: &[f64],
@@ -2163,7 +2058,6 @@ pub fn srsi_js(
     let out = srsi_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&format!("srsi: {}", e)))?;
 
-    
     let mut values = Vec::with_capacity(2 * data.len());
     values.extend_from_slice(&out.k);
     values.extend_from_slice(&out.d);
@@ -2171,7 +2065,7 @@ pub fn srsi_js(
     Ok(values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srsi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2180,7 +2074,7 @@ pub fn srsi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srsi_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2188,7 +2082,7 @@ pub fn srsi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srsi_into(
     in_ptr: usize,
@@ -2216,7 +2110,6 @@ pub fn srsi_into(
         };
         let input = SrsiInput::from_slice(data, params);
 
-        
         let needs_temp = in_ptr == k_ptr || in_ptr == d_ptr || k_ptr == d_ptr;
 
         if needs_temp {
@@ -2240,7 +2133,7 @@ pub fn srsi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SrsiBatchConfig {
     pub rsi_period_range: (usize, usize, usize),
@@ -2249,17 +2142,17 @@ pub struct SrsiBatchConfig {
     pub d_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SrsiBatchJsOutput {
-    pub k_values: Vec<f64>, 
-    pub d_values: Vec<f64>, 
-    pub rows: usize,        
-    pub cols: usize,        
+    pub k_values: Vec<f64>,
+    pub d_values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
     pub combos: Vec<SrsiParams>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = srsi_batch)]
 pub fn srsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: SrsiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2287,7 +2180,7 @@ pub fn srsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn srsi_batch_into(
     in_ptr: usize,
@@ -2448,67 +2341,66 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            SrsiParams::default(), 
+            SrsiParams::default(),
             SrsiParams {
-                rsi_period: Some(2), 
+                rsi_period: Some(2),
                 stoch_period: Some(2),
                 k: Some(2),
                 d: Some(2),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(5), 
+                rsi_period: Some(5),
                 stoch_period: Some(5),
                 k: Some(3),
                 d: Some(3),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(10), 
+                rsi_period: Some(10),
                 stoch_period: Some(10),
                 k: Some(5),
                 d: Some(5),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(20), 
+                rsi_period: Some(20),
                 stoch_period: Some(20),
                 k: Some(7),
                 d: Some(7),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(50), 
+                rsi_period: Some(50),
                 stoch_period: Some(50),
                 k: Some(10),
                 d: Some(10),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(7), 
+                rsi_period: Some(7),
                 stoch_period: Some(14),
                 k: Some(3),
                 d: Some(5),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(14), 
+                rsi_period: Some(14),
                 stoch_period: Some(7),
                 k: Some(5),
                 d: Some(3),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(21), 
+                rsi_period: Some(21),
                 stoch_period: Some(14),
                 k: Some(6),
                 d: Some(4),
                 source: None,
             },
             SrsiParams {
-                rsi_period: Some(100), 
+                rsi_period: Some(100),
                 stoch_period: Some(100),
                 k: Some(20),
                 d: Some(20),
@@ -2520,15 +2412,13 @@ mod tests {
             let input = SrsiInput::from_candles(&candles, "close", params.clone());
             let output = srsi_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in K output \
@@ -2569,15 +2459,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in D output \
@@ -2624,7 +2512,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_srsi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2636,12 +2524,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=20, 2usize..=20, 2usize..=10, 2usize..=10).prop_flat_map(
             |(rsi_period, stoch_period, k, d)| {
-                
-                
-                let min_data_needed = rsi_period + stoch_period.max(k).max(d) + 10; 
+                let min_data_needed = rsi_period + stoch_period.max(k).max(d) + 10;
                 (
                     prop::collection::vec(
                         (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
@@ -2666,19 +2551,13 @@ mod tests {
                 };
                 let input = SrsiInput::from_slice(&data, params.clone());
 
-                
                 let output_result = srsi_with_kernel(&input, kernel);
                 let ref_output_result = srsi_with_kernel(&input, Kernel::Scalar);
 
-                
                 match (output_result, ref_output_result) {
                     (Ok(output), Ok(ref_output)) => {
-                        
-                        
-                        
                         let expected_min_warmup = rsi_period;
 
-                        
                         for i in 0..data.len() {
                             if !output.k[i].is_nan() {
                                 prop_assert!(
@@ -2698,8 +2577,6 @@ mod tests {
                             }
                         }
 
-                        
-                        
                         for i in 0..expected_min_warmup.min(data.len()) {
                             prop_assert!(
                                 output.k[i].is_nan(),
@@ -2715,7 +2592,6 @@ mod tests {
                             );
                         }
 
-                        
                         let has_valid_k = output.k.iter().any(|&x| !x.is_nan());
                         let has_valid_d = output.d.iter().any(|&x| !x.is_nan());
                         if data.len() > rsi_period + stoch_period + k + d {
@@ -2729,7 +2605,6 @@ mod tests {
                             );
                         }
 
-                        
                         if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
                             let last_k = output.k[data.len() - 1];
                             let last_d = output.d[data.len() - 1];
@@ -2747,7 +2622,6 @@ mod tests {
                             }
                         }
 
-                        
                         let is_increasing = data.windows(2).all(|w| w[1] > w[0]);
                         if is_increasing && has_valid_k {
                             let last_k = output.k[data.len() - 1];
@@ -2760,7 +2634,6 @@ mod tests {
                             }
                         }
 
-                        
                         let is_decreasing = data.windows(2).all(|w| w[1] < w[0]);
                         if is_decreasing && has_valid_k {
                             let last_k = output.k[data.len() - 1];
@@ -2773,14 +2646,12 @@ mod tests {
                             }
                         }
 
-                        
                         for i in 0..data.len() {
                             let k_val = output.k[i];
                             let d_val = output.d[i];
                             let ref_k = ref_output.k[i];
                             let ref_d = ref_output.d[i];
 
-                            
                             if !k_val.is_finite() || !ref_k.is_finite() {
                                 prop_assert!(
                                     k_val.to_bits() == ref_k.to_bits(),
@@ -2790,7 +2661,6 @@ mod tests {
                                     ref_k
                                 );
                             } else {
-                                
                                 let k_ulp_diff = k_val.to_bits().abs_diff(ref_k.to_bits());
                                 prop_assert!(
                                     (k_val - ref_k).abs() <= 1e-9 || k_ulp_diff <= 4,
@@ -2823,7 +2693,6 @@ mod tests {
                             }
                         }
 
-                        
                         let output2 = srsi_with_kernel(&input, kernel).unwrap();
                         for i in 0..data.len() {
                             prop_assert!(
@@ -2842,9 +2711,7 @@ mod tests {
                             );
                         }
                     }
-                    (Err(_), Err(_)) => {
-                        
-                    }
+                    (Err(_), Err(_)) => {}
                     (Ok(_), Err(e)) => {
                         prop_assert!(false, "Kernel succeeded but scalar failed: {:?}", e);
                     }
@@ -2894,16 +2761,13 @@ mod tests {
 
     #[test]
     fn test_srsi_into_slice_size_mismatch() {
-        
-        
         let data: Vec<f64> = (1..=50).map(|x| x as f64).collect();
         let data_len = data.len();
         let params = SrsiParams::default();
         let input = SrsiInput::from_slice(&data, params);
 
-        
-        let mut k_small = vec![0.0; 30]; 
-        let mut d_correct = vec![0.0; data_len]; 
+        let mut k_small = vec![0.0; 30];
+        let mut d_correct = vec![0.0; data_len];
         let result = srsi_into_slice(&mut k_small, &mut d_correct, &input, Kernel::Scalar);
         match result {
             Err(SrsiError::OutputLengthMismatch {
@@ -2918,9 +2782,8 @@ mod tests {
             _ => panic!("Expected SizeMismatch error with k buffer too small"),
         }
 
-        
-        let mut k_correct = vec![0.0; data_len]; 
-        let mut d_small = vec![0.0; 35]; 
+        let mut k_correct = vec![0.0; data_len];
+        let mut d_small = vec![0.0; 35];
         let result = srsi_into_slice(&mut k_correct, &mut d_small, &input, Kernel::Scalar);
         match result {
             Err(SrsiError::OutputLengthMismatch {
@@ -2935,9 +2798,8 @@ mod tests {
             _ => panic!("Expected SizeMismatch error with d buffer too small"),
         }
 
-        
-        let mut k_wrong = vec![0.0; 60]; 
-        let mut d_wrong = vec![0.0; 70]; 
+        let mut k_wrong = vec![0.0; 60];
+        let mut d_wrong = vec![0.0; 70];
         let result = srsi_into_slice(&mut k_wrong, &mut d_wrong, &input, Kernel::Scalar);
         match result {
             Err(SrsiError::OutputLengthMismatch {
@@ -2952,7 +2814,6 @@ mod tests {
             _ => panic!("Expected SizeMismatch error with both buffers wrong size"),
         }
 
-        
         let mut k_ok = vec![0.0; data_len];
         let mut d_ok = vec![0.0; data_len];
         let result = srsi_into_slice(&mut k_ok, &mut d_ok, &input, Kernel::Scalar);
@@ -2968,28 +2829,22 @@ mod tests {
 
     #[test]
     fn test_srsi_into_matches_api() {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file).expect("load csv");
         let input = SrsiInput::from_candles(&c, "close", SrsiParams::default());
 
-        
         let base = srsi(&input).expect("srsi baseline");
 
-        
         let mut out_k = vec![0.0; c.close.len()];
         let mut out_d = vec![0.0; c.close.len()];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             srsi_into(&input, &mut out_k, &mut out_d).expect("srsi_into");
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
-            srsi_into_slice(&mut out_k, &mut out_d, &input, Kernel::Auto)
-                .expect("srsi_into_slice");
+            srsi_into_slice(&mut out_k, &mut out_d, &input, Kernel::Auto).expect("srsi_into_slice");
         }
 
         assert_eq!(base.k.len(), c.close.len());
@@ -3039,16 +2894,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            ((2, 10, 2), (2, 10, 2), (2, 4, 1), (2, 4, 1)), 
-            ((5, 25, 5), (5, 25, 5), (3, 7, 2), (3, 7, 2)), 
-            ((30, 60, 15), (30, 60, 15), (5, 10, 5), (5, 10, 5)), 
-            ((2, 5, 1), (2, 5, 1), (2, 3, 1), (2, 3, 1)),   
-            ((10, 30, 10), (5, 15, 5), (3, 6, 3), (3, 6, 3)), 
-            ((14, 14, 0), (14, 14, 0), (3, 3, 0), (3, 3, 0)), 
-            ((7, 21, 7), (14, 28, 14), (3, 9, 3), (3, 9, 3)), 
+            ((2, 10, 2), (2, 10, 2), (2, 4, 1), (2, 4, 1)),
+            ((5, 25, 5), (5, 25, 5), (3, 7, 2), (3, 7, 2)),
+            ((30, 60, 15), (30, 60, 15), (5, 10, 5), (5, 10, 5)),
+            ((2, 5, 1), (2, 5, 1), (2, 3, 1), (2, 3, 1)),
+            ((10, 30, 10), (5, 15, 5), (3, 6, 3), (3, 6, 3)),
+            ((14, 14, 0), (14, 14, 0), (3, 3, 0), (3, 3, 0)),
+            ((7, 21, 7), (14, 28, 14), (3, 9, 3), (3, 9, 3)),
         ];
 
         for (cfg_idx, &(rsi_range, stoch_range, k_range, d_range)) in
@@ -3062,7 +2915,6 @@ mod tests {
                 .d_range(d_range.0, d_range.1, d_range.2)
                 .apply_slice(&c.close)?;
 
-            
             for (idx, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3073,7 +2925,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in K output \
@@ -3111,7 +2962,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3122,7 +2972,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in D output \
@@ -3166,7 +3015,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {

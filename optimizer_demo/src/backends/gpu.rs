@@ -32,7 +32,7 @@ mod imp {
         let cols = slow_periods.len();
         let metrics = req.metrics.max(5).min(5);
 
-        
+
         fn values_or_range(p: &Option<serde_json::Value>, key: &str, default_val: f64) -> Vec<f64> {
             if let Some(j) = p {
                 if let Some(v) = j.get(key) {
@@ -66,10 +66,10 @@ mod imp {
         let layers = f_ext * s_ext;
         let mut out = vec![0f32; layers * rows * cols * metrics];
 
-        
+
         let alma = CudaAlma::new(0).map_err(|e| anyhow!(e.to_string()))?;
 
-        
+
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/double_crossover.ptx"));
         let module = Module::from_ptx(ptx, &[])?;
         let kernel = module.get_function("double_cross_backtest_f32")?;
@@ -79,13 +79,13 @@ mod imp {
         let d_fast_periods = DeviceBuffer::from_slice(&fast_periods.iter().map(|&p| p as i32).collect::<Vec<_>>())?;
         let d_slow_periods = DeviceBuffer::from_slice(&slow_periods.iter().map(|&p| p as i32).collect::<Vec<_>>())?;
 
-        
+
         let max_pf = *fast_periods.iter().max().unwrap();
         let max_ps = *slow_periods.iter().max().unwrap();
         let pf_tile = (rows).min(512);
         let ps_tile = (cols).min(512);
 
-        
+
         let mut d_fast_ma: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(pf_tile * t_len) }?;
         let mut d_slow_ma: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(ps_tile * t_len) }?;
         let mut d_fast_w: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(pf_tile * max_pf) }?;
@@ -96,11 +96,11 @@ mod imp {
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
         let block_x: u32 = 256;
-        
+
         let mut layer = 0usize;
         for &f_offv in &f_offs {
             for &f_sigv in &f_sigs {
-                
+
                 let mut f_ofs = 0usize;
                 while f_ofs < rows {
                     let pf = pf_tile.min(rows - f_ofs);
@@ -129,7 +129,7 @@ mod imp {
                                 let d_sp = DeviceBuffer::from_slice(&slow_periods[s_ofs..s_ofs+ps].iter().map(|&x| x as i32).collect::<Vec<_>>())?;
                                 alma.alma_batch_device(&d_prices, &d_slow_w, &d_sp, &d_slow_inv, max_ps as i32, t_len as i32, ps as i32, first_valid, &mut d_slow_ma).map_err(|e| anyhow!(e.to_string()))?;
 
-                                
+
                                 let pairs = pf * ps;
                                 let grid_x = ((pairs as u32) + block_x - 1) / block_x;
                                 let mut args: Vec<*mut c_void> = Vec::new();
@@ -167,7 +167,7 @@ mod imp {
                                     stream.synchronize()?;
                                     let mut host_tile = vec![0f32; pairs * metrics];
                                     d_tile.copy_to(&mut host_tile)?;
-                                    
+
                                     for i in 0..pf { for j in 0..ps {
                                         let f_idx = f_ofs + i; let s_idx = s_ofs + j;
                                         let base = (((layer * rows + f_idx) * cols + s_idx) * metrics) as usize;

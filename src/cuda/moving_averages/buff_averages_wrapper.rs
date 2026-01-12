@@ -1,11 +1,3 @@
-//! CUDA scaffolding for Buff Averages kernels.
-//!
-//! Upgraded to follow the ALMA "gold standard" conventions:
-//! - Policy-based kernel selection (plain vs tiled) with introspection
-//! - VRAM-awareness (optional mem_get_info) and deterministic launches
-//! - Bench profiles that preallocate and only launch kernels in the hot path
-//! - Host-side prefix sums (default) with a device-prefix launch path
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -24,8 +16,8 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -37,15 +29,24 @@ pub enum CudaBuffAveragesError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("out of memory on device: required ≈{required} bytes (incl headroom {headroom}), free={free}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("arithmetic overflow while computing {context}")]
     ArithmeticOverflow { context: &'static str },
-    #[error(
-        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device/context mismatch: buffer on device {buf}, current device {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -80,7 +81,7 @@ pub mod benches {
 
     struct BuffAveragesBatchState {
         cuda: CudaBuffAverages,
-        // Pre-staged device buffers
+
         d_prefix_pv: DeviceBuffer<f32>,
         d_prefix_vv: DeviceBuffer<f32>,
         d_fast: DeviceBuffer<i32>,
@@ -107,7 +108,7 @@ pub mod benches {
                     &mut self.d_slow_out,
                 )
                 .expect("launch buff averages (device prefixes)");
-            // Deterministic timing for benches
+
             self.cuda.synchronize().expect("sync");
         }
     }
@@ -132,14 +133,12 @@ pub mod benches {
             slow_period: (32, 128, 16),
         };
 
-        // Expand combos and build host prefix once
         let combos = CudaBuffAverages::expand_grid(&sweep);
         let (prefix_pv, prefix_vv) = CudaBuffAverages::build_prefix_sums(&price, &volume);
         let fast_periods: Vec<i32> = combos.iter().map(|&(f, _)| f as i32).collect();
         let slow_periods: Vec<i32> = combos.iter().map(|&(_, s)| s as i32).collect();
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
 
-        // Upload device buffers once; preallocate outputs
         let d_prefix_pv = DeviceBuffer::from_slice(&prefix_pv).expect("d_prefix_pv");
         let d_prefix_vv = DeviceBuffer::from_slice(&prefix_vv).expect("d_prefix_vv");
         let d_fast = DeviceBuffer::from_slice(&fast_periods).expect("d_fast");
@@ -213,7 +212,6 @@ pub mod benches {
         let fast = 16usize;
         let slow = 64usize;
 
-        // Host prep for prefixes and first_valids
         let prep = CudaBuffAverages::prepare_many_series_inputs(
             &price_tm, &volume_tm, cols, rows, fast, slow,
         )
@@ -244,8 +242,6 @@ pub mod benches {
         Box::new(prep_buff_averages_many_series())
     }
 }
-
-// thiserror::Error derive already provides std::error::Error
 
 pub struct CudaBuffAverages {
     module: Module,
@@ -307,7 +303,7 @@ impl CudaBuffAverages {
         let context = Arc::new(Context::new(device)?);
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/buff_averages_kernel.ptx"));
-        // Align with ALMA JIT policy: prefer DetermineTargetFromContext + O2, allow optional MaxRegisters via env
+
         let mut jit_vec: Vec<ModuleJitOption> = vec![
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -320,7 +316,8 @@ impl CudaBuffAverages {
         let module = match Module::from_ptx(ptx, &jit_vec) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -342,7 +339,6 @@ impl CudaBuffAverages {
         })
     }
 
-    /// Create with an explicit policy (mirrors ALMA convenience).
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaBuffPolicy,
@@ -375,20 +371,16 @@ impl CudaBuffAverages {
             .map_err(|e| CudaBuffAveragesError::Cuda(e))
     }
 
-    /// Best-effort: prefer L1 cache for global-memory-heavy kernels.
     #[inline]
     fn prefer_l1(&self, func: &mut cust::function::Function) {
         let _ = func.set_cache_config(CacheConfig::PreferL1);
     }
 
-    /// Best-effort: set an L2 persisting cache window on the current stream.
-    /// Window covers [base, base+bytes). Falls back silently if unsupported.
     unsafe fn set_l2_persist_window(&self, base: u64, bytes: usize, hit_ratio: f32) {
         if bytes == 0 {
             return;
         }
 
-        // Clamp to device max APW size
         let device = Device::get_device(self.device_id).ok();
         let mut max_win: i32 = 0;
         if let Some(dev) = device {
@@ -404,7 +396,6 @@ impl CudaBuffAverages {
             bytes
         };
 
-        // Reserve some L2 set-aside for persisting
         let mut max_persist: i32 = 0;
         if let Some(dev) = device {
             let _ = cu::cuDeviceGetAttribute(
@@ -426,7 +417,6 @@ impl CudaBuffAverages {
             );
         }
 
-        // Build the APW on the current stream
         let mut val: cu::CUstreamAttrValue = std::mem::zeroed();
         let apw = cu::CUaccessPolicyWindow_v1 {
             base_ptr: base as *mut std::ffi::c_void,
@@ -438,7 +428,7 @@ impl CudaBuffAverages {
             hitProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_PERSISTING,
             missProp: cu::CUaccessProperty_enum::CU_ACCESS_PROPERTY_NORMAL,
         };
-        // SAFETY: set only the APW field of the union
+
         *(&mut val.accessPolicyWindow) = apw;
 
         let _ = cu::cuStreamSetAttribute(
@@ -448,8 +438,6 @@ impl CudaBuffAverages {
         );
     }
 
-    /// Convenience: set a window that covers two buffers; if span exceeds device
-    /// max, fall back to the larger of the two.
     #[inline]
     unsafe fn set_l2_window_for_pair(
         &self,
@@ -535,16 +523,27 @@ impl CudaBuffAverages {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaBuffAveragesError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
-        let sum = required_bytes
-            .checked_add(headroom_bytes)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "required_bytes + headroom" })?;
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaBuffAveragesError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
+        let sum = required_bytes.checked_add(headroom_bytes).ok_or(
+            CudaBuffAveragesError::ArithmeticOverflow {
+                context: "required_bytes + headroom",
+            },
+        )?;
         if let Some((free, _)) = Self::device_mem_info() {
             if sum <= free {
                 Ok(())
             } else {
-                Err(CudaBuffAveragesError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaBuffAveragesError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -552,18 +551,24 @@ impl CudaBuffAverages {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
-    fn validate_launch(&self, grid: GridSize, block: BlockSize) -> Result<(), CudaBuffAveragesError> {
-        // Best-effort static checks against common device limits.
-        // Use conservative defaults if attribute queries fail.
+    fn validate_launch(
+        &self,
+        grid: GridSize,
+        block: BlockSize,
+    ) -> Result<(), CudaBuffAveragesError> {
         unsafe {
             let dev = Device::get_device(self.device_id).ok();
-            let mut max_threads_per_block: i32 = 1024; // typical default
+            let mut max_threads_per_block: i32 = 1024;
             if let Some(d) = dev {
                 let _ = cu::cuDeviceGetAttribute(
                     &mut max_threads_per_block as *mut _,
@@ -608,7 +613,11 @@ impl CudaBuffAverages {
             if step == 0 || start == end {
                 return vec![start];
             }
-            let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+            let (lo, hi) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             (lo..=hi).step_by(step).collect()
         }
 
@@ -721,7 +730,6 @@ impl CudaBuffAverages {
         d_fast_out: &mut DeviceBuffer<f32>,
         d_slow_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaBuffAveragesError> {
-        // Decide kernel per policy
         let mut use_tiled = len > 8192;
         let mut block_x: u32 = 256;
         let mut tile_choice: Option<u32> = None;
@@ -737,7 +745,6 @@ impl CudaBuffAverages {
             }
         }
 
-        // Try to persist the prefix arrays in L2 during this run (best-effort).
         unsafe {
             let pv_ptr = d_prefix_pv.as_device_ptr().as_raw();
             let vv_ptr = d_prefix_vv.as_device_ptr().as_raw();
@@ -761,7 +768,6 @@ impl CudaBuffAverages {
             };
             self.prefer_l1(&mut func);
 
-            // Introspection
             unsafe {
                 (*(self as *const _ as *mut CudaBuffAverages)).last_batch =
                     Some(BatchKernelSelected::Tiled1x { tile: block_x });
@@ -817,9 +823,11 @@ impl CudaBuffAverages {
             let mut func = self
                 .module
                 .get_function("buff_averages_batch_prefix_f32")
-                .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol { name: "buff_averages_batch_prefix_f32" })?;
+                .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol {
+                    name: "buff_averages_batch_prefix_f32",
+                })?;
             self.prefer_l1(&mut func);
-            // Introspection
+
             unsafe {
                 (*(self as *const _ as *mut CudaBuffAverages)).last_batch =
                     Some(BatchKernelSelected::Plain { block_x });
@@ -876,7 +884,6 @@ impl CudaBuffAverages {
         Ok(())
     }
 
-    // ---------------- Many-series host-side helpers ----------------
     fn prepare_many_series_inputs(
         prices_tm_f32: &[f32],
         volumes_tm_f32: &[f32],
@@ -911,7 +918,6 @@ impl CudaBuffAverages {
             ));
         }
 
-        // Find first valid row per series where both price & volume are finite
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -968,7 +974,6 @@ impl CudaBuffAverages {
             ));
         }
 
-        // Best-effort: persist the time-major prefix matrices in L2 for this run.
         unsafe {
             let pv_ptr = d_pv_prefix_tm.as_device_ptr().as_raw();
             let vv_ptr = d_vv_prefix_tm.as_device_ptr().as_raw();
@@ -976,12 +981,10 @@ impl CudaBuffAverages {
             self.set_l2_window_for_pair(pv_ptr, bytes, vv_ptr, bytes);
         }
 
-        // Prefer 2D tiles when available; try swizzled (sx*) first, then fall back to tx*
         let try_2d = |tx: u32, ty: u32| -> Option<()> {
             let fname_candidates: &[&str] = match (tx, ty) {
                 (128, 4) => &[
-                    // swizzled first (if present), then legacy tx*
-                    "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty4", // may not exist
+                    "buff_averages_many_series_one_param_tiled2d_f32_sx128_ty4",
                     "buff_averages_many_series_one_param_tiled2d_f32_tx128_ty4",
                 ],
                 (128, 2) => &[
@@ -1002,14 +1005,11 @@ impl CudaBuffAverages {
                 sel?
             };
 
-            // Compute grid depending on kernel mapping (swizzled vs legacy)
             let (grid_x, grid_y) = if picked.contains("_sx") {
-                // swizzled: block.x = 128 maps series; block.y = ty maps time rows
                 let gx = ((series_len as u32) + ty - 1) / ty;
                 let gy = ((num_series as u32) + 128 - 1) / 128;
                 (gx, gy)
             } else {
-                // legacy tx*: block.x = tx maps time; block.y = ty maps series
                 let gx = ((series_len as u32) + tx - 1) / tx;
                 let gy = ((num_series as u32) + ty - 1) / ty;
                 (gx, gy)
@@ -1038,7 +1038,7 @@ impl CudaBuffAverages {
                     &mut outf_ptr as *mut _ as *mut c_void,
                     &mut outs_ptr as *mut _ as *mut c_void,
                 ];
-                // Convert launch validation Result to Option in this Option-returning closure
+
                 self.validate_launch(grid, block).ok()?;
                 self.stream
                     .launch(&func, grid, block, 0, args)
@@ -1079,11 +1079,12 @@ impl CudaBuffAverages {
             ManySeriesKernelPolicy::OneD { .. } => {}
         }
 
-        // Fallback 1D
         let mut func = self
             .module
             .get_function("buff_averages_many_series_one_param_f32")
-            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol { name: "buff_averages_many_series_one_param_f32" })?;
+            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol {
+                name: "buff_averages_many_series_one_param_f32",
+            })?;
         self.prefer_l1(&mut func);
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -1134,25 +1135,38 @@ impl CudaBuffAverages {
         let len = price_f32.len();
         let (prefix_pv, prefix_vv) = Self::build_prefix_sums(price_f32, volume_f32);
 
-        // Optional VRAM check (rough estimate). Headroom default: 64MB.
         let rows = combos.len();
-        let prefix_bytes = (len + 1)
-            .checked_mul(4 * 2)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "prefix bytes" })?;
-        let period_bytes = rows
-            .checked_mul(4 * 2)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "period bytes" })?;
+        let prefix_bytes =
+            (len + 1)
+                .checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "prefix bytes",
+                })?;
+        let period_bytes =
+            rows.checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "period bytes",
+                })?;
         let out_elems = rows
             .checked_mul(len)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "rows * len" })?;
-        let output_bytes = out_elems
-            .checked_mul(4 * 2)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "output bytes" })?;
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "rows * len",
+            })?;
+        let output_bytes =
+            out_elems
+                .checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "output bytes",
+                })?;
         let bytes_required = prefix_bytes
             .checked_add(period_bytes)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "prefix+period" })?
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "prefix+period",
+            })?
             .checked_add(output_bytes)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "total bytes" })?;
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "total bytes",
+            })?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
@@ -1168,8 +1182,10 @@ impl CudaBuffAverages {
         let d_slow = DeviceBuffer::from_slice(&slow_periods)?;
 
         let elems = combos.len() * len;
-        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
-        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_fast_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_slow_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_prefix_pv,
@@ -1199,8 +1215,6 @@ impl CudaBuffAverages {
         ))
     }
 
-    /// Launch using pre-staged device buffers (prefix arrays, period arrays, outputs).
-    /// Does not allocate or copy; intended for deterministic benches and integrations.
     pub fn buff_averages_batch_from_device_prefixes(
         &self,
         d_prefix_pv: &DeviceBuffer<f32>,
@@ -1236,8 +1250,6 @@ impl CudaBuffAverages {
         self.run_batch_kernel(price_f32, volume_f32, &combos, first_valid)
     }
 
-    /// Expansion-based (two-float) variant: builds PV/VV prefix sums as (hi, lo) and
-    /// launches the corresponding FP32-only kernels. Improves numeric accuracy without FP64.
     pub fn buff_averages_batch_dev_exp2(
         &self,
         price_f32: &[f32],
@@ -1245,35 +1257,47 @@ impl CudaBuffAverages {
         sweep: &BuffAveragesBatchRange,
     ) -> Result<(DeviceArrayF32, DeviceArrayF32), CudaBuffAveragesError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(price_f32, volume_f32, sweep)?;
-        // Build expansion prefixes on host
+
         let (pv_hi, pv_lo, vv_hi, vv_lo) = build_prefix_sums_exp2(price_f32, volume_f32);
 
-        // VRAM estimate
         let rows = combos.len();
-        let prefix_bytes = (len + 1)
-            .checked_mul(4 * 4)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "prefix bytes (exp2)" })?;
-        let period_bytes = rows
-            .checked_mul(4 * 2)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "period bytes (exp2)" })?;
+        let prefix_bytes =
+            (len + 1)
+                .checked_mul(4 * 4)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "prefix bytes (exp2)",
+                })?;
+        let period_bytes =
+            rows.checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "period bytes (exp2)",
+                })?;
         let out_elems = rows
             .checked_mul(len)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "rows * len (exp2)" })?;
-        let output_bytes = out_elems
-            .checked_mul(4 * 2)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "output bytes (exp2)" })?;
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "rows * len (exp2)",
+            })?;
+        let output_bytes =
+            out_elems
+                .checked_mul(4 * 2)
+                .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                    context: "output bytes (exp2)",
+                })?;
         let bytes_required = prefix_bytes
             .checked_add(period_bytes)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "prefix+period (exp2)" })?
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "prefix+period (exp2)",
+            })?
             .checked_add(output_bytes)
-            .ok_or(CudaBuffAveragesError::ArithmeticOverflow { context: "total bytes (exp2)" })?;
+            .ok_or(CudaBuffAveragesError::ArithmeticOverflow {
+                context: "total bytes (exp2)",
+            })?;
         let headroom = env::var("CUDA_MEM_HEADROOM")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
         Self::will_fit_checked(bytes_required, headroom)?;
 
-        // Upload device buffers
         let d_pv_hi = DeviceBuffer::from_slice(&pv_hi)?;
         let d_pv_lo = DeviceBuffer::from_slice(&pv_lo)?;
         let d_vv_hi = DeviceBuffer::from_slice(&vv_hi)?;
@@ -1283,23 +1307,25 @@ impl CudaBuffAverages {
         let d_fast = DeviceBuffer::from_slice(&fast_periods)?;
         let d_slow = DeviceBuffer::from_slice(&slow_periods)?;
 
-        // Outputs
         let elems = combos.len() * len;
-        let mut d_fast_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
-        let mut d_slow_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_fast_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_slow_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
-        // Launch plain 1D expansion kernel
         let mut func = self
             .module
             .get_function("buff_averages_batch_prefix_exp2_f32")
-            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol { name: "buff_averages_batch_prefix_exp2_f32" })?;
+            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol {
+                name: "buff_averages_batch_prefix_exp2_f32",
+            })?;
         self.prefer_l1(&mut func);
         let block_x: u32 = 256;
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let block: BlockSize = (block_x, 1, 1).into();
         const MAX_GRID_Y: usize = 65_535;
         let mut start = 0usize;
-        // Best-effort: persist PV/VV hi prefixes in L2 for this run
+
         unsafe {
             let pv_ptr = d_pv_hi.as_device_ptr().as_raw();
             let vv_ptr = d_vv_hi.as_device_ptr().as_raw();
@@ -1367,7 +1393,6 @@ impl CudaBuffAverages {
         ))
     }
 
-    /// Many-series × one-parameter (time-major). Returns VRAM-backed (fast, slow).
     pub fn buff_averages_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -1386,7 +1411,6 @@ impl CudaBuffAverages {
             slow_period,
         )?;
 
-        // VRAM estimate
         let elems = cols * rows;
         let required = ((rows + 1) * cols * 2 + elems * 2) * std::mem::size_of::<f32>()
             + cols * std::mem::size_of::<i32>();
@@ -1395,20 +1419,24 @@ impl CudaBuffAverages {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(64 * 1024 * 1024);
         if !Self::mem_check_enabled() {
-            // bypass
         } else if let Some((free, _)) = Self::device_mem_info() {
             if required > free.saturating_sub(headroom) {
-                return Err(CudaBuffAveragesError::OutOfMemory { required, free, headroom });
+                return Err(CudaBuffAveragesError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             }
         } else {
-            // no mem info; proceed
         }
 
         let d_pv = DeviceBuffer::from_slice(&prep.pv_prefix_tm)?;
         let d_vv = DeviceBuffer::from_slice(&prep.vv_prefix_tm)?;
         let d_fv = DeviceBuffer::from_slice(&prep.first_valids)?;
-        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
-        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_fast_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_slow_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         self.launch_many_series_kernel(
             &d_pv,
@@ -1437,7 +1465,6 @@ impl CudaBuffAverages {
         ))
     }
 
-    /// Expansion-based many-series (time-major) launcher.
     pub fn buff_averages_many_series_one_param_dev_exp2(
         &self,
         prices_tm_f32: &[f32],
@@ -1463,7 +1490,6 @@ impl CudaBuffAverages {
             &prep.first_valids,
         );
 
-        // VRAM check (four prefix arrays)
         let elems = cols * rows;
         let required = ((rows + 1) * cols * 4 + elems * 2) * std::mem::size_of::<f32>()
             + cols * std::mem::size_of::<i32>();
@@ -1474,7 +1500,11 @@ impl CudaBuffAverages {
         if !Self::mem_check_enabled() {
         } else if let Some((free, _)) = Self::device_mem_info() {
             if required > free.saturating_sub(headroom) {
-                return Err(CudaBuffAveragesError::OutOfMemory { required, free, headroom });
+                return Err(CudaBuffAveragesError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             }
         }
 
@@ -1483,19 +1513,23 @@ impl CudaBuffAverages {
         let d_vv_hi = DeviceBuffer::from_slice(&vv_hi_tm)?;
         let d_vv_lo = DeviceBuffer::from_slice(&vv_lo_tm)?;
         let d_fv = DeviceBuffer::from_slice(&prep.first_valids)?;
-        let mut d_fast_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
-        let mut d_slow_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_fast_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_slow_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         let mut func = self
             .module
             .get_function("buff_averages_many_series_one_param_exp2_f32")
-            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol { name: "buff_averages_many_series_one_param_exp2_f32" })?;
+            .map_err(|_| CudaBuffAveragesError::MissingKernelSymbol {
+                name: "buff_averages_many_series_one_param_exp2_f32",
+            })?;
         self.prefer_l1(&mut func);
         let block_x: u32 = 128;
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Best-effort: persist prefixes in L2 (use hi arrays as representative windows)
+
         unsafe {
             let pv_ptr = d_pv_hi.as_device_ptr().as_raw();
             let vv_ptr = d_vv_hi.as_device_ptr().as_raw();
@@ -1545,7 +1579,6 @@ impl CudaBuffAverages {
         ))
     }
 
-    /// Many-series device-precomputed variant (time-major prefixes on device).
     #[allow(clippy::too_many_arguments)]
     pub fn buff_averages_many_series_one_param_device(
         &self,
@@ -1599,10 +1632,6 @@ impl CudaBuffAverages {
         Ok((combos.len(), len, combos))
     }
 
-    /// Same as `buff_averages_batch_into_host_f32`, but writes into page-locked
-    /// host buffers so we avoid the extra staging copy and can use async D2H.
-    ///
-    /// SAFETY: The caller must ensure the `LockedBuffer` lifetime covers the copy.
     pub fn buff_averages_batch_into_pinned_host_f32(
         &self,
         price_f32: &[f32],
@@ -1625,18 +1654,19 @@ impl CudaBuffAverages {
         let (fast_dev, slow_dev) =
             self.run_batch_kernel(price_f32, volume_f32, &combos, first_valid)?;
 
-        // Asynchronous D2H into pinned memory, then sync once
         unsafe {
-            fast_dev.buf.async_copy_to(fast_out_pinned.as_mut_slice(), &self.stream)?;
-            slow_dev.buf.async_copy_to(slow_out_pinned.as_mut_slice(), &self.stream)?;
+            fast_dev
+                .buf
+                .async_copy_to(fast_out_pinned.as_mut_slice(), &self.stream)?;
+            slow_dev
+                .buf
+                .async_copy_to(slow_out_pinned.as_mut_slice(), &self.stream)?;
         }
         self.stream.synchronize()?;
 
         Ok((combos.len(), len, combos))
     }
 }
-
-// -------- Many-series structs + prefix builder --------
 
 struct PreparedManySeries {
     first_valids: Vec<i32>,
@@ -1651,7 +1681,6 @@ fn build_prefix_sums_time_major(
     rows: usize,
     first_valids: &[i32],
 ) -> (Vec<f32>, Vec<f32>) {
-    // (rows+1) x cols layout so index (t+1, s) exists without bounds checks
     let mut pv_prefix = vec![0.0f32; (rows + 1) * cols];
     let mut vv_prefix = vec![0.0f32; (rows + 1) * cols];
     for s in 0..cols {
@@ -1675,8 +1704,6 @@ fn build_prefix_sums_time_major(
     }
     (pv_prefix, vv_prefix)
 }
-
-// -------- Expansion prefix builders (host, FP32 EFT) --------
 
 fn two_sum_f32(a: f32, b: f32) -> (f32, f32) {
     let s = a + b;

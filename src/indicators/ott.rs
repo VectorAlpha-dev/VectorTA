@@ -1,27 +1,3 @@
-//! # Optimized Trend Tracker (OTT)
-//!
-//! The Optimized Trend Tracker is a trend-following indicator that uses dynamic stop levels
-//! based on a moving average to identify trend direction and provide optimized tracking values.
-//!
-//! ## Parameters
-//! - **period**: The lookback period for the moving average (default: 2)
-//! - **percent**: The percentage offset for stop levels (default: 1.4)
-//! - **ma_type**: Type of moving average to use (default: "VAR")
-//!
-//! ## Returns
-//! - **`Ok(OttOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(OttError)`** on failure
-//!
-//! ## Developer Notes
-//! - SIMD: Loop-carried dependencies prevent time-wise vectorization; AVX2/AVX512 stubs delegate to scalar (FMA-friendly via mul_add).
-//! - Streaming: Upgraded to true O(1) per tick for SMA/EMA/WWMA/WMA/ZLEMA/VAR using rings and running state (matches batch semantics).
-//! - Batch: Reuses MA per (period, ma_type) across rows to avoid redundant computation; results identical to single-series path.
-//! - Memory: Uses zero-copy helpers; batch initializes warmup prefixes per-row.
-//!
-//! Decision log: SIMD disabled by default for OTT; CUDA wrapper present with typed errors and VRAM checks; Python interop uses CUDA Array Interface v3 + DLPack v1.x; streaming kernel is scalar O(1) and validated against batch tests.
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -37,12 +13,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -54,7 +28,6 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-
 use crate::indicators::moving_averages::{
     ema::{ema_with_kernel, EmaInput, EmaParams},
     linreg::{linreg_with_kernel, LinRegInput, LinRegParams},
@@ -64,21 +37,17 @@ use crate::indicators::moving_averages::{
 };
 use crate::indicators::tsf::{tsf_with_kernel, TsfInput, TsfParams};
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::collections::HashMap;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
 
 impl<'a> AsRef<[f64]> for OttInput<'a> {
     #[inline(always)]
@@ -90,8 +59,6 @@ impl<'a> AsRef<[f64]> for OttInput<'a> {
     }
 }
 
-
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum OttData<'a> {
     Candles {
@@ -101,15 +68,16 @@ pub enum OttData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct OttOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct OttParams {
     pub period: Option<usize>,
     pub percent: Option<f64>,
@@ -126,7 +94,6 @@ impl Default for OttParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct OttInput<'a> {
     pub data: OttData<'a>,
@@ -177,8 +144,6 @@ impl<'a> OttInput<'a> {
     }
 }
 
-
-/// Builder for ergonomic API usage
 #[derive(Clone, Debug)]
 pub struct OttBuilder {
     period: Option<usize>,
@@ -272,7 +237,6 @@ impl OttBuilder {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum OttError {
     #[error("ott: Input data slice is empty.")]
@@ -292,34 +256,32 @@ pub enum OttError {
     #[error("ott: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("ott: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("ott: Invalid kernel for batch operation. Expected batch kernel, got: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    
+
     #[error("ott: Invalid kernel for batch operation")]
     InvalidBatchKernel,
 }
 
-
-/// Main entry point with automatic kernel detection
 #[inline]
 pub fn ott(input: &OttInput) -> Result<OttOutput, OttError> {
     ott_with_kernel(input, Kernel::Auto)
 }
 
-/// Entry point with explicit kernel selection
 pub fn ott_with_kernel(input: &OttInput, kernel: Kernel) -> Result<OttOutput, OttError> {
     let (data, period, percent, ma_type, first, chosen) = ott_prepare(input, kernel)?;
 
-    
-    
     if false
         && chosen == Kernel::Scalar
         && period == 2
         && percent == 1.4
         && ma_type.to_uppercase() == "VAR"
     {
-        
         let mut out = vec![f64::NAN; data.len()];
         unsafe {
             ott_scalar_classic(data, period, percent, first, &mut out)?;
@@ -327,16 +289,13 @@ pub fn ott_with_kernel(input: &OttInput, kernel: Kernel) -> Result<OttOutput, Ot
         return Ok(OttOutput { values: out });
     }
 
-    
     let ma_values = calculate_moving_average(data, period, ma_type, chosen)?;
 
-    
     let ma_first = ma_values
         .iter()
         .position(|&x| !x.is_nan())
         .unwrap_or(data.len());
 
-    
     let mut out = alloc_with_nan_prefix(data.len(), ma_first);
 
     ott_compute_into(
@@ -346,18 +305,12 @@ pub fn ott_with_kernel(input: &OttInput, kernel: Kernel) -> Result<OttOutput, Ot
     Ok(OttOutput { values: out })
 }
 
-/// Write OTT into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup semantics exactly as the Vec-returning API.
-/// - `out.len()` must equal the input length; returns the module's existing error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ott_into(input: &OttInput, out: &mut [f64]) -> Result<(), OttError> {
-    // Delegate to the zero-allocation internal path with Kernel::Auto.
     ott_into_slice(out, input, Kernel::Auto)
 }
 
-/// Zero-allocation version for WASM and performance-critical paths
 #[inline]
 pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result<(), OttError> {
     let (data, period, percent, ma_type, first, chosen) = ott_prepare(input, kern)?;
@@ -371,7 +324,6 @@ pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result
 
     let ma_values = calculate_moving_average(data, period, ma_type, chosen)?;
 
-    // Compute warmup from the MA itself for Pine compatibility
     let ma_first = ma_values
         .iter()
         .position(|&x| !x.is_nan())
@@ -379,7 +331,6 @@ pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result
 
     ott_compute_into(data, &ma_values, percent, ma_first, period, chosen, dst);
 
-    // Fill warmup period with NaN
     for v in &mut dst[..ma_first] {
         *v = f64::NAN;
     }
@@ -387,7 +338,6 @@ pub fn ott_into_slice(dst: &mut [f64], input: &OttInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Prepare and validate input data
 #[inline(always)]
 fn ott_prepare<'a>(
     input: &'a OttInput,
@@ -405,9 +355,8 @@ fn ott_prepare<'a>(
 
     let period = input.get_period();
     let percent = input.get_percent();
-    let ma_type = input.get_ma_type(); // now &str
+    let ma_type = input.get_ma_type();
 
-    // Validation
     if period == 0 || period > data.len() {
         return Err(OttError::InvalidPeriod {
             period,
@@ -427,7 +376,6 @@ fn ott_prepare<'a>(
     }
 
     let chosen = match kernel {
-        // SIMD kernels are stubs; avoid runtime detection overhead for Auto.
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -435,7 +383,6 @@ fn ott_prepare<'a>(
     Ok((data, period, percent, ma_type, first, chosen))
 }
 
-/// Calculate the selected moving average
 fn calculate_moving_average(
     data: &[f64],
     period: usize,
@@ -476,18 +423,9 @@ fn calculate_moving_average(
                     reason: e.to_string(),
                 })
         }
-        "TMA" => {
-            // Triangular Moving Average: SMA of SMA
-            calculate_tma(data, period, kernel)
-        }
-        "VAR" => {
-            // Variable Moving Average from PineScript
-            calculate_var_ma(data, period)
-        }
-        "WWMA" => {
-            // Welles Wilder Moving Average
-            calculate_wwma(data, period)
-        }
+        "TMA" => calculate_tma(data, period, kernel),
+        "VAR" => calculate_var_ma(data, period),
+        "WWMA" => calculate_wwma(data, period),
         "ZLEMA" => {
             let params = ZlemaParams {
                 period: Some(period),
@@ -516,12 +454,10 @@ fn calculate_moving_average(
     }
 }
 
-/// Calculate Triangular Moving Average (TMA)
 fn calculate_tma(data: &[f64], period: usize, kernel: Kernel) -> Result<Vec<f64>, OttError> {
     let half_period = (period + 1) / 2;
     let floor_half = period / 2 + 1;
 
-    // First SMA
     let params1 = SmaParams {
         period: Some(half_period),
     };
@@ -530,7 +466,6 @@ fn calculate_tma(data: &[f64], period: usize, kernel: Kernel) -> Result<Vec<f64>
         reason: e.to_string(),
     })?;
 
-    // Second SMA
     let params2 = SmaParams {
         period: Some(floor_half),
     };
@@ -542,7 +477,6 @@ fn calculate_tma(data: &[f64], period: usize, kernel: Kernel) -> Result<Vec<f64>
     Ok(sma2.values)
 }
 
-/// Calculate Welles Wilder Moving Average (WWMA) - Zero-copy version
 fn calculate_wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
     let first = data
         .iter()
@@ -559,7 +493,6 @@ fn calculate_wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
     let mut out = alloc_with_nan_prefix(data.len(), first);
     let alpha = 1.0 / period as f64;
 
-    // Pine-compatible first value: wwalpha*src[first] since nz(WWMA[1]) = 0.0
     let mut wwma = alpha * data[first];
     out[first] = wwma;
 
@@ -574,32 +507,24 @@ fn calculate_wwma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
     Ok(out)
 }
 
-/// Calculate Variable Moving Average (VAR) - Optimized with ring buffers
 fn calculate_var_ma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(OttError::AllValuesNaN)?;
 
-    // Pine doesn't error when <10 bars; it outputs zeros until window fills
-    
-
-    
     let mut out = alloc_with_nan_prefix(data.len(), first);
     let valpha = 2.0 / (period as f64 + 1.0);
 
-    
     let mut ring_u = [0.0f64; 9];
     let mut ring_d = [0.0f64; 9];
     let mut u_sum = 0.0;
     let mut d_sum = 0.0;
     let mut idx = 0usize;
 
-    
     let mut var = 0.0;
     out[first] = var;
 
-    
     let start = first + 1;
     let pre_end = (first + 8).min(data.len().saturating_sub(1));
     for i in start..=pre_end {
@@ -615,16 +540,13 @@ fn calculate_var_ma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
         ring_d[idx] = down;
         d_sum += down;
         idx = (idx + 1) % 9;
-        out[i] = var; 
+        out[i] = var;
     }
 
-    
-    
     if data.len() - first <= 9 {
         return Ok(out);
     }
 
-    
     for i in (first + 9)..data.len() {
         let a = data[i - 1];
         let b = data[i];
@@ -632,7 +554,6 @@ fn calculate_var_ma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
             continue;
         }
 
-        
         let old_u = ring_u[idx];
         let old_d = ring_d[idx];
         let up = (b - a).max(0.0);
@@ -659,7 +580,6 @@ fn calculate_var_ma(data: &[f64], period: usize) -> Result<Vec<f64>, OttError> {
     Ok(out)
 }
 
-/// Core computation dispatcher
 #[inline(always)]
 fn ott_compute_into(
     data: &[f64],
@@ -671,7 +591,6 @@ fn ott_compute_into(
     out: &mut [f64],
 ) {
     unsafe {
-        
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -701,9 +620,6 @@ fn ott_compute_into(
     }
 }
 
-
-/// Optimized classic kernel for OTT with default parameters (period=2, percent=1.4, ma_type="VAR")
-/// Inlines VAR moving average calculation (VIDYA) and OTT computation for maximum performance
 #[inline(always)]
 pub unsafe fn ott_scalar_classic(
     data: &[f64],
@@ -714,22 +630,18 @@ pub unsafe fn ott_scalar_classic(
 ) -> Result<(), OttError> {
     let len = data.len();
 
-    
     let valpha = 2.0 / (period as f64 + 1.0);
 
-    
     let mut ring_u = [0.0f64; 9];
     let mut ring_d = [0.0f64; 9];
     let mut u_sum = 0.0;
     let mut d_sum = 0.0;
     let mut idx = 0usize;
 
-    
     let mut var = 0.0;
     let mut var_ma = vec![f64::NAN; len];
     var_ma[first] = var;
 
-    
     let start = first + 1;
     let pre_end = (first + 8).min(len.saturating_sub(1));
     for i in start..=pre_end {
@@ -744,15 +656,13 @@ pub unsafe fn ott_scalar_classic(
             d_sum += down;
             idx = (idx + 1) % 9;
         }
-        var_ma[i] = var; 
+        var_ma[i] = var;
     }
 
-    
     for i in (first + 9)..len {
         let a = data[i - 1];
         let b = data[i];
         if !a.is_nan() && !b.is_nan() {
-            
             let old_u = ring_u[idx];
             let old_d = ring_d[idx];
             let up = (b - a).max(0.0);
@@ -775,20 +685,17 @@ pub unsafe fn ott_scalar_classic(
             var = valpha * vcmo.abs() * b + (1.0 - valpha * vcmo.abs()) * var;
             var_ma[i] = var;
         } else if i > first {
-            var_ma[i] = var_ma[i - 1]; 
+            var_ma[i] = var_ma[i - 1];
         }
     }
 
-    
     let fark = percent * 0.01;
-    let ma_first = first; 
+    let ma_first = first;
 
-    
     for i in 0..ma_first {
         out[i] = f64::NAN;
     }
 
-    
     let mut dir = 1i32;
     let mut long_stop = f64::NAN;
     let mut short_stop = f64::NAN;
@@ -802,7 +709,6 @@ pub unsafe fn ott_scalar_classic(
 
         let offset = mavg * fark;
 
-        
         let long_stop_prev = if long_stop.is_nan() {
             mavg - offset
         } else {
@@ -814,7 +720,6 @@ pub unsafe fn ott_scalar_classic(
             mavg - offset
         };
 
-        
         let short_stop_prev = if short_stop.is_nan() {
             mavg + offset
         } else {
@@ -826,7 +731,6 @@ pub unsafe fn ott_scalar_classic(
             mavg + offset
         };
 
-        
         let prev_dir = dir;
         if mavg > short_stop_prev {
             dir = 1;
@@ -834,17 +738,12 @@ pub unsafe fn ott_scalar_classic(
             dir = -1;
         }
 
-        
         out[i] = if dir == -1 { short_stop } else { long_stop };
     }
 
     Ok(())
 }
 
-
-/// Fully loop-jammed scalar OTT kernel following Pine semantics.
-/// - Seeds stops once from first valid MA (avoids per-iter NaN branches)
-/// - Hoists invariants and uses mul_add for FMA-friendly codegen
 #[inline]
 pub fn ott_scalar(
     _data: &[f64],
@@ -859,11 +758,9 @@ pub fn ott_scalar(
         return;
     }
 
-    
-    let fark = percent * 0.01; 
-    let scale_minus = 1.0 - (percent * 0.005); 
+    let fark = percent * 0.01;
+    let scale_minus = 1.0 - (percent * 0.005);
 
-    
     let mut i = first_val;
     let mut m = ma_values[i];
     if m.is_nan() {
@@ -875,12 +772,10 @@ pub fn ott_scalar(
         }
     }
 
-    
-    let mut long_stop = m.mul_add(-fark, m); 
-    let mut short_stop = m.mul_add(fark, m); 
+    let mut long_stop = m.mul_add(-fark, m);
+    let mut short_stop = m.mul_add(fark, m);
     let mut dir: i32 = 1;
 
-    
     let mt0 = long_stop;
     let scale0 = if m > mt0 {
         scale_minus + fark
@@ -890,25 +785,21 @@ pub fn ott_scalar(
     out[i] = mt0 * scale0;
     i += 1;
 
-    
     while i < len {
         let mavg = ma_values[i];
         if !mavg.is_nan() {
-            
-            let cand_long = mavg.mul_add(-fark, mavg); 
-            let cand_short = mavg.mul_add(fark, mavg); 
+            let cand_long = mavg.mul_add(-fark, mavg);
+            let cand_short = mavg.mul_add(fark, mavg);
 
-            
             let lprev = long_stop;
             let sprev = short_stop;
 
-            
             if mavg > lprev {
                 long_stop = if cand_long > lprev { cand_long } else { lprev };
             } else {
                 long_stop = cand_long;
             }
-            
+
             if mavg < sprev {
                 short_stop = if cand_short < sprev {
                     cand_short
@@ -919,14 +810,12 @@ pub fn ott_scalar(
                 short_stop = cand_short;
             }
 
-            
             if dir == -1 && mavg > sprev {
                 dir = 1;
             } else if dir == 1 && mavg < lprev {
                 dir = -1;
             }
 
-            
             let mt = if dir == 1 { long_stop } else { short_stop };
             let scale = if mavg > mt {
                 scale_minus + fark
@@ -939,7 +828,6 @@ pub fn ott_scalar(
     }
 }
 
-
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn ott_simd128(
@@ -950,10 +838,8 @@ unsafe fn ott_simd128(
     period: usize,
     out: &mut [f64],
 ) {
-    
     ott_scalar(data, ma_values, percent, first_val, period, out);
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
@@ -965,10 +851,8 @@ unsafe fn ott_avx2(
     period: usize,
     out: &mut [f64],
 ) {
-    
     ott_scalar(data, ma_values, percent, first_val, period, out);
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
@@ -980,65 +864,51 @@ unsafe fn ott_avx512(
     period: usize,
     out: &mut [f64],
 ) {
-    
     ott_scalar(data, ma_values, percent, first_val, period, out);
 }
 
-
-/// Streaming calculator for real-time updates (O(1) per tick)
 #[derive(Debug, Clone)]
 pub struct OttStream {
-    
     period: usize,
     percent: f64,
     ma_type: String,
 
-    
     buf: Vec<f64>,
-    pos: usize,   
-    count: usize, 
+    pos: usize,
+    count: usize,
 
-    
     long_stop: f64,
     short_stop: f64,
     dir: i32,
 
-    
-    fark: f64,        
-    scale_plus: f64,  
-    scale_minus: f64, 
+    fark: f64,
+    scale_plus: f64,
+    scale_minus: f64,
 
-    
-    
     sma_sum: f64,
 
-    
     ema_alpha: f64,
     ema_state: Option<f64>,
 
-    
     ww_alpha: f64,
     wwma_state: Option<f64>,
 
-    
-    wma_simple_sum: f64,   
-    wma_weighted_sum: f64, 
-    wma_inv_norm: f64,     
+    wma_simple_sum: f64,
+    wma_weighted_sum: f64,
+    wma_inv_norm: f64,
 
-    
     zlema_alpha: f64,
     zlema_state: Option<f64>,
     zlema_lag: usize,
 
-    
-    var_alpha_base: f64, 
-    var_state: f64,      
+    var_alpha_base: f64,
+    var_state: f64,
     var_u_ring: [f64; 9],
     var_d_ring: [f64; 9],
-    var_idx: usize,        
-    var_u_sum: f64,        
-    var_d_sum: f64,        
-    var_seen_diffs: usize, 
+    var_idx: usize,
+    var_u_sum: f64,
+    var_d_sum: f64,
+    var_seen_diffs: usize,
 }
 
 impl OttStream {
@@ -1057,25 +927,21 @@ impl OttStream {
             return Err(OttError::InvalidPercent { percent });
         }
 
-        
         let need = if ma_type.eq_ignore_ascii_case("VAR") {
             period.max(10)
         } else {
             period.max(1)
         };
 
-        
         let fark = percent * 0.01;
-        let scale_minus = 1.0 - (percent * 0.005); 
-        let scale_plus = 1.0 + (percent * 0.005); 
+        let scale_minus = 1.0 - (percent * 0.005);
+        let scale_plus = 1.0 + (percent * 0.005);
 
-        
         let ema_alpha = 2.0 / (period as f64 + 1.0);
         let ww_alpha = 1.0 / period as f64;
         let zlema_alpha = ema_alpha;
         let zlema_lag = ((period.saturating_sub(1)) as f64 / 2.0).floor() as usize;
 
-        
         let n = period as f64;
         let wma_inv_norm = if period > 1 {
             2.0 / (n * (n + 1.0))
@@ -1100,28 +966,22 @@ impl OttStream {
             scale_plus,
             scale_minus,
 
-            
             sma_sum: 0.0,
 
-            
             ema_alpha,
             ema_state: None,
 
-            
             ww_alpha,
             wwma_state: None,
 
-            
             wma_simple_sum: 0.0,
             wma_weighted_sum: 0.0,
             wma_inv_norm,
 
-            
             zlema_alpha,
             zlema_state: None,
             zlema_lag,
 
-            
             var_alpha_base: ema_alpha,
             var_state: 0.0,
             var_u_ring: [0.0; 9],
@@ -1133,12 +993,10 @@ impl OttStream {
         })
     }
 
-    /// O(1) update; returns None until warmup completes
     #[inline]
     pub fn update(&mut self, x: f64) -> Option<f64> {
         let cap = self.buf.len();
 
-        
         let old = self.buf[self.pos];
         self.buf[self.pos] = x;
         self.pos = (self.pos + 1) % cap;
@@ -1146,17 +1004,14 @@ impl OttStream {
             self.count += 1;
         }
 
-        
         let ma = self.calculate_ma(x, old);
 
         if !ma.is_finite() || self.count < cap {
             return None;
         }
 
-        
         let offset = ma * self.fark;
 
-        
         let lprev = if self.long_stop.is_nan() {
             ma - offset
         } else {
@@ -1168,7 +1023,6 @@ impl OttStream {
             self.short_stop
         };
 
-        
         let cand_long = ma - offset;
         self.long_stop = if ma > lprev {
             if cand_long > lprev {
@@ -1191,14 +1045,12 @@ impl OttStream {
             cand_short
         };
 
-        
         if self.dir == -1 && ma > sprev {
             self.dir = 1;
         } else if self.dir == 1 && ma < lprev {
             self.dir = -1;
         }
 
-        
         let mt = if self.dir == 1 {
             self.long_stop
         } else {
@@ -1213,30 +1065,21 @@ impl OttStream {
         Some(scaled)
     }
 
-    
-
     #[inline]
     fn calculate_ma(&mut self, x: f64, old: f64) -> f64 {
         match self.ma_type.as_str() {
-            
             "VAR" => self.update_var(x),
 
-            
             "WWMA" => self.update_wwma(x),
 
-            
             "EMA" => self.update_ema(x),
 
-            
             "SMA" => self.update_sma(x, old),
 
-            
             "WMA" => self.update_wma(x, old),
 
-            
             "ZLEMA" => self.update_zlema(x),
 
-            
             _ => self.update_sma(x, old),
         }
     }
@@ -1258,7 +1101,7 @@ impl OttStream {
     #[inline]
     fn update_ema(&mut self, x: f64) -> f64 {
         let ema = match self.ema_state {
-            Some(prev) => self.ema_alpha.mul_add(x - prev, prev), 
+            Some(prev) => self.ema_alpha.mul_add(x - prev, prev),
             None => x,
         };
         self.ema_state = Some(ema);
@@ -1269,7 +1112,7 @@ impl OttStream {
     fn update_wwma(&mut self, x: f64) -> f64 {
         let ww = match self.wwma_state {
             Some(prev) => self.ww_alpha.mul_add(x - prev, prev),
-            None => self.ww_alpha * x, 
+            None => self.ww_alpha * x,
         };
         self.wwma_state = Some(ww);
         ww
@@ -1277,9 +1120,8 @@ impl OttStream {
 
     #[inline]
     fn update_wma(&mut self, x: f64, old: f64) -> f64 {
-        
         if self.count <= self.period {
-            let w = self.count as f64; 
+            let w = self.count as f64;
             self.wma_simple_sum += x;
             self.wma_weighted_sum += w * x;
 
@@ -1289,12 +1131,9 @@ impl OttStream {
             return self.wma_weighted_sum * self.wma_inv_norm;
         }
 
-        
-        
         let s_prev = self.wma_simple_sum;
         self.wma_weighted_sum += self.period as f64 * x - s_prev;
 
-        
         let x_out = old;
         self.wma_simple_sum += x - x_out;
 
@@ -1322,22 +1161,19 @@ impl OttStream {
 
     #[inline]
     fn update_var(&mut self, x: f64) -> f64 {
-        
         let cap = self.buf.len();
         if self.count == 0 {
             return self.var_state;
         }
-        let prev_idx = (self.pos + cap - 2) % cap; 
+        let prev_idx = (self.pos + cap - 2) % cap;
         let prev = self.buf[prev_idx];
         if !x.is_finite() || !prev.is_finite() {
             return self.var_state;
         }
 
-        
         let up = (x - prev).max(0.0);
         let dn = (prev - x).max(0.0);
 
-        
         let old_u = self.var_u_ring[self.var_idx];
         let old_d = self.var_d_ring[self.var_idx];
         self.var_u_ring[self.var_idx] = up;
@@ -1351,7 +1187,6 @@ impl OttStream {
         self.var_d_sum += dn - old_d;
         self.var_idx = (self.var_idx + 1) % 9;
 
-        
         if self.count < 10 || self.var_seen_diffs < 9 {
             return self.var_state;
         }
@@ -1364,14 +1199,12 @@ impl OttStream {
         };
 
         let alpha = cmo_abs * self.var_alpha_base;
-        
+
         self.var_state = alpha.mul_add(x - self.var_state, self.var_state);
         self.var_state
     }
 }
 
-
-/// Batch processing for parameter sweeps
 #[derive(Clone, Debug)]
 pub struct OttBatchRange {
     pub period: (usize, usize, usize),
@@ -1623,7 +1456,6 @@ fn ott_batch_inner_into(
         });
     }
 
-    
     let row_kern = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -1637,7 +1469,6 @@ fn ott_batch_inner_into(
         k => k,
     };
 
-    
     let mut ma_cache: HashMap<(usize, String), (Vec<f64>, usize)> = HashMap::new();
     for prm in &combos {
         let p = prm.period.unwrap();
@@ -1663,7 +1494,6 @@ fn ott_batch_inner_into(
         }
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1674,21 +1504,17 @@ fn ott_batch_inner_into(
         let pct = prm.percent.unwrap();
         let mt = prm.ma_type.as_deref().unwrap();
 
-        
         let key = (p, mt.to_uppercase());
         let (ma, ma_first) = ma_cache.get(&key).expect("missing MA cache entry");
 
-        
         let row: &mut [f64] = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
 
-        
         for v in &mut row[..(*ma_first).min(cols)] {
             *v = f64::NAN;
         }
 
-        
         ott_compute_into(data, ma, pct, *ma_first, p, row_kern, row);
         Ok(())
     };
@@ -1749,19 +1575,18 @@ fn ott_batch_inner(
     }
 
     let rows = combos.len();
-    rows.checked_mul(cols).ok_or_else(|| OttError::InvalidRange {
-        start: sweep.period.0.to_string(),
-        end: sweep.period.1.to_string(),
-        step: sweep.period.2.to_string(),
-    })?;
+    rows.checked_mul(cols)
+        .ok_or_else(|| OttError::InvalidRange {
+            start: sweep.period.0.to_string(),
+            end: sweep.period.1.to_string(),
+            step: sweep.period.2.to_string(),
+        })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let combos = ott_batch_inner_into(data, sweep, kern, parallel, out)?;
 
     let values = unsafe {
@@ -1790,10 +1615,9 @@ pub fn ott_batch_with_kernel(
         other if other.is_batch() => other,
         _ => return Err(OttError::InvalidKernelForBatch(k)),
     };
-    
+
     ott_batch_par_slice(data, sweep, kernel)
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ott")]
@@ -1868,9 +1692,7 @@ pub fn ott_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    
-    let combos =
-        expand_grid_ott(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_ott(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -1878,7 +1700,6 @@ pub fn ott_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows * cols overflow"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -1916,12 +1737,11 @@ pub fn ott_batch_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    
+
     let types = PyList::new(py, combos.iter().map(|p| p.ma_type.as_deref().unwrap()))?;
     dict.set_item("ma_types", types)?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ott_cuda_batch_dev")]
@@ -1944,9 +1764,8 @@ pub fn ott_cuda_batch_dev_py(
         percent: percent_range,
         ma_types,
     };
-    
-    let combos =
-        expand_grid_ott(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let combos = expand_grid_ott(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let cols = slice_in.len();
     for prm in &combos {
         let p = prm.period.unwrap();
@@ -2007,8 +1826,7 @@ pub fn ott_cuda_many_series_one_param_dev_py(
     Ok(handle)
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ott_js(
     data: &[f64],
@@ -2024,7 +1842,7 @@ pub fn ott_js(
     let input = OttInput::from_slice(data, params);
 
     let mut out = vec![f64::NAN; data.len()];
-    
+
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::Scalar
     } else {
@@ -2034,7 +1852,7 @@ pub fn ott_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ott_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2043,7 +1861,7 @@ pub fn ott_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ott_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2051,7 +1869,7 @@ pub fn ott_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ott_into(
     in_ptr: *const f64,
@@ -2075,7 +1893,6 @@ pub fn ott_into(
         };
         let input = OttInput::from_slice(data, params);
 
-        
         let kernel = if cfg!(target_arch = "wasm32") {
             Kernel::Scalar
         } else {
@@ -2097,7 +1914,7 @@ pub fn ott_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2110,7 +1927,7 @@ pub struct OttContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl OttContext {
@@ -2161,7 +1978,7 @@ impl OttContext {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct OttBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2169,7 +1986,7 @@ pub struct OttBatchConfig {
     pub ma_types: Vec<String>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct OttBatchJsOutput {
     pub values: Vec<f64>,
@@ -2178,7 +1995,7 @@ pub struct OttBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ott_batch)]
 pub fn ott_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: OttBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2188,7 +2005,7 @@ pub fn ott_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         percent: cfg.percent_range,
         ma_types: cfg.ma_types,
     };
-    
+
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::ScalarBatch
     } else {
@@ -2206,7 +2023,7 @@ pub fn ott_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ott_batch_into(
     in_ptr: *const f64,
@@ -2231,8 +2048,7 @@ pub fn ott_batch_into(
         percent: (q_start, q_end, q_step),
         ma_types: types,
     };
-    let combos = expand_grid_ott(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid_ott(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     if combos.is_empty() {
         return Err(JsValue::from_str("no parameter combinations"));
     }
@@ -2248,7 +2064,6 @@ pub fn ott_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        
         let row_kern = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2290,7 +2105,6 @@ pub fn ott_batch_into(
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2305,11 +2119,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = OttInput::from_candles(&candles, "close", OttParams::default());
         let result = ott_with_kernel(&input, kernel)?;
 
-        
         let expected_last_five = [
             59719.89457348,
             59719.89457348,
@@ -2448,7 +2260,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(feature = "proptest")]
     proptest! {
         #[test]
@@ -2479,11 +2290,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = OttInput::from_candles(&candles, "close", OttParams::default());
         let first_result = ott_with_kernel(&input, kernel)?;
 
-        
         let input2 = OttInput::from_slice(&first_result.values, OttParams::default());
         let second_result = ott_with_kernel(&input2, kernel)?;
 
@@ -2511,14 +2320,12 @@ mod tests {
             test_name
         );
 
-        
         let first_valid = result
             .values
             .iter()
             .position(|x| !x.is_nan())
             .unwrap_or(result.values.len());
 
-        
         if result.values.len() > first_valid + 100 {
             for i in (first_valid + 100)..result.values.len() {
                 if candles.close[i].is_nan() {
@@ -2533,9 +2340,6 @@ mod tests {
             }
         }
 
-        
-        
-        
         assert!(
             first_valid <= candles.close.len(),
             "[{}] First valid index out of range",
@@ -2550,11 +2354,9 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let close = &candles.close;
 
-        
         let input = OttInput::from_candles(&candles, "close", OttParams::default());
         let batch_result = ott_with_kernel(&input, kernel)?;
 
-        
         let mut stream = OttStream::try_new(OttParams::default())?;
         let mut stream_values = Vec::new();
 
@@ -2563,7 +2365,6 @@ mod tests {
             stream_values.push(result.unwrap_or(f64::NAN));
         }
 
-        
         assert_eq!(
             batch_result.values.len(),
             stream_values.len(),
@@ -2571,17 +2372,15 @@ mod tests {
             test_name
         );
 
-        
-        
         let warmup = OttParams::default().period.unwrap_or(2);
         if batch_result.values.len() > warmup + 10 {
             for i in (warmup + 10)..batch_result.values.len() {
                 if batch_result.values[i].is_nan() || stream_values[i].is_nan() {
                     continue;
                 }
-                
+
                 let diff = (batch_result.values[i] - stream_values[i]).abs();
-                let tolerance = batch_result.values[i].abs() * 0.05; 
+                let tolerance = batch_result.values[i].abs() * 0.05;
                 assert!(
                     diff <= tolerance.max(1.0),
                     "[{}] OTT streaming mismatch at index {}: batch={}, stream={}, diff={}",
@@ -2596,7 +2395,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_ott_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2623,7 +2421,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_ott_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2687,7 +2484,6 @@ mod tests {
         check_ott_invalid_percent
     );
 
-    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -2736,7 +2532,6 @@ mod tests {
             .ma_types(vec!["VAR".to_string(), "WWMA".to_string()])
             .apply_slice(&data)?;
 
-        
         assert_eq!(
             out.rows, 8,
             "[{}] Expected 8 rows for parameter sweep",
@@ -2744,7 +2539,6 @@ mod tests {
         );
         assert_eq!(out.cols, 100, "[{}] Column count mismatch", test);
 
-        
         assert_eq!(out.combos.len(), 8, "[{}] Combos count mismatch", test);
         Ok(())
     }
@@ -2822,12 +2616,10 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0];
 
-        
         let out1 = OttBatchBuilder::with_default_slice(&data, kernel)?;
         assert_eq!(out1.rows, 1);
         assert_eq!(out1.cols, data.len());
 
-        
         let builder = OttBatchBuilder::new()
             .kernel(kernel)
             .period_static(3)
@@ -2838,7 +2630,6 @@ mod tests {
         assert_eq!(out2.rows, 1);
         assert_eq!(out2.cols, data.len());
 
-        
         let params = OttParams {
             period: Some(3),
             percent: Some(1.4),
@@ -2852,12 +2643,10 @@ mod tests {
         assert!(values.is_some());
         assert_eq!(values.unwrap().len(), data.len());
 
-        
         let default_params = OttParams::default();
         let default_row_idx = out1.row_for_params(&default_params);
-        assert_eq!(default_row_idx, Some(0)); 
+        assert_eq!(default_row_idx, Some(0));
 
-        
         let invalid_params = OttParams {
             period: Some(999),
             percent: Some(999.0),
@@ -2872,41 +2661,33 @@ mod tests {
     gen_batch_tests!(check_batch_helpers_and_row_lookup);
 }
 
-
 #[cfg(test)]
 #[test]
 fn test_ott_into_matches_api() {
-    
     let n = 256usize;
     let mut data = Vec::with_capacity(n);
     for i in 0..n {
-        
         let x = i as f64;
         data.push((x * 0.1).sin() * 100.0 + x * 0.05);
     }
 
     let input = OttInput::from_slice(&data, OttParams::default());
 
-    
     let baseline = ott(&input).expect("baseline ott() failed");
 
-    
     let mut into_out = vec![0.0; data.len()];
-    
-    #[cfg(not(feature = "wasm"))]
+
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     {
         ott_into(&input, &mut into_out).expect("ott_into failed");
     }
-    #[cfg(feature = "wasm")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     {
-        
-        
         ott_into_slice(&mut into_out, &input, Kernel::Scalar).expect("ott_into_slice failed");
     }
 
     assert_eq!(baseline.values.len(), into_out.len());
 
-    
     fn eq_or_both_nan(a: f64, b: f64) -> bool {
         (a.is_nan() && b.is_nan()) || a == b || (a - b).abs() <= 1e-12
     }

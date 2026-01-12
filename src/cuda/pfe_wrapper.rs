@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Polarized Fractal Efficiency (PFE).
-//!
-//! Parity items covered:
-//! - PTX JIT via include_str!(concat!(env!("OUT_DIR"), "/pfe_kernel.ptx")) with DetermineTargetFromContext
-//!   and OptLevel O2, plus simpler fallbacks on failure.
-//! - NON_BLOCKING stream
-//! - VRAM-aware chunking of parameter rows to keep grid.y within limits and avoid OOMs.
-//! - Public device entry points for batch and many-series (time-major) variants.
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::pfe::PfeBatchRange;
 use cust::context::Context;
@@ -31,13 +22,24 @@ pub enum CudaPfeError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -157,9 +159,8 @@ impl CudaPfe {
 
     #[inline]
     fn chunk_rows(n_rows: usize, len: usize) -> usize {
-        
         let headroom = 64usize << 20;
-        let bytes_per_row = len * std::mem::size_of::<f32>(); 
+        let bytes_per_row = len * std::mem::size_of::<f32>();
         if let Ok((free, _)) = mem_get_info() {
             if free > headroom {
                 let cap = (free - headroom) / bytes_per_row;
@@ -171,10 +172,14 @@ impl CudaPfe {
 
     #[inline]
     fn clone_fill_head_with_first_valid(data: &[f32], first_valid: usize) -> Vec<f32> {
-        if first_valid == 0 { return data.to_vec(); }
+        if first_valid == 0 {
+            return data.to_vec();
+        }
         let mut v = data.to_vec();
         let seed = v[first_valid];
-        for i in 0..=first_valid { v[i] = seed; }
+        for i in 0..=first_valid {
+            v[i] = seed;
+        }
         v
     }
 
@@ -190,7 +195,7 @@ impl CudaPfe {
         let first_valid = Self::first_valid(data_f32)
             .ok_or_else(|| CudaPfeError::InvalidInput("all NaN".into()))?;
         let combos = Self::expand_grid(sweep)?;
-        
+
         for c in &combos {
             let p = c.period as usize;
             let s = c.smoothing as usize;
@@ -205,10 +210,6 @@ impl CudaPfe {
             }
         }
 
-        
-        
-        
-        
         let len_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaPfeError::InvalidInput("size overflow".into()))?;
@@ -233,23 +234,19 @@ impl CudaPfe {
         let headroom = 64usize << 20;
         Self::will_fit(required, headroom)?;
 
-        
         if let (Ok(func_steps), Ok(func_pref), Ok(func_main)) = (
             self.module.get_function("pfe_build_steps_f32"),
             self.module.get_function("pfe_build_prefix_float2_serial"),
             self.module.get_function("pfe_many_params_prefix_f32"),
         ) {
-            
             let data_filled = Self::clone_fill_head_with_first_valid(data_f32, first_valid);
 
-            
             let d_data = DeviceBuffer::from_slice(&data_filled)?;
             let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
             let smooths: Vec<i32> = combos.iter().map(|c| c.smoothing).collect();
             let d_periods = DeviceBuffer::from_slice(&periods)?;
             let d_smooths = DeviceBuffer::from_slice(&smooths)?;
 
-            
             let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             let block_x: u32 = 256;
             let grid_x: u32 = (((len as u32) + block_x - 1) / block_x).max(1);
@@ -264,10 +261,10 @@ impl CudaPfe {
                     &mut len_i as *mut _ as *mut c_void,
                     &mut steps_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func_steps, grid_1d, block_1d, 0, args)?;
+                self.stream
+                    .launch(&func_steps, grid_1d, block_1d, 0, args)?;
             }
 
-            
             let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
             unsafe {
@@ -283,18 +280,17 @@ impl CudaPfe {
                 ];
                 let grid_one: GridSize = (1u32, 1u32, 1u32).into();
                 let block_one: BlockSize = (1u32, 1u32, 1u32).into();
-                self.stream.launch(&func_pref, grid_one, block_one, 0, args)?;
+                self.stream
+                    .launch(&func_pref, grid_one, block_one, 0, args)?;
             }
             drop(d_steps);
 
-            
             let total_out = combos
                 .len()
                 .checked_mul(len)
                 .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
             let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }?;
 
-            
             let block_x: u32 = 256;
             let grid_x: u32 = (((combos.len() as u32) + block_x - 1) / block_x).max(1);
             let grid_np: GridSize = (grid_x, 1, 1).into();
@@ -332,15 +328,12 @@ impl CudaPfe {
             });
         }
 
-        
-        
         let mut prefix = vec![0.0f64; len];
         for i in 1..len {
             let d = (data_f32[i] as f64) - (data_f32[i - 1] as f64);
             prefix[i] = prefix[i - 1] + (d.mul_add(d, 1.0)).sqrt();
         }
 
-        
         let d_data = DeviceBuffer::from_slice(data_f32)?;
         let d_prefix = DeviceBuffer::from_slice(&prefix)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
@@ -381,12 +374,11 @@ impl CudaPfe {
                 self.stream.launch(&func, grid, block, 0, args)?;
             }
         } else {
-            let func = self
-                .module
-                .get_function("pfe_batch_f32")
-                .map_err(|_| CudaPfeError::MissingKernelSymbol {
+            let func = self.module.get_function("pfe_batch_f32").map_err(|_| {
+                CudaPfeError::MissingKernelSymbol {
                     name: "pfe_batch_f32",
-                })?;
+                }
+            })?;
             let chunk = Self::chunk_rows(combos.len(), len);
             let mut launched = 0usize;
             while launched < combos.len() {
@@ -462,7 +454,6 @@ impl CudaPfe {
             return Err(CudaPfeError::InvalidInput("invalid smoothing".into()));
         }
 
-        
         let mut fvs = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = 0usize;
@@ -632,7 +623,6 @@ pub mod benches {
         let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
         let d_data = DeviceBuffer::from_slice(&price).expect("d_data");
 
-        
         let mut d_steps: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
         let mut d_pref_hi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
         let mut d_pref_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.unwrap();
@@ -653,7 +643,9 @@ pub mod benches {
                 &mut len_i as *mut _ as *mut c_void,
                 &mut steps_ptr as *mut _ as *mut c_void,
             ];
-            cuda.stream.launch(&build_steps, grid, block, 0, args).unwrap();
+            cuda.stream
+                .launch(&build_steps, grid, block, 0, args)
+                .unwrap();
 
             let build_pref = cuda
                 .module
@@ -671,7 +663,9 @@ pub mod benches {
                 &mut hi_ptr as *mut _ as *mut c_void,
                 &mut lo_ptr as *mut _ as *mut c_void,
             ];
-            cuda.stream.launch(&build_pref, grid, block, 0, args).unwrap();
+            cuda.stream
+                .launch(&build_pref, grid, block, 0, args)
+                .unwrap();
         }
         cuda.synchronize().expect("sync prefix");
 

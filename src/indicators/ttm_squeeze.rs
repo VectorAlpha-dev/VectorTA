@@ -1,24 +1,3 @@
-//! # TTM Squeeze
-//!
-//! TTM Squeeze momentum oscillator with multi-level squeeze detection.
-//! Combines Bollinger Bands and Keltner Channels to identify squeeze conditions.
-//!
-//! ## Parameters
-//! - **length**: Period for calculations (default: 20)
-//! - **bb_mult**: Bollinger Band standard deviation multiplier (default: 2.0)
-//! - **kc_mult_high**: Keltner Channel multiplier #1 (default: 1.0)
-//! - **kc_mult_mid**: Keltner Channel multiplier #2 (default: 1.5)
-//! - **kc_mult_low**: Keltner Channel multiplier #3 (default: 2.0)
-//!
-//! ## Returns
-//! - **momentum**: Momentum oscillator values
-//! - **squeeze**: Squeeze state (0=NoSqz, 1=LowSqz, 2=MidSqz, 3=HighSqz)
-//!
-//! ## Developer Notes / Decision log
-//! - SIMD: not implemented for this indicator; workload is sequential/windowed and largely memory-bound/branch-heavy. Scalar is the reference path; AVX batch kernels are stubs that delegate to scalar logic.
-//! - CUDA: wrapper exists with VRAM checks and typed errors; Python exposes CUDA Array Interface v3 and DLPack v1.x via shared `DeviceArrayF32Py` handles.
-//! - Streaming / batch: streaming kernel uses O(1) rolling state; ScalarBatch uses row-specific grouping by `length` with shared momentum and per-row squeeze thresholds. Other batch kernels fall back to per-row computation.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyUntypedArrayMethods};
 #[cfg(feature = "python")]
@@ -26,9 +5,9 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::moving_averages::sma::{sma_with_kernel, SmaInput, SmaParams};
@@ -57,7 +36,10 @@ pub struct TtmSqueezeOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct TtmSqueezeParams {
     pub length: Option<usize>,
     pub bb_mult: Option<f64>,
@@ -136,7 +118,6 @@ impl<'a> TtmSqueezeInput<'a> {
         self.params.kc_mult_low.unwrap_or(2.0)
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct TtmSqueezeBuilder {
@@ -290,7 +271,6 @@ pub enum TtmSqueezeError {
     LinRegError(String),
 }
 
-/// Calculate standard deviation
 #[inline]
 fn std_dev(data: &[f64], mean: f64, start: usize, end: usize) -> f64 {
     let mut sum_sq = 0.0;
@@ -311,7 +291,6 @@ fn std_dev(data: &[f64], mean: f64, start: usize, end: usize) -> f64 {
     }
 }
 
-/// Calculate true range
 #[inline]
 fn true_range(high: f64, low: f64, prev_close: Option<f64>) -> f64 {
     match prev_close {
@@ -325,7 +304,6 @@ fn true_range(high: f64, low: f64, prev_close: Option<f64>) -> f64 {
     }
 }
 
-/// Validate parameters
 fn validate_params(params: &TtmSqueezeParams) -> Result<(), TtmSqueezeError> {
     let ok = |x: f64| x.is_finite() && x > 0.0;
 
@@ -337,9 +315,7 @@ fn validate_params(params: &TtmSqueezeParams) -> Result<(), TtmSqueezeError> {
 
     if let Some(x) = params.kc_mult_high {
         if !ok(x) {
-            return Err(TtmSqueezeError::InvalidKcMultHigh {
-                kc_mult_high: x,
-            });
+            return Err(TtmSqueezeError::InvalidKcMultHigh { kc_mult_high: x });
         }
     }
 
@@ -367,10 +343,8 @@ pub fn ttm_squeeze_with_kernel(
     input: &TtmSqueezeInput,
     kernel: Kernel,
 ) -> Result<TtmSqueezeOutput, TtmSqueezeError> {
-    
     validate_params(&input.params)?;
 
-    
     let (high, low, close) = match &input.data {
         TtmSqueezeData::Candles { candles } => {
             if candles.close.is_empty() {
@@ -407,7 +381,6 @@ pub fn ttm_squeeze_with_kernel(
         });
     }
 
-    
     let first = close
         .iter()
         .position(|&x| !x.is_nan())
@@ -421,7 +394,6 @@ pub fn ttm_squeeze_with_kernel(
 
     let warmup = first + length - 1;
 
-    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -434,7 +406,6 @@ pub fn ttm_squeeze_with_kernel(
         && kc_mult_mid == 1.5
         && kc_mult_low == 2.0
     {
-        
         let mut momentum = alloc_with_nan_prefix(len, warmup);
         let mut squeeze = alloc_with_nan_prefix(len, warmup);
 
@@ -458,7 +429,6 @@ pub fn ttm_squeeze_with_kernel(
         return Ok(TtmSqueezeOutput { momentum, squeeze });
     }
 
-    
     let sma_params = SmaParams {
         period: Some(length),
     };
@@ -467,7 +437,6 @@ pub fn ttm_squeeze_with_kernel(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let sma_values = sma_result.values;
 
-    
     let mut tr = alloc_with_nan_prefix(len, first);
     for i in first..len {
         tr[i] = if i == first {
@@ -481,7 +450,6 @@ pub fn ttm_squeeze_with_kernel(
         };
     }
 
-    
     let tr_sma_params = SmaParams {
         period: Some(length),
     };
@@ -490,11 +458,9 @@ pub fn ttm_squeeze_with_kernel(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let dev_kc = tr_sma_result.values;
 
-    
     let mut squeeze = alloc_with_nan_prefix(len, warmup);
     let mut momentum = alloc_with_nan_prefix(len, warmup);
 
-    
     for i in warmup..len {
         let m = sma_values[i];
         let dkc = dev_kc[i];
@@ -502,7 +468,6 @@ pub fn ttm_squeeze_with_kernel(
             continue;
         }
 
-        
         let start = i + 1 - length;
         let mut sum = 0.0;
         let mut cnt = 0usize;
@@ -521,7 +486,6 @@ pub fn ttm_squeeze_with_kernel(
             let bb_upper = m + bb_mult * std;
             let bb_lower = m - bb_mult * std;
 
-            
             let kc_upper_low = m + dkc * kc_mult_low;
             let kc_lower_low = m - dkc * kc_mult_low;
             let kc_upper_mid = m + dkc * kc_mult_mid;
@@ -529,23 +493,18 @@ pub fn ttm_squeeze_with_kernel(
             let kc_upper_high = m + dkc * kc_mult_high;
             let kc_lower_high = m - dkc * kc_mult_high;
 
-            
             let no_sqz = bb_lower < kc_lower_low || bb_upper > kc_upper_low;
             squeeze[i] = if no_sqz {
-                0.0 
+                0.0
             } else if bb_lower >= kc_lower_high || bb_upper <= kc_upper_high {
-                3.0 
+                3.0
             } else if bb_lower >= kc_lower_mid || bb_upper <= kc_upper_mid {
-                2.0 
+                2.0
             } else {
-                1.0 
+                1.0
             };
         }
 
-        
-        
-
-        
         let mut highest = f64::NEG_INFINITY;
         let mut lowest = f64::INFINITY;
         let mut has_valid = false;
@@ -559,12 +518,10 @@ pub fn ttm_squeeze_with_kernel(
         }
 
         if has_valid {
-            
             let midpoint = (highest + lowest) * 0.5;
-            
+
             let avg = (midpoint + m) * 0.5;
 
-            
             let mut sx = 0.0;
             let mut sy = 0.0;
             let mut sxy = 0.0;
@@ -595,7 +552,6 @@ pub fn ttm_squeeze_with_kernel(
     Ok(TtmSqueezeOutput { momentum, squeeze })
 }
 
-/// Zero-copy version that writes directly into provided slices
 #[inline]
 pub fn ttm_squeeze_into_slices(
     dst_momentum: &mut [f64],
@@ -603,10 +559,8 @@ pub fn ttm_squeeze_into_slices(
     input: &TtmSqueezeInput,
     kernel: Kernel,
 ) -> Result<(), TtmSqueezeError> {
-    
     validate_params(&input.params)?;
 
-    
     let (high, low, close) = match &input.data {
         TtmSqueezeData::Candles { candles } => {
             (&candles.high[..], &candles.low[..], &candles.close[..])
@@ -653,13 +607,11 @@ pub fn ttm_squeeze_into_slices(
 
     let warmup = first + length - 1;
 
-    
     for i in 0..warmup {
         dst_momentum[i] = f64::NAN;
         dst_squeeze[i] = f64::NAN;
     }
 
-    
     let sma_params = SmaParams {
         period: Some(length),
     };
@@ -668,7 +620,6 @@ pub fn ttm_squeeze_into_slices(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let sma_values = sma_result.values;
 
-    
     let mut tr_values = alloc_with_nan_prefix(len, first);
     for i in first..len {
         tr_values[i] = if i == first {
@@ -686,7 +637,6 @@ pub fn ttm_squeeze_into_slices(
         .map_err(|e| TtmSqueezeError::SmaError(e.to_string()))?;
     let dev_kc = tr_sma_result.values;
 
-    
     for i in warmup..len {
         let m = sma_values[i];
         let dev_kc_val = dev_kc[i];
@@ -696,7 +646,6 @@ pub fn ttm_squeeze_into_slices(
             continue;
         }
 
-        
         let start = i + 1 - length;
         let mut sum = 0.0;
         let mut count = 0;
@@ -742,11 +691,9 @@ pub fn ttm_squeeze_into_slices(
         };
     }
 
-    
     for end_idx in warmup..len {
         let start_idx = end_idx + 1 - length;
 
-        
         let mut highest = f64::NEG_INFINITY;
         let mut lowest = f64::INFINITY;
         let mut has_valid = false;
@@ -764,11 +711,9 @@ pub fn ttm_squeeze_into_slices(
             continue;
         }
 
-        
         let midpoint = (highest + lowest) * 0.5;
         let avg = (midpoint + sma_values[end_idx]) / 2.0;
 
-        
         let mut sum_x = 0.0;
         let mut sum_y = 0.0;
         let mut sum_xy = 0.0;
@@ -800,12 +745,6 @@ pub fn ttm_squeeze_into_slices(
     Ok(())
 }
 
-/// Compute TTM Squeeze into caller-provided buffers (no allocations).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - Both `dst_momentum` and `dst_squeeze` must have length equal to the input length.
-/// - Pass `Kernel::Auto` for automatic kernel selection (recommended); other kernels
-///   follow the module’s dispatch rules.
 #[inline]
 pub fn ttm_squeeze_into(
     dst_momentum: &mut [f64],
@@ -815,7 +754,6 @@ pub fn ttm_squeeze_into(
 ) -> Result<(), TtmSqueezeError> {
     ttm_squeeze_into_slices(dst_momentum, dst_squeeze, input, kernel)
 }
-
 
 #[derive(Debug, Clone)]
 struct MonoDeque {
@@ -860,7 +798,6 @@ impl MonoDeque {
         self.val[self.head]
     }
 
-    
     #[inline(always)]
     fn expire(&mut self, min_idx: usize) {
         while self.len > 0 {
@@ -876,7 +813,6 @@ impl MonoDeque {
         }
     }
 
-    
     #[inline(always)]
     fn push(&mut self, idx: usize, value: f64) {
         while self.len > 0 {
@@ -886,7 +822,7 @@ impl MonoDeque {
                 self.tail - 1
             };
             let back_val = self.val[back_pos];
-            
+
             let ok = if self.is_max {
                 back_val >= value
             } else {
@@ -908,46 +844,39 @@ impl MonoDeque {
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct TtmSqueezeStream {
     params: TtmSqueezeParams,
 
-    
     hi: Vec<f64>,
     lo: Vec<f64>,
     cl: Vec<f64>,
     tr: Vec<f64>,
 
-    head: usize,  
-    filled: bool, 
-    t: usize,     
+    head: usize,
+    filled: bool,
+    t: usize,
 
-    
-    sum0: f64,   
-    sum1: f64,   
-    sumsq: f64,  
-    tr_sum: f64, 
+    sum0: f64,
+    sum1: f64,
+    sumsq: f64,
+    tr_sum: f64,
 
-    
     prev_close: Option<f64>,
 
-    
     n: usize,
     n_f64: f64,
     inv_n: f64,
     sx: f64,
     sx2: f64,
-    inv_den: f64, 
+    inv_den: f64,
     half_nm1: f64,
 
-    
     bb_sq: f64,
     kc_low_sq: f64,
     kc_mid_sq: f64,
     kc_high_sq: f64,
 
-    
     max_q: MonoDeque,
     min_q: MonoDeque,
 }
@@ -962,16 +891,14 @@ impl TtmSqueezeStream {
             });
         }
 
-        
         let n_f64 = n as f64;
         let inv_n = 1.0 / n_f64;
         let sx = 0.5 * n_f64 * (n_f64 - 1.0);
         let sx2 = (n_f64 - 1.0) * n_f64 * (2.0 * n_f64 - 1.0) / 6.0;
         let den = n_f64 * sx2 - sx * sx;
-        let inv_den = if den > 0.0 { 1.0 / den } else { 0.0 }; 
+        let inv_den = if den > 0.0 { 1.0 / den } else { 0.0 };
         let half_nm1 = 0.5 * (n_f64 - 1.0);
 
-        
         let bb = params.bb_mult.unwrap_or(2.0);
         let kc_hi = params.kc_mult_high.unwrap_or(1.0);
         let kc_md = params.kc_mult_mid.unwrap_or(1.5);
@@ -1013,13 +940,11 @@ impl TtmSqueezeStream {
         })
     }
 
-    /// O(1) update. Returns (momentum, squeeze) after warmup; None otherwise.
     #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
         let n = self.n;
         let pos = self.head;
 
-        
         let tr_new = match self.prev_close {
             Some(pc) => {
                 let hl = high - low;
@@ -1040,33 +965,27 @@ impl TtmSqueezeStream {
             None => high - low,
         };
 
-        
         if self.filled {
-            
             let min_idx = self.t + 1 - n;
             self.max_q.expire(min_idx);
             self.min_q.expire(min_idx);
         }
 
-        
         self.max_q.push(self.t, high);
         self.min_q.push(self.t, low);
 
-        
         let old_c = self.cl[pos];
         let old_tr = self.tr[pos];
 
-        
         self.hi[pos] = high;
         self.lo[pos] = low;
         self.cl[pos] = close;
         self.tr[pos] = tr_new;
 
         if !self.filled {
-            
             self.sum0 += close;
             self.sumsq = close.mul_add(close, self.sumsq);
-            self.sum1 += (self.t as f64) * close; 
+            self.sum1 += (self.t as f64) * close;
             self.tr_sum += tr_new;
 
             self.prev_close = Some(close);
@@ -1077,23 +996,17 @@ impl TtmSqueezeStream {
                 return None;
             }
 
-            
             self.filled = true;
             return Some(self.emit());
         }
 
-        
         let sum0_old = self.sum0;
 
-        
         self.sum0 += close - old_c;
         self.sumsq = close.mul_add(close, self.sumsq - old_c * old_c);
 
-        
-        
         self.sum1 = self.sum1 - sum0_old + old_c + (self.n_f64 - 1.0) * close;
 
-        
         self.tr_sum += tr_new - old_tr;
 
         self.prev_close = Some(close);
@@ -1105,32 +1018,28 @@ impl TtmSqueezeStream {
 
     #[inline]
     fn emit(&self) -> (f64, f64) {
-        
         let m = self.sum0 * self.inv_n;
-        let var = (-m).mul_add(m, self.sumsq * self.inv_n); 
+        let var = (-m).mul_add(m, self.sumsq * self.inv_n);
         let var_pos = if var > 0.0 { var } else { 0.0 };
 
         let dkc = self.tr_sum * self.inv_n;
         let dkc2 = dkc * dkc;
 
-        
         let bbv = self.bb_sq * var_pos;
         let t_low = self.kc_low_sq * dkc2;
         let t_mid = self.kc_mid_sq * dkc2;
         let t_hi = self.kc_high_sq * dkc2;
 
         let sqz = if bbv > t_low {
-            0.0 
+            0.0
         } else if bbv <= t_hi {
-            3.0 
+            3.0
         } else if bbv <= t_mid {
-            2.0 
+            2.0
         } else {
-            1.0 
+            1.0
         };
 
-        
-        
         let highest = if self.max_q.is_empty() {
             f64::NAN
         } else {
@@ -1145,9 +1054,6 @@ impl TtmSqueezeStream {
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
 
-        
-        
-        
         let sy = self.sum0 - avg * self.n_f64;
         let sxy = self.sum1 - avg * self.sx;
 
@@ -1183,9 +1089,6 @@ impl TtmSqueezeStream {
     }
 }
 
-
-/// Optimized classic kernel for TTM Squeeze with default parameters
-/// Inlines SMA calculations and standard deviation computation for maximum performance
 #[inline(always)]
 pub unsafe fn ttm_squeeze_scalar_classic(
     high: &[f64],
@@ -1206,40 +1109,35 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         return Ok(());
     }
 
-    
     let n = length as f64;
     let sx = 0.5 * n * (n - 1.0);
     let sx2 = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0;
-    let den = n * sx2 - sx * sx; 
-    let inv_den = 1.0 / den; 
+    let den = n * sx2 - sx * sx;
+    let inv_den = 1.0 / den;
     let inv_n = 1.0 / n;
     let half_nm1 = 0.5 * (n - 1.0);
 
-    
     let mut cbuf = vec![0.0f64; length];
     let mut trbuf = vec![0.0f64; length];
     let mut cpos = 0usize;
     let mut trpos = 0usize;
 
-    let mut sum0 = 0.0f64; 
-    let mut sum1 = 0.0f64; 
-    let mut sumsq = 0.0f64; 
-    let mut tr_sum = 0.0f64; 
+    let mut sum0 = 0.0f64;
+    let mut sum1 = 0.0f64;
+    let mut sumsq = 0.0f64;
+    let mut tr_sum = 0.0f64;
 
-    
     let cap = length;
     let mut max_q = vec![0usize; cap];
     let mut min_q = vec![0usize; cap];
     let (mut max_head, mut max_tail, mut max_len) = (0usize, 0usize, 0usize);
     let (mut min_head, mut min_tail, mut min_len) = (0usize, 0usize, 0usize);
 
-    
     let bb_sq = bb_mult * bb_mult;
     let kc_low_sq = kc_mult_low * kc_mult_low;
     let kc_mid_sq = kc_mult_mid * kc_mult_mid;
     let kc_high_sq = kc_mult_high * kc_mult_high;
 
-    
     {
         let mut r = 0usize;
         let mut i = first;
@@ -1250,7 +1148,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             sumsq = c.mul_add(c, sumsq);
             sum1 += (r as f64) * c;
 
-            
             let tr_val = if i == first {
                 *high.get_unchecked(i) - *low.get_unchecked(i)
             } else {
@@ -1275,7 +1172,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             *trbuf.get_unchecked_mut(trpos) = tr_val;
             tr_sum += tr_val;
 
-            
             while max_len > 0 {
                 let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                 let back_idx = *max_q.get_unchecked(back_pos);
@@ -1292,7 +1188,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             }
             max_len += 1;
 
-            
             while min_len > 0 {
                 let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
                 let back_idx = *min_q.get_unchecked(back_pos);
@@ -1322,7 +1217,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         }
     }
 
-    
     {
         let m = sum0 * inv_n;
         let var = (-m).mul_add(m, sumsq * inv_n);
@@ -1330,29 +1224,26 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         let dkc = tr_sum * inv_n;
         let dkc2 = dkc * dkc;
 
-        
         let bbv = bb_sq * var_pos;
         let t_low = kc_low_sq * dkc2;
         let t_mid = kc_mid_sq * dkc2;
         let t_high = kc_high_sq * dkc2;
 
         *squeeze.get_unchecked_mut(warmup) = if bbv > t_low {
-            0.0 
+            0.0
         } else if bbv <= t_high {
-            3.0 
+            3.0
         } else if bbv <= t_mid {
-            2.0 
+            2.0
         } else {
-            1.0 
+            1.0
         };
 
-        
         let hi_idx = *max_q.get_unchecked(max_head);
         let lo_idx = *min_q.get_unchecked(min_head);
         let highest = *high.get_unchecked(hi_idx);
         let lowest = *low.get_unchecked(lo_idx);
 
-        
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
         let sy = sum0 - avg * n;
@@ -1361,12 +1252,10 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         *momentum.get_unchecked_mut(warmup) = sy * inv_n + slope * half_nm1;
     }
 
-    
     let mut i = warmup + 1;
     while i < len {
         let start_idx = i + 1 - length;
 
-        
         while max_len > 0 {
             let front_idx = *max_q.get_unchecked(max_head);
             if front_idx >= start_idx {
@@ -1390,7 +1279,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             min_len -= 1;
         }
 
-        
         while max_len > 0 {
             let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
             let back_idx = *max_q.get_unchecked(back_pos);
@@ -1423,7 +1311,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
         }
         min_len += 1;
 
-        
         let old = *cbuf.get_unchecked(cpos);
         let new = *close.get_unchecked(i);
         let sum0_old = sum0;
@@ -1436,7 +1323,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             cpos = 0;
         }
 
-        
         let old_tr = *trbuf.get_unchecked(trpos);
         let pc = *close.get_unchecked(i - 1);
         let hi_i = *high.get_unchecked(i);
@@ -1452,7 +1338,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             trpos = 0;
         }
 
-        
         let m = sum0 * inv_n;
         let var = (-m).mul_add(m, sumsq * inv_n);
         let var_pos = if var > 0.0 { var } else { 0.0 };
@@ -1472,13 +1357,11 @@ pub unsafe fn ttm_squeeze_scalar_classic(
             1.0
         };
 
-        
         let hi_idx = *max_q.get_unchecked(max_head);
         let lo_idx = *min_q.get_unchecked(min_head);
         let highest = *high.get_unchecked(hi_idx);
         let lowest = *low.get_unchecked(lo_idx);
 
-        
         let midpoint = 0.5 * (highest + lowest);
         let avg = 0.5 * (midpoint + m);
         let sy = sum0 - avg * n;
@@ -1491,7 +1374,6 @@ pub unsafe fn ttm_squeeze_scalar_classic(
 
     Ok(())
 }
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1515,7 +1397,6 @@ pub fn ttm_squeeze_py<'py>(
     let l = low.as_slice()?;
     let c = close.as_slice()?;
 
-    // Validate array lengths are consistent
     if h.len() != l.len() || l.len() != c.len() {
         return Err(PyValueError::new_err(format!(
             "ttm_squeeze: Inconsistent slice lengths - high={}, low={}, close={}",
@@ -1545,7 +1426,6 @@ pub fn ttm_squeeze_py<'py>(
     Ok((momentum.into_pyarray(py), squeeze.into_pyarray(py)))
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaTtmSqueeze};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1553,7 +1433,6 @@ use crate::indicators::moving_averages::alma::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
-// PyValueError already imported in Python bindings above.
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ttm_squeeze_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, length_range, bb_mult_range, kc_high_range, kc_mid_range, kc_low_range, device_id=0))]
@@ -1690,16 +1569,15 @@ impl TtmSqueezeStreamPy {
     }
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TtmSqueezeJsResult {
-    pub values: Vec<f64>, // row-major: [momentum..., squeeze...]
-    pub rows: usize,      // 2 (momentum and squeeze)
-    pub cols: usize,      // data length
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ttm_squeeze)]
 pub fn ttm_squeeze_js(
     high: &[f64],
@@ -1738,7 +1616,7 @@ pub fn ttm_squeeze_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ttm_squeeze_into)]
 pub fn ttm_squeeze_into_js(
     high: &[f64],
@@ -1773,8 +1651,7 @@ pub fn ttm_squeeze_into_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// WASM alloc/free/into pointer functions for zero-copy interop
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ttm_squeeze_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1783,7 +1660,7 @@ pub fn ttm_squeeze_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ttm_squeeze_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1791,7 +1668,7 @@ pub fn ttm_squeeze_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ttm_squeeze_into_ptrs)]
 pub fn ttm_squeeze_into_js_ptrs(
     high: *const f64,
@@ -1851,7 +1728,6 @@ pub fn ttm_squeeze_into_js_ptrs(
     }
 }
 
-// ==================== BATCH API ====================
 use crate::utilities::helpers::{
     detect_best_batch_kernel, init_matrix_prefixes, make_uninit_matrix,
 };
@@ -2163,7 +2039,6 @@ pub fn ttm_squeeze_batch_with_kernel(
         core::slice::from_raw_parts_mut(sqz_guard.as_mut_ptr() as *mut f64, sqz_guard.len())
     };
 
-    // Select kernel once for all rows
     let chosen_batch = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         kb if kb.is_batch() => kb,
@@ -2172,7 +2047,6 @@ pub fn ttm_squeeze_batch_with_kernel(
         }
     };
 
-    // Map batch kernel to per-row compute kernel
     let row_kernel = match chosen_batch {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -2180,10 +2054,7 @@ pub fn ttm_squeeze_batch_with_kernel(
         _ => unreachable!(),
     };
 
-    // Row-specific optimization for ScalarBatch: group rows by length and
-    // share rolling state across rows that only differ by multipliers.
     if chosen_batch == Kernel::ScalarBatch {
-        // Collect unique lengths
         let mut lengths: Vec<usize> = Vec::new();
         for p in &combos {
             let l = p.length.unwrap_or(20);
@@ -2197,7 +2068,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                 continue;
             }
 
-            // Gather rows for this length and precompute squared multipliers
             struct RowCfg {
                 row: usize,
                 bb_sq: f64,
@@ -2233,7 +2103,6 @@ pub fn ttm_squeeze_batch_with_kernel(
             let inv_n = 1.0 / n;
             let half_nm1 = 0.5 * (n - 1.0);
 
-            // Rolling buffers
             let mut cbuf = vec![0.0f64; l];
             let mut trbuf = vec![0.0f64; l];
             let (mut cpos, mut trpos) = (0usize, 0usize);
@@ -2242,7 +2111,6 @@ pub fn ttm_squeeze_batch_with_kernel(
             let mut sumsq = 0.0f64;
             let mut tr_sum = 0.0f64;
 
-            // Deques for highs/lows (indices)
             let cap = l;
             let mut max_q = vec![0usize; cap];
             let mut min_q = vec![0usize; cap];
@@ -2251,7 +2119,6 @@ pub fn ttm_squeeze_batch_with_kernel(
 
             let warm = first + l - 1;
 
-            // Seed [first ..= warm]
             let mut r = 0usize;
             let mut i = first;
             while i <= warm {
@@ -2261,7 +2128,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                 sumsq = c.mul_add(c, sumsq);
                 sum1 += (r as f64) * c;
 
-                // TR
                 let tr_val = if i == first {
                     high[i] - low[i]
                 } else {
@@ -2274,7 +2140,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                 trbuf[trpos] = tr_val;
                 tr_sum += tr_val;
 
-                // max deque
                 while max_len > 0 {
                     let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                     let back_idx = max_q[back_pos];
@@ -2291,7 +2156,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                 }
                 max_len += 1;
 
-                // min deque
                 while min_len > 0 {
                     let back_pos = if min_tail == 0 { cap - 1 } else { min_tail - 1 };
                     let back_idx = min_q[back_pos];
@@ -2320,14 +2184,12 @@ pub fn ttm_squeeze_batch_with_kernel(
                 i += 1;
             }
 
-            // Emit at warmup
             let m = sum0 * inv_n;
             let var = (-m).mul_add(m, sumsq * inv_n);
             let var_pos = if var > 0.0 { var } else { 0.0 };
             let dkc = tr_sum * inv_n;
             let dkc2 = dkc * dkc;
 
-            // Highest/lowest via deques
             let hi_idx = max_q[max_head];
             let lo_idx = min_q[min_head];
             let highest = high[hi_idx];
@@ -2340,7 +2202,6 @@ pub fn ttm_squeeze_batch_with_kernel(
             let mom_val = sy * inv_n + slope * half_nm1;
 
             for rc in &group {
-                // Squeeze levels without sqrt
                 let bbv = rc.bb_sq * var_pos;
                 let t_low = rc.kc_low_sq * dkc2;
                 let t_mid = rc.kc_mid_sq * dkc2;
@@ -2360,11 +2221,10 @@ pub fn ttm_squeeze_batch_with_kernel(
                 mom_slice[m_off] = mom_val;
             }
 
-            // Slide
             let mut i = warm + 1;
             while i < cols {
                 let start_idx = i + 1 - l;
-                // Evict expired
+
                 while max_len > 0 {
                     let front_idx = max_q[max_head];
                     if front_idx >= start_idx {
@@ -2388,7 +2248,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                     min_len -= 1;
                 }
 
-                // Push new
                 while max_len > 0 {
                     let back_pos = if max_tail == 0 { cap - 1 } else { max_tail - 1 };
                     let back_idx = max_q[back_pos];
@@ -2421,7 +2280,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                 }
                 min_len += 1;
 
-                // Rolling sums
                 let old = cbuf[cpos];
                 let new = close[i];
                 let sum0_old = sum0;
@@ -2434,7 +2292,6 @@ pub fn ttm_squeeze_batch_with_kernel(
                     cpos = 0;
                 }
 
-                // TR rolling
                 let old_tr = trbuf[trpos];
                 let pc = close[i - 1];
                 let hi_i = high[i];
@@ -2450,14 +2307,12 @@ pub fn ttm_squeeze_batch_with_kernel(
                     trpos = 0;
                 }
 
-                // Shared metrics
                 let m = sum0 * inv_n;
                 let var = (-m).mul_add(m, sumsq * inv_n);
                 let var_pos = if var > 0.0 { var } else { 0.0 };
                 let dkc = tr_sum * inv_n;
                 let dkc2 = dkc * dkc;
 
-                // Momentum shared
                 let hi_idx = max_q[max_head];
                 let lo_idx = min_q[min_head];
                 let highest = high[hi_idx];
@@ -2493,7 +2348,6 @@ pub fn ttm_squeeze_batch_with_kernel(
             }
         }
     } else {
-        // Fallback: process each parameter combination independently
         for (row, p) in combos.iter().enumerate() {
             let input = TtmSqueezeInput::from_slices(high, low, close, p.clone());
             let dst_m = &mut mom_slice[row * cols..(row + 1) * cols];
@@ -2528,7 +2382,6 @@ pub fn ttm_squeeze_batch_with_kernel(
     })
 }
 
-// Python batch binding
 #[cfg(feature = "python")]
 #[pyfunction(name = "ttm_squeeze_batch")]
 #[pyo3(signature = (high, low, close, length_range, bb_mult_range, kc_high_range, kc_mid_range, kc_low_range, kernel=None))]
@@ -2617,8 +2470,7 @@ pub fn ttm_squeeze_batch_py<'py>(
     Ok(dict)
 }
 
-// WASM batch binding
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TtmSqueezeBatchConfig {
     pub length_range: (usize, usize, usize),
@@ -2628,16 +2480,16 @@ pub struct TtmSqueezeBatchConfig {
     pub kc_low_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TtmSqueezeBatchJsOutput {
-    pub values: Vec<f64>, // 2*rows*cols, row-major per combo: [mom..., sqz..., mom..., sqz..., ...]
-    pub rows: usize,      // parameter combinations * 2
-    pub cols: usize,      // data length
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
     pub combos: Vec<TtmSqueezeParams>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "ttm_squeeze_batch")]
 pub fn ttm_squeeze_batch_unified_js(
     high: &[f64],
@@ -2659,7 +2511,6 @@ pub fn ttm_squeeze_batch_unified_js(
     let out = ttm_squeeze_batch_with_kernel(high, low, close, &sweep, detect_best_batch_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Pack per-combo rows: momentum then squeeze
     let mut values = Vec::with_capacity(2 * out.rows * out.cols);
     for r in 0..out.rows {
         let s = r * out.cols;
@@ -2678,14 +2529,12 @@ pub fn ttm_squeeze_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ==================== UNIT TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
 
-    // Helper macro to skip unsupported kernel tests
     macro_rules! skip_if_unsupported {
         ($kernel:expr, $test_name:expr) => {
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -2709,28 +2558,21 @@ mod tests {
         let input = TtmSqueezeInput::with_default_candles(&candles);
         let result = ttm_squeeze_with_kernel(&input, kernel)?;
 
-        // Check that we have valid output
         assert_eq!(result.momentum.len(), candles.close.len());
         assert_eq!(result.squeeze.len(), candles.close.len());
 
-        // Note: The original reference values appear to be from a different implementation
-        // Our implementation correctly follows the PineScript formula:
-        // ta.linreg(close - math.avg(math.avg(ta.highest(high, length), ta.lowest(low, length)), ta.sma(close, length)), length, 0)
         let expected_momentum = [
-            -167.98676428571423, // Originally -170.88 (close match)
-            -154.99159285714336, // Originally -155.37 (close match)
-            -148.98427857142892, // Originally -65.28 (diverges)
-            -131.80910714285744, // Originally -61.14 (diverges)
-            -89.35822142857162,  // Originally -178.12 (diverges)
+            -167.98676428571423,
+            -154.99159285714336,
+            -148.98427857142892,
+            -131.80910714285744,
+            -89.35822142857162,
         ];
 
-        // Expected reference values for squeeze
-        let expected_squeeze = [0.0, 0.0, 0.0, 0.0, 1.0]; // Note: index 4 shows squeeze state 1
+        let expected_squeeze = [0.0, 0.0, 0.0, 0.0, 1.0];
 
-        // Check momentum values after warmup (starting at index 19 for length=20)
-        let warmup_period = 19; // length - 1
+        let warmup_period = 19;
 
-        // Check momentum values match our implementation
         for (i, &expected) in expected_momentum.iter().enumerate() {
             let actual = result.momentum[warmup_period + i];
             let diff = (actual - expected).abs();
@@ -2745,7 +2587,6 @@ mod tests {
             );
         }
 
-        // Check squeeze values after warmup
         for (i, &expected) in expected_squeeze.iter().enumerate() {
             let actual = result.squeeze[warmup_period + i];
             assert_eq!(
@@ -2755,11 +2596,9 @@ mod tests {
             );
         }
 
-        // Find first non-NaN values to validate the output
         let first_valid_momentum = result.momentum.iter().position(|&x| !x.is_nan());
         let first_valid_squeeze = result.squeeze.iter().position(|&x| !x.is_nan());
 
-        // Verify we have valid values somewhere in the output
         assert!(
             first_valid_momentum.is_some(),
             "[{}] No valid momentum values found",
@@ -2771,7 +2610,6 @@ mod tests {
             test_name
         );
 
-        // Verify early values are NaN (warmup period)
         if let Some(first_mom) = first_valid_momentum {
             for i in 0..first_mom.min(10) {
                 assert!(
@@ -2950,7 +2788,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let high = vec![1.0; 10];
         let low = vec![0.9; 10];
-        let close = vec![0.95; 5]; // Different length
+        let close = vec![0.95; 5];
         let params = TtmSqueezeParams::default();
 
         let input = TtmSqueezeInput::from_slices(&high, &low, &close, params);
@@ -2975,11 +2813,9 @@ mod tests {
         let input = TtmSqueezeInput::with_default_candles(&candles);
         let result = ttm_squeeze_with_kernel(&input, kernel)?;
 
-        // Check that NaN handling is consistent
         assert_eq!(result.momentum.len(), candles.close.len());
         assert_eq!(result.squeeze.len(), candles.close.len());
 
-        // After warmup, should have no NaN values
         if result.momentum.len() > 40 {
             for i in 40..result.momentum.len() {
                 assert!(
@@ -3043,7 +2879,6 @@ mod tests {
             }
         }
 
-        // Stream should produce values after warmup
         assert!(
             !stream_momentum.is_empty(),
             "[{}] Stream should produce values",
@@ -3127,7 +2962,6 @@ mod tests {
         Ok(())
     }
 
-    // Batch API tests
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let candles = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
@@ -3158,7 +2992,6 @@ mod tests {
         Ok(())
     }
 
-    // Test generation macro
     macro_rules! generate_ttm_squeeze_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3185,7 +3018,6 @@ mod tests {
         };
     }
 
-    // Generate all tests
     generate_ttm_squeeze_tests!(
         check_ttm_squeeze_accuracy,
         check_ttm_squeeze_partial_params,
@@ -3202,7 +3034,6 @@ mod tests {
         check_ttm_squeeze_no_poison
     );
 
-    // Batch test generation macro
     macro_rules! gen_batch_tests {
         ($f:ident) => {
             paste::paste! {
@@ -3241,26 +3072,21 @@ mod tests {
 
     #[test]
     fn test_ttm_squeeze_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use the existing repository CSV to mirror other tests
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = TtmSqueezeInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
         let baseline = ttm_squeeze(&input)?;
 
-        // Preallocate outputs and invoke the zero-allocation API
         let len = candles.close.len();
         let mut mom_out = vec![0.0f64; len];
         let mut sqz_out = vec![0.0f64; len];
         ttm_squeeze_into(&mut mom_out, &mut sqz_out, &input, Kernel::Auto)?;
 
-        // Length parity
         assert_eq!(baseline.momentum.len(), len);
         assert_eq!(baseline.squeeze.len(), len);
 
-        // Value-by-value parity (NaN == NaN; tight epsilon for finite values)
         for i in 0..len {
             assert!(
                 eq_or_both_nan_eps(baseline.momentum[i], mom_out[i], 1e-7),

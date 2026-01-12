@@ -1,9 +1,3 @@
-//! CUDA support for the Wilder's Moving Average (Wilders) indicator.
-//!
-//! Mirrors the CPU batching API by accepting a single series alongside a sweep
-//! of periods. Kernels run entirely in FP32 and reuse precomputed alpha values
-//! and warm-up indices to keep the GPU work focused on the recurrence itself.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::moving_averages::wilders::{WildersBatchRange, WildersParams};
@@ -15,20 +9,26 @@ use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::cell::RefCell;
-use std::sync::Arc;
 use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaWildersError {
     #[error("CUDA: {0}")]
     Cuda(#[from] cust::error::CudaError),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -36,7 +36,14 @@ pub enum CudaWildersError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -53,11 +60,10 @@ pub struct CudaWilders {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // CHANGE: cache param buffers to avoid re-copying identical sweeps
+
     param_cache: RefCell<Option<ParamCache>>,
 }
 
-// CHANGE: small cache for batch parameter buffers
 struct ParamCache {
     hash: u64,
     periods: DeviceBuffer<i32>,
@@ -73,7 +79,6 @@ struct PreparedWildersBatch {
     warm_indices: Vec<i32>,
 }
 
-/// VRAM-backed array handle for Wilders with context guard and device id
 pub struct DeviceArrayF32Wilders {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -83,9 +88,13 @@ pub struct DeviceArrayF32Wilders {
 }
 impl DeviceArrayF32Wilders {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 impl CudaWilders {
@@ -94,7 +103,6 @@ impl CudaWilders {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        // PTX JIT with target-from-context, high opt with fallbacks
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/wilders_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
@@ -127,7 +135,6 @@ impl CudaWilders {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.periods_i32.len();
 
-        // VRAM estimate (input + params + output) with headroom and overflow guards
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -162,14 +169,18 @@ impl CudaWilders {
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; // 64MB safety
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let (free, _tot) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaWildersError::OutOfMemory { required, free, headroom });
+            return Err(CudaWildersError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices = DeviceBuffer::from_slice(data_f32).map_err(CudaWildersError::from)?;
-        // CHANGE: cache parameter device buffers across identical sweeps
+
         let mut hasher = DefaultHasher::new();
         prepared.periods_i32.hash(&mut hasher);
         for &a in &prepared.alphas_f32 {
@@ -202,9 +213,9 @@ impl CudaWilders {
                 warm,
             });
         }
-        let cache = cache_guard
-            .as_ref()
-            .ok_or_else(|| CudaWildersError::InvalidInput("failed to populate param cache".into()))?;
+        let cache = cache_guard.as_ref().ok_or_else(|| {
+            CudaWildersError::InvalidInput("failed to populate param cache".into())
+        })?;
         let total = prepared
             .series_len
             .checked_mul(n_combos)
@@ -222,7 +233,6 @@ impl CudaWilders {
             &mut d_out,
         )?;
 
-        // Synchronize producing stream so __cuda_array_interface__ may omit 'stream'.
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Wilders {
@@ -458,18 +468,18 @@ impl CudaWilders {
             }
         }
 
-        // Fallback: original plain kernel (cooperative NaN fill + block-reduced warm sum)
-        let mut func = self
-            .module
-            .get_function("wilders_batch_f32")
-            .map_err(|_| CudaWildersError::MissingKernelSymbol { name: "wilders_batch_f32" })?;
+        let mut func = self.module.get_function("wilders_batch_f32").map_err(|_| {
+            CudaWildersError::MissingKernelSymbol {
+                name: "wilders_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x_user = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             BatchKernelPolicy::Auto => 256,
         };
-        let block_threads = ((block_x_user / 32).max(1).min(32)) * 32; // 32..1024
+        let block_threads = ((block_x_user / 32).max(1).min(32)) * 32;
         unsafe {
             (*(self as *const _ as *mut CudaWilders)).last_batch =
                 Some(BatchKernelSelected::Plain {
@@ -480,7 +490,7 @@ impl CudaWilders {
 
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_threads, 1, 1).into();
-        // Basic launch validation: threads per block <= 1024
+
         if block_threads > 1024 {
             return Err(CudaWildersError::LaunchConfigTooLarge {
                 gx: n_combos as u32,
@@ -528,11 +538,12 @@ impl CudaWilders {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaWildersError> {
-        // CHANGE: prefer L1 cache and map one warp per series
         let mut func = self
             .module
             .get_function("wilders_many_series_one_param_f32")
-            .map_err(|_| CudaWildersError::MissingKernelSymbol { name: "wilders_many_series_one_param_f32" })?;
+            .map_err(|_| CudaWildersError::MissingKernelSymbol {
+                name: "wilders_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x_user = match self.policy.many_series {
@@ -545,7 +556,7 @@ impl CudaWilders {
                 }
             }
         };
-        let block_threads = ((block_x_user / 32).max(1).min(32)) * 32; // 32..1024
+        let block_threads = ((block_x_user / 32).max(1).min(32)) * 32;
         let warps_per_block: u32 = (block_threads / 32) as u32;
         let grid_x: u32 = ((num_series as u32) + (warps_per_block - 1)) / warps_per_block;
         unsafe {
@@ -592,7 +603,6 @@ impl CudaWilders {
         let (first_valids, period, alpha) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
@@ -612,7 +622,11 @@ impl CudaWilders {
             .ok_or_else(|| CudaWildersError::InvalidInput("size overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             let (free, _tot) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaWildersError::OutOfMemory { required, free, headroom: 64 * 1024 * 1024 });
+            return Err(CudaWildersError::OutOfMemory {
+                required,
+                free,
+                headroom: 64 * 1024 * 1024,
+            });
         }
 
         let d_prices_tm = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaWildersError::from)?;
@@ -629,7 +643,6 @@ impl CudaWilders {
             &mut d_out_tm,
         )?;
 
-        // Synchronize producing stream so __cuda_array_interface__ may omit 'stream'.
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Wilders {
@@ -724,8 +737,6 @@ impl CudaWilders {
         }
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
@@ -893,9 +904,11 @@ pub mod benches {
 
 fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
     let (start, end, step) = range.period;
-    // Zero step or identical bounds → static
+
     if step == 0 || start == end {
-        return vec![WildersParams { period: Some(start) }];
+        return vec![WildersParams {
+            period: Some(start),
+        }];
     }
 
     let mut out = Vec::new();
@@ -926,8 +939,6 @@ fn expand_periods(range: &WildersBatchRange) -> Vec<WildersParams> {
     }
     out
 }
-
-// --- Simple policy types (parity with ALMA/CWMA style) ---
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {

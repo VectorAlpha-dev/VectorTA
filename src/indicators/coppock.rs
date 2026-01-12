@@ -1,33 +1,3 @@
-//! # Coppock Curve (CC)
-//!
-//! The Coppock Curve is a momentum indicator that sums two different ROC values
-//! (long and short), and then smooths the sum with a chosen MA (e.g. WMA, SMA, etc.).
-//!
-//! Classic defaults:
-//! - Short ROC = 11
-//! - Long ROC = 14
-//! - MA period = 10
-//! - MA type = "wma"
-//!
-//! ## Parameters
-//! - **short_roc_period**: Period for short ROC (defaults to 11).
-//! - **long_roc_period**: Period for long ROC (defaults to 14).
-//! - **ma_period**: Period for smoothing (defaults to 10).
-//! - **ma_type**: Type of MA (e.g., `"wma"`, `"ema"`, `"sma"`). Defaults to `"wma"`.
-//! - **source**: Candle field (e.g. `"close"`, `"hlc3"`). Defaults to `"close"`.
-//!
-//! ## Returns
-//! - `Ok(CoppockOutput)` on success, containing a vector matching the input length,
-//!   with leading `NaN`s until the earliest valid index.
-//! - `Err(CoppockError)` otherwise.
-//!
-//! ## Developer Notes
-//! - **SIMD**: AVX2/AVX512 enabled for the sum-of-ROC sweep (vectorizes across time). Falls back to scalar when `nightly-avx` is disabled.
-//! - **Streaming**: ✅ Implemented with CoppockStream (update function is O(1))
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for intermediate sum_roc buffer
-//! - **Batch operations**: ✅ Uses row dispatch (Scalar/AVX2/AVX512) to build the ROC-sum, then applies the selected MA per row.
-//! - **Decision log**: SIMD enabled for ROC sweep (Auto → Scalar for perf); CUDA wrapper returns VRAM-backed handles; Python interop exposes CUDA Array Interface v3 and DLPack v1.x without changing numerical outputs.
-
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -45,9 +15,9 @@ use std::error::Error;
 use std::mem::ManuallyDrop;
 use thiserror::Error;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for CoppockInput<'a> {
@@ -75,7 +45,10 @@ pub struct CoppockOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CoppockParams {
     pub short_roc_period: Option<usize>,
     pub long_roc_period: Option<usize>,
@@ -245,7 +218,11 @@ pub enum CoppockError {
     #[error("coppock: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("coppock: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("coppock: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("coppock: Invalid input: {0}")]
@@ -254,7 +231,7 @@ pub enum CoppockError {
     MaError(#[from] Box<dyn Error + Send + Sync>),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<CoppockError> for JsValue {
     fn from(err: CoppockError) -> Self {
         JsValue::from_str(&err.to_string())
@@ -307,17 +284,12 @@ pub fn coppock_with_kernel(
         });
     }
 
-    
     let warmup_period = first + largest_roc;
 
-    
-    
-    
     let mut sum_roc = alloc_with_nan_prefix(data_len, warmup_period);
 
     unsafe {
         match match kernel {
-            
             Kernel::Auto => Kernel::Scalar,
             other => other,
         } {
@@ -332,10 +304,7 @@ pub fn coppock_with_kernel(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 coppock_avx512(data, short, long, first, &mut sum_roc)
             }
-            _ => {
-                
-                coppock_scalar(data, short, long, first, &mut sum_roc)
-            }
+            _ => coppock_scalar(data, short, long, first, &mut sum_roc),
         }
     }
 
@@ -405,22 +374,17 @@ pub fn coppock_into_slice(
         });
     }
 
-    // Calculate warmup period for sum_roc
     let warmup_period = first + largest_roc;
 
-    // Allocate sum_roc buffer with NaN prefix
     let mut sum_roc = alloc_with_nan_prefix(data_len, warmup_period);
 
     let resolved_kernel = match kernel {
-        // Disable SIMD for Auto due to underperformance (<5% gain); keep explicit SIMD for testing.
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
     let ma_type = input.get_ma_type();
 
-    // Dispatch to classic kernel for scalar with common MA types
-    // Classic kernel provides optimized loop-jammed implementation for default MA types
     if resolved_kernel == Kernel::Scalar
         && (ma_type == "wma" || ma_type == "sma" || ma_type == "ema")
     {
@@ -429,7 +393,6 @@ pub fn coppock_into_slice(
         }
     }
 
-    // Regular path: calculate sum_roc first, then smooth
     unsafe {
         match resolved_kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -443,14 +406,10 @@ pub fn coppock_into_slice(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 coppock_avx512(data, short, long, first, &mut sum_roc)
             }
-            _ => {
-                // Fallback to scalar when SIMD is unavailable in this build.
-                coppock_scalar(data, short, long, first, &mut sum_roc)
-            }
+            _ => coppock_scalar(data, short, long, first, &mut sum_roc),
         }
     }
 
-    // Unfortunately, ma() returns a Vec<f64>, so we still need this allocation
     let smoothed = ma(ma_type, MaData::Slice(&sum_roc), ma_p).map_err(|e| {
         use std::fmt;
         #[derive(Debug)]
@@ -464,25 +423,16 @@ pub fn coppock_into_slice(
         CoppockError::MaError(Box::new(MaErrorWrapper(e.to_string())))
     })?;
 
-    
     out.copy_from_slice(&smoothed);
     Ok(())
 }
 
-#[cfg(not(feature = "wasm"))]
-/// Writes Coppock values into the provided output slice without allocating the
-/// output buffer. Preserves NaN warmups exactly as the Vec-returning API.
-/// The `out` length must equal the input length.
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn coppock_into(input: &CoppockInput, out: &mut [f64]) -> Result<(), CoppockError> {
-    
-    
     coppock_into_slice(out, input, Kernel::ScalarBatch)
 }
 
-/// Classic kernel optimization for Coppock with inline MA calculations
-/// This eliminates the function call overhead for the smoothing MA operation
-/// Optimized for the default MA types: WMA and SMA
 pub unsafe fn coppock_scalar_classic(
     data: &[f64],
     short: usize,
@@ -496,7 +446,6 @@ pub unsafe fn coppock_scalar_classic(
     let largest_roc = short.max(long);
     let warmup_period = first + largest_roc;
 
-    
     let mut sum_roc = alloc_with_nan_prefix(len, warmup_period);
     let start_idx = first + largest_roc;
 
@@ -509,16 +458,13 @@ pub unsafe fn coppock_scalar_classic(
         sum_roc[i] = short_val + long_val;
     }
 
-    
     match ma_type {
         "wma" => {
-            
             let warmup_final = warmup_period + ma_period - 1;
             for i in 0..warmup_final.min(len) {
                 out[i] = f64::NAN;
             }
 
-            
             let weight_sum = (ma_period * (ma_period + 1)) as f64 / 2.0;
 
             for i in warmup_final..len {
@@ -542,13 +488,11 @@ pub unsafe fn coppock_scalar_classic(
             }
         }
         "sma" => {
-            
             let warmup_final = warmup_period + ma_period - 1;
             for i in 0..warmup_final.min(len) {
                 out[i] = f64::NAN;
             }
 
-            
             let mut sum = 0.0;
             for i in warmup_period..(warmup_period + ma_period.min(len - warmup_period)) {
                 if !sum_roc[i].is_nan() {
@@ -559,7 +503,6 @@ pub unsafe fn coppock_scalar_classic(
             if warmup_final < len {
                 out[warmup_final] = sum / ma_period as f64;
 
-                
                 for i in (warmup_final + 1)..len {
                     if !sum_roc[i].is_nan() && !sum_roc[i - ma_period].is_nan() {
                         sum += sum_roc[i] - sum_roc[i - ma_period];
@@ -571,7 +514,6 @@ pub unsafe fn coppock_scalar_classic(
             }
         }
         "ema" => {
-            
             let warmup_final = warmup_period + ma_period - 1;
             for i in 0..warmup_final.min(len) {
                 out[i] = f64::NAN;
@@ -580,13 +522,11 @@ pub unsafe fn coppock_scalar_classic(
             let alpha = 2.0 / (ma_period as f64 + 1.0);
             let mut ema_value = f64::NAN;
 
-            
             for i in warmup_period..len {
                 if !sum_roc[i].is_nan() {
                     ema_value = sum_roc[i];
                     out[i] = ema_value;
 
-                    
                     for j in (i + 1)..len {
                         if !sum_roc[j].is_nan() {
                             ema_value = alpha * sum_roc[j] + (1.0 - alpha) * ema_value;
@@ -600,7 +540,6 @@ pub unsafe fn coppock_scalar_classic(
             }
         }
         _ => {
-            
             let smoothed = ma(ma_type, MaData::Slice(&sum_roc), ma_period).map_err(|e| {
                 CoppockError::MaError(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
@@ -646,7 +585,7 @@ pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize
     let mut p_out = out.as_mut_ptr().add(start);
 
     let remaining = n - start;
-    let step = 4usize; 
+    let step = 4usize;
     let vec_len = remaining / step * step;
 
     let v_one = _mm256_set1_pd(1.0);
@@ -673,7 +612,6 @@ pub unsafe fn coppock_avx2(data: &[f64], short: usize, long: usize, first: usize
         p_out = p_out.add(step);
     }
 
-    
     let tail = remaining - vec_len;
     for _ in 0..tail {
         let c = *p_cur;
@@ -730,7 +668,7 @@ pub unsafe fn coppock_avx512_short(
     let mut p_out = out.as_mut_ptr().add(start);
 
     let remaining = n - start;
-    let step = 8usize; 
+    let step = 8usize;
     let vec_len = remaining / step * step;
 
     let v_one = _mm512_set1_pd(1.0);
@@ -757,7 +695,6 @@ pub unsafe fn coppock_avx512_short(
         p_out = p_out.add(step);
     }
 
-    
     let tail = remaining - vec_len;
     for _ in 0..tail {
         let c = *p_cur;
@@ -783,10 +720,8 @@ pub unsafe fn coppock_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    
     coppock_avx512_short(data, short, long, first, out)
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MaMode {
@@ -798,31 +733,25 @@ enum MaMode {
 
 #[derive(Debug, Clone)]
 pub struct CoppockStream {
-    
     short: usize,
     long: usize,
     ma_period: usize,
     ma_type: String,
     mode: MaMode,
 
-    
     price: Vec<f64>,
     inv_price: Vec<f64>,
     p_head: usize,
     p_filled: bool,
 
-    
     roc: Vec<f64>,
     r_head: usize,
     r_filled: bool,
 
-    
-    
-    ma_sum: f64,    
-    wma_num: f64,   
-    wma_denom: f64, 
+    ma_sum: f64,
+    wma_num: f64,
+    wma_denom: f64,
 
-    
     ema_alpha: f64,
     ema_val: f64,
     ema_init: bool,
@@ -913,7 +842,6 @@ impl CoppockStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         let p_n = self.price.len();
         let write_p = self.p_head;
 
@@ -928,7 +856,6 @@ impl CoppockStream {
             return None;
         }
 
-        
         let cur_idx = write_p;
         let prev_s_idx = wrap_sub(cur_idx, self.short, p_n);
         let prev_l_idx = wrap_sub(cur_idx, self.long, p_n);
@@ -941,17 +868,13 @@ impl CoppockStream {
             return None;
         }
 
-        
         let mut sum_roc = (cur * (invs + invl) - 2.0) * 100.0;
 
-        
         let n = self.ma_period;
         let write_r = self.r_head;
         let old = self.roc[write_r];
 
         if !self.r_filled {
-            
-            
             self.ma_sum += sum_roc;
             self.wma_num += (write_r as f64 + 1.0) * sum_roc;
 
@@ -966,12 +889,10 @@ impl CoppockStream {
                 return None;
             }
 
-            
             return Some(match self.mode {
                 MaMode::Wma => self.wma_num / self.wma_denom,
                 MaMode::Sma => self.ma_sum / n as f64,
                 MaMode::Ema => {
-                    
                     self.ema_val = sum_roc;
                     self.ema_init = true;
                     self.ema_val
@@ -980,13 +901,11 @@ impl CoppockStream {
             });
         }
 
-        
-        let prev_sum = self.ma_sum; 
-        self.ma_sum = prev_sum - old + sum_roc; 
-                                                
+        let prev_sum = self.ma_sum;
+        self.ma_sum = prev_sum - old + sum_roc;
+
         self.wma_num = self.wma_num + (n as f64) * sum_roc - prev_sum;
 
-        
         self.roc[write_r] = sum_roc;
         bump(&mut self.r_head, n);
 
@@ -1090,12 +1009,9 @@ pub fn coppock_batch_with_kernel(
     k: Kernel,
 ) -> Result<CoppockBatchOutput, CoppockError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
-        _ => {
-            return Err(CoppockError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(CoppockError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1144,24 +1060,23 @@ fn expand_grid(r: &CoppockBatchRange) -> Result<Vec<CoppockParams>, CoppockError
                 if cur == end {
                     break;
                 }
-                cur = cur
-                    .checked_add(step)
-                    .ok_or(CoppockError::InvalidRange { start, end, step })?;
+                cur =
+                    cur.checked_add(step)
+                        .ok_or(CoppockError::InvalidRange { start, end, step })?;
                 if cur > end {
                     break;
                 }
             }
         } else {
-            
             let mut cur = start;
             loop {
                 v.push(cur);
                 if cur == end {
                     break;
                 }
-                cur = cur
-                    .checked_sub(step)
-                    .ok_or(CoppockError::InvalidRange { start, end, step })?;
+                cur =
+                    cur.checked_sub(step)
+                        .ok_or(CoppockError::InvalidRange { start, end, step })?;
                 if cur < end {
                     break;
                 }
@@ -1230,7 +1145,11 @@ fn coppock_batch_inner(
 ) -> Result<CoppockBatchOutput, CoppockError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(CoppockError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(CoppockError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let first = data
         .iter()
@@ -1241,10 +1160,9 @@ fn coppock_batch_inner(
         .map(|c| c.short_roc_period.unwrap().max(c.long_roc_period.unwrap()))
         .max()
         .unwrap();
-    let _ = combos
-        .len()
-        .checked_mul(max_roc)
-        .ok_or_else(|| CoppockError::InvalidInput("coppock: n_combos*max_period overflow".into()))?;
+    let _ = combos.len().checked_mul(max_roc).ok_or_else(|| {
+        CoppockError::InvalidInput("coppock: n_combos*max_period overflow".into())
+    })?;
     if data.len() - first < max_roc {
         return Err(CoppockError::NotEnoughValidData {
             needed: max_roc,
@@ -1258,13 +1176,8 @@ fn coppock_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| CoppockError::InvalidInput("rows*cols overflow".into()))?;
 
-    
-    
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1272,29 +1185,20 @@ fn coppock_batch_inner(
             let long = c.long_roc_period.unwrap();
             let ma_p = c.ma_period.unwrap();
             let largest = short.max(long);
-            
-            
+
             first + largest + (ma_p - 1)
         })
         .collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
-    
     let inv: Vec<f64> = data.iter().map(|&x| 1.0f64 / x).collect();
 
-    
-    
-    
-    
     let do_row = |row: usize, out_row: &mut [f64]| {
         let c = &combos[row];
         let short = c.short_roc_period.unwrap();
@@ -1303,18 +1207,13 @@ fn coppock_batch_inner(
         let ma_type = c.ma_type.as_deref().unwrap_or("wma");
         let largest = short.max(long);
 
-        
         let sum_roc_warmup = first + largest;
 
-        
         let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
         coppock_row_scalar_with_inv(data, first, short, long, &inv, &mut sum_roc);
 
-        
-        
         let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
 
-        
         out_row.copy_from_slice(&smoothed);
     };
 
@@ -1338,7 +1237,6 @@ fn coppock_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1365,7 +1263,11 @@ pub fn coppock_batch_inner_into(
 ) -> Result<Vec<CoppockParams>, CoppockError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(CoppockError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(CoppockError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let first = data
         .iter()
@@ -1376,10 +1278,9 @@ pub fn coppock_batch_inner_into(
         .map(|c| c.short_roc_period.unwrap().max(c.long_roc_period.unwrap()))
         .max()
         .unwrap();
-    let _ = combos
-        .len()
-        .checked_mul(max_roc)
-        .ok_or_else(|| CoppockError::InvalidInput("coppock: n_combos*max_period overflow".into()))?;
+    let _ = combos.len().checked_mul(max_roc).ok_or_else(|| {
+        CoppockError::InvalidInput("coppock: n_combos*max_period overflow".into())
+    })?;
     if data.len() - first < max_roc {
         return Err(CoppockError::NotEnoughValidData {
             needed: max_roc,
@@ -1393,10 +1294,12 @@ pub fn coppock_batch_inner_into(
         .checked_mul(cols)
         .ok_or_else(|| CoppockError::InvalidInput("rows*cols overflow".into()))?;
     if out.len() != expected {
-        return Err(CoppockError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(CoppockError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1408,7 +1311,6 @@ pub fn coppock_batch_inner_into(
         })
         .collect();
 
-    
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1417,10 +1319,8 @@ pub fn coppock_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let inv: Vec<f64> = data.iter().map(|&x| 1.0f64 / x).collect();
 
-    
     let do_row = |row: usize, out_row: &mut [f64]| {
         let c = &combos[row];
         let short = c.short_roc_period.unwrap();
@@ -1430,16 +1330,12 @@ pub fn coppock_batch_inner_into(
         let largest = short.max(long);
         let sum_roc_warmup = first + largest;
 
-        
         let mut sum_roc = alloc_with_nan_prefix(cols, sum_roc_warmup);
 
-        
         coppock_row_scalar_with_inv(data, first, short, long, &inv, &mut sum_roc);
 
-        
         let smoothed = ma(&ma_type, MaData::Slice(&sum_roc), ma_p).expect("MA error inside batch");
 
-        
         out_row.copy_from_slice(&smoothed);
     };
 
@@ -1596,30 +1492,25 @@ mod tests {
 
     #[test]
     fn test_coppock_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let data: Vec<f64> = (0..n).map(|i| 100.0 + (i as f64) * 0.25).collect();
 
         let input = CoppockInput::from_slice(&data, CoppockParams::default());
 
-        
         let baseline = coppock(&input)?.values;
 
-        
         let mut out = vec![0.0; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             coppock_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             out.copy_from_slice(&baseline);
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        
         for i in 0..n {
             let a = baseline[i];
             let b = out[i];
@@ -1738,7 +1629,7 @@ mod tests {
 
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
-        let default_params = CoppockParams::default(); 
+        let default_params = CoppockParams::default();
         let first_input = CoppockInput::from_candles(&candles, "close", default_params.clone());
         let first_result = coppock_with_kernel(&first_input, kernel)?;
 
@@ -1855,7 +1746,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_coppock_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1863,7 +1753,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let param_combos = vec![
             CoppockParams {
                 short_roc_period: Some(11),
@@ -1889,16 +1778,13 @@ mod tests {
             let input = CoppockInput::from_candles(&candles, "close", params);
             let output = coppock_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1906,7 +1792,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1914,7 +1799,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1927,7 +1811,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_coppock_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1965,10 +1848,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let random_data_strat =
             (2usize..=20, 5usize..=30, 2usize..=15).prop_flat_map(|(short, long, ma_period)| {
-                let data_len = long.max(short) + ma_period + 50; 
+                let data_len = long.max(short) + ma_period + 50;
                 (
                     prop::collection::vec(
                         (10.0f64..10000.0f64)
@@ -1982,7 +1864,6 @@ mod tests {
                 )
             });
 
-        
         let constant_data_strat =
             (2usize..=15, 5usize..=20, 2usize..=10).prop_flat_map(|(short, long, ma_period)| {
                 let data_len = long.max(short) + ma_period + 30;
@@ -1995,7 +1876,6 @@ mod tests {
                 )
             });
 
-        
         let trending_data_strat =
             (2usize..=15, 5usize..=25, 2usize..=12).prop_flat_map(|(short, long, ma_period)| {
                 let data_len = long.max(short) + ma_period + 40;
@@ -2022,7 +1902,6 @@ mod tests {
                 )
             });
 
-        
         let edge_case_strat =
             (2usize..=3, 3usize..=5, 2usize..=3).prop_flat_map(|(short, long, ma_period)| {
                 let data_len = 20;
@@ -2038,7 +1917,6 @@ mod tests {
                 )
             });
 
-        
         let equal_periods_strat =
             (5usize..=15, 2usize..=10).prop_flat_map(|(period, ma_period)| {
                 let data_len = period + ma_period + 30;
@@ -2048,13 +1926,12 @@ mod tests {
                         data_len..data_len + 20,
                     ),
                     Just(period),
-                    Just(period), 
+                    Just(period),
                     Just(ma_period),
                     Just("wma"),
                 )
             });
 
-        
         let nan_prefix_strat = (2usize..=10, 5usize..=15, 2usize..=8, 1usize..=5).prop_flat_map(
             |(short, long, ma_period, nan_count)| {
                 let data_len = nan_count + long.max(short) + ma_period + 20;
@@ -2064,7 +1941,6 @@ mod tests {
                         data_len - nan_count..data_len - nan_count + 10,
                     )
                     .prop_map(move |mut vals| {
-                        
                         let mut result = vec![f64::NAN; nan_count];
                         result.append(&mut vals);
                         result
@@ -2077,7 +1953,6 @@ mod tests {
             },
         );
 
-        
         let combined_strat = prop::strategy::Union::new(vec![
             random_data_strat.boxed(),
             constant_data_strat.boxed(),
@@ -2099,7 +1974,6 @@ mod tests {
                     };
                     let input = CoppockInput::from_slice(&data, params.clone());
 
-                    
                     let result = coppock_with_kernel(&input, kernel);
                     prop_assert!(
                         result.is_ok(),
@@ -2108,22 +1982,18 @@ mod tests {
                     );
                     let out = result.unwrap().values;
 
-                    
                     let ref_result = coppock_with_kernel(&input, Kernel::Scalar);
                     prop_assert!(ref_result.is_ok(), "Reference computation failed");
                     let ref_out = ref_result.unwrap().values;
 
-                    
                     let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
                     let largest_roc = short.max(long);
                     let warmup = first + largest_roc + (ma_period - 1);
 
-                    
                     for i in warmup..data.len() {
                         let y = out[i];
                         let r = ref_out[i];
 
-                        
                         if y.is_nan() != r.is_nan() {
                             prop_assert!(
                                 false,
@@ -2135,7 +2005,6 @@ mod tests {
                         }
 
                         if y.is_finite() && r.is_finite() {
-                            
                             let y_bits = y.to_bits();
                             let r_bits = r.to_bits();
                             let ulp_diff = y_bits.abs_diff(r_bits);
@@ -2152,7 +2021,6 @@ mod tests {
                         }
                     }
 
-                    
                     let is_constant = data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON);
                     if is_constant && data.len() > warmup + 5 {
                         for i in (warmup + 5)..data.len() {
@@ -2168,27 +2036,24 @@ mod tests {
                         }
                     }
 
-                    
                     let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
                     let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
                     if (is_increasing || is_decreasing) && data.len() > warmup + 10 {
-                        
                         let expected_positive = is_increasing;
 
-                        
                         for i in (warmup + 10)..(warmup + 15).min(data.len()) {
                             let val = out[i];
                             if val.is_finite() && val.abs() > 1e-10 {
                                 if expected_positive {
                                     prop_assert!(
-									val >= -1e-6, 
+									val >= -1e-6,
 									"Expected positive Coppock for increasing data, got {} at index {}",
 									val, i
 								);
                                 } else {
                                     prop_assert!(
-									val <= 1e-6, 
+									val <= 1e-6,
 									"Expected negative Coppock for decreasing data, got {} at index {}",
 									val, i
 								);
@@ -2197,7 +2062,6 @@ mod tests {
                         }
                     }
 
-                    
                     for i in warmup..data.len() {
                         let val = out[i];
                         prop_assert!(
@@ -2208,14 +2072,9 @@ mod tests {
                         );
                     }
 
-                    
-                    
-                    
                     for i in warmup..data.len() {
                         let val = out[i];
                         if val.is_finite() {
-                            
-                            
                             prop_assert!(
 							val.abs() <= 100_000.0,
 							"Unreasonably large Coppock value {} at index {} (exceeds 100,000%)",
@@ -2224,8 +2083,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     for i in warmup..data.len() {
                         let val = out[i];
                         prop_assert!(
@@ -2235,8 +2092,6 @@ mod tests {
                             val
                         );
 
-                        
-                        
                         if i >= largest_roc {
                             let current = data[i];
                             let prev_short = data[i - short];
@@ -2248,7 +2103,6 @@ mod tests {
                                 && prev_short != 0.0
                                 && prev_long != 0.0
                             {
-                                
                                 if i >= warmup {
                                     prop_assert!(
 									val.is_finite(),
@@ -2260,14 +2114,10 @@ mod tests {
                         }
                     }
 
-                    
                     if short == long && data.len() > warmup + 5 {
-                        
-                        
                         for i in (warmup + 1)..data.len().min(warmup + 6) {
                             let val = out[i];
                             if val.is_finite() {
-                                
                                 prop_assert!(
                                     val.abs() <= 100_000.0,
                                     "Equal periods produced unreasonable value {} at index {}",
@@ -2329,7 +2179,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2337,17 +2186,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CoppockBatchBuilder::new()
             .kernel(kernel)
-            .short_range(5, 15, 5) 
-            .long_range(10, 20, 5) 
-            .ma_range(3, 9, 3) 
+            .short_range(5, 15, 5)
+            .long_range(10, 20, 5)
+            .ma_range(3, 9, 3)
             .apply_candles(&c, "close")?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -2356,7 +2202,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2364,7 +2209,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2372,7 +2216,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2384,7 +2227,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2414,9 +2256,7 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn coppock_js(
     data: &[f64],
@@ -2437,7 +2277,7 @@ pub fn coppock_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CoppockBatchConfig {
     pub short_range: (usize, usize, usize),
@@ -2446,7 +2286,7 @@ pub struct CoppockBatchConfig {
     pub ma_type: Option<String>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CoppockBatchJsOutput {
     pub values: Vec<f64>,
@@ -2455,7 +2295,7 @@ pub struct CoppockBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = coppock_batch)]
 pub fn coppock_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: CoppockBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2477,7 +2317,7 @@ pub fn coppock_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn coppock_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2486,7 +2326,7 @@ pub fn coppock_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn coppock_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2494,7 +2334,7 @@ pub fn coppock_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn coppock_into(
     in_ptr: *const f64,
@@ -2509,12 +2349,10 @@ pub fn coppock_into(
         return Err(JsValue::from_str("null pointer"));
     }
 
-    
     if short_roc == 0 || long_roc == 0 || ma_period == 0 {
         return Err(JsValue::from_str("Invalid period"));
     }
 
-    
     let max_period = short_roc.max(long_roc).max(ma_period);
     if max_period > len {
         return Err(JsValue::from_str("Period exceeds data length"));
@@ -2542,8 +2380,6 @@ pub fn coppock_into(
     }
     Ok(())
 }
-
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2647,7 +2483,6 @@ pub fn coppock_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -2657,7 +2492,7 @@ pub fn coppock_batch_py<'py>(
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
-            
+
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2665,7 +2500,6 @@ pub fn coppock_batch_py<'py>(
                 _ => kernel,
             };
 
-            
             let mut filled_combos = combos.clone();
             if let Some(mt) = ma_type {
                 for combo in &mut filled_combos {
@@ -2678,7 +2512,6 @@ pub fn coppock_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2716,7 +2549,6 @@ pub fn coppock_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2744,13 +2576,12 @@ impl CoppockDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producer stream is synchronized before returning the handle; omit "stream" per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
         (2, self.inner.device_id as i32)
     }
 
@@ -2766,8 +2597,7 @@ impl CoppockDeviceArrayF32Py {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2786,7 +2616,6 @@ impl CoppockDeviceArrayF32Py {
             }
         }
 
-        // Stream semantics: producer synchronizes before __dlpack__; accept but do not use stream.
         if let Some(s) = stream.as_ref() {
             if let Ok(i) = s.extract::<i64>(py) {
                 if i == 0 {
@@ -2797,9 +2626,8 @@ impl CoppockDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx_clone = self.inner.ctx.clone();
         let device_id = self.inner.device_id;
         let inner = std::mem::replace(

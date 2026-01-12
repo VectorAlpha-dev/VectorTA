@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::supertrend::{
     supertrend_batch_with_kernel, supertrend_with_kernel, SuperTrendBatchRange, SuperTrendData,
     SuperTrendInput, SuperTrendParams,
@@ -125,7 +123,6 @@ fn supertrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std
     let period = 10usize;
     let factor = 3.0f64;
 
-    
     let mut cpu_trend_tm = vec![f64::NAN; cols * rows];
     let mut cpu_changed_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

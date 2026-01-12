@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::fvg_trailing_stop::{
     fvg_trailing_stop_batch_with_kernel, fvg_trailing_stop_with_kernel, FvgTrailingStopInput,
     FvgTrailingStopParams, FvgTsBatchRange,
@@ -36,7 +34,7 @@ fn fvg_ts_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[fvg_ts_cuda_batch_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    
+
     let len = 4096usize;
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
@@ -82,8 +80,8 @@ fn fvg_ts_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     batch.upper_ts.buf.copy_to(&mut gut)?;
     batch.lower_ts.buf.copy_to(&mut glt)?;
 
-    let tol = 1e-2; 
-                    
+    let tol = 1e-2;
+
     let rows = cpu.rows;
     let cols = cpu.cols;
     for r in 0..rows {
@@ -149,7 +147,7 @@ fn fvg_ts_cuda_many_series_matches_cpu() -> Result<(), Box<dyn std::error::Error
         smoothing_length: Some(9),
         reset_on_cross: Some(false),
     };
-    
+
     let mut cpu_u = vec![f64::NAN; cols * rows];
     let mut cpu_l = vec![f64::NAN; cols * rows];
     let mut cpu_ut = vec![f64::NAN; cols * rows];

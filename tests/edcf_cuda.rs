@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::edcf::{
     edcf_batch_with_kernel, EdcfBatchRange, EdcfParams,
 };

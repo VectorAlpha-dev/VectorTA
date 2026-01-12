@@ -1,5 +1,3 @@
-
-
 #![cfg(feature = "cuda")]
 
 use cust::memory::CopyDestination;
@@ -43,7 +41,9 @@ fn to_f32(v: &[f64]) -> Vec<f32> {
 #[test]
 fn buff_averages_cuda_plain_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     if using_nvcc_stub() {
-        eprintln!("[buff_averages_cuda_plain_matches_cpu] skipped - NVCC stub in use (placeholder PTX)");
+        eprintln!(
+            "[buff_averages_cuda_plain_matches_cpu] skipped - NVCC stub in use (placeholder PTX)"
+        );
         return Ok(());
     }
     if !cuda_available() {
@@ -51,7 +51,7 @@ fn buff_averages_cuda_plain_matches_cpu() -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    let len = 12_000usize; 
+    let len = 12_000usize;
     let (price, volume) = synth(len);
     let sweep = BuffAveragesBatchRange {
         fast_period: (4, 20, 4),

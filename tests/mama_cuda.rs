@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::mama::{
     mama_batch_with_kernel, MamaBatchRange, MamaBuilder,
 };
@@ -76,8 +74,6 @@ fn mama_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         .copy_to(&mut gpu_f_host)
         .expect("copy fama results to host");
 
-    
-    
     let tol = 4e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         let cpu_m = cpu.mama_values[idx];

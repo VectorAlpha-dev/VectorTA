@@ -1,22 +1,3 @@
-//! # Rate of Change Ratio (ROCR)
-//!
-//! Measures the ratio current/past, centered at 1.0 (>1 increase, <1 decrease).
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//! - **period**: Lookback window (default: 10)
-//!
-//! ## Returns
-//! - `Vec<f64>` - ROCR values centered at 1.0, matching input length
-//!
-//! ## Developer Status / Decision Log
-//! - SIMD implemented (AVX2/AVX512) but disabled by default for ROCR: indicator is memory-bound and
-//!   scalar is consistently fastest; `Kernel::Auto` short-circuits to the scalar path.
-//! - CUDA wrapper present and returns VRAM handles; Python bindings expose CUDA Array Interface v3
-//!   and DLPack v1.x for zero-copy interop (CuPy, PyTorch, JAX), with numerical semantics unchanged.
-//! - Streaming path is O(1) with a branch-lean ring buffer; batch paths reuse 1/x precompute and
-//!   share allocation helpers (`alloc_with_nan_prefix`, `make_uninit_matrix`) for cache-friendly layout.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -35,8 +16,16 @@ use thiserror::Error;
 
 const DEFAULT_PERIOD: usize = 10;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -46,19 +35,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for RocrInput<'a> {
@@ -86,7 +67,10 @@ pub struct RocrOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RocrParams {
     pub period: Option<usize>,
 }
@@ -206,7 +190,11 @@ pub enum RocrError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("rocr: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("rocr: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
@@ -242,7 +230,6 @@ fn rocr_prepare<'a>(
         });
     }
 
-    // SIMD underperforms for ROCR (memory-bound, simple ratio). Short-circuit Auto to Scalar.
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -271,18 +258,11 @@ pub fn rocr_with_kernel(input: &RocrInput, kernel: Kernel) -> Result<RocrOutput,
     Ok(RocrOutput { values: out })
 }
 
-/// Write ROCR into a caller-provided buffer without allocating.
-///
-/// - Preserves the exact NaN warmup prefix semantics of the Vec API.
-/// - The output slice length must equal the input length.
-/// - Uses kernel auto-selection identical to `rocr()`.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn rocr_into(input: &RocrInput, out: &mut [f64]) -> Result<(), RocrError> {
-    // Delegate to the shared compute path that also handles warmups
     rocr_into_slice(out, input, Kernel::Auto)
 }
 
-/// Write ROCR directly to output slice - zero allocations (for WASM optimization)
 pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Result<(), RocrError> {
     let (data, period, first, chosen) = rocr_prepare(input, kern)?;
     if dst.len() != data.len() {
@@ -303,7 +283,6 @@ pub fn rocr_into_slice(dst: &mut [f64], input: &RocrInput, kern: Kernel) -> Resu
         }
     }
 
-    // Warmup prefix = NaN, inclusive of first..first+period
     let warm = first + period;
     for v in &mut dst[..warm] {
         *v = f64::NAN;
@@ -341,12 +320,12 @@ pub fn rocr_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f
             while i + step <= end {
                 let cur = _mm512_loadu_pd(data.as_ptr().add(i));
                 let pst = _mm512_loadu_pd(data.as_ptr().add(i - period));
-                // bad = (pst == 0.0) | isnan(pst)
+
                 let m0 = _mm512_cmp_pd_mask(pst, _mm512_set1_pd(0.0), _CMP_EQ_OQ);
                 let m1 = _mm512_cmp_pd_mask(pst, pst, _CMP_UNORD_Q);
                 let bad = m0 | m1;
                 let good = !bad;
-                // Compute only on good lanes; masked lanes become 0.0 automatically
+
                 let res = _mm512_maskz_div_pd(good, cur, pst);
                 _mm512_storeu_pd(out.as_mut_ptr().add(i), res);
                 i += step;
@@ -380,9 +359,7 @@ pub fn rocr_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64
             let end = len;
             let zero = _mm256_set1_pd(0.0);
 
-            // Unroll by 2 vectors (8 lanes)
             while i + 8 <= end {
-                // Block 0
                 let cur0 = _mm256_loadu_pd(data.as_ptr().add(i));
                 let pst0 = _mm256_loadu_pd(data.as_ptr().add(p));
                 let div0 = _mm256_div_pd(cur0, pst0);
@@ -392,7 +369,6 @@ pub fn rocr_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64
                 let res0 = _mm256_andnot_pd(m0, div0);
                 _mm256_storeu_pd(out.as_mut_ptr().add(i), res0);
 
-                // Block 1
                 let cur1 = _mm256_loadu_pd(data.as_ptr().add(i + 4));
                 let pst1 = _mm256_loadu_pd(data.as_ptr().add(p + 4));
                 let div1 = _mm256_div_pd(cur1, pst1);
@@ -475,28 +451,23 @@ impl RocrStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Bit masks for IEEE-754 f64
-        const ABS_MASK: u64 = 0x7fff_ffff_ffff_ffff; // |x| == 0  <=> (bits & ABS_MASK) == 0
-        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000; // exponent all 1s
-        const MAN_MASK: u64 = 0x000f_ffff_ffff_ffff; // mantissa != 0 => NaN when exponent is all 1s
+        const ABS_MASK: u64 = 0x7fff_ffff_ffff_ffff;
+        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+        const MAN_MASK: u64 = 0x000f_ffff_ffff_ffff;
 
-        // 1) Read past sample at current head position.
         let past = self.buffer[self.head];
 
-        // 2) Compute output once we have filled the ring. Divide first, then mask to 0.0 if
-        //    denominator is 0 or NaN. This preserves existing semantics and avoids an extra branch.
         let out = if self.filled {
-            let y = value / past; // allowed even if past is 0 or NaN
+            let y = value / past;
             let pb = past.to_bits();
             let is_zero = (pb & ABS_MASK) == 0;
             let is_nan = (pb & EXP_MASK) == EXP_MASK && (pb & MAN_MASK) != 0;
-            let good_mask: u64 = (!(is_zero | is_nan) as u64).wrapping_neg(); // all-1s if good, else 0
+            let good_mask: u64 = (!(is_zero | is_nan) as u64).wrapping_neg();
             Some(f64::from_bits(y.to_bits() & good_mask))
         } else {
             None
         };
 
-        // 3) Write current value and advance head without modulo.
         self.buffer[self.head] = value;
         let next = self.head + 1;
         if next == self.period {
@@ -574,7 +545,6 @@ pub fn rocr_batch_with_kernel(
     sweep: &RocrBatchRange,
     k: Kernel,
 ) -> Result<RocrBatchOutput, RocrError> {
-    // Disable SIMD auto-selection for ROCR batch: scalar is consistently fastest.
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -619,7 +589,7 @@ fn expand_grid(r: &RocrBatchRange) -> Result<Vec<RocrParams>, RocrError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        // Forward sweep
+
         if start < end {
             let st = step.max(1);
             let mut v = Vec::new();
@@ -636,7 +606,7 @@ fn expand_grid(r: &RocrBatchRange) -> Result<Vec<RocrParams>, RocrError> {
             }
             return Ok(v);
         }
-        // Reversed bounds (start > end) – walk downward
+
         let st = step.max(1) as isize;
         let mut v = Vec::new();
         let mut x = start as isize;
@@ -733,44 +703,37 @@ fn rocr_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Guard rows * cols to avoid overflow before allocating.
     rows.checked_mul(cols).ok_or(RocrError::InvalidRange {
         start: rows,
         end: cols,
         step: 0,
     })?;
 
-    // Use uninitialized memory for better performance
     let mut values_uninit = make_uninit_matrix(rows, cols);
 
-    // Initialize NaN prefixes for each row based on period (checked add for safety)
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
             let p = c.period.unwrap();
-            first
-                .checked_add(p)
-                .ok_or(RocrError::InvalidRange {
-                    start: first,
-                    end: p,
-                    step: 0,
-                })
+            first.checked_add(p).ok_or(RocrError::InvalidRange {
+                start: first,
+                end: p,
+                step: 0,
+            })
         })
         .collect::<Result<_, _>>()?;
     init_matrix_prefixes(&mut values_uninit, cols, &warmup_periods);
 
-    // Convert to mutable slice without copying - using ManuallyDrop pattern from ALMA
     let mut buf_guard = core::mem::ManuallyDrop::new(values_uninit);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Optional shared precompute for Scalar: inv[j] = valid(data[j]) ? 1/data[j] : 0.0
     let inv: Option<AVec<f64>> = match kern {
         Kernel::Scalar => {
             let mut buf: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, cols);
             unsafe { buf.set_len(cols) };
-            // Compute from first..; earlier entries don't matter (warmup is NaN)
+
             const ABS_MASK: u64 = 0x7fff_ffff_ffff_ffff;
             const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
             const MAN_MASK: u64 = 0x000f_ffff_ffff_ffff;
@@ -823,7 +786,6 @@ fn rocr_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -864,7 +826,6 @@ fn rocr_batch_inner_into(
         return Err(RocrError::AllValuesNaN);
     }
 
-    
     let expected = combos
         .len()
         .checked_mul(cols)
@@ -1080,10 +1041,8 @@ pub unsafe fn rocr_row_avx512_long(data: &[f64], first: usize, period: usize, ou
 
 #[inline(always)]
 pub fn expand_grid_rocr(r: &RocrBatchRange) -> Vec<RocrParams> {
-    
     expand_grid(r).unwrap_or_else(|_| Vec::new())
 }
-
 
 #[inline(always)]
 unsafe fn rocr_row_scalar_mul(
@@ -1100,7 +1059,6 @@ unsafe fn rocr_row_scalar_mul(
         i += 1;
     }
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "rocr")]
@@ -1172,7 +1130,7 @@ impl RocrDeviceArrayF32Py {
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         let ptr_val = inner.buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr_val, false))?;
-        // Producer stream is synchronized in CudaRocr before returning this handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1190,7 +1148,6 @@ impl RocrDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         _copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Optional: validate requested device, if provided.
         if let Some(dev) = dl_device {
             if let Ok((dtype, did)) = dev.extract::<(i32, i32)>(py) {
                 if dtype != 2 || did != self.device_id {
@@ -1199,7 +1156,6 @@ impl RocrDeviceArrayF32Py {
             }
         }
 
-        // Interpret stream per Array API; producer work is already synchronized, so we do not enqueue events.
         if let Some(s) = stream {
             if let Ok(v) = s.extract::<i64>(py) {
                 if v == 0 {
@@ -1207,13 +1163,11 @@ impl RocrDeviceArrayF32Py {
                         "__dlpack__(stream=0) is invalid for CUDA",
                     ));
                 }
-                // 1 => legacy default stream, 2 => per-thread default stream, others are opaque cudaStream_t pointers.
             }
         }
 
-        // Move VRAM handle out of this wrapper and into the shared DLPack manager.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -1227,7 +1181,6 @@ impl RocrDeviceArrayF32Py {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Negotiate DLPack version with the consumer and delegate capsule construction.
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, self.device_id, max_version_bound)
@@ -1259,9 +1212,10 @@ pub fn rocr_batch_py<'py>(
     use std::mem::MaybeUninit;
 
     let slice_in = data.as_slice()?;
-    let sweep = RocrBatchRange { period: period_range };
+    let sweep = RocrBatchRange {
+        period: period_range,
+    };
 
-    // Build combos up front to compute warmup prefix per row
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
@@ -1279,7 +1233,6 @@ pub fn rocr_batch_py<'py>(
         _ => unreachable!(),
     };
 
-    // Allocate uninitialized Python array, then prefill warm prefixes via helper
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rocr_batch_py: rows*cols overflow"))?;
@@ -1295,7 +1248,6 @@ pub fn rocr_batch_py<'py>(
         })
         .collect::<Result<_, _>>()?;
 
-    // Cast to MaybeUninit and initialize only warm prefixes with NaN (zero extra copies)
     unsafe {
         let mu: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
             slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1304,9 +1256,7 @@ pub fn rocr_batch_py<'py>(
         init_matrix_prefixes(mu, cols, &warms);
     }
 
-    // Now compute rows directly into the same buffer
-    py
-        .allow_threads(|| rocr_batch_inner_into(slice_in, &combos, first, simd, true, slice_out))
+    py.allow_threads(|| rocr_batch_inner_into(slice_in, &combos, first, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
@@ -1323,7 +1273,6 @@ pub fn rocr_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "rocr_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1345,8 +1294,7 @@ pub fn rocr_cuda_batch_dev_py(
         period: period_range,
     };
     let result: PyResult<(DeviceArrayF32, Arc<Context>, u32)> = py.allow_threads(|| {
-        let cuda =
-            CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let buf = cuda
@@ -1378,8 +1326,7 @@ pub fn rocr_cuda_many_series_one_param_dev_py(
     }
     let slice = data_tm_f32.as_slice()?;
     let result: PyResult<(DeviceArrayF32, Arc<Context>, u32)> = py.allow_threads(|| {
-        let cuda =
-            CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaRocr::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let buf = cuda
@@ -1391,8 +1338,7 @@ pub fn rocr_cuda_many_series_one_param_dev_py(
     Ok(RocrDeviceArrayF32Py::new_from_cuda(inner, ctx, dev_id))
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocr_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = RocrParams {
@@ -1400,14 +1346,14 @@ pub fn rocr_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = RocrInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
     rocr_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocr_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1416,7 +1362,7 @@ pub fn rocr_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocr_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1424,7 +1370,7 @@ pub fn rocr_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocr_into(
     in_ptr: *const f64,
@@ -1444,15 +1390,12 @@ pub fn rocr_into(
         let input = RocrInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
-            // In-place operation - use temporary buffer
             let mut temp = vec![0.0; len];
             rocr_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct write to output buffer
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             rocr_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1462,23 +1405,22 @@ pub fn rocr_into(
     }
 }
 
-// Batch API for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RocrBatchConfig {
-    pub period_range: (usize, usize, usize), // (start, end, step)
+    pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RocrBatchJsOutput {
-    pub values: Vec<f64>, // Flattened array
+    pub values: Vec<f64>,
     pub combos: Vec<RocrParams>,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = rocr_batch)]
 pub fn rocr_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: RocrBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1502,7 +1444,7 @@ pub fn rocr_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rocr_batch_into(
     in_ptr: *const f64,
@@ -1521,12 +1463,10 @@ pub fn rocr_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        // Expand grid once to determine number of combinations and detect invalid ranges.
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let period_count = combos.len();
 
         if in_ptr == out_ptr {
-            // In-place is only sensible when period_count == 1; still guard for correctness.
             let total_elements = period_count
                 .checked_mul(len)
                 .ok_or_else(|| JsValue::from_str("rocr_batch_into: rows*cols overflow"))?;
@@ -1555,7 +1495,6 @@ pub fn rocr_batch_into(
                 init_matrix_prefixes(mu, len, &warms);
             }
 
-            // Compute batch directly into temp buffer
             let simd = match detect_best_batch_kernel() {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -1595,7 +1534,6 @@ pub fn rocr_batch_into(
         init_matrix_prefixes(mu, len, &warms);
         let out = std::slice::from_raw_parts_mut(out_ptr, total_elements);
 
-        // Compute batch directly into output buffer
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1614,10 +1552,9 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_rocr_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Use repository CSV data for parity, matching other ROCR tests
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1635,7 +1572,9 @@ mod tests {
             assert!(
                 eq_or_both_nan(a, b),
                 "mismatch at index {}: api={} into={}",
-                i, a, b
+                i,
+                a,
+                b
             );
         }
         Ok(())
@@ -1850,15 +1789,14 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            RocrParams::default(),            // period: 10
-            RocrParams { period: Some(1) },   // minimum viable
-            RocrParams { period: Some(5) },   // small
-            RocrParams { period: Some(20) },  // medium
-            RocrParams { period: Some(50) },  // large
-            RocrParams { period: Some(100) }, // very large
-            RocrParams { period: Some(2) },   // edge case: smallest meaningful period
+            RocrParams::default(),
+            RocrParams { period: Some(1) },
+            RocrParams { period: Some(5) },
+            RocrParams { period: Some(20) },
+            RocrParams { period: Some(50) },
+            RocrParams { period: Some(100) },
+            RocrParams { period: Some(2) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1867,12 +1805,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1919,7 +1856,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_rocr_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1931,19 +1868,13 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // ROCR is for price data, typically positive but can be zero
-        // Test with realistic price ranges including edge cases
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     prop::strategy::Union::new(vec![
-                        // Most values: normal price range
                         (0.1f64..10000f64).boxed(),
-                        // Occasional zeros (about 5% chance)
                         prop::strategy::Just(0.0).boxed(),
-                        // Extreme small values for ratio testing
                         (1e-10f64..1e-5f64).boxed(),
-                        // Large values for overflow testing
                         (1e5f64..1e8f64).boxed(),
                     ])
                     .prop_filter("finite values", |x| x.is_finite() && *x >= 0.0),
@@ -1964,7 +1895,6 @@ mod tests {
                 let RocrOutput { values: ref_out } =
                     rocr_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Check warmup period - first 'period' values should be NaN
                 for i in 0..period {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1974,12 +1904,10 @@ mod tests {
                     );
                 }
 
-                // Verify ROCR calculation for valid indices
                 for i in period..data.len() {
                     let current = data[i];
                     let past = data[i - period];
 
-                    // Calculate expected value according to ROCR formula
                     let expected = if past == 0.0 || past.is_nan() {
                         0.0
                     } else {
@@ -1989,9 +1917,7 @@ mod tests {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Verify the mathematical formula
                     if !y.is_nan() {
-                        // Use relative tolerance for large values, absolute for small
                         let tolerance = if expected.abs() > 1.0 {
                             expected.abs() * 1e-9
                         } else {
@@ -2004,7 +1930,6 @@ mod tests {
 							i, y, expected, current, past
 						);
 
-                        // ROCR should be non-negative (prices are non-negative)
                         prop_assert!(
                             y >= 0.0,
                             "ROCR should be non-negative at idx {}: got {}",
@@ -2012,7 +1937,6 @@ mod tests {
                             y
                         );
 
-                        // Test edge case: when current is 0, ROCR should be 0
                         if current == 0.0 && past != 0.0 {
                             prop_assert!(
                                 y == 0.0,
@@ -2022,7 +1946,6 @@ mod tests {
                             );
                         }
 
-                        // Test edge case: when past is 0, ROCR should be 0
                         if past == 0.0 {
                             prop_assert!(
                                 y == 0.0,
@@ -2032,7 +1955,6 @@ mod tests {
                             );
                         }
 
-                        // Verify no overflow/underflow with extreme ratios
                         prop_assert!(
                             y.is_finite(),
                             "ROCR should be finite at idx {}: got {} (current={}, past={})",
@@ -2043,7 +1965,6 @@ mod tests {
                         );
                     }
 
-                    // Special case: period = 1 means comparing to previous value
                     if period == 1 && i > 0 && data[i - 1] != 0.0 {
                         let expected_simple = data[i] / data[i - 1];
                         if !y.is_nan() {
@@ -2062,11 +1983,9 @@ mod tests {
                         }
                     }
 
-                    // Special case: constant non-zero data should return 1.0
-                    // Only check this for windows with at least 2 elements
                     if i >= period && period > 1 {
                         let window = &data[i - period + 1..=i];
-                        // Check if all values in the window are approximately equal
+
                         let first_val = window[0];
                         let is_constant = first_val != 0.0
                             && window.iter().all(|&v| {
@@ -2083,7 +2002,6 @@ mod tests {
                         }
                     }
 
-                    // Verify kernel consistency
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -2100,7 +2018,6 @@ mod tests {
 
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    // Allow slightly more ULP difference for extreme values
                     let max_ulp = if y.abs() > 1e6 || y.abs() < 1e-6 {
                         8
                     } else {
@@ -2203,15 +2120,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
         let test_configs = vec![
-            (2, 10, 2),     // Small periods
-            (5, 25, 5),     // Medium periods
-            (30, 60, 15),   // Large periods
-            (2, 5, 1),      // Dense small range
-            (10, 50, 10),   // Wide range with large step
-            (1, 3, 1),      // Minimum periods
-            (100, 200, 50), // Very large periods
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 50, 10),
+            (1, 3, 1),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2230,7 +2146,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \

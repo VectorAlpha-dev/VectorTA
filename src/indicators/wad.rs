@@ -1,36 +1,9 @@
-//! # Williams Accumulation/Distribution (WAD)
-//!
-//! A cumulative measure of buying and selling pressure based on the relationship between
-//! current close, previous close, and the high-low price range.
-//!
-//! ## Parameters
-//! - None (WAD is a cumulative indicator without period)
-//!
-//! ## Inputs
-//! - High, low, and close price series (or candles)
-//! - All series must have the same length
-//!
-//! ## Returns
-//! - **values**: Cumulative WAD values as `Vec<f64>` (length matches input)
-//!
-//! ## Developer Notes / Decision Log
-//! - SIMD status: AVX2/AVX512 variants are implemented as unrolled, pointer-based kernels.
-//!   WAD is inherently loop-carried (depends on previous close and cumulative sum),
-//!   so SIMD here focuses on reducing branch mispredictions and improving ILP via unrolling
-//!   and FMA-friendly expressions rather than true wide data-parallelism.
-//! - Scalar path remains the reference; it is safe and branchless to minimize mispredictions.
-//! - CUDA status: single-series and many-series FP32 kernels are provided; wrappers return VRAM
-//!   handles that integrate with Python via CAI v3 and DLPack v1.x, with work synchronized
-//!   before the handle is exposed.
-//! - Streaming update: O(1) with minimal state; matches scalar batch semantics.
-//! - Memory: Uses the crate’s zero-copy/uninitialized helpers where applicable.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaWad;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -39,9 +12,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -156,7 +129,11 @@ pub enum WadError {
     #[error("wad: Empty or mismatched lengths: expected = {expected}, got = {got}.")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("wad: Invalid range: start={start}, end={end}, step={step}.")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("wad: Invalid kernel for batch: {0:?}.")]
     InvalidKernelForBatch(Kernel),
     #[error("wad: Invalid input: {msg}.")]
@@ -182,7 +159,11 @@ pub fn wad_with_kernel(input: &WadInput, kernel: Kernel) -> Result<WadOutput, Wa
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        let got = if low.len() != len { low.len() } else { close.len() };
+        let got = if low.len() != len {
+            low.len()
+        } else {
+            close.len()
+        };
         return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
@@ -220,17 +201,16 @@ pub fn wad_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
     let mut acc = 0.0f64;
     let mut pc = close[0];
 
-    
     for i in 1..n {
         let h = high[i];
         let l = low[i];
         let c = close[i];
         let trh = pc.max(h);
         let trl = pc.min(l);
-        
+
         let gt = (c > pc) as i32 as f64;
         let lt = (c < pc) as i32 as f64;
-        
+
         let ad = gt.mul_add(c - trl, lt * (c - trh));
         acc += ad;
         out[i] = acc;
@@ -241,8 +221,6 @@ pub fn wad_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    
-    
     #[cfg(target_arch = "x86_64")]
     #[target_feature(enable = "avx2,fma")]
     unsafe fn inner(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
@@ -262,7 +240,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
         let mut i = 1usize;
 
         while i + 7 < n {
-            
             use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
             if i + 40 < n {
                 _mm_prefetch(cp.add(i + 32) as *const i8, _MM_HINT_T0);
@@ -270,7 +247,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
                 _mm_prefetch(lp.add(i + 32) as *const i8, _MM_HINT_T0);
             }
 
-            
             let c0 = *cp.add(i);
             let h0 = *hp.add(i);
             let l0 = *lp.add(i);
@@ -282,7 +258,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad0;
             *op.add(i) = acc;
 
-            
             let c1 = *cp.add(i + 1);
             let h1 = *hp.add(i + 1);
             let l1 = *lp.add(i + 1);
@@ -294,7 +269,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad1;
             *op.add(i + 1) = acc;
 
-            
             let c2 = *cp.add(i + 2);
             let h2 = *hp.add(i + 2);
             let l2 = *lp.add(i + 2);
@@ -306,7 +280,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad2;
             *op.add(i + 2) = acc;
 
-            
             let c3 = *cp.add(i + 3);
             let h3 = *hp.add(i + 3);
             let l3 = *lp.add(i + 3);
@@ -318,7 +291,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad3;
             *op.add(i + 3) = acc;
 
-            
             let c4 = *cp.add(i + 4);
             let h4 = *hp.add(i + 4);
             let l4 = *lp.add(i + 4);
@@ -330,7 +302,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad4;
             *op.add(i + 4) = acc;
 
-            
             let c5 = *cp.add(i + 5);
             let h5 = *hp.add(i + 5);
             let l5 = *lp.add(i + 5);
@@ -342,7 +313,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad5;
             *op.add(i + 5) = acc;
 
-            
             let c6 = *cp.add(i + 6);
             let h6 = *hp.add(i + 6);
             let l6 = *lp.add(i + 6);
@@ -354,7 +324,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
             acc += ad6;
             *op.add(i + 6) = acc;
 
-            
             let c7 = *cp.add(i + 7);
             let h7 = *hp.add(i + 7);
             let l7 = *lp.add(i + 7);
@@ -392,7 +361,6 @@ pub unsafe fn wad_avx2(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx512(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    
     if high.len() <= 64 {
         wad_avx512_short(high, low, close, out);
     } else {
@@ -403,7 +371,6 @@ pub unsafe fn wad_avx512(high: &[f64], low: &[f64], close: &[f64], out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx512_short(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    
     #[target_feature(enable = "avx512f,fma")]
     unsafe fn inner(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
         let n = close.len();
@@ -535,7 +502,6 @@ pub unsafe fn wad_avx512_short(high: &[f64], low: &[f64], close: &[f64], out: &m
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn wad_avx512_long(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
-    
     #[target_feature(enable = "avx512f,fma")]
     unsafe fn inner(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
         let n = close.len();
@@ -615,7 +581,6 @@ pub unsafe fn wad_avx512_long(high: &[f64], low: &[f64], close: &[f64], out: &mu
     inner(high, low, close, out)
 }
 
-
 #[inline(always)]
 pub unsafe fn wad_row_scalar(high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
     wad_scalar(high, low, close, out)
@@ -655,7 +620,6 @@ impl WadStream {
     }
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> f64 {
-        
         let pc = match self.prev_close {
             Some(pc) => pc,
             None => {
@@ -664,11 +628,9 @@ impl WadStream {
             }
         };
 
-        
         let trh = pc.max(high);
         let trl = pc.min(low);
 
-        
         let gt = (close > pc) as i32 as f64;
         let lt = (close < pc) as i32 as f64;
         let ad = gt.mul_add(close - trl, lt * (close - trh));
@@ -761,8 +723,6 @@ impl WadBatchOutput {
 
 #[inline(always)]
 pub fn expand_grid(_r: &WadBatchRange) -> Vec<WadParams> {
-    
-    
     let mut result = Vec::with_capacity(1);
     result.push(WadParams);
     result
@@ -800,7 +760,11 @@ fn wad_batch_inner(
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        let got = if low.len() != len { low.len() } else { close.len() };
+        let got = if low.len() != len {
+            low.len()
+        } else {
+            close.len()
+        };
         return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
@@ -810,18 +774,15 @@ fn wad_batch_inner(
         return Err(WadError::AllValuesNaN);
     }
 
-    
     let mut buf_mu = make_uninit_matrix(1, len);
-    init_matrix_prefixes(&mut buf_mu, len, &[0]); 
+    init_matrix_prefixes(&mut buf_mu, len, &[0]);
 
     let mut guard = ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     wad_batch_inner_into(high, low, close, kern, false, out)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -851,7 +812,11 @@ fn wad_batch_inner_into(
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        let got = if low.len() != len { low.len() } else { close.len() };
+        let got = if low.len() != len {
+            low.len()
+        } else {
+            close.len()
+        };
         return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
@@ -861,7 +826,10 @@ fn wad_batch_inner_into(
         return Err(WadError::AllValuesNaN);
     }
     if out.len() != len {
-        return Err(WadError::OutputLengthMismatch { expected: len, got: out.len() });
+        return Err(WadError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
     }
 
     let actual = match kern {
@@ -990,11 +958,9 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_wad_small_example(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let high = [10.0, 11.0, 12.0, 11.5, 12.5];
         let low = [9.0, 9.5, 11.0, 10.5, 11.0];
         let close = [9.5, 10.5, 11.5, 11.0, 12.0];
@@ -1002,7 +968,7 @@ mod tests {
 
         let input = WadInput::from_slices(&high, &low, &close);
         let output = wad_with_kernel(&input, kernel)?;
-        
+
         assert_eq!(output.values.len(), 5);
 
         for i in 0..5 {
@@ -1029,11 +995,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        let test_configs = vec![
-            WadParams::default(),
-            
-        ];
+        let test_configs = vec![WadParams::default()];
 
         for (param_idx, params) in test_configs.iter().enumerate() {
             let input = WadInput {
@@ -1044,12 +1006,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1081,7 +1042,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_wad_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(debug_assertions)]
@@ -1091,8 +1052,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        
         let test_configs = vec!["high", "low", "close"];
 
         for (cfg_idx, &source) in test_configs.iter().enumerate() {
@@ -1112,7 +1071,6 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1144,7 +1102,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_wad_tests {
@@ -1211,18 +1169,14 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=200).prop_flat_map(|len| {
             prop::collection::vec(
                 (1.0f64..1000.0f64).prop_flat_map(|base_price| {
-                    
-                    let range = base_price * 0.1; 
+                    let range = base_price * 0.1;
                     let low = base_price - range;
                     let high = base_price + range;
 
-                    
                     (low..=high).prop_map(move |close| {
-                        
                         let actual_low = low.min(close);
                         let actual_high = high.max(close);
                         (actual_high, actual_low, close)
@@ -1236,18 +1190,14 @@ mod tests {
             let (highs, lows, closes): (Vec<f64>, Vec<f64>, Vec<f64>) =
                 ohlc_data.into_iter().map(|(h, l, c)| (h, l, c)).unzip3();
 
-            
             let input = WadInput::from_slices(&highs, &lows, &closes);
 
-            
             let WadOutput { values: out } = wad_with_kernel(&input, kernel).unwrap();
             let WadOutput { values: ref_out } = wad_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            
             prop_assert_eq!(out[0], 0.0, "First WAD value must be 0.0");
             prop_assert_eq!(ref_out[0], 0.0, "First reference WAD value must be 0.0");
 
-            
             let mut expected_sum = 0.0;
             let mut prev_close = closes[0];
 
@@ -1273,7 +1223,6 @@ mod tests {
 
                 expected_sum += ad;
 
-                
                 prop_assert!(
                     (out[i] - expected_sum).abs() <= 1e-9,
                     "WAD mismatch at idx {}: got {}, expected {}",
@@ -1285,12 +1234,10 @@ mod tests {
                 prev_close = closes[i];
             }
 
-            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                
                 if !y.is_finite() || !r.is_finite() {
                     prop_assert_eq!(
                         y.to_bits(),
@@ -1303,7 +1250,6 @@ mod tests {
                     continue;
                 }
 
-                
                 let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                 prop_assert!(
                     (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1316,7 +1262,6 @@ mod tests {
                 );
             }
 
-            
             for i in 1..closes.len() {
                 if (closes[i] - closes[i - 1]).abs() < f64::EPSILON {
                     let ad_change = if i == 1 {
@@ -1334,18 +1279,15 @@ mod tests {
                 }
             }
 
-            
             if closes.len() == 1 {
                 prop_assert_eq!(out.len(), 1);
                 prop_assert_eq!(out[0], 0.0);
             }
 
-            
             if closes
                 .windows(2)
                 .all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
             {
-                
                 for i in 0..out.len() {
                     prop_assert!(
                         out[i].abs() < 1e-9,
@@ -1356,10 +1298,8 @@ mod tests {
                 }
             }
 
-            
             let strictly_increasing = closes.windows(2).all(|w| w[1] > w[0]);
             if strictly_increasing && closes.len() > 1 {
-                
                 for i in 1..out.len() {
                     prop_assert!(
 							out[i] >= out[i-1] - 1e-9,
@@ -1369,10 +1309,8 @@ mod tests {
                 }
             }
 
-            
             let strictly_decreasing = closes.windows(2).all(|w| w[1] < w[0]);
             if strictly_decreasing && closes.len() > 1 {
-                
                 for i in 1..out.len() {
                     prop_assert!(
 							out[i] <= out[i-1] + 1e-9,
@@ -1388,7 +1326,6 @@ mod tests {
         Ok(())
     }
 
-    
     trait Unzip3<A, B, C> {
         fn unzip3(self) -> (Vec<A>, Vec<B>, Vec<C>);
     }
@@ -1413,23 +1350,20 @@ mod tests {
 
     #[test]
     fn test_wad_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = WadInput::from_candles(&candles);
 
-        
         let baseline = wad(&input)?.values;
 
-        
         let mut out = vec![0.0; baseline.len()];
         #[allow(unused_variables)]
         {
-            #[cfg(not(feature = "wasm"))]
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
             {
                 wad_into(&input, &mut out)?;
             }
-            #[cfg(feature = "wasm")]
+            #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
             {
                 wad_into_slice(&mut out, &input, Kernel::Auto)?;
             }
@@ -1437,7 +1371,6 @@ mod tests {
 
         assert_eq!(baseline.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1455,7 +1388,6 @@ mod tests {
         Ok(())
     }
 }
-
 
 #[inline(always)]
 fn wad_prepare<'a>(
@@ -1476,7 +1408,11 @@ fn wad_prepare<'a>(
     }
     let len = high.len();
     if len != low.len() || len != close.len() {
-        let got = if low.len() != len { low.len() } else { close.len() };
+        let got = if low.len() != len {
+            low.len()
+        } else {
+            close.len()
+        };
         return Err(WadError::OutputLengthMismatch { expected: len, got });
     }
     if high.iter().all(|x| x.is_nan())
@@ -1499,7 +1435,10 @@ pub fn wad_into_slice(dst: &mut [f64], input: &WadInput, kern: Kernel) -> Result
     let (high, low, close, len, chosen) = wad_prepare(input, kern)?;
 
     if dst.len() != len {
-        return Err(WadError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(WadError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     unsafe {
@@ -1516,12 +1455,8 @@ pub fn wad_into_slice(dst: &mut [f64], input: &WadInput, kern: Kernel) -> Result
     Ok(())
 }
 
-#[cfg(not(feature = "wasm"))]
-/// Write Williams Accumulation/Distribution (WAD) values into a caller-provided buffer.
-///
-/// - Preserves the module's warmup behavior (WAD has no NaN warmup; first value is 0.0).
-/// - `out.len()` must equal the input series length; returns the module's length error on mismatch.
-/// - Uses `Kernel::Auto` for runtime kernel selection and performs no internal allocations.
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+
 pub fn wad_into(input: &WadInput, out: &mut [f64]) -> Result<(), WadError> {
     wad_into_slice(out, input, Kernel::Auto)
 }
@@ -1691,7 +1626,7 @@ pub fn wad_batch_py<'py>(
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wad_js(high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
     let input = WadInput::from_slices(high, low, close);
@@ -1704,7 +1639,7 @@ pub fn wad_js(high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsVa
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wad_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1713,7 +1648,7 @@ pub fn wad_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wad_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1723,7 +1658,7 @@ pub fn wad_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wad_into(
     high_ptr: *const f64,
@@ -1743,12 +1678,10 @@ pub fn wad_into(
 
         let input = WadInput::from_slices(high, low, close);
 
-        // Check for aliasing - if any input pointer equals output pointer
         if high_ptr as *const f64 == out_ptr as *const f64
             || low_ptr as *const f64 == out_ptr as *const f64
             || close_ptr as *const f64 == out_ptr as *const f64
         {
-            // Handle aliasing by using temp buffer
             let mut temp = vec![0.0; len];
             wad_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1764,7 +1697,7 @@ pub fn wad_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wad_batch_into(
     high_ptr: *const f64,
@@ -1783,18 +1716,17 @@ pub fn wad_batch_into(
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
         wad_batch_inner_into(high, low, close, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(1) // rows
+        Ok(1)
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WadBatchConfig {
-    // WAD has no parameters, but we keep the structure for consistency
     pub dummy: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WadBatchJsOutput {
     pub values: Vec<f64>,
@@ -1802,13 +1734,13 @@ pub struct WadBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = wad_batch)]
 pub fn wad_batch_unified_js(
     high: &[f64],
     low: &[f64],
     close: &[f64],
-    _config: JsValue, // accept and ignore, WAD has no params
+    _config: JsValue,
 ) -> Result<JsValue, JsValue> {
     let out = wad_batch_inner(high, low, close, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;

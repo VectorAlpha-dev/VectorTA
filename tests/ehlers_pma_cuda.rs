@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehlers_pma::{
     ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput, EhlersPmaParams,
 };

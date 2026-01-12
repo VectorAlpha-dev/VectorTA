@@ -1,26 +1,5 @@
-//! # Z-Score (Zscore)
-//!
-//! A statistical measurement that describes a value's relationship to the mean of a group of values,
-//! measured in terms of standard deviations. A Z-Score of 0 indicates the value is identical to the mean,
-//! while positive/negative Z-Scores indicate how many standard deviations above/below the mean the value is.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points). Defaults to 14.
-//! - **ma_type**: Type of moving average for the mean. Defaults to `"sma"`.
-//! - **nbdev**: Multiplier for deviation. Defaults to 1.0.
-//! - **devtype**: 0 = stddev, 1 = mean abs dev, 2 = median abs dev. Defaults to 0.
-//!
-//! ## Returns
-//! - **`Ok(ZscoreOutput)`** on success, containing a `Vec<f64>` matching the input.
-//! - **`Err(ZscoreError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD (single-series): kept as stubs delegating to scalar; rolling deps limit wins. Documented choice per guide.
-//! - Scalar fast paths: SMA path is O(1) with rolling sums; EMA path optimized to O(1) using window sums and EMA-based MSE. Hot loops use FMA (`mul_add`) and unchecked indexing to eliminate bounds checks.
-//! - Batch (row-specific): SMA+stddev path shares prefix sums and uses AVX2/AVX512 for base/scale copy; selected at runtime.
-//! - CUDA: SMA+stddev kernels wrapped with typed errors, VRAM checks, and Python handles that expose CUDA Array Interface v3 and DLPack v1.x with RAII-backed context lifetime.
-//! - Streaming: O(1) for devtype==0 with SMA/EMA/WMA using ring-buffer + rolling stats; otherwise falls back to O(n) slow path for correctness.
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(feature = "cuda")]
 use crate::cuda::{CudaZscore, CudaZscoreError};
 use crate::indicators::deviation::{
@@ -28,6 +7,8 @@ use crate::indicators::deviation::{
 };
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -35,17 +16,13 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::DeviceArrayF32;
+use aligned_vec::{AVec, CACHELINE_ALIGN};
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-use aligned_vec::{AVec, CACHELINE_ALIGN};
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -56,14 +33,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for ZscoreInput<'a> {
@@ -91,7 +68,10 @@ pub struct ZscoreOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ZscoreParams {
     pub period: Option<usize>,
     pub ma_type: Option<String>,
@@ -301,7 +281,6 @@ pub fn zscore_with_kernel(
     let devtype = input.get_devtype();
 
     let chosen = match kernel {
-        // AVX512 downclocks here; prefer AVX2 when available.
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx2,
             other => other,
@@ -336,9 +315,7 @@ pub unsafe fn zscore_scalar(
     nbdev: f64,
     devtype: usize,
 ) -> Result<ZscoreOutput, ZscoreError> {
-    // Check for classic kernel optimization
     if devtype == 0 {
-        // Standard deviation only
         if ma_type == "sma" {
             return zscore_scalar_classic_sma(data, period, first, nbdev);
         } else if ma_type == "ema" {
@@ -346,7 +323,6 @@ pub unsafe fn zscore_scalar(
         }
     }
 
-    // Fall back to regular implementation for other MA types or deviation types
     let means = ma(ma_type, MaData::Slice(data), period)
         .map_err(|e| ZscoreError::MaError(e.to_string()))?;
     let dev_input = DevInput {
@@ -379,7 +355,6 @@ pub unsafe fn zscore_scalar(
     Ok(ZscoreOutput { values: out })
 }
 
-// Classic kernel with inline SMA and standard deviation
 #[inline]
 pub unsafe fn zscore_scalar_classic_sma(
     data: &[f64],
@@ -390,7 +365,6 @@ pub unsafe fn zscore_scalar_classic_sma(
     let warmup_end = first + period - 1;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
 
-    // Calculate initial SMA and sum of squares
     let inv = 1.0 / (period as f64);
     let mut sum = 0.0f64;
     let mut sum_sqr = 0.0f64;
@@ -399,13 +373,13 @@ pub unsafe fn zscore_scalar_classic_sma(
         while j <= warmup_end {
             let v = *data.get_unchecked(j);
             sum += v;
-            // sum_sqr += v*v via FMA for precision/perf
+
             sum_sqr = v.mul_add(v, sum_sqr);
             j += 1;
         }
     }
     let mut mean = sum * inv;
-    // var = E[x^2] - (E[x])^2 using FMA
+
     let mut variance = (-mean).mul_add(mean, sum_sqr * inv);
     if variance < 0.0 {
         variance = 0.0;
@@ -416,7 +390,6 @@ pub unsafe fn zscore_scalar_classic_sma(
         variance.sqrt() * nbdev
     };
 
-    // First valid value
     let xw = *data.get_unchecked(warmup_end);
     *out.get_unchecked_mut(warmup_end) = if stddev == 0.0 || stddev.is_nan() {
         f64::NAN
@@ -424,20 +397,17 @@ pub unsafe fn zscore_scalar_classic_sma(
         (xw - mean) / stddev
     };
 
-    // Rolling calculation with efficient updates
     let n = data.len();
     let mut i = warmup_end + 1;
     while i < n {
-        // Update rolling SMA and sum of squares
         let old_val = *data.get_unchecked(i - period);
         let new_val = *data.get_unchecked(i);
         let dd = new_val - old_val;
         sum += dd;
-        // new^2 - old^2 = (new - old) * (new + old)
+
         sum_sqr = (new_val + old_val).mul_add(dd, sum_sqr);
         mean = sum * inv;
 
-        // Standard deviation using the efficient formula
         variance = (-mean).mul_add(mean, sum_sqr * inv);
         if variance < 0.0 {
             variance = 0.0;
@@ -448,7 +418,6 @@ pub unsafe fn zscore_scalar_classic_sma(
             variance.sqrt() * nbdev
         };
 
-        // Calculate z-score
         *out.get_unchecked_mut(i) = if stddev == 0.0 || stddev.is_nan() {
             f64::NAN
         } else {
@@ -460,7 +429,6 @@ pub unsafe fn zscore_scalar_classic_sma(
     Ok(ZscoreOutput { values: out })
 }
 
-// Classic kernel with inline EMA mean + population stddev around EMA (O(1) per step)
 #[inline]
 pub unsafe fn zscore_scalar_classic_ema(
     data: &[f64],
@@ -481,7 +449,6 @@ pub unsafe fn zscore_scalar_classic_ema(
     let alpha = 2.0 / (den + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Initialize rolling window sums and seed EMA with SMA
     let mut sum = 0.0f64;
     let mut sum2 = 0.0f64;
     {
@@ -495,16 +462,14 @@ pub unsafe fn zscore_scalar_classic_ema(
     }
     let mut ema = sum * inv;
 
-    // Compute σ as sqrt(E[(x - EMA)^2]) using window sums with FMA
     let mut ex = sum * inv;
     let mut ex2 = sum2 * inv;
     let mut mse = (-2.0 * ema).mul_add(ex, ema.mul_add(ema, ex2));
     if mse < 0.0 {
-        mse = 0.0; // numerical guard
+        mse = 0.0;
     }
     let mut sd = mse.sqrt() * nbdev;
 
-    // First valid value at warmup_end
     let xw = *data.get_unchecked(warmup_end);
     *out.get_unchecked_mut(warmup_end) = if sd == 0.0 || sd.is_nan() {
         f64::NAN
@@ -512,23 +477,19 @@ pub unsafe fn zscore_scalar_classic_ema(
         (xw - ema) / sd
     };
 
-    // Rolling updates (O(1) per step)
     let mut i = warmup_end + 1;
     while i < n {
         let new = *data.get_unchecked(i);
         let old = *data.get_unchecked(i - period);
 
-        // Update sliding window expectations
         let dd = new - old;
         sum += dd;
         sum2 = (new + old).mul_add(dd, sum2);
         ex = sum * inv;
         ex2 = sum2 * inv;
 
-        // Update EMA
         ema = ema.mul_add(one_minus_alpha, alpha * new);
 
-        // Window MSE relative to current EMA
         mse = (-2.0 * ema).mul_add(ex, ema.mul_add(ema, ex2));
         if mse < 0.0 {
             mse = 0.0;
@@ -602,41 +563,32 @@ pub unsafe fn zscore_avx512_long(
     zscore_scalar(data, period, first, ma_type, nbdev, devtype)
 }
 
-/// Streaming kernel decision: O(1) for SMA/EMA/WMA with stddev; otherwise fall back to slow path for exactness.
 #[derive(Debug, Clone)]
 pub struct ZscoreStream {
-    // config
     period: usize,
     ma_type: String,
     nbdev: f64,
     devtype: usize,
 
-    // ring buffer
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
 
-    // O(1) state for devtype==0 (stddev)
-    // uniform window sums
     sum: f64,
     sum2: f64,
-    // WMA rolling weighted sum (weights 1..n, newest has weight n)
+
     wsum: f64,
 
-    // EMA state
     ema: f64,
     ema_inited: bool,
 
-    // NaN tracking (any NaN in window -> z = NaN)
     nan_count: usize,
 
-    // precomputed constants
     inv_period: f64,
     wma_denom: f64,
     inv_wma_denom: f64,
     inv_nbdev: f64,
 
-    // parsed MA kind to avoid per-tick string compares
     kind: MaKind,
 }
 
@@ -692,7 +644,7 @@ impl ZscoreStream {
             ema: 0.0,
             ema_inited: false,
 
-            nan_count: period, // buffer seeded with NaNs
+            nan_count: period,
 
             inv_period: 1.0 / n,
             wma_denom: wden,
@@ -702,10 +654,8 @@ impl ZscoreStream {
         })
     }
 
-    /// Push a value; return z-score once the window is full.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Evict oldest, insert newest in ring
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
@@ -714,7 +664,6 @@ impl ZscoreStream {
             self.filled = true;
         }
 
-        // NaN bookkeeping (uniform: any NaN in window => z = NaN)
         if old.is_nan() {
             self.nan_count = self.nan_count.saturating_sub(1);
         }
@@ -722,55 +671,40 @@ impl ZscoreStream {
             self.nan_count += 1;
         }
 
-        // Before sums change, store previous sum for WMA recurrence
         let sum_prev = self.sum;
 
-        // Update uniform window sums ignoring NaNs (they simply don't contribute)
         let old_c = if old.is_nan() { 0.0 } else { old };
         let new_c = if value.is_nan() { 0.0 } else { value };
 
         self.sum = self.sum + new_c - old_c;
         self.sum2 = self.sum2 + new_c * new_c - old_c * old_c;
 
-        
-        
         self.wsum = self.wsum - sum_prev + (self.period as f64) * new_c;
 
         if !self.filled {
-            return None; 
+            return None;
         }
 
-        
         if self.devtype == 0 && self.nbdev != 0.0 && self.nan_count == 0 {
-            
             let mean = match self.kind {
-                MaKind::Sma => {
-                    
-                    self.sum * self.inv_period
-                }
+                MaKind::Sma => self.sum * self.inv_period,
                 MaKind::Ema => {
-                    
                     if !self.ema_inited {
                         self.ema = self.sum * self.inv_period;
                         self.ema_inited = true;
                         self.ema
                     } else {
-                        let alpha = 2.0 / ((self.period as f64) + 1.0); 
+                        let alpha = 2.0 / ((self.period as f64) + 1.0);
                         self.ema = self.ema.mul_add(1.0 - alpha, alpha * new_c);
                         self.ema
                     }
                 }
-                MaKind::Wma => {
-                    
-                    self.wsum * self.inv_wma_denom
-                }
+                MaKind::Wma => self.wsum * self.inv_wma_denom,
                 MaKind::Other => {
-                    
                     return Some(self.compute_zscore_slow());
                 }
             };
 
-            
             let ex = self.sum * self.inv_period;
             let ex2 = self.sum2 * self.inv_period;
 
@@ -795,7 +729,6 @@ impl ZscoreStream {
                 return Some(f64::NAN);
             }
 
-            
             let last_idx = if self.head == 0 {
                 self.period - 1
             } else {
@@ -806,15 +739,11 @@ impl ZscoreStream {
             return Some(z);
         }
 
-        
         Some(self.compute_zscore_slow())
     }
 
-    /// Former O(n) path preserved for correctness in non-fast cases.
-    /// It recreates the ordered window and delegates to `ma()` + `deviation()`.
     #[inline(always)]
     fn compute_zscore_slow(&self) -> f64 {
-        
         let mut ordered = vec![0.0; self.period];
         let mut idx = self.head;
         for i in 0..self.period {
@@ -822,13 +751,11 @@ impl ZscoreStream {
             idx = (idx + 1) % self.period;
         }
 
-        
         let means = match ma(&self.ma_type, MaData::Slice(&ordered), self.period) {
             Ok(m) => m,
             Err(_) => return f64::NAN,
         };
 
-        
         let dev_input = DevInput {
             data: DeviationData::Slice(&ordered),
             params: DevParams {
@@ -1175,10 +1102,8 @@ fn zscore_batch_inner(
         step: 0.0,
     })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1194,10 +1119,8 @@ fn zscore_batch_inner(
         })
         .collect::<Result<_, _>>()?;
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1370,9 +1293,7 @@ unsafe fn zscore_row_scalar(
     devtype: usize,
     out: &mut [f64],
 ) {
-    
     if devtype == 0 {
-        
         if ma_type == "sma" {
             zscore_row_scalar_classic_sma(data, first, period, nbdev, out);
             return;
@@ -1382,11 +1303,9 @@ unsafe fn zscore_row_scalar(
         }
     }
 
-    
     let means = match ma(ma_type, MaData::Slice(data), period) {
         Ok(m) => m,
         Err(_) => {
-            
             out.fill(f64::NAN);
             return;
         }
@@ -1401,7 +1320,6 @@ unsafe fn zscore_row_scalar(
     let mut sigmas = match deviation(&dev_input) {
         Ok(d) => d.values,
         Err(_) => {
-            
             out.fill(f64::NAN);
             return;
         }
@@ -1422,7 +1340,6 @@ unsafe fn zscore_row_scalar(
     }
 }
 
-
 #[inline(always)]
 unsafe fn zscore_row_scalar_classic_sma(
     data: &[f64],
@@ -1433,7 +1350,6 @@ unsafe fn zscore_row_scalar_classic_sma(
 ) {
     let warmup_end = first + period - 1;
 
-    
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
     for j in first..=warmup_end {
@@ -1832,7 +1748,6 @@ impl RowWriter {
     }
 }
 
-
 #[inline(always)]
 unsafe fn zscore_row_scalar_classic_ema(
     data: &[f64],
@@ -1852,7 +1767,6 @@ unsafe fn zscore_row_scalar_classic_ema(
     let alpha = 2.0 / (den + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    
     let mut sum = 0.0;
     let mut sum2 = 0.0;
     {
@@ -1866,7 +1780,6 @@ unsafe fn zscore_row_scalar_classic_ema(
     }
     let mut ema = sum / den;
 
-    
     let mut mse = (sum2 / den) - 2.0 * ema * (sum / den) + ema * ema;
     if mse < 0.0 {
         mse = 0.0;
@@ -1879,7 +1792,6 @@ unsafe fn zscore_row_scalar_classic_ema(
         (data[warmup_end] - ema) / sd
     };
 
-    
     let mut i = warmup_end + 1;
     while i < n {
         let new = data[i];
@@ -2006,13 +1918,11 @@ pub fn zscore_batch_inner_into(
 
     let rows = combos.len();
 
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(ZscoreError::InvalidRange {
-            start: rows as f64,
-            end: cols as f64,
-            step: 0.0,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(ZscoreError::InvalidRange {
+        start: rows as f64,
+        end: cols as f64,
+        step: 0.0,
+    })?;
     if out.len() != expected {
         return Err(ZscoreError::OutputLengthMismatch {
             expected,
@@ -2020,8 +1930,6 @@ pub fn zscore_batch_inner_into(
         });
     }
 
-    
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -2211,7 +2119,6 @@ pub fn zscore_py<'py>(
     Ok(result_vec.into_pyarray(py))
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct ZscoreDeviceArrayF32Py {
@@ -2232,7 +2139,7 @@ impl ZscoreDeviceArrayF32Py {
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let ptr_val = self.inner.buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr_val, false))?;
-        // Producing kernels synchronize before returning handles, so no stream needed.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2250,12 +2157,10 @@ impl ZscoreDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Validate requested device when provided, preserving previous error semantics.
         let (dev_type, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != dev_type || dev_id != alloc_dev {
-                    // Historically this wrapper did not implement cross-device copies.
                     return Err(PyValueError::new_err(
                         "zscore: dl_device mismatch; cross-device copy not implemented",
                     ));
@@ -2265,9 +2170,8 @@ impl ZscoreDeviceArrayF32Py {
         let _ = stream;
         let _ = copy;
 
-        // Move the VRAM handle into a dummy so that the DLPack capsule owns the buffer.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -2322,8 +2226,7 @@ pub fn zscore_cuda_batch_dev_py<'py>(
     };
 
     let (inner, ctx, dev_id, combos) = py.allow_threads(|| {
-        let cuda =
-            CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let (arr, combos) = cuda
@@ -2343,7 +2246,10 @@ pub fn zscore_cuda_batch_dev_py<'py>(
     dict.set_item("ma_types", ma_types)?;
     dict.set_item("devtypes", devtypes.into_pyarray(py))?;
 
-    Ok((ZscoreDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id), dict))
+    Ok((
+        ZscoreDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id),
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2371,18 +2277,11 @@ pub fn zscore_cuda_many_series_one_param_dev_py<'py>(
 
     let slice_in = data_tm_f32.as_slice()?;
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaZscore::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let arr = cuda
-            .zscore_many_series_one_param_time_major_dev(
-                slice_in,
-                cols,
-                rows,
-                period,
-                nbdev as f32,
-            )
+            .zscore_many_series_one_param_time_major_dev(slice_in, cols, rows, period, nbdev as f32)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
@@ -2441,8 +2340,7 @@ pub fn zscore_batch_py<'py>(
         devtype: devtype_range,
     };
 
-    let combos =
-        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2507,9 +2405,6 @@ pub fn zscore_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-/// Write zscore directly to output slice - no allocations
 pub fn zscore_into_slice(
     dst: &mut [f64],
     input: &ZscoreInput,
@@ -2550,7 +2445,6 @@ pub fn zscore_into_slice(
     let devtype = input.get_devtype();
 
     let chosen = match kern {
-        
         Kernel::Auto => match detect_best_kernel() {
             Kernel::Avx512 | Kernel::Avx512Batch => Kernel::Avx2,
             other => other,
@@ -2583,12 +2477,7 @@ pub fn zscore_into_slice(
     Ok(())
 }
 
-/// Write Z-Score values into a caller-provided buffer without allocating.
-///
-/// - Preserves the NaN warmup prefix exactly like the Vec-returning API
-///   (first_valid + period - 1 entries are set to NaN).
-/// - The `out` slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn zscore_into(input: &ZscoreInput, out: &mut [f64]) -> Result<(), ZscoreError> {
     zscore_into_slice(out, input, Kernel::Auto)
 }
@@ -2612,9 +2501,7 @@ unsafe fn zscore_compute_into_scalar(
         return Ok(());
     }
 
-    
     if devtype == 0 {
-        
         if ma_type == "sma" {
             let inv = 1.0 / (period as f64);
             let mut sum = 0.0f64;
@@ -2633,7 +2520,11 @@ unsafe fn zscore_compute_into_scalar(
             if variance < 0.0 {
                 variance = 0.0;
             }
-            let mut sd = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
+            let mut sd = if variance == 0.0 {
+                0.0
+            } else {
+                variance.sqrt() * nbdev
+            };
 
             let xw = *data.get_unchecked(warmup_end);
             *out.get_unchecked_mut(warmup_end) = if sd == 0.0 || sd.is_nan() {
@@ -2656,7 +2547,11 @@ unsafe fn zscore_compute_into_scalar(
                 if variance < 0.0 {
                     variance = 0.0;
                 }
-                sd = if variance == 0.0 { 0.0 } else { variance.sqrt() * nbdev };
+                sd = if variance == 0.0 {
+                    0.0
+                } else {
+                    variance.sqrt() * nbdev
+                };
 
                 *out.get_unchecked_mut(i) = if sd == 0.0 || sd.is_nan() {
                     f64::NAN
@@ -2669,7 +2564,6 @@ unsafe fn zscore_compute_into_scalar(
             return Ok(());
         }
 
-        
         if ma_type == "ema" {
             let den = period as f64;
             let inv = 1.0 / den;
@@ -2736,7 +2630,6 @@ unsafe fn zscore_compute_into_scalar(
         }
     }
 
-    
     let means = ma(ma_type, MaData::Slice(data), period)
         .map_err(|e| ZscoreError::MaError(e.to_string()))?;
     let dev_input = DevInput {
@@ -2792,9 +2685,7 @@ unsafe fn zscore_compute_into_avx512(
     zscore_compute_into_scalar(data, period, first, ma_type, nbdev, devtype, out)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zscore_js(
     data: &[f64],
@@ -2819,7 +2710,7 @@ pub fn zscore_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zscore_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2828,7 +2719,7 @@ pub fn zscore_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zscore_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2838,7 +2729,7 @@ pub fn zscore_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zscore_into(
     in_ptr: *const f64,
@@ -2864,7 +2755,6 @@ pub fn zscore_into(
         let input = ZscoreInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             zscore_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2880,7 +2770,7 @@ pub fn zscore_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ZscoreBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2889,7 +2779,7 @@ pub struct ZscoreBatchConfig {
     pub devtype_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ZscoreBatchJsOutput {
     pub values: Vec<f64>,
@@ -2898,7 +2788,7 @@ pub struct ZscoreBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = zscore_batch)]
 pub fn zscore_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: ZscoreBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2928,7 +2818,7 @@ pub fn zscore_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zscore_batch_into(
     in_ptr: *const f64,
@@ -3092,14 +2982,6 @@ mod tests {
         let input = ZscoreInput::from_candles(&candles, "close", ZscoreParams::default());
         let result = zscore_with_kernel(&input, kernel)?;
 
-        
-        
-        
-        
-        
-        
-        
-        
         let expected_last_five = [
             -0.3040683926967643,
             -0.41042159719064014,
@@ -3153,18 +3035,14 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             ZscoreParams::default(),
-            
             ZscoreParams {
                 period: Some(2),
                 ma_type: Some("sma".to_string()),
                 nbdev: Some(1.0),
                 devtype: Some(0),
             },
-            
             ZscoreParams {
                 period: Some(5),
                 ma_type: Some("ema".to_string()),
@@ -3177,20 +3055,18 @@ mod tests {
                 nbdev: Some(2.0),
                 devtype: Some(0),
             },
-            
             ZscoreParams {
                 period: Some(20),
                 ma_type: Some("sma".to_string()),
                 nbdev: Some(1.5),
-                devtype: Some(1), 
+                devtype: Some(1),
             },
             ZscoreParams {
                 period: Some(30),
                 ma_type: Some("ema".to_string()),
                 nbdev: Some(2.5),
-                devtype: Some(2), 
+                devtype: Some(2),
             },
-            
             ZscoreParams {
                 period: Some(50),
                 ma_type: Some("wma".to_string()),
@@ -3203,7 +3079,6 @@ mod tests {
                 nbdev: Some(1.0),
                 devtype: Some(1),
             },
-            
             ZscoreParams {
                 period: Some(14),
                 ma_type: Some("ema".to_string()),
@@ -3222,23 +3097,22 @@ mod tests {
                 nbdev: Some(4.0),
                 devtype: Some(1),
             },
-            
             ZscoreParams {
                 period: Some(7),
                 ma_type: Some("ema".to_string()),
-                nbdev: Some(1.618), 
+                nbdev: Some(1.618),
                 devtype: Some(0),
             },
             ZscoreParams {
                 period: Some(21),
                 ma_type: Some("sma".to_string()),
-                nbdev: Some(2.718), 
+                nbdev: Some(2.718),
                 devtype: Some(1),
             },
             ZscoreParams {
                 period: Some(42),
                 ma_type: Some("wma".to_string()),
-                nbdev: Some(3.14159), 
+                nbdev: Some(3.14159),
                 devtype: Some(2),
             },
         ];
@@ -3249,12 +3123,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -3310,7 +3183,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_zscore_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -3322,20 +3195,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
-                
                 prop::collection::vec(
                     (-1e5f64..1e5f64).prop_filter("finite", |x| x.is_finite()),
-                    period + 10..400, 
+                    period + 10..400,
                 ),
                 Just(period),
-                
                 prop::sample::select(vec!["sma", "ema", "wma"]),
-                
                 0.5f64..3.0f64,
-                
                 0usize..=2,
             )
         });
@@ -3351,15 +3219,12 @@ mod tests {
                 };
                 let input = ZscoreInput::from_slice(&data, params.clone());
 
-                
                 let ZscoreOutput { values: out } = zscore_with_kernel(&input, kernel)?;
-                
+
                 let ZscoreOutput { values: ref_out } = zscore_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -3369,14 +3234,11 @@ mod tests {
                     );
                 }
 
-                
                 for i in (period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if !y.is_finite() || !r.is_finite() {
-                        
                         prop_assert_eq!(
                             y.to_bits(),
                             r.to_bits(),
@@ -3386,7 +3248,6 @@ mod tests {
                             r
                         );
                     } else {
-                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
@@ -3402,11 +3263,10 @@ mod tests {
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
                     for i in (period - 1)..data.len() {
                         prop_assert!(
-                            out[i].is_nan() || devtype != 0, 
+                            out[i].is_nan() || devtype != 0,
                             "Expected NaN for constant data with stddev at index {}, got {}",
                             i,
                             out[i]
@@ -3414,7 +3274,6 @@ mod tests {
                     }
                 }
 
-                
                 if period == 2 && devtype == 0 && ma_type == "sma" {
                     for i in 1..data.len() {
                         if out[i].is_finite() {
@@ -3497,18 +3356,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 0.5, 2.0, 0.5, 0), 
-            (5, 25, 5, 1.0, 3.0, 1.0, 1), 
-            (10, 50, 10, 1.5, 3.5, 1.0, 2), 
-            (2, 5, 1, 0.1, 1.0, 0.3, 0),  
-            (14, 14, 0, 1.0, 4.0, 0.5, 0), 
-            (20, 40, 10, 2.0, 2.0, 0.0, 1), 
+            (2, 10, 2, 0.5, 2.0, 0.5, 0),
+            (5, 25, 5, 1.0, 3.0, 1.0, 1),
+            (10, 50, 10, 1.5, 3.5, 1.0, 2),
+            (2, 5, 1, 0.1, 1.0, 0.3, 0),
+            (14, 14, 0, 1.0, 4.0, 0.5, 0),
+            (20, 40, 10, 2.0, 2.0, 0.0, 1),
         ];
 
-        
         let ma_types = vec!["sma", "ema", "wma"];
 
         for (
@@ -3519,24 +3375,20 @@ mod tests {
             for ma_type in &ma_types {
                 let mut builder = ZscoreBatchBuilder::new().kernel(kernel);
 
-                
                 if period_step > 0 {
                     builder = builder.period_range(period_start, period_end, period_step);
                 } else {
                     builder = builder.period_static(period_start);
                 }
 
-                
                 if nbdev_step > 0.0 {
                     builder = builder.nbdev_range(nbdev_start, nbdev_end, nbdev_step);
                 } else {
                     builder = builder.nbdev_static(nbdev_start);
                 }
 
-                
                 builder = builder.ma_type_static(ma_type.to_string());
 
-                
                 builder = builder.devtype_static(devtype);
 
                 let output = builder.apply_candles(&c, "close")?;
@@ -3551,7 +3403,6 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {} (MA: {}): Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3591,7 +3442,6 @@ mod tests {
             }
         }
 
-        
         let devtype_test = ZscoreBatchBuilder::new()
             .kernel(kernel)
             .period_range(10, 30, 10)
@@ -3645,7 +3495,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     gen_batch_tests!(check_batch_default_row);
@@ -3653,33 +3503,25 @@ mod tests {
 
     #[test]
     fn test_zscore_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = ZscoreInput::from_candles(&candles, "close", ZscoreParams::default());
 
-        
         let baseline = zscore(&input)?.values;
 
-        
         let mut out = vec![0.0; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             zscore_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             zscore_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        
-        
-        
         let eq_or_both_nan = |a: f64, b: f64| -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-9)
         };

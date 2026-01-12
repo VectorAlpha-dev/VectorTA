@@ -1,35 +1,3 @@
-//! # Aroon Oscillator
-//!
-//! The Aroon Oscillator measures the relative time since the most recent highest
-//! high and lowest low within a specified `length`. It oscillates between -100
-//! and +100, providing insights into the strength and direction of a price trend.
-//! Higher positive values indicate a stronger uptrend, while negative values
-//! signify a more dominant downtrend.
-//!
-//! ## Parameters
-//! - **length**: The number of recent bars to look back when identifying the highest
-//!   high and lowest low (defaults to 14).
-//!
-//! ## Returns
-//! - **`Ok(AroonOscOutput)`** on success, containing a `Vec<f64>` of the oscillator values.
-//! - **`Err(AroonOscError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - Decision: Streaming switched to true amortized O(1) using two monotonic deques (max-high, min-low),
-//!   preserving earliest-index tie rules and computing `(hi_idx - lo_idx) * (100/length)`.
-//!   This fixes the previous stream path’s sign issue and improves worst-case update cost.
-//! - Scalar: single-pass implementation with two paths:
-//!   - length <= 64: tight window rescan jammed across high/low (fastest for small windows)
-//!   - length > 64: O(n) monotonic deques for max(high)/min(low) with earliest-index tie rules
-//!   Baseline (RUSTFLAGS="-C target-cpu=native") on local machine:
-//!   - aroon_osc_scalar/10k ≈ 75–77 µs; 100k ≈ 761–795 µs
-//! - SIMD: stubs delegate to scalar. Intra-series parallelization is not viable (IIR-like dependency).
-//!   Packing the two deques into lanes underutilizes AVX and regresses due to control flow and shuffles.
-//! - Batch: current path computes each row via the scalar kernel; parallelization uses rayon when selected.
-//!   Row-specific SIMD was evaluated as low benefit without shared precompute; no RMQ/sparse-table added.
-//! - Memory: follows `alma.rs` patterns (zero-copy/uninitialized allocation; warmup prefixes preserved).
-//! - Decision log: SIMD stubs call scalar; CUDA wrapper returns FP32 VRAM handles; Python interop exposes CAI v3 + DLPack v1.x; numerical outputs unchanged.
-
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -58,7 +26,10 @@ pub enum AroonOscData<'a> {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct AroonOscParams {
     pub length: Option<usize>,
 }
@@ -201,9 +172,13 @@ pub enum AroonOscError {
     MismatchSliceLength { high_len: usize, low_len: usize },
     #[error("aroonosc: Output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
-    
+
     #[error("aroonosc: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("aroonosc: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
@@ -223,7 +198,10 @@ fn aroon_osc_prepare<'a>(
     let low = input.get_low();
     let len = low.len();
     if length == 0 {
-        return Err(AroonOscError::InvalidPeriod { period: length, data_len: len });
+        return Err(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: len,
+        });
     }
 
     if high.is_empty() || low.is_empty() {
@@ -237,21 +215,20 @@ fn aroon_osc_prepare<'a>(
     }
 
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
-    
-    let window = length
-        .checked_add(1)
-        .ok_or(AroonOscError::InvalidPeriod {
-            period: length,
-            data_len: len,
-        })?;
-    let available = len
-        .checked_sub(first)
-        .ok_or(AroonOscError::InvalidPeriod {
-            period: length,
-            data_len: len,
-        })?;
+
+    let window = length.checked_add(1).ok_or(AroonOscError::InvalidPeriod {
+        period: length,
+        data_len: len,
+    })?;
+    let available = len.checked_sub(first).ok_or(AroonOscError::InvalidPeriod {
+        period: length,
+        data_len: len,
+    })?;
     if available < window {
-        return Err(AroonOscError::NotEnoughValidData { needed: window, valid: available });
+        return Err(AroonOscError::NotEnoughValidData {
+            needed: window,
+            valid: available,
+        });
     }
 
     let chosen = match kernel {
@@ -287,11 +264,6 @@ pub fn aroon_osc_with_kernel(
     Ok(AroonOscOutput { values: out })
 }
 
-/// Compute Aroon Oscillator into a caller-provided buffer (no allocations).
-///
-/// - Preserves the module's NaN warmup behavior by pre-filling the warmup
-///   prefix with a quiet-NaN (same pattern as `alloc_with_nan_prefix`).
-/// - `out.len()` must equal the input length; otherwise an error is returned.
 #[inline]
 pub fn aroon_osc_into(input: &AroonOscInput, out: &mut [f64]) -> Result<(), AroonOscError> {
     let (high, low, length, first, chosen) = aroon_osc_prepare(input, Kernel::Auto)?;
@@ -303,7 +275,6 @@ pub fn aroon_osc_into(input: &AroonOscInput, out: &mut [f64]) -> Result<(), Aroo
         });
     }
 
-    // Prefill warmup prefix to match Vec-returning API's quiet-NaN pattern
     let warm_end = first
         .checked_add(length)
         .ok_or(AroonOscError::InvalidPeriod {
@@ -340,25 +311,18 @@ pub fn aroon_osc_scalar_highlow_into(
 ) {
     let len = low.len();
     let window = length + 1;
-    let start_i = first + length; 
+    let start_i = first + length;
     if start_i >= len {
         return;
     }
-    
-    
+
     if length <= 64 {
-        
-        
-        
-        
-        
         let scale = 100.0 / length as f64;
         unsafe {
             let h_ptr = high.as_ptr();
             let l_ptr = low.as_ptr();
             let out_ptr = out.as_mut_ptr();
 
-            
             let mut maxi = first;
             let mut mini = first;
             let mut max = *h_ptr.add(first);
@@ -382,7 +346,6 @@ pub fn aroon_osc_scalar_highlow_into(
             while i < len {
                 let start = i - length;
 
-                
                 let bar_h = *h_ptr.add(i);
                 if maxi < start {
                     maxi = start;
@@ -401,7 +364,6 @@ pub fn aroon_osc_scalar_highlow_into(
                     max = bar_h;
                 }
 
-                
                 let bar_l = *l_ptr.add(i);
                 if mini < start {
                     mini = start;
@@ -420,7 +382,6 @@ pub fn aroon_osc_scalar_highlow_into(
                     min = bar_l;
                 }
 
-                
                 let v = (maxi as f64 - mini as f64) * scale;
                 *out_ptr.add(i) = v.max(-100.0).min(100.0);
                 i += 1;
@@ -429,8 +390,7 @@ pub fn aroon_osc_scalar_highlow_into(
         return;
     }
 
-    
-    let cap = window; 
+    let cap = window;
 
     let mut dq_hi = vec![0usize; cap];
     let mut hi_head = 0usize;
@@ -458,16 +418,13 @@ pub fn aroon_osc_scalar_highlow_into(
         }
     }
 
-    
     for i in first..start_i {
-        
         let v_hi = high[i];
         while hi_len > 0 {
             let last = dec_wrap(hi_tail, cap);
             let last_idx = dq_hi[last];
             let last_val = high[last_idx];
             if last_val < v_hi {
-                
                 hi_tail = last;
                 hi_len -= 1;
             } else {
@@ -478,14 +435,12 @@ pub fn aroon_osc_scalar_highlow_into(
         inc_wrap(&mut hi_tail, cap);
         hi_len += 1;
 
-        
         let v_lo = low[i];
         while lo_len > 0 {
             let last = dec_wrap(lo_tail, cap);
             let last_idx = dq_lo[last];
             let last_val = low[last_idx];
             if last_val > v_lo {
-                
                 lo_tail = last;
                 lo_len -= 1;
             } else {
@@ -499,9 +454,8 @@ pub fn aroon_osc_scalar_highlow_into(
 
     let scale = 100.0 / length as f64;
     for i in start_i..len {
-        let start = i - length; 
+        let start = i - length;
 
-        
         while hi_len > 0 && dq_hi[hi_head] < start {
             inc_wrap(&mut hi_head, cap);
             hi_len -= 1;
@@ -511,14 +465,12 @@ pub fn aroon_osc_scalar_highlow_into(
             lo_len -= 1;
         }
 
-        
         let v_hi = high[i];
         while hi_len > 0 {
             let last = dec_wrap(hi_tail, cap);
             let last_idx = dq_hi[last];
             let last_val = high[last_idx];
             if last_val < v_hi {
-                
                 hi_tail = last;
                 hi_len -= 1;
             } else {
@@ -535,7 +487,6 @@ pub fn aroon_osc_scalar_highlow_into(
             let last_idx = dq_lo[last];
             let last_val = low[last_idx];
             if last_val > v_lo {
-                
                 lo_tail = last;
                 lo_len -= 1;
             } else {
@@ -586,7 +537,6 @@ pub unsafe fn aroon_osc_avx512_long(
     aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 
-/// Write Aroon Oscillator directly to output slice - no allocations
 #[inline]
 pub fn aroon_osc_into_slice(
     dst: &mut [f64],
@@ -595,7 +545,10 @@ pub fn aroon_osc_into_slice(
 ) -> Result<(), AroonOscError> {
     let (high, low, length, first, chosen) = aroon_osc_prepare(input, kern)?;
     if dst.len() != high.len() {
-        return Err(AroonOscError::OutputLengthMismatch { expected: high.len(), got: dst.len() });
+        return Err(AroonOscError::OutputLengthMismatch {
+            expected: high.len(),
+            got: dst.len(),
+        });
     }
 
     match chosen {
@@ -747,16 +700,19 @@ fn expand_grid(r: &AroonOscBatchRange) -> Result<Vec<AroonOscParams>, AroonOscEr
             }
             Ok(v)
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
                 let next = cur.saturating_sub(step);
-                if next == cur { break; }
+                if next == cur {
+                    break;
+                }
                 cur = next;
             }
-            if v.is_empty() { return Err(AroonOscError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(AroonOscError::InvalidRange { start, end, step });
+            }
             Ok(v)
         }
     }
@@ -811,40 +767,36 @@ fn aroon_osc_batch_inner(
 
     let len = high.len();
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
-    
+
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-    let needed = max_len
-        .checked_add(1)
-        .ok_or(AroonOscError::InvalidRange {
-            start: sweep.length.0,
-            end: sweep.length.1,
-            step: sweep.length.2,
-        })?;
-    let available = len
-        .checked_sub(first)
-        .ok_or(AroonOscError::InvalidRange {
-            start: sweep.length.0,
-            end: sweep.length.1,
-            step: sweep.length.2,
-        })?;
+    let needed = max_len.checked_add(1).ok_or(AroonOscError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
+    let available = len.checked_sub(first).ok_or(AroonOscError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
     if available < needed {
-        return Err(AroonOscError::NotEnoughValidData { needed, valid: available });
+        return Err(AroonOscError::NotEnoughValidData {
+            needed,
+            valid: available,
+        });
     }
 
     let rows = combos.len();
     let cols = len;
 
-    
     rows.checked_mul(cols).ok_or(AroonOscError::InvalidRange {
         start: sweep.length.0,
         end: sweep.length.1,
         step: sweep.length.2,
     })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -859,7 +811,6 @@ fn aroon_osc_batch_inner(
         .collect::<Result<_, _>>()?;
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -891,7 +842,6 @@ fn aroon_osc_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -935,22 +885,21 @@ fn aroon_osc_batch_inner_into(
     let len = high.len();
     let first = first_valid_hilo(high, low).ok_or(AroonOscError::AllValuesNaN)?;
     let max_len = combos.iter().map(|c| c.length.unwrap()).max().unwrap();
-    let needed = max_len
-        .checked_add(1)
-        .ok_or(AroonOscError::InvalidRange {
-            start: sweep.length.0,
-            end: sweep.length.1,
-            step: sweep.length.2,
-        })?;
-    let available = len
-        .checked_sub(first)
-        .ok_or(AroonOscError::InvalidRange {
-            start: sweep.length.0,
-            end: sweep.length.1,
-            step: sweep.length.2,
-        })?;
+    let needed = max_len.checked_add(1).ok_or(AroonOscError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
+    let available = len.checked_sub(first).ok_or(AroonOscError::InvalidRange {
+        start: sweep.length.0,
+        end: sweep.length.1,
+        step: sweep.length.2,
+    })?;
     if available < needed {
-        return Err(AroonOscError::NotEnoughValidData { needed, valid: available });
+        return Err(AroonOscError::NotEnoughValidData {
+            needed,
+            valid: available,
+        });
     }
 
     let rows = combos.len();
@@ -968,7 +917,6 @@ fn aroon_osc_batch_inner_into(
         })
         .collect::<Result<_, _>>()?;
 
-    
     let mut out_uninit = unsafe {
         Vec::from_raw_parts(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -979,7 +927,6 @@ fn aroon_osc_batch_inner_into(
     init_matrix_prefixes(&mut out_uninit, cols, &warmup_periods);
     std::mem::forget(out_uninit);
 
-    
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -988,7 +935,6 @@ fn aroon_osc_batch_inner_into(
     };
 
     let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| {
-        
         let dst = unsafe {
             core::slice::from_raw_parts_mut(row_mu.as_mut_ptr() as *mut f64, row_mu.len())
         };
@@ -1074,7 +1020,6 @@ pub unsafe fn aroon_osc_row_avx512_long(
     aroon_osc_scalar_highlow_into(high, low, length, first, out)
 }
 
-/// Write batch Aroon Oscillator directly to output slice - no allocations
 #[inline]
 pub fn aroon_osc_batch_into_slice(
     high: &[f64],
@@ -1110,28 +1055,28 @@ pub fn aroon_osc_batch_into_slice(
             step: sweep.length.2,
         })?;
     if out.len() != expected_len {
-        return Err(AroonOscError::OutputLengthMismatch { expected: expected_len, got: out.len() });
+        return Err(AroonOscError::OutputLengthMismatch {
+            expected: expected_len,
+            got: out.len(),
+        });
     }
 
-    
     aroon_osc_batch_inner_into(high, low, sweep, kern, parallel, out)
 }
 
 #[derive(Debug, Clone)]
 pub struct AroonOscStream {
     length: usize,
-    scale: f64, 
-    cap: usize, 
-    t: usize,   
+    scale: f64,
+    cap: usize,
+    t: usize,
 
-    
     hi_idx: Vec<usize>,
     hi_val: Vec<f64>,
     hi_head: usize,
     hi_tail: usize,
     hi_len: usize,
 
-    
     lo_idx: Vec<usize>,
     lo_val: Vec<f64>,
     lo_head: usize,
@@ -1144,11 +1089,15 @@ impl AroonOscStream {
     pub fn try_new(params: AroonOscParams) -> Result<Self, AroonOscError> {
         let length = params.length.unwrap_or(14);
         if length == 0 {
-            return Err(AroonOscError::InvalidPeriod { period: length, data_len: 0 });
+            return Err(AroonOscError::InvalidPeriod {
+                period: length,
+                data_len: 0,
+            });
         }
-        let cap = length
-            .checked_add(1)
-            .ok_or(AroonOscError::InvalidPeriod { period: length, data_len: 0 })?; 
+        let cap = length.checked_add(1).ok_or(AroonOscError::InvalidPeriod {
+            period: length,
+            data_len: 0,
+        })?;
         Ok(Self {
             length,
             scale: 100.0 / length as f64,
@@ -1167,14 +1116,11 @@ impl AroonOscStream {
         })
     }
 
-    /// O(1) amortized per update.
-    /// Returns `None` until we've seen `length+1` bars (first non-NaN at t == length).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        let idx = self.t; // index of this bar
-        let min_idx_in_window = idx.saturating_sub(self.length); // earliest index allowed
+        let idx = self.t;
+        let min_idx_in_window = idx.saturating_sub(self.length);
 
-        // 1) Expire outdated indices from the fronts
         while self.hi_len > 0 && self.hi_idx[self.hi_head] < min_idx_in_window {
             self.hi_head = self.inc_wrap(self.hi_head);
             self.hi_len -= 1;
@@ -1184,7 +1130,6 @@ impl AroonOscStream {
             self.lo_len -= 1;
         }
 
-        // 2) Normalize NaNs so they never become extrema
         let h = if high.is_finite() {
             high
         } else {
@@ -1192,7 +1137,6 @@ impl AroonOscStream {
         };
         let l = if low.is_finite() { low } else { f64::INFINITY };
 
-        // 3) Push new high into a strictly decreasing deque (preserves earliest index on ties)
         while self.hi_len > 0 {
             let last = self.dec_wrap(self.hi_tail);
             if self.hi_val[last] < h {
@@ -1207,7 +1151,6 @@ impl AroonOscStream {
         self.hi_tail = self.inc_wrap(self.hi_tail);
         self.hi_len += 1;
 
-        // 4) Push new low into a strictly increasing deque (preserves earliest index on ties)
         while self.lo_len > 0 {
             let last = self.dec_wrap(self.lo_tail);
             if self.lo_val[last] > l {
@@ -1222,21 +1165,17 @@ impl AroonOscStream {
         self.lo_tail = self.inc_wrap(self.lo_tail);
         self.lo_len += 1;
 
-        // 5) Advance time
         self.t = idx.wrapping_add(1);
 
-        // 6) Emit oscillator after warmup (first non-NaN at t == length)
         if idx < self.length {
             return None;
         }
         debug_assert!(self.hi_len > 0 && self.lo_len > 0);
 
-        // Aroon Osc = (hi_idx - lo_idx) * (100/length)
         let hi_i = self.hi_idx[self.hi_head] as i64;
         let lo_i = self.lo_idx[self.lo_head] as i64;
         let v = (hi_i - lo_i) as f64 * self.scale;
 
-        // Strictly speaking this clamp isn't needed (diff in [-length, length])
         Some(v.max(-100.0).min(100.0))
     }
 
@@ -1264,10 +1203,9 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
-    
+
     #[test]
     fn test_aroonosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let n = 256usize;
         let timestamp: Vec<i64> = (0..n as i64).collect();
         let mut open = Vec::with_capacity(n);
@@ -1295,16 +1233,13 @@ mod tests {
         let candles = Candles::new(timestamp, open, high.clone(), low.clone(), close, volume);
         let input = AroonOscInput::with_default_candles(&candles);
 
-        
         let baseline = aroon_osc(&input)?.values;
 
-        
         let mut out = vec![0.0; n];
         aroon_osc_into(&input, &mut out)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1427,7 +1362,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_aroonosc_no_poison(
         test_name: &str,
@@ -1438,15 +1372,7 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        let test_lengths = vec![
-            5,   
-            14,  
-            25,  
-            50,  
-            100, 
-            200, 
-        ];
+        let test_lengths = vec![5, 14, 25, 50, 100, 200];
 
         for length in test_lengths {
             let params = AroonOscParams {
@@ -1454,23 +1380,19 @@ mod tests {
             };
             let input = AroonOscInput::from_candles(&candles, params);
 
-            
             if candles.close.len() < length {
                 continue;
             }
 
             let output = aroon_osc_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with length {}",
@@ -1478,7 +1400,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with length {}",
@@ -1486,7 +1407,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with length {}",
@@ -1499,7 +1419,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_aroonosc_no_poison(
         _test_name: &str,
@@ -1517,18 +1436,17 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100)
             .prop_flat_map(|length| {
-                let min_size = (length * 2).max(length + 20); 
+                let min_size = (length * 2).max(length + 20);
                 let max_size = 400;
                 (
-                    10.0f64..1000.0f64, 
-                    0.0f64..0.1f64,     
-                    -0.02f64..0.02f64,  
-                    min_size..max_size, 
-                    Just(length),       
-                    0u8..6, 
+                    10.0f64..1000.0f64,
+                    0.0f64..0.1f64,
+                    -0.02f64..0.02f64,
+                    min_size..max_size,
+                    Just(length),
+                    0u8..6,
                 )
             })
             .prop_map(
@@ -1536,20 +1454,17 @@ mod tests {
                     let mut high = Vec::with_capacity(size);
                     let mut low = Vec::with_capacity(size);
 
-                    
                     for i in 0..size {
                         let time_factor = i as f64 / size as f64;
 
                         let (h, l) = match market_type {
                             0 => {
-                                
                                 let cycle = (time_factor * 4.0 * std::f64::consts::PI).sin();
                                 let price = base_price * (1.0 + cycle * volatility);
                                 let spread = price * volatility * 0.5;
                                 (price + spread, price - spread)
                             }
                             1 => {
-                                
                                 let price = base_price * (1.0 + trend.abs() * i as f64);
                                 let noise = ((i * 17 + 13) % 100) as f64 / 100.0 - 0.5;
                                 let variation = price * volatility * noise * 0.3;
@@ -1557,7 +1472,6 @@ mod tests {
                                 (price + variation + spread, price + variation - spread)
                             }
                             2 => {
-                                
                                 let price = base_price * (1.0 - trend.abs() * i as f64).max(1.0);
                                 let noise = ((i * 23 + 7) % 100) as f64 / 100.0 - 0.5;
                                 let variation = price * volatility * noise * 0.3;
@@ -1565,26 +1479,22 @@ mod tests {
                                 (price + variation + spread, price + variation - spread)
                             }
                             3 => {
-                                
                                 let price = base_price;
                                 (price, price)
                             }
                             4 => {
-                                
                                 let price = base_price + (i as f64 * base_price * 0.01);
-                                let spread = price * 0.001; 
+                                let spread = price * 0.001;
                                 (price + spread, price - spread)
                             }
                             _ => {
-                                
                                 let price = base_price
                                     - (i as f64 * base_price * 0.005).min(base_price * 0.9);
-                                let spread = price * 0.001; 
+                                let spread = price * 0.001;
                                 (price + spread, price - spread)
                             }
                         };
 
-                        
                         high.push(h.max(l));
                         low.push(h.min(l));
                     }
@@ -1600,16 +1510,12 @@ mod tests {
                 };
                 let input = AroonOscInput::from_slices_hl(&high, &low, params);
 
-                
                 let result = aroon_osc_with_kernel(&input, kernel)?;
 
-                
                 let reference = aroon_osc_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(result.values.len(), high.len(), "Output length mismatch");
 
-                
                 for i in 0..length {
                     prop_assert!(
                         result.values[i].is_nan(),
@@ -1619,12 +1525,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in length..result.values.len() {
                     let val = result.values[i];
                     let ref_val = reference.values[i];
 
-                    
                     prop_assert!(
                         val >= -100.0 && val <= 100.0,
                         "AroonOsc value {} at index {} out of range [-100, 100]",
@@ -1632,9 +1536,7 @@ mod tests {
                         i
                     );
 
-                    
                     if val.is_finite() && ref_val.is_finite() {
-                        
                         let diff = (val - ref_val).abs();
                         prop_assert!(
                             diff <= 1e-9,
@@ -1645,7 +1547,6 @@ mod tests {
                             diff
                         );
                     } else {
-                        
                         prop_assert_eq!(
                             val.is_nan(),
                             ref_val.is_nan(),
@@ -1656,12 +1557,10 @@ mod tests {
                         );
                     }
 
-                    
                     let window_start = i.saturating_sub(length);
                     let window_high = &high[window_start..=i];
                     let window_low = &low[window_start..=i];
 
-                    
                     if window_high
                         .iter()
                         .all(|&h| (h - window_high[0]).abs() < f64::EPSILON)
@@ -1677,7 +1576,6 @@ mod tests {
 						);
                     }
 
-                    
                     let highest_idx = window_high
                         .iter()
                         .enumerate()
@@ -1692,9 +1590,7 @@ mod tests {
                         .map(|(idx, _)| idx)
                         .unwrap_or(0);
 
-                    
                     if highest_idx == window_high.len() - 1 {
-                        
                         prop_assert!(
 							val >= -100.0 && val <= 100.0,
 							"When highest high is most recent, AroonOsc {} should be valid at index {}",
@@ -1703,9 +1599,7 @@ mod tests {
 						);
                     }
 
-                    
                     if lowest_idx == window_low.len() - 1 {
-                        
                         prop_assert!(
 							val >= -100.0 && val <= 100.0,
 							"When lowest low is most recent, AroonOsc {} should be valid at index {}",
@@ -1714,10 +1608,7 @@ mod tests {
 						);
                     }
 
-                    
                     if market_type == 4 {
-                        
-                        
                         prop_assert!(
 							val >= -100.0,
 							"Monotonic increasing should not produce very negative AroonOsc, got {} at index {}",
@@ -1725,8 +1616,6 @@ mod tests {
 							i
 						);
                     } else if market_type == 5 {
-                        
-                        
                         prop_assert!(
 							val <= 100.0,
 							"Monotonic decreasing should not produce very positive AroonOsc, got {} at index {}",
@@ -1735,7 +1624,6 @@ mod tests {
 						);
                     }
 
-                    
                     let is_flat_window = window_high
                         .iter()
                         .all(|&h| (h - window_high[0]).abs() < f64::EPSILON)
@@ -1745,7 +1633,6 @@ mod tests {
 
                     if !is_flat_window {
                         if highest_idx == window_high.len() - 1 && lowest_idx == 0 {
-                            
                             prop_assert!(
 								val >= 50.0,
 								"When highest is recent and lowest is old, AroonOsc {} should be positive at index {}",
@@ -1753,7 +1640,6 @@ mod tests {
 								i
 							);
                         } else if lowest_idx == window_low.len() - 1 && highest_idx == 0 {
-                            
                             prop_assert!(
 								val <= -50.0,
 								"When lowest is recent and highest is old, AroonOsc {} should be negative at index {}",
@@ -1764,7 +1650,6 @@ mod tests {
                     }
                 }
 
-                
                 #[cfg(debug_assertions)]
                 for &val in &result.values {
                     if !val.is_nan() {
@@ -1844,7 +1729,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1852,19 +1736,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (10, 100, 10), 
-            (50, 200, 50), 
-            (14, 14, 0),   
-            (1, 5, 1),     
+            (2, 10, 2),
+            (5, 25, 5),
+            (10, 100, 10),
+            (50, 200, 50),
+            (14, 14, 0),
+            (1, 5, 1),
         ];
 
         for (start, end, step) in test_configs {
-            
             if c.close.len() < end {
                 continue;
             }
@@ -1874,9 +1755,7 @@ mod tests {
                 .length_range(start, end, step)
                 .apply_candles(&c)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1886,7 +1765,6 @@ mod tests {
                 let col = idx % output.cols;
                 let length = output.combos[row].length.unwrap_or(14);
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
@@ -1894,7 +1772,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
@@ -1902,7 +1779,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with length {} in range ({}, {}, {})",
@@ -1915,7 +1791,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1950,9 +1825,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "python")]
@@ -1970,11 +1845,9 @@ pub fn aroon_osc_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    // Get slices - as_slice() will fail if array is not contiguous
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Validate inputs have same length
     if high_slice.len() != low_slice.len() {
         return Err(PyValueError::new_err(format!(
             "High and low arrays must have same length. Got high: {}, low: {}",
@@ -1983,28 +1856,23 @@ pub fn aroon_osc_py<'py>(
         )));
     }
 
-    // Check length validity early
     if length == 0 {
         return Err(PyValueError::new_err(
             "Invalid length: length must be greater than 0",
         ));
     }
 
-    // Validate kernel parameter before entering allow_threads
     let kern = validate_kernel(kernel, false)?;
 
-    // Build input struct
     let params = AroonOscParams {
         length: Some(length),
     };
     let aroon_in = AroonOscInput::from_slices_hl(high_slice, low_slice, params);
 
-    // Get Vec<f64> from Rust function with zero-copy transfer
     let result_vec: Vec<f64> = py
         .allow_threads(|| aroon_osc_with_kernel(&aroon_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2027,8 +1895,6 @@ impl AroonOscStreamPy {
         Ok(AroonOscStreamPy { stream })
     }
 
-    /// Updates the stream with new high/low values and returns the calculated Aroon Oscillator value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         self.stream.update(high, low)
     }
@@ -2050,7 +1916,6 @@ pub fn aroon_osc_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    
     if high_slice.len() != low_slice.len() {
         return Err(PyValueError::new_err(format!(
             "High and low arrays must have same length. Got high: {}, low: {}",
@@ -2059,26 +1924,21 @@ pub fn aroon_osc_batch_py<'py>(
         )));
     }
 
-    
     let kern = validate_kernel(kernel, true)?;
 
     let sweep = AroonOscBatchRange {
         length: length_range,
     };
 
-    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| -> Result<Vec<AroonOscParams>, AroonOscError> {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2094,7 +1954,6 @@ pub fn aroon_osc_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2108,7 +1967,6 @@ pub fn aroon_osc_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct PrimaryCtxGuard {
@@ -2155,9 +2013,15 @@ pub struct AroonOscDeviceArrayF32Py {
 #[pymethods]
 impl AroonOscDeviceArrayF32Py {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         use pyo3::types::PyDict;
-        let inner = self.inner.as_ref().ok_or_else(|| PyValueError::new_err("buffer already exported"))?;
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("buffer already exported"))?;
         let d = PyDict::new(py);
         d.set_item("shape", (inner.rows, inner.cols))?;
         d.set_item("typestr", "<f4")?;
@@ -2168,8 +2032,11 @@ impl AroonOscDeviceArrayF32Py {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        let ptr_val: usize =
-            if inner.rows == 0 || inner.cols == 0 { 0 } else { inner.device_ptr() as usize };
+        let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 {
+            0
+        } else {
+            inner.device_ptr() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         Ok(d)
@@ -2227,7 +2094,9 @@ impl AroonOscDeviceArrayF32Py {
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl Drop for AroonOscDeviceArrayF32Py {
     fn drop(&mut self) {
-        unsafe { self.pc_guard.push_current(); }
+        unsafe {
+            self.pc_guard.push_current();
+        }
     }
 }
 
@@ -2264,9 +2133,13 @@ pub fn aroonosc_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
-    let guard = PrimaryCtxGuard::new(device_id as u32)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32, pc_guard: guard })
+    let guard =
+        PrimaryCtxGuard::new(device_id as u32).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(AroonOscDeviceArrayF32Py {
+        inner: Some(inner),
+        device_id: device_id as u32,
+        pc_guard: guard,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2301,12 +2174,16 @@ pub fn aroonosc_cuda_many_series_one_param_dev_py(
         cuda.aroonosc_many_series_one_param_time_major_dev(h, l, cols, rows, length)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let guard = PrimaryCtxGuard::new(device_id as u32)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-    Ok(AroonOscDeviceArrayF32Py { inner: Some(inner), device_id: device_id as u32, pc_guard: guard })
+    let guard =
+        PrimaryCtxGuard::new(device_id as u32).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    Ok(AroonOscDeviceArrayF32Py {
+        inner: Some(inner),
+        device_id: device_id as u32,
+        pc_guard: guard,
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_js(high: &[f64], low: &[f64], length: usize) -> Result<Vec<f64>, JsValue> {
     if high.len() != low.len() {
@@ -2322,13 +2199,12 @@ pub fn aroonosc_js(high: &[f64], low: &[f64], length: usize) -> Result<Vec<f64>,
     };
     let input = AroonOscInput::from_slices_hl(high, low, params);
 
-    // Use aroon_osc_with_kernel to properly allocate with NaN prefix
     aroon_osc_with_kernel(&input, Kernel::Auto)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_batch_js(
     high: &[f64],
@@ -2349,13 +2225,12 @@ pub fn aroonosc_batch_js(
         length: (length_start, length_end, length_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     aroon_osc_batch_slice(high, low, &sweep, Kernel::Auto)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_batch_metadata_js(
     length_start: usize,
@@ -2376,14 +2251,13 @@ pub fn aroonosc_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AroonOscBatchConfig {
     pub length_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AroonOscBatchJsOutput {
     pub values: Vec<f64>,
@@ -2392,7 +2266,7 @@ pub struct AroonOscBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = aroonosc_batch)]
 pub fn aroon_osc_batch_unified_js(
     high: &[f64],
@@ -2407,7 +2281,6 @@ pub fn aroon_osc_batch_unified_js(
         )));
     }
 
-    // 1. Deserialize the configuration object from JavaScript
     let config: AroonOscBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -2415,11 +2288,9 @@ pub fn aroon_osc_batch_unified_js(
         length: config.length_range,
     };
 
-    // 2. Run the existing core logic
     let output = aroon_osc_batch_slice(high, low, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // 3. Create the structured output
     let js_output = AroonOscBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2427,12 +2298,11 @@ pub fn aroon_osc_batch_unified_js(
         cols: output.cols,
     };
 
-    // 4. Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2441,7 +2311,7 @@ pub fn aroonosc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2451,7 +2321,7 @@ pub fn aroonosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_into(
     high_ptr: *const f64,
@@ -2473,7 +2343,6 @@ pub fn aroonosc_into(
         };
         let input = AroonOscInput::from_slices_hl(high, low, params);
 
-        // Check for aliasing - if any input overlaps with output, use temp buffer
         if high_ptr == out_ptr || low_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             aroon_osc_into_slice(&mut temp, &input, Kernel::Auto)
@@ -2490,7 +2359,7 @@ pub fn aroonosc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn aroonosc_batch_into(
     high_ptr: *const f64,
@@ -2520,7 +2389,6 @@ pub fn aroonosc_batch_into(
             .ok_or_else(|| JsValue::from_str("aroonosc: length range too large"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, expected_len);
 
-        // Check for aliasing - if any input overlaps with output, use temp buffer
         let high_overlaps = (high_ptr as usize) < (out_ptr as usize + expected_len * 8)
             && (high_ptr as usize + len * 8) > (out_ptr as usize);
         let low_overlaps = (low_ptr as usize) < (out_ptr as usize + expected_len * 8)

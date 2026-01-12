@@ -1,17 +1,3 @@
-//! CUDA wrapper for Gator Oscillator (GATOR): upper/lower histograms and their 1-bar changes.
-//!
-//! Pattern classification: Recurrence/IIR per-parameter (sequential over time).
-//! We implement:
-//! - gatorosc_batch_f32: one series × many params (one block per row; shared rings)
-//! - gatorosc_many_series_one_param_f32: many series × one param (one thread per series)
-//!
-//! Parity items (mirrors ALMA/CWMA wrappers):
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/gatorosc_kernel.ptx"))
-//! - Stream NON_BLOCKING
-//! - JIT options: DetermineTargetFromContext + OptLevel O2 with fallbacks
-//! - VRAM check with ~64MB headroom and grid.y (or chunk count) <= 65_535
-//! - Logging of selected policy when BENCH_DEBUG=1
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -34,7 +20,11 @@ pub enum CudaGatorOscError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -42,7 +32,14 @@ pub enum CudaGatorOscError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -90,7 +87,7 @@ impl CudaGatorOsc {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
         let ctx = Arc::new(Context::new(device)?);
-        
+
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .unwrap_or(65_535) as usize;
@@ -122,17 +119,25 @@ impl CudaGatorOsc {
     }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
-    pub fn ctx(&self) -> Arc<Context> { self.context.clone() }
+    pub fn ctx(&self) -> Arc<Context> {
+        self.context.clone()
+    }
 
     #[inline]
-    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) { self.policy = p; }
+    pub fn set_policy(&mut self, p: CudaGatorOscPolicy) {
+        self.policy = p;
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 let per_scenario =
@@ -140,14 +145,18 @@ impl CudaGatorOsc {
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGatorOsc)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 let per_scenario =
@@ -155,12 +164,13 @@ impl CudaGatorOsc {
                 if per_scenario || !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] GATOR many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaGatorOsc)).debug_many_logged = true;
+                }
             }
         }
     }
 
-    
     pub fn gatorosc_batch_dev(
         &self,
         data_f32: &[f32],
@@ -176,12 +186,10 @@ impl CudaGatorOsc {
             .ok_or_else(|| CudaGatorOscError::InvalidInput("all values are NaN".into()))?;
 
         let combos = expand_grid(sweep)?;
-        
-        
+
         let warp_scan_enabled =
             std::env::var("GATOROSC_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
 
-        
         let mut jl: Vec<i32> = Vec::with_capacity(combos.len());
         let mut js: Vec<i32> = Vec::with_capacity(combos.len());
         let mut tl: Vec<i32> = Vec::with_capacity(combos.len());
@@ -206,7 +214,12 @@ impl CudaGatorOsc {
             let lower_needed =
                 (tlen as usize).max(llen as usize) + (tsh as usize).max(lsh as usize);
             needed_max = needed_max.max(upper_needed.max(lower_needed));
-            jl.push(jlen); js.push(jsh); tl.push(tlen); ts_.push(tsh); ll.push(llen); ls.push(lsh);
+            jl.push(jlen);
+            js.push(jsh);
+            tl.push(tlen);
+            ts_.push(tsh);
+            ll.push(llen);
+            ls.push(lsh);
         }
         let valid_tail = len - first_valid;
         if valid_tail < needed_max {
@@ -216,7 +229,6 @@ impl CudaGatorOsc {
             )));
         }
 
-        
         let rows = combos.len();
         let elt = std::mem::size_of::<f32>();
         let total_elems = rows
@@ -236,16 +248,13 @@ impl CudaGatorOsc {
             .ok_or_else(|| CudaGatorOscError::InvalidInput("bytes overflow".into()))?;
         CudaGatorOsc::will_fit(required, headroom)?;
 
-        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
 
-        
         let mut d_upper: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lower: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_uchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lchn: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
-        
         let launch_chunk = |this: &CudaGatorOsc,
                             start: usize,
                             chunk: usize,
@@ -261,22 +270,30 @@ impl CudaGatorOsc {
             let func = this
                 .module
                 .get_function("gatorosc_batch_f32")
-                .map_err(|_| CudaGatorOscError::MissingKernelSymbol { name: "gatorosc_batch_f32" })?;
+                .map_err(|_| CudaGatorOscError::MissingKernelSymbol {
+                    name: "gatorosc_batch_f32",
+                })?;
             let block_x = if warp_scan_enabled {
-                
-                
                 let mut bx = this.policy.batch_block_x.unwrap_or(32).max(32);
                 bx -= bx % 32;
-                if bx == 0 { bx = 32; }
+                if bx == 0 {
+                    bx = 32;
+                }
                 bx
             } else {
-                
                 1
             };
             let grid: GridSize = (chunk as u32, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             if (chunk as u32) as usize > this.max_grid_x {
-                return Err(CudaGatorOscError::LaunchConfigTooLarge { gx: chunk as u32, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+                return Err(CudaGatorOscError::LaunchConfigTooLarge {
+                    gx: chunk as u32,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
             }
             unsafe {
                 (*(this as *const _ as *mut CudaGatorOsc)).last_batch =
@@ -298,8 +315,9 @@ impl CudaGatorOsc {
                     .ok_or_else(|| CudaGatorOscError::InvalidInput("row offset overflow".into()))?;
                 let row_off_bytes = row_off_elems
                     .checked_mul(std::mem::size_of::<f32>())
-                    .ok_or_else(|| CudaGatorOscError::InvalidInput("row offset bytes overflow".into()))?
-                    as u64;
+                    .ok_or_else(|| {
+                        CudaGatorOscError::InvalidInput("row offset bytes overflow".into())
+                    })? as u64;
                 let mut u_ptr = d_upper.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
                 let mut l_ptr = d_lower.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
                 let mut uc_ptr = d_uchn.as_device_ptr().as_raw().wrapping_add(row_off_bytes);
@@ -330,18 +348,14 @@ impl CudaGatorOsc {
             Ok(())
         };
 
-        
         let mut launched = 0usize;
         while launched < rows {
             let chunk = (rows - launched).min(self.max_grid_x);
             let chunk_max_shift = max_shift_in_range(&js, &ts_, &ls, launched, chunk);
             let ring_len_i = if warp_scan_enabled {
-                
-                
                 let min_ring = (chunk_max_shift + 1).max(64);
                 ((min_ring + 31) / 32 * 32) as i32
             } else {
-                
                 (chunk_max_shift + 1) as i32
             };
             launch_chunk(self, launched, chunk, ring_len_i)?;
@@ -373,7 +387,6 @@ impl CudaGatorOsc {
         })
     }
 
-    
     pub fn gatorosc_many_series_one_param_time_major_dev(
         &self,
         prices_tm: &[f32],
@@ -402,7 +415,7 @@ impl CudaGatorOsc {
                 "time-major length mismatch".into(),
             ));
         }
-        
+
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -432,7 +445,6 @@ impl CudaGatorOsc {
             }
         }
 
-        
         let elt_f32 = std::mem::size_of::<f32>();
         let elt_i32 = std::mem::size_of::<i32>();
         let bytes_prices = prices_tm
@@ -468,8 +480,10 @@ impl CudaGatorOsc {
         let func = self
             .module
             .get_function("gatorosc_many_series_one_param_f32")
-            .map_err(|_| CudaGatorOscError::MissingKernelSymbol { name: "gatorosc_many_series_one_param_f32" })?;
-        
+            .map_err(|_| CudaGatorOscError::MissingKernelSymbol {
+                name: "gatorosc_many_series_one_param_f32",
+            })?;
+
         let ring_len = (jaws_shift.max(teeth_shift).max(lips_shift) + 1) as i32;
         let per_thread_smem = (ring_len as usize) * 3 * std::mem::size_of::<f32>();
         let smem_budget = self.max_smem_per_block.saturating_sub(1024);
@@ -480,7 +494,10 @@ impl CudaGatorOsc {
             smem_budget / per_thread_smem
         };
         let mut block_x = requested_block_x.min((max_by_smem as u32).max(32));
-        block_x -= block_x % 32; if block_x == 0 { block_x = 32; }
+        block_x -= block_x % 32;
+        if block_x == 0 {
+            block_x = 32;
+        }
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         if (grid_x as usize) > self.max_grid_x {
             return Err(CudaGatorOscError::LaunchConfigTooLarge {
@@ -571,30 +588,40 @@ impl CudaGatorOsc {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaGatorOscError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             let need = required_bytes.saturating_add(headroom_bytes);
-            if need <= free { Ok(()) } else { Err(CudaGatorOscError::OutOfMemory { required: need, free, headroom: headroom_bytes }) }
+            if need <= free {
+                Ok(())
+            } else {
+                Err(CudaGatorOscError::OutOfMemory {
+                    required: need,
+                    free,
+                    headroom: headroom_bytes,
+                })
+            }
         } else {
             Ok(())
         }
     }
 }
 
-
 fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
     if start < end {
-        
         return (start..=end).step_by(step.max(1)).collect();
     }
-    
+
     let mut v = Vec::new();
     let mut cur = start;
     let s = step.max(1);
@@ -617,15 +644,29 @@ fn expand_grid(r: &GatorOscBatchRange) -> Result<Vec<GatorOscParams>, CudaGatorO
     let ts = axis(r.teeth_shift);
     let ll = axis(r.lips_length);
     let ls = axis(r.lips_shift);
-    if jl.is_empty() || js.is_empty() || tl.is_empty() || ts.is_empty() || ll.is_empty() || ls.is_empty() {
-        return Err(CudaGatorOscError::InvalidInput("empty sweep expansion".into()));
+    if jl.is_empty()
+        || js.is_empty()
+        || tl.is_empty()
+        || ts.is_empty()
+        || ll.is_empty()
+        || ls.is_empty()
+    {
+        return Err(CudaGatorOscError::InvalidInput(
+            "empty sweep expansion".into(),
+        ));
     }
-    let cap = jl.len()
-        .checked_mul(js.len()).ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
-        .checked_mul(tl.len()).ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
-        .checked_mul(ts.len()).ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
-        .checked_mul(ll.len()).ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
-        .checked_mul(ls.len()).ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?;
+    let cap = jl
+        .len()
+        .checked_mul(js.len())
+        .ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
+        .checked_mul(tl.len())
+        .ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
+        .checked_mul(ts.len())
+        .ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
+        .checked_mul(ll.len())
+        .ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?
+        .checked_mul(ls.len())
+        .ok_or_else(|| CudaGatorOscError::InvalidInput("sweep overflow".into()))?;
     let mut out = Vec::with_capacity(cap);
     for &a in &jl {
         for &b in &js {
@@ -654,11 +695,13 @@ fn expand_grid(r: &GatorOscBatchRange) -> Result<Vec<GatorOscParams>, CudaGatorO
 fn max_shift_in_range(js: &[i32], ts: &[i32], ls: &[i32], start: usize, count: usize) -> usize {
     let mut m = 0usize;
     for i in start..start + count {
-        m = m.max(js[i] as usize).max(ts[i] as usize).max(ls[i] as usize);
+        m = m
+            .max(js[i] as usize)
+            .max(ts[i] as usize)
+            .max(ls[i] as usize);
     }
     m
 }
-
 
 pub mod benches {
     use super::*;
@@ -666,7 +709,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 96; 
+    const PARAM_SWEEP: usize = 96;
 
     fn mem_required() -> usize {
         let out_bytes = 4 * ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
@@ -690,7 +733,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaGatorOsc::new(0).expect("cuda gator");
         let data = gen_series(ONE_SERIES_LEN);
-        
+
         let sweep = GatorOscBatchRange {
             jaws_length: (8, 14, 2),
             jaws_shift: (2, 6, 2),
@@ -703,8 +746,6 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        
-        
         if std::env::var("CUDA_BENCH_ENABLE_GATOROSC").ok().as_deref() != Some("1") {
             return Vec::new();
         }

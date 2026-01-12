@@ -1,18 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for STC (Schaff Trend Cycle)
-//!
-//! Parity targets with ALMA/CWMA-style wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/stc_kernel.ptx")) with
-//!   DetermineTargetFromContext + OptLevel O2 fallbacks.
-//! - NON_BLOCKING stream.
-//! - Warmup/NaN semantics match scalar stc.rs exactly: warm = first_valid + max(fast,slow,k,d) - 1.
-//! - Batch (one-series × many-params) and many-series × one-param (time-major) entry points.
-//! - VRAM checks + grid chunking (<= 65_535 rows per launch).
-//! - Math pattern: Recurrence/IIR. We implement the classic EMA/EMA path on device. SMA/SMA is
-//!   a future extension; exotic MA types can be composed by precomputing MAs via the CUDA MA
-//!   selector and applying a small, dedicated kernel (not included here for brevity).
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::stc::{StcBatchRange, StcParams};
 use cust::context::Context;
@@ -61,7 +48,11 @@ pub enum CudaStcError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -69,7 +60,14 @@ pub enum CudaStcError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -87,7 +85,6 @@ pub struct CudaStc {
 impl CudaStc {
     #[inline(always)]
     fn stc_batch_smem_bytes(max_k: usize) -> usize {
-        
         max_k * (2 * size_of::<f32>() + 4 * size_of::<i32>())
     }
     pub fn new(device_id: usize) -> Result<Self, CudaStcError> {
@@ -194,9 +191,7 @@ impl CudaStc {
             .checked_mul(ss.len())
             .and_then(|v| v.checked_mul(ks.len()))
             .and_then(|v| v.checked_mul(ds.len()))
-            .ok_or_else(|| {
-                CudaStcError::InvalidInput("parameter grid size overflow".into())
-            })?;
+            .ok_or_else(|| CudaStcError::InvalidInput("parameter grid size overflow".into()))?;
 
         let mut out = Vec::with_capacity(cap);
         for &f in &fs {
@@ -232,7 +227,6 @@ impl CudaStc {
         Ok(first)
     }
 
-    
     pub fn stc_batch_dev(
         &self,
         data: &[f32],
@@ -258,7 +252,6 @@ impl CudaStc {
             .unwrap();
         let first_valid = Self::validate_first_valid(data, max_needed)?;
 
-        
         let rows = combos.len();
         let rows_len = rows
             .checked_mul(len)
@@ -291,16 +284,13 @@ impl CudaStc {
             }
         }
 
-        
         let h = LockedBuffer::from_slice(data)?;
         let mut d_prices: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
         unsafe {
-            d_prices
-                .async_copy_from(&h, &self.stream)?;
+            d_prices.async_copy_from(&h, &self.stream)?;
         }
 
-        
         let fasts: Vec<i32> = combos
             .iter()
             .map(|c| c.fast_period.unwrap() as i32)
@@ -317,7 +307,6 @@ impl CudaStc {
         let h_k = LockedBuffer::from_slice(&ks)?;
         let h_d = LockedBuffer::from_slice(&ds)?;
 
-        
         let mut d_f: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized_async(rows, &self.stream) }?;
         let mut d_s: DeviceBuffer<i32> =
@@ -327,38 +316,30 @@ impl CudaStc {
         let mut d_d: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized_async(rows, &self.stream) }?;
         unsafe {
-            d_f.async_copy_from(&h_f, &self.stream)
-                ?;
-            d_s.async_copy_from(&h_s, &self.stream)
-                ?;
-            d_k.async_copy_from(&h_k, &self.stream)
-                ?;
-            d_d.async_copy_from(&h_d, &self.stream)
-                ?;
+            d_f.async_copy_from(&h_f, &self.stream)?;
+            d_s.async_copy_from(&h_s, &self.stream)?;
+            d_k.async_copy_from(&h_k, &self.stream)?;
+            d_d.async_copy_from(&h_d, &self.stream)?;
         }
 
-        
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(rows_len, &self.stream) }?;
 
-        
-        let mut func = self
-            .module
-            .get_function("stc_batch_f32")
-            .map_err(|_| CudaStcError::MissingKernelSymbol { name: "stc_batch_f32" })?;
-        
+        let mut func = self.module.get_function("stc_batch_f32").map_err(|_| {
+            CudaStcError::MissingKernelSymbol {
+                name: "stc_batch_f32",
+            }
+        })?;
+
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 1,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
-        
-        func.set_cache_config(CacheConfig::PreferShared)
-            ?;
-        func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
-            ?;
+
+        func.set_cache_config(CacheConfig::PreferShared)?;
+        func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)?;
 
         for (start, count) in Self::grid_x_chunks(rows) {
-            
             let local_max_k = ks[start..start + count]
                 .iter()
                 .copied()
@@ -381,7 +362,7 @@ impl CudaStc {
                 let grid: GridSize = (count as u32, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 let mut p_ptr = d_prices.as_device_ptr().as_raw();
-                
+
                 let mut f_ptr = d_f.as_device_ptr().add(start).as_raw();
                 let mut s_ptr = d_s.as_device_ptr().add(start).as_raw();
                 let mut k_ptr = d_k.as_device_ptr().add(start).as_raw();
@@ -390,11 +371,8 @@ impl CudaStc {
                 let mut fv_i = first_valid as i32;
                 let mut r_i = count as i32;
                 let mut mk_i = local_max_k as i32;
-                
-                let mut o_ptr = d_out
-                    .as_device_ptr()
-                    .add(start * len)
-                    .as_raw();
+
+                let mut o_ptr = d_out.as_device_ptr().add(start * len).as_raw();
                 let mut args: [*mut c_void; 10] = [
                     &mut p_ptr as *mut _ as *mut c_void,
                     &mut f_ptr as *mut _ as *mut c_void,
@@ -426,10 +404,8 @@ impl CudaStc {
             },
             combos,
         ))
-        
     }
 
-    
     pub fn stc_many_series_one_param_time_major_dev(
         &self,
         data_tm: &[f32],
@@ -449,16 +425,15 @@ impl CudaStc {
 
         let fast = params.fast_period.unwrap_or(23);
         let slow = params.slow_period.unwrap_or(50);
-        
+
         let k = params.k_period.unwrap_or(10);
         let d = params.d_period.unwrap_or(3);
 
-        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
                 let idx = t * cols + s;
-                
+
                 if data_tm[idx].is_finite() {
                     first_valids[s] = t as i32;
                     break;
@@ -466,7 +441,7 @@ impl CudaStc {
             }
             let fv = first_valids[s] as usize;
             let warm = fv + fast.max(slow).max(k).max(d) - 1;
-            
+
             if warm >= rows {
                 return Err(CudaStcError::InvalidInput(
                     "not enough valid data for at least one series".into(),
@@ -474,7 +449,6 @@ impl CudaStc {
             }
         }
 
-        
         let elem = std::mem::size_of::<f32>();
         let data_bytes = cells
             .checked_mul(elem)
@@ -504,7 +478,6 @@ impl CudaStc {
             }
         }
 
-        
         let h_tm = LockedBuffer::from_slice(data_tm)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
         let mut d_data: DeviceBuffer<f32> =
@@ -512,16 +485,12 @@ impl CudaStc {
         let mut d_first: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized_async(cols, &self.stream) }?;
         unsafe {
-            d_data
-                .async_copy_from(&h_tm, &self.stream)?;
-            d_first
-                .async_copy_from(&h_first, &self.stream)?;
+            d_data.async_copy_from(&h_tm, &self.stream)?;
+            d_first.async_copy_from(&h_first, &self.stream)?;
         }
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cells, &self.stream) }?;
 
-        
-        
         let func = self
             .module
             .get_function("stc_many_series_one_param_f32")
@@ -538,7 +507,7 @@ impl CudaStc {
             let block: BlockSize = (block_x, 1, 1).into();
             let mut d_ptr = d_data.as_device_ptr().as_raw();
             let mut f_ptr = d_first.as_device_ptr().as_raw();
-            
+
             let mut c_i = cols as i32;
             let mut r_i = rows as i32;
             let mut fast_i = fast as i32;
@@ -570,7 +539,6 @@ impl CudaStc {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
@@ -589,7 +557,7 @@ pub mod benches {
                         let x = i as f32;
                         data[i] = (x * 0.0013).sin() + 0.0002 * x;
                     }
-                    
+
                     let sweep = StcBatchRange {
                         fast_period: (10, 25, 5),
                         slow_period: (30, 60, 10),
@@ -618,8 +586,8 @@ pub mod benches {
                     }
 
                     let mut cuda = CudaStc::new(0).unwrap();
-                    let d_prices =
-                        unsafe { DeviceBuffer::from_slice_async(&data, &cuda.stream) }.expect("d_prices");
+                    let d_prices = unsafe { DeviceBuffer::from_slice_async(&data, &cuda.stream) }
+                        .expect("d_prices");
                     let d_f = DeviceBuffer::from_slice(&fasts).expect("d_f");
                     let d_s = DeviceBuffer::from_slice(&slows).expect("d_s");
                     let d_k = DeviceBuffer::from_slice(&ks).expect("d_k");
@@ -627,8 +595,12 @@ pub mod benches {
                     let mut d_out: DeviceBuffer<f32> =
                         unsafe { DeviceBuffer::uninitialized(rows * N) }.expect("d_out");
 
-                    let mut func = cuda.module.get_function("stc_batch_f32").expect("stc_batch_f32");
-                    func.set_cache_config(CacheConfig::PreferShared).expect("cache_config");
+                    let mut func = cuda
+                        .module
+                        .get_function("stc_batch_f32")
+                        .expect("stc_batch_f32");
+                    func.set_cache_config(CacheConfig::PreferShared)
+                        .expect("cache_config");
                     func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)
                         .expect("smem_config");
 
@@ -748,8 +720,8 @@ pub mod benches {
                     let grid_x = ((cols as u32) + block_x - 1) / block_x;
 
                     let mut cuda = CudaStc::new(0).unwrap();
-                    let d_data =
-                        unsafe { DeviceBuffer::from_slice_async(&tm, &cuda.stream) }.expect("d_data");
+                    let d_data = unsafe { DeviceBuffer::from_slice_async(&tm, &cuda.stream) }
+                        .expect("d_data");
                     let d_first = DeviceBuffer::from_slice(&first_valids).expect("d_first");
                     let mut d_out: DeviceBuffer<f32> =
                         unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out");

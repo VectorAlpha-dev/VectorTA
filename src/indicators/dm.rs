@@ -1,29 +1,3 @@
-//! # Directional Movement (DM)
-//!
-//! Measures the strength of upward and downward price movements based on changes
-//! between consecutive high and low values. +DM is computed when the positive
-//! range (current high minus previous high) exceeds the negative range (previous
-//! low minus current low), while -DM is computed in the opposite case.
-//!
-//! ## Parameters
-//! - **period**: The smoothing window size (default: 14)
-//!
-//! ## Returns
-//! - **`Ok(DmOutput)`** on success, containing two `Vec<f64>` arrays:
-//!   - plus: Plus directional movement values
-//!   - minus: Minus directional movement values
-//! - **`Err(DmError)`** on various error conditions.
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: Implemented (candidate generation only), but Auto short-circuits to scalar
-//!   by default because AVX2 underperforms and AVX512 gains are small (~4% at 100k on test CPU).
-//!   You can still force `Kernel::Avx2`/`Kernel::Avx512` explicitly to use SIMD.
-//! - **Streaming Performance**: O(1) - uses exponential (Wilder) smoothing for efficient incremental updates
-//! - **Memory Optimization**: GOOD - uses alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes throughout
-//! - **Decision Note**: Streaming kernel caches `1/period` and uses FMA when available; exact Wilder
-//!   smoothing preserved. CUDA wrapper uses typed errors + `will_fit`, and Python CUDA handles expose
-//!   CAI v3 and DLPack v1.x via shared `DeviceArrayF32Py`. Numerical outputs remain unchanged.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dm_wrapper::CudaDm;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -173,7 +147,11 @@ pub enum DmError {
     #[error("dm: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("dm: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("dm: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -226,8 +204,6 @@ fn dm_prepare<'a>(
         });
     }
 
-    
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -256,9 +232,8 @@ fn dm_compute_into_scalar(
         let mut sum_plus = 0.0f64;
         let mut sum_minus = 0.0f64;
 
-        
         let mut i = first + 1;
-        let warm_stop = end_init + 1; 
+        let warm_stop = end_init + 1;
 
         let mut prev_high = *high.get_unchecked(first);
         let mut prev_low = *low.get_unchecked(first);
@@ -282,7 +257,6 @@ fn dm_compute_into_scalar(
         *plus_out.get_unchecked_mut(end_init) = sum_plus;
         *minus_out.get_unchecked_mut(end_init) = sum_minus;
 
-        
         if end_init + 1 >= n {
             return;
         }
@@ -370,7 +344,6 @@ unsafe fn dm_compute_into_avx2(
     let inv_p = 1.0 / (period as f64);
     let zero = _mm256_setzero_pd();
 
-    
     let mut sum_plus = 0.0f64;
     let mut sum_minus = 0.0f64;
     let mut i = first + 1;
@@ -537,7 +510,6 @@ unsafe fn dm_compute_into_avx512(
     let inv_p = 1.0 / (period as f64);
     let zero = _mm512_set1_pd(0.0);
 
-    
     let mut sum_plus = 0.0f64;
     let mut sum_minus = 0.0f64;
     let mut i = first + 1;
@@ -661,7 +633,6 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
     let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
     let warm = first + period - 1;
 
-    
     let mut plus = alloc_with_nan_prefix(high.len(), warm);
     let mut minus = alloc_with_nan_prefix(high.len(), warm);
 
@@ -669,30 +640,28 @@ pub fn dm_with_kernel(input: &DmInput, kernel: Kernel) -> Result<DmOutput, DmErr
     Ok(DmOutput { plus, minus })
 }
 
-/// Writes (+DM, −DM) into caller-provided output slices without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - Both `plus_out.len()` and `minus_out.len()` must equal the input length.
-/// - Errors mirror the existing API semantics.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dm_into(
     input: &DmInput,
     plus_out: &mut [f64],
     minus_out: &mut [f64],
 ) -> Result<(), DmError> {
-    
     let (high, low, period, first, chosen) = dm_prepare(input, Kernel::Auto)?;
 
-    
     if plus_out.len() != high.len() {
-        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: plus_out.len() });
+        return Err(DmError::OutputLengthMismatch {
+            expected: high.len(),
+            got: plus_out.len(),
+        });
     }
     if minus_out.len() != high.len() {
-        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: minus_out.len() });
+        return Err(DmError::OutputLengthMismatch {
+            expected: high.len(),
+            got: minus_out.len(),
+        });
     }
 
-    
     let warm = first + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm_end = warm.min(high.len());
@@ -703,7 +672,6 @@ pub fn dm_into(
         *v = qnan;
     }
 
-    
     dm_compute_into(high, low, period, first, chosen, plus_out, minus_out);
     Ok(())
 }
@@ -717,10 +685,16 @@ pub fn dm_into_slice(
 ) -> Result<(), DmError> {
     let (high, low, period, first, chosen) = dm_prepare(input, kernel)?;
     if plus_dst.len() != high.len() {
-        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: plus_dst.len() });
+        return Err(DmError::OutputLengthMismatch {
+            expected: high.len(),
+            got: plus_dst.len(),
+        });
     }
     if minus_dst.len() != high.len() {
-        return Err(DmError::OutputLengthMismatch { expected: high.len(), got: minus_dst.len() });
+        return Err(DmError::OutputLengthMismatch {
+            expected: high.len(),
+            got: minus_dst.len(),
+        });
     }
 
     dm_compute_into(high, low, period, first, chosen, plus_dst, minus_dst);
@@ -811,7 +785,6 @@ pub unsafe fn dm_avx512(
     })
 }
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn dm_avx512_short(
@@ -837,7 +810,7 @@ pub unsafe fn dm_avx512_long(
 #[derive(Debug, Clone)]
 pub struct DmStream {
     period: usize,
-    inv_period: f64, 
+    inv_period: f64,
     sum_plus: f64,
     sum_minus: f64,
     prev_high: f64,
@@ -866,50 +839,39 @@ impl DmStream {
         })
     }
 
-    /// O(1) streaming update using Wilder smoothing.
-    /// Returns None until warmup completes; then returns smoothed (+DM, -DM).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<(f64, f64)> {
-        
         if self.count == 0 {
             self.prev_high = high;
             self.prev_low = low;
         }
 
-        
         let dp = high - self.prev_high;
         let dm = self.prev_low - low;
 
-        
         self.prev_high = high;
         self.prev_low = low;
 
-        
         let dp_pos = dp.max(0.0);
         let dm_pos = dm.max(0.0);
 
-        
         let plus_val = if dp_pos > dm_pos { dp_pos } else { 0.0 };
         let minus_val = if dm_pos > dp_pos { dm_pos } else { 0.0 };
 
-        
         if self.count < self.period - 1 {
             self.sum_plus += plus_val;
             self.sum_minus += minus_val;
             self.count += 1;
             return None;
         } else if self.count == self.period - 1 {
-            
             self.sum_plus += plus_val;
             self.sum_minus += minus_val;
             self.count += 1;
             return Some((self.sum_plus, self.sum_minus));
         }
 
-        
         #[cfg(target_feature = "fma")]
         {
-            
             self.sum_plus = (-self.inv_period).mul_add(self.sum_plus, self.sum_plus + plus_val);
             self.sum_minus = (-self.inv_period).mul_add(self.sum_minus, self.sum_minus + minus_val);
         }
@@ -1022,7 +984,7 @@ fn expand_grid(r: &DmBatchRange) -> Result<Vec<DmParams>, DmError> {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let st = step.max(1) as isize;
         let mut x = start as isize;
@@ -1100,10 +1062,12 @@ fn dm_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(DmError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+
+    let _total = rows.checked_mul(cols).ok_or(DmError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let chosen = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1186,16 +1150,16 @@ fn dm_batch_inner(
 
     let rows = combos.len();
     let cols = high.len();
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(DmError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
-    
+    let _total = rows.checked_mul(cols).ok_or(DmError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+
     let mut plus_mu = make_uninit_matrix(rows, cols);
     let mut minus_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1203,7 +1167,6 @@ fn dm_batch_inner(
     init_matrix_prefixes(&mut plus_mu, cols, &warm);
     init_matrix_prefixes(&mut minus_mu, cols, &warm);
 
-    
     let mut plus_guard = core::mem::ManuallyDrop::new(plus_mu);
     let mut minus_guard = core::mem::ManuallyDrop::new(minus_mu);
     let plus_out: &mut [f64] = unsafe {
@@ -1215,7 +1178,6 @@ fn dm_batch_inner(
 
     let combos = dm_batch_inner_into(high, low, sweep, kern, parallel, first, plus_out, minus_out)?;
 
-    
     let plus = unsafe {
         Vec::from_raw_parts(
             plus_guard.as_mut_ptr() as *mut f64,
@@ -1357,8 +1319,6 @@ unsafe fn dm_row_avx512_long(
 ) {
     dm_row_avx512(high, low, first, period, plus, minus)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1567,26 +1527,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             DmParams::default(),
-            
             DmParams { period: Some(2) },
-            
             DmParams { period: Some(3) },
             DmParams { period: Some(5) },
             DmParams { period: Some(7) },
-            
             DmParams { period: Some(10) },
-            DmParams { period: Some(14) }, 
+            DmParams { period: Some(14) },
             DmParams { period: Some(20) },
             DmParams { period: Some(30) },
-            
             DmParams { period: Some(50) },
             DmParams { period: Some(100) },
             DmParams { period: Some(200) },
-            
             DmParams { period: Some(25) },
         ];
 
@@ -1594,15 +1547,13 @@ mod tests {
             let input = DmInput::from_candles(&candles, params.clone());
             let output = dm_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.plus.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in plus array \
@@ -1631,15 +1582,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.minus.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in minus array \
@@ -1677,7 +1626,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1689,13 +1638,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                
                 (100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
                     .prop_flat_map(move |(base_price, volatility, data_len)| {
-                        
                         (
                             Just(base_price),
                             Just(volatility),
@@ -1706,23 +1652,20 @@ mod tests {
                     })
                     .prop_map(
                         move |(base_price, volatility, data_len, changes, spreads)| {
-                            
                             let mut high = Vec::with_capacity(data_len);
                             let mut low = Vec::with_capacity(data_len);
                             let mut current_price = base_price;
 
                             for i in 0..data_len {
-                                
                                 let change = changes[i] * volatility * current_price;
-                                current_price = (current_price + change).max(10.0); 
+                                current_price = (current_price + change).max(10.0);
 
-                                
                                 let spread = current_price * 0.01 * spreads[i];
                                 let daily_high = current_price + spread;
                                 let daily_low = current_price - spread;
 
                                 high.push(daily_high);
-                                low.push(daily_low.max(1.0)); 
+                                low.push(daily_low.max(1.0));
                             }
 
                             (high, low)
@@ -1738,23 +1681,19 @@ mod tests {
             };
             let input = DmInput::from_slices(&high, &low, params);
 
-            
             let DmOutput {
                 plus: out_plus,
                 minus: out_minus,
             } = dm_with_kernel(&input, kernel)?;
 
-            
             let DmOutput {
                 plus: ref_plus,
                 minus: ref_minus,
             } = dm_with_kernel(&input, Kernel::Scalar)?;
 
-            
             prop_assert_eq!(out_plus.len(), high.len());
             prop_assert_eq!(out_minus.len(), high.len());
 
-            
             let warmup_period = period - 1;
             for i in 0..warmup_period {
                 prop_assert!(
@@ -1769,7 +1708,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_period..high.len() {
                 if !out_plus[i].is_nan() {
                     prop_assert!(
@@ -1789,7 +1727,6 @@ mod tests {
                 }
             }
 
-            
             const MAX_ULP: i64 = 3;
             for i in 0..high.len() {
                 let plus_y = out_plus[i];
@@ -1797,7 +1734,6 @@ mod tests {
                 let minus_y = out_minus[i];
                 let minus_r = ref_minus[i];
 
-                
                 if plus_y.is_nan() {
                     prop_assert!(
                         plus_r.is_nan(),
@@ -1820,7 +1756,6 @@ mod tests {
                     );
                 }
 
-                
                 if minus_y.is_nan() {
                     prop_assert!(
                         minus_r.is_nan(),
@@ -1846,12 +1781,10 @@ mod tests {
                 }
             }
 
-            
             let all_high_equal = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
             let all_low_equal = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
             if all_high_equal && all_low_equal {
-                
                 for i in (period * 2).min(high.len() - 1)..high.len() {
                     if !out_plus[i].is_nan() {
                         prop_assert!(
@@ -1896,13 +1829,11 @@ mod tests {
 
     #[test]
     fn test_dm_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
         let mut price = 100.0f64;
         for i in 0..n {
-            
             let drift = ((i % 7) as i32 - 3) as f64 * 0.3;
             price = (price + drift).max(1.0);
             let spread = 0.5 + 0.1 * ((i % 5) as f64);
@@ -1912,16 +1843,13 @@ mod tests {
 
         let input = DmInput::from_slices(&high, &low, DmParams::default());
 
-        
         let base = dm(&input)?;
 
-        
         let mut plus = vec![0.0; n];
         let mut minus = vec![0.0; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         dm_into(&input, &mut plus, &mut minus)?;
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             a == b || (a.is_nan() && b.is_nan())
         }
@@ -1995,23 +1923,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            
-            (2, 10, 2), 
-            
-            (5, 25, 5), 
-            
-            (30, 60, 15), 
-            
-            (2, 5, 1), 
-            
-            (14, 14, 0), 
-            
-            (10, 100, 10), 
-            
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (14, 14, 0),
+            (10, 100, 10),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2020,7 +1939,6 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c)?;
 
-            
             for (idx, &val) in output.plus.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2031,7 +1949,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in plus \
@@ -2060,7 +1977,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.minus.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2071,7 +1987,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) in minus \
@@ -2109,7 +2024,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2167,7 +2082,6 @@ pub fn dm_py<'py>(
     let input = DmInput::from_slices(h, l, params);
     let kern = validate_kernel(kernel, false)?;
 
-    
     let out_plus = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
     let out_minus = unsafe { PyArray1::<f64>::new(py, [h.len()], false) };
     let plus_slice = unsafe { out_plus.as_slice_mut()? };
@@ -2204,7 +2118,6 @@ pub fn dm_batch_py<'py>(
         .allow_threads(|| dm_batch_with_kernel(h, l, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // reshape into (rows, cols) without extra copies
     let plus = unsafe { PyArray1::from_vec(py, output.plus).reshape((output.rows, output.cols))? };
     let minus =
         unsafe { PyArray1::from_vec(py, output.minus).reshape((output.rows, output.cols))? };
@@ -2224,7 +2137,6 @@ pub fn dm_batch_py<'py>(
     Ok(dict)
 }
 
-// ----- Python CUDA bindings -----
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "dm_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, period_range, device_id=0))]
@@ -2248,14 +2160,21 @@ pub fn dm_cuda_batch_dev_py(
         let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
-        cuda
-            .dm_batch_dev(h, l, &sweep)
+        cuda.dm_batch_dev(h, l, &sweep)
             .map(|(pair, _)| (pair, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.plus, _ctx: Some(ctx.clone()), device_id: Some(dev) },
-        DeviceArrayF32Py { inner: pair.minus, _ctx: Some(ctx), device_id: Some(dev) },
+        DeviceArrayF32Py {
+            inner: pair.plus,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev),
+        },
+        DeviceArrayF32Py {
+            inner: pair.minus,
+            _ctx: Some(ctx),
+            device_id: Some(dev),
+        },
     ))
 }
 
@@ -2281,18 +2200,24 @@ pub fn dm_cuda_many_series_one_param_dev_py(
         let cuda = CudaDm::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev = cuda.device_id();
-        cuda
-            .dm_many_series_one_param_time_major_dev(h, l, cols, rows, period)
+        cuda.dm_many_series_one_param_time_major_dev(h, l, cols, rows, period)
             .map(|pair| (pair, ctx, dev))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: pair.plus, _ctx: Some(ctx.clone()), device_id: Some(dev) },
-        DeviceArrayF32Py { inner: pair.minus, _ctx: Some(ctx), device_id: Some(dev) },
+        DeviceArrayF32Py {
+            inner: pair.plus,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev),
+        },
+        DeviceArrayF32Py {
+            inner: pair.minus,
+            _ctx: Some(ctx),
+            device_id: Some(dev),
+        },
     ))
 }
 
-// Optional: streaming
 #[cfg(feature = "python")]
 #[pyclass(name = "DmStream")]
 pub struct DmStreamPy {
@@ -2315,20 +2240,20 @@ impl DmStreamPy {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DmJsOutput {
-    pub values: Vec<f64>, // [plus..., minus...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dm)]
 pub fn dm_js(high: &[f64], low: &[f64], period: usize) -> Result<JsValue, JsValue> {
     if high.len() != low.len() {
@@ -2359,22 +2284,22 @@ pub fn dm_js(high: &[f64], low: &[f64], period: usize) -> Result<JsValue, JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DmBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DmBatchJsOutput {
-    pub values: Vec<f64>, // rows = 2 * combos, each row length = cols
-    pub rows: usize,      // 2*combos
+    pub values: Vec<f64>,
+    pub rows: usize,
     pub cols: usize,
     pub periods: Vec<usize>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dm_batch)]
 pub fn dm_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     if high.len() != low.len() {
@@ -2389,7 +2314,6 @@ pub fn dm_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
     let out = dm_batch_inner(high, low, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // flatten to 2*rows
     let mut values = Vec::with_capacity(out.plus.len() + out.minus.len());
     values.extend_from_slice(&out.plus);
     values.extend_from_slice(&out.minus);
@@ -2410,8 +2334,7 @@ pub fn dm_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Optional low-level pointers for zero-copy JS interop (parity with ALMA)
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dm_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2419,7 +2342,7 @@ pub fn dm_alloc(len: usize) -> *mut f64 {
     std::mem::forget(v);
     p
 }
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dm_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2427,7 +2350,7 @@ pub fn dm_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dm_into)]
 pub fn dm_into_js(
     high_ptr: *const f64,

@@ -1,28 +1,3 @@
-//! # Schaff Trend Cycle (STC)
-//!
-//! Schaff Trend Cycle (STC) is an oscillator that applies MACD and double stochastic steps,
-//! then smooths with EMA. This implementation supports batch, AVX, and builder APIs like alma.rs.
-//!
-//! ## Parameters
-//! - **fast_period**: Period for fast MA (default: 23)
-//! - **slow_period**: Period for slow MA (default: 50)
-//! - **k_period**: Stochastic window (default: 10)
-//! - **d_period**: EMA smoothing window (default: 3)
-//! - **fast_ma_type**: Type for fast MA (default: "ema")
-//! - **slow_ma_type**: Type for slow MA (default: "ema")
-//!
-//! ## Returns
-//! - **`Ok(StcOutput)`** or **`Err(StcError)`**
-//!
-//! ## Developer Notes
-//! - Scalar optimized: classic EMA/EMA path is fused and allocation-light. Sliding min/max are computed via small O(k) ring scans with branch-light loops and inline EMA updates (mul_add), matching alma.rs patterns.
-//! - AVX2/AVX512: SIMD paths remain stubs delegating to scalar. The pipeline’s branchy sliding-window min/max and validity handling make profitable vectorization non-trivial; revisit only with a clear design.
-//! - Row-specific batch: not attempted; little shared precompute across varying periods in typical sweeps. Batch rows call the optimized scalar path.
-//! - Streaming Performance: Streaming path is O(1) amortized per tick for EMA/EMA and SMA/SMA via EMA seeds/rolling sums and monotonic deques for sliding min/max; falls back to exact O(n) recompute for exotic MA types.
-//! - Memory Optimization: Uses `alloc_with_nan_prefix` for proper warmup handling. Intermediate calculations use appropriately sized working buffers rather than full data-length allocations.
-//!
-//! Decision: Keep SIMD and row-specific batch disabled by default. In local runs (RUSTFLAGS="-C target-cpu=native"), the scalar kernel processes 100k samples in ~0.88 ms on a modern x86_64 CPU; further gains require a different min/max strategy that preserves unit-test parity.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaStc;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -48,12 +23,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -81,7 +56,10 @@ pub struct StcOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct StcParams {
     pub fast_period: Option<usize>,
     pub slow_period: Option<usize>,
@@ -279,7 +257,11 @@ pub enum StcError {
     #[error("stc: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("stc: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("stc: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("stc: Internal error: {0}")]
@@ -399,7 +381,6 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
         });
     }
 
-    
     let warmup_end = first + needed - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_end.min(len)] {
@@ -454,14 +435,7 @@ pub fn stc_into_slice(dst: &mut [f64], input: &StcInput, kern: Kernel) -> Result
     Ok(())
 }
 
-
-
-#[cfg(not(feature = "wasm"))]
-/// Computes Schaff Trend Cycle into an existing output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix semantics).
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-/// - Uses `Kernel::Auto` to dispatch to the best available implementation.
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn stc_into(input: &StcInput, out: &mut [f64]) -> Result<(), StcError> {
     stc_into_slice(out, input, Kernel::Auto)
@@ -479,14 +453,12 @@ pub fn stc_scalar(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), StcError> {
-    
     if fast_type == "ema" && slow_type == "ema" {
         return unsafe { stc_scalar_classic_ema(data, fast, slow, k, d, first, out) };
     } else if fast_type == "sma" && slow_type == "sma" {
         return unsafe { stc_scalar_classic_sma(data, fast, slow, k, d, first, out) };
     }
 
-    
     use crate::indicators::ema::{ema, EmaInput, EmaParams};
     use crate::indicators::moving_averages::ma::{ma, MaData};
     use crate::indicators::utility_functions::{max_rolling, min_rolling};
@@ -495,23 +467,18 @@ pub fn stc_scalar(
     let len = data.len();
     let slice = &data[first..];
 
-    
     let fast_ma = ma(fast_type, MaData::Slice(slice), fast)
         .map_err(|e| StcError::Internal(format!("Fast MA error: {}", e)))?;
     let slow_ma = ma(slow_type, MaData::Slice(slice), slow)
         .map_err(|e| StcError::Internal(format!("Slow MA error: {}", e)))?;
 
-    
-    
     let working_len = slice.len();
     let mut macd = alloc_with_nan_prefix(working_len, 0);
 
-    
     for i in 0..working_len {
         macd[i] = fast_ma[i] - slow_ma[i];
     }
 
-    
     let macd_min = min_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let macd_max = max_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -525,12 +492,10 @@ pub fn stc_scalar(
         }
     }
 
-    
     let d_ema = ema(&EmaInput::from_slice(&stok, EmaParams { period: Some(d) }))
         .map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let d_vals = &d_ema.values;
 
-    
     let d_min = min_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let d_max = max_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -544,19 +509,16 @@ pub fn stc_scalar(
         }
     }
 
-    
     let kd_ema = ema(&EmaInput::from_slice(&kd, EmaParams { period: Some(d) }))
         .map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let final_stc = &kd_ema.values;
 
-    
     for (i, &val) in final_stc.iter().enumerate() {
         out[first + i] = val;
     }
 
     Ok(())
 }
-
 
 #[inline]
 pub unsafe fn stc_scalar_classic_ema(
@@ -568,17 +530,11 @@ pub unsafe fn stc_scalar_classic_ema(
     first: usize,
     out: &mut [f64],
 ) -> Result<(), StcError> {
-    
-    
-    
-
     #[inline(always)]
     fn fma(prev: f64, a: f64, x: f64) -> f64 {
-        
         (x - prev).mul_add(a, prev)
     }
 
-    
     const HUNDRED: f64 = 100.0;
     const EPS: f64 = f64::EPSILON;
 
@@ -588,26 +544,18 @@ pub unsafe fn stc_scalar_classic_ema(
         return Ok(());
     }
 
-    
     let fast_a = 2.0 / (fast as f64 + 1.0);
     let slow_a = 2.0 / (slow as f64 + 1.0);
     let d_a = 2.0 / (d as f64 + 1.0);
 
-    
-    
-    
     let mut fast_sum = 0.0;
     let mut slow_sum = 0.0;
     let mut fast_init_cnt: usize = 0;
     let mut slow_init_cnt: usize = 0;
 
-    
     let mut fast_ema = f64::NAN;
     let mut slow_ema = f64::NAN;
 
-    
-    
-    
     let mut macd_ring: Vec<f64> = vec![f64::NAN; k];
     let mut macd_valid_ring: Vec<u8> = vec![0; k];
     let mut macd_valid_sum: usize = 0;
@@ -618,7 +566,6 @@ pub unsafe fn stc_scalar_classic_ema(
     let mut d_valid_sum: usize = 0;
     let mut d_vpos: usize = 0;
 
-    
     let mut d_ema = f64::NAN;
     let mut d_sum = 0.0;
     let mut d_init_cnt = 0usize;
@@ -627,15 +574,10 @@ pub unsafe fn stc_scalar_classic_ema(
     let mut final_sum = 0.0;
     let mut final_init_cnt = 0usize;
 
-    
-
-    
     let mut i = 0usize;
     while i < n {
         let x = *slice.get_unchecked(i);
 
-        
-        
         if x.is_finite() {
             if fast_init_cnt < fast {
                 fast_init_cnt += 1;
@@ -644,15 +586,11 @@ pub unsafe fn stc_scalar_classic_ema(
                     fast_ema = fast_sum / fast as f64;
                 }
             } else {
-                
                 fast_ema = fma(fast_ema, fast_a, x);
             }
         } else {
-            
-            
         }
 
-        
         if x.is_finite() {
             if slow_init_cnt < slow {
                 slow_init_cnt += 1;
@@ -664,13 +602,14 @@ pub unsafe fn stc_scalar_classic_ema(
                 slow_ema = fma(slow_ema, slow_a, x);
             }
         } else {
-            
         }
 
-        
-        let macd = if slow_init_cnt >= slow { fast_ema - slow_ema } else { f64::NAN };
+        let macd = if slow_init_cnt >= slow {
+            fast_ema - slow_ema
+        } else {
+            f64::NAN
+        };
 
-        
         if i >= k {
             macd_valid_sum -= *macd_valid_ring.get_unchecked(macd_vpos) as usize;
         }
@@ -685,15 +624,13 @@ pub unsafe fn stc_scalar_classic_ema(
             macd_vpos = 0;
         }
 
-        
         let stok = if macd_valid_sum == k && macd_is_valid != 0 {
-            
             let mut mn = *macd_ring.get_unchecked(0);
             let mut mx = mn;
             let mut j = 1usize;
             while j < k {
                 let v = *macd_ring.get_unchecked(j);
-                
+
                 if v < mn {
                     mn = v;
                 }
@@ -714,7 +651,6 @@ pub unsafe fn stc_scalar_classic_ema(
             f64::NAN
         };
 
-        
         let d_val = if !stok.is_nan() {
             if d_init_cnt < d {
                 d_sum += stok;
@@ -723,7 +659,6 @@ pub unsafe fn stc_scalar_classic_ema(
                     d_ema = d_sum / d as f64;
                     d_ema
                 } else {
-                    
                     d_sum / (d_init_cnt as f64)
                 }
             } else {
@@ -731,19 +666,15 @@ pub unsafe fn stc_scalar_classic_ema(
                 d_ema
             }
         } else {
-            
             if d_init_cnt == 0 {
                 f64::NAN
             } else if d_init_cnt < d {
-                
                 d_sum / (d_init_cnt as f64)
             } else {
-                
                 d_ema
             }
         };
 
-        
         if i >= k {
             d_valid_sum -= *d_valid_ring.get_unchecked(d_vpos) as usize;
         }
@@ -758,9 +689,7 @@ pub unsafe fn stc_scalar_classic_ema(
             d_vpos = 0;
         }
 
-        
         let kd = if d_valid_sum == k && d_is_valid != 0 {
-            
             let mut mn = *d_ring.get_unchecked(0);
             let mut mx = mn;
             let mut j = 1usize;
@@ -786,7 +715,6 @@ pub unsafe fn stc_scalar_classic_ema(
             f64::NAN
         };
 
-        
         let dst = out.get_unchecked_mut(first + i);
         if !kd.is_nan() {
             if final_init_cnt < d {
@@ -796,7 +724,6 @@ pub unsafe fn stc_scalar_classic_ema(
                     final_ema = final_sum / d as f64;
                     *dst = final_ema;
                 } else {
-                    
                     *dst = final_sum / (final_init_cnt as f64);
                 }
             } else {
@@ -804,7 +731,6 @@ pub unsafe fn stc_scalar_classic_ema(
                 *dst = final_ema;
             }
         } else {
-            
             if final_init_cnt == 0 {
                 *dst = f64::NAN;
             } else if final_init_cnt < d {
@@ -819,7 +745,6 @@ pub unsafe fn stc_scalar_classic_ema(
 
     Ok(())
 }
-
 
 #[inline]
 pub unsafe fn stc_scalar_classic_sma(
@@ -837,14 +762,11 @@ pub unsafe fn stc_scalar_classic_sma(
     let slice = &data[first..];
     let working_len = slice.len();
 
-    
     let mut macd = alloc_with_nan_prefix(working_len, 0);
 
-    
     let mut fast_sum = 0.0;
     let mut slow_sum = 0.0;
 
-    
     for i in 0..fast.min(working_len) {
         fast_sum += slice[i];
     }
@@ -852,7 +774,6 @@ pub unsafe fn stc_scalar_classic_sma(
         slow_sum += slice[i];
     }
 
-    
     for i in 0..working_len {
         if i >= fast {
             fast_sum = fast_sum - slice[i - fast] + slice[i];
@@ -865,7 +786,6 @@ pub unsafe fn stc_scalar_classic_sma(
             let fast_ma = if i >= fast - 1 {
                 fast_sum / fast as f64
             } else {
-                
                 let mut sum = 0.0;
                 let start = if i >= fast - 1 { i - fast + 1 } else { 0 };
                 for j in start..=i {
@@ -880,7 +800,6 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    
     let macd_min = min_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let macd_max = max_rolling(&macd, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -894,7 +813,6 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    
     let d_alpha = 2.0 / (d as f64 + 1.0);
     let mut d_vals = alloc_with_nan_prefix(working_len, 0);
     let mut d_ema = f64::NAN;
@@ -921,7 +839,6 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    
     let d_min = min_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
     let d_max = max_rolling(&d_vals, k).map_err(|e| StcError::Internal(format!("{:?}", e)))?;
 
@@ -935,7 +852,6 @@ pub unsafe fn stc_scalar_classic_sma(
         }
     }
 
-    
     let mut final_ema = f64::NAN;
     let mut final_sum = 0.0;
     let mut final_count = 0;
@@ -1030,7 +946,6 @@ pub unsafe fn stc_avx512_long(
 ) -> Result<(), StcError> {
     stc_scalar(data, fast, slow, k, d, fast_type, slow_type, first, out)
 }
-
 
 #[derive(Clone, Debug)]
 pub struct StcBatchRange {
@@ -1267,15 +1182,16 @@ fn stc_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    let _ = rows.checked_mul(cols).ok_or_else(|| StcError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| StcError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1357,14 +1273,12 @@ pub unsafe fn stc_row_scalar(
     let fast_type = prm.fast_ma_type.as_deref().unwrap_or("ema");
     let slow_type = prm.slow_ma_type.as_deref().unwrap_or("ema");
 
-    
     if fast_type == "ema" && slow_type == "ema" {
         return stc_row_scalar_classic_ema(data, first, prm, out);
     } else if fast_type == "sma" && slow_type == "sma" {
         return stc_row_scalar_classic_sma(data, first, prm, out);
     }
 
-    
     stc_scalar(
         data,
         prm.fast_period.unwrap(),
@@ -1377,7 +1291,6 @@ pub unsafe fn stc_row_scalar(
         out,
     )
 }
-
 
 #[inline(always)]
 pub unsafe fn stc_row_scalar_classic_ema(
@@ -1396,7 +1309,6 @@ pub unsafe fn stc_row_scalar_classic_ema(
         out,
     )
 }
-
 
 #[inline(always)]
 pub unsafe fn stc_row_scalar_classic_sma(
@@ -1464,7 +1376,6 @@ pub unsafe fn stc_row_avx512_long(
     stc_row_scalar(data, first, prm, out)
 }
 
-
 use std::collections::VecDeque;
 
 #[derive(Debug, Clone)]
@@ -1473,48 +1384,39 @@ pub struct StcStream {
     pub slow_period: usize,
     pub k_period: usize,
     pub d_period: usize,
-    
+
     fast_ma_type: String,
     slow_ma_type: String,
 
-    
-    started: bool,  
-    poisoned: bool, 
-    ticks: usize,   
+    started: bool,
+    poisoned: bool,
+    ticks: usize,
 
-    
     min_data: usize,
 
-    
     fast_ema: EmaSeed,
     slow_ema: EmaSeed,
 
-    
     fast_sma: SmaState,
     slow_sma: SmaState,
 
-    
     macd_last: f64,
-    macd_valid_flags: Vec<u8>, 
+    macd_valid_flags: Vec<u8>,
     macd_vpos: usize,
     macd_valid_sum: usize,
-    macd_min: MonoMin, 
+    macd_min: MonoMin,
     macd_max: MonoMax,
 
-    
     d_ema: EmaSeed,
 
-    
-    d_valid_flags: Vec<u8>, 
+    d_valid_flags: Vec<u8>,
     d_vpos: usize,
     d_valid_sum: usize,
-    d_min: MonoMin, 
+    d_min: MonoMin,
     d_max: MonoMax,
 
-    
     final_ema: EmaSeed,
 
-    
     fallback: bool,
     buffer: Vec<f64>,
     params: StcParams,
@@ -1541,10 +1443,7 @@ impl EmaSeed {
             seeded: false,
         }
     }
-    /// Step with value x.
-    /// Matches scalar EMA warmup semantics:
-    /// - Before seeded: return running mean (sum/cnt) for the samples seen so far.
-    /// - Once seeded: classic EMA update `ema = ema + a*(x - ema)`.
+
     #[inline(always)]
     fn step(&mut self, x: f64) -> f64 {
         if !self.seeded {
@@ -1555,11 +1454,9 @@ impl EmaSeed {
                 self.seeded = true;
                 self.ema
             } else {
-                
                 self.sum / self.cnt as f64
             }
         } else {
-            
             let e = (x - self.ema).mul_add(self.alpha, self.ema);
             self.ema = e;
             e
@@ -1574,10 +1471,6 @@ impl EmaSeed {
         self.ema
     }
 
-    /// When input is missing for this tick, mirror scalar behavior without mutating state:
-    /// - If no samples yet, return NaN.
-    /// - If warming (cnt < period), return current running mean (sum/cnt).
-    /// - If seeded, carry forward the previous EMA value.
     #[inline(always)]
     fn value_or_carry(&self) -> f64 {
         if self.cnt == 0 {
@@ -1609,9 +1502,7 @@ impl SmaState {
             cnt: 0,
         }
     }
-    /// Step with value x. Returns (value, seeded).
-    /// If not yet seeded (cnt < period), value = partial mean (sum/cnt), seeded=false.
-    /// Once seeded, value = full SMA (sum/period), seeded=true.
+
     #[inline(always)]
     fn step(&mut self, x: f64) -> (f64, bool) {
         if self.cnt < self.period {
@@ -1624,7 +1515,6 @@ impl SmaState {
             self.cnt += 1;
             (self.sum / self.cnt as f64, false)
         } else {
-            
             let old = self.ring[self.pos];
             self.ring[self.pos] = x;
             self.pos += 1;
@@ -1640,7 +1530,6 @@ impl SmaState {
         self.cnt >= self.period
     }
 
-    /// Return current SMA value and whether full window has been seeded, without mutating state.
     #[inline(always)]
     fn current(&self) -> (f64, bool) {
         if self.cnt == 0 {
@@ -1674,14 +1563,13 @@ impl MonoMin {
         while let Some(&(_, back_v)) = self.q.back() {
             if back_v <= v {
                 break;
-            } 
+            }
             self.q.pop_back();
         }
         self.q.push_back((idx, v));
     }
     #[inline(always)]
     fn evict_older_than(&mut self, cutoff_exclusive: usize, k: usize) {
-        
         while let Some(&(j, _)) = self.q.front() {
             if j + k <= cutoff_exclusive {
                 self.q.pop_front();
@@ -1707,7 +1595,7 @@ impl MonoMax {
         while let Some(&(_, back_v)) = self.q.back() {
             if back_v >= v {
                 break;
-            } 
+            }
             self.q.pop_back();
         }
         self.q.push_back((idx, v));
@@ -1743,7 +1631,7 @@ impl StcStream {
 
         let fast_ma = params.fast_ma_type.as_deref().unwrap_or("ema").to_string();
         let slow_ma = params.slow_ma_type.as_deref().unwrap_or("ema").to_string();
-        let min_data = fast.max(slow).max(k).max(d); 
+        let min_data = fast.max(slow).max(k).max(d);
 
         let fallback =
             !((fast_ma == "ema" && slow_ma == "ema") || (fast_ma == "sma" && slow_ma == "sma"));
@@ -1791,13 +1679,8 @@ impl StcStream {
         })
     }
 
-    /// O(1) amortized tick update.
-    /// Contract preserved: returns `None` until at least `max(fast, slow, k, d)` samples
-    /// have been seen (since the first non-NaN). After that, returns `Some(val)` which
-    /// can still be `NaN` until the full pipeline is naturally warmed.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !self.started {
             if value.is_nan() {
                 return None;
@@ -1806,7 +1689,6 @@ impl StcStream {
             self.ticks = 0;
         }
 
-        
         let (macd, macd_valid) = if self.fast_ma_type == "ema" && self.slow_ma_type == "ema" {
             if value.is_nan() {
                 let valid = self.slow_ema.is_seeded();
@@ -1831,16 +1713,23 @@ impl StcStream {
             if value.is_nan() {
                 let (fast_val, _fast_seeded) = self.fast_sma.current();
                 let (slow_val, slow_seeded) = self.slow_sma.current();
-                let macd = if slow_seeded { fast_val - slow_val } else { f64::NAN };
+                let macd = if slow_seeded {
+                    fast_val - slow_val
+                } else {
+                    f64::NAN
+                };
                 (macd, slow_seeded)
             } else {
                 let (fast_val, _fast_seeded_or_partial) = self.fast_sma.step(value);
                 let (slow_val, slow_seeded) = self.slow_sma.step(value);
-                let macd = if slow_seeded { fast_val - slow_val } else { f64::NAN };
+                let macd = if slow_seeded {
+                    fast_val - slow_val
+                } else {
+                    f64::NAN
+                };
                 (macd, slow_seeded)
             }
         } else {
-            
             self.buffer.push(value);
             if self.buffer.len() < self.min_data {
                 return None;
@@ -1854,7 +1743,6 @@ impl StcStream {
 
         self.macd_last = macd;
 
-        
         if self.ticks >= self.k_period {
             self.macd_valid_sum -= self.macd_valid_flags[self.macd_vpos] as usize;
         }
@@ -1866,7 +1754,6 @@ impl StcStream {
         self.macd_valid_flags[self.macd_vpos] = macd_is_valid;
         self.macd_valid_sum += macd_is_valid as usize;
 
-        
         if macd_is_valid == 1 {
             self.macd_min.push(self.ticks, macd);
             self.macd_max.push(self.ticks, macd);
@@ -1879,13 +1766,11 @@ impl StcStream {
             self.macd_vpos = 0;
         }
 
-        
         let stok = if self.macd_valid_sum == self.k_period && macd_is_valid == 1 {
             let mn = self.macd_min.min();
             let mx = self.macd_max.max();
             let range = mx - mn;
             if range.abs() > f64::EPSILON {
-                
                 (macd - mn) * (100.0 / range)
             } else {
                 50.0
@@ -1896,15 +1781,12 @@ impl StcStream {
             f64::NAN
         };
 
-        
         let d_val = if !stok.is_nan() {
             self.d_ema.step(stok)
         } else {
-            
             self.d_ema.value_or_carry()
         };
 
-        
         let d_is_valid = (!d_val.is_nan()) as u8;
         if self.ticks >= self.k_period {
             self.d_valid_sum -= self.d_valid_flags[self.d_vpos] as usize;
@@ -1924,7 +1806,6 @@ impl StcStream {
             self.d_vpos = 0;
         }
 
-        
         let kd = if self.d_valid_sum == self.k_period && d_is_valid == 1 {
             let mn = self.d_min.min();
             let mx = self.d_max.max();
@@ -1940,15 +1821,12 @@ impl StcStream {
             f64::NAN
         };
 
-        
         let out = if !kd.is_nan() {
             self.final_ema.step(kd)
         } else {
-            
             self.final_ema.value_or_carry()
         };
 
-        
         self.ticks += 1;
         if self.ticks < self.min_data {
             None
@@ -2229,7 +2107,6 @@ pub fn stc_cuda_many_series_one_param_dev_py<'py>(
     make_device_array_py(device_id, inner)
 }
 
-
 #[inline(always)]
 fn stc_batch_inner_into(
     data: &[f64],
@@ -2277,11 +2154,13 @@ fn stc_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    let expected = rows.checked_mul(cols).ok_or_else(|| StcError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| StcError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
     if out.len() != expected {
         return Err(StcError::OutputLengthMismatch {
             expected,
@@ -2289,7 +2168,6 @@ fn stc_batch_inner_into(
         });
     }
 
-    
     let mut out_mu = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -2338,7 +2216,6 @@ fn stc_batch_inner_into(
         #[cfg(not(target_arch = "wasm32"))]
         {
             out_mu.par_chunks_mut(cols).enumerate().for_each(|(r, mr)| {
-                
                 let row_slice =
                     unsafe { core::slice::from_raw_parts_mut(mr.as_mut_ptr() as *mut f64, cols) };
                 do_row(r, row_slice).unwrap();
@@ -2361,11 +2238,7 @@ fn stc_batch_inner_into(
     Ok(combos)
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stc_js(
     data: &[f64],
@@ -2393,7 +2266,7 @@ pub fn stc_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2402,7 +2275,7 @@ pub fn stc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2412,7 +2285,7 @@ pub fn stc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stc_into(
     in_ptr: *const f64,
@@ -2442,7 +2315,6 @@ pub fn stc_into(
         let input = StcInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             stc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2458,7 +2330,7 @@ pub fn stc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StcBatchConfig {
     pub fast_period_range: (usize, usize, usize),
@@ -2467,7 +2339,7 @@ pub struct StcBatchConfig {
     pub d_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StcBatchJsOutput {
     pub values: Vec<f64>,
@@ -2476,7 +2348,7 @@ pub struct StcBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = stc_batch)]
 pub fn stc_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: StcBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2521,20 +2393,17 @@ mod tests {
 
     #[test]
     fn test_stc_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = StcInput::with_default_candles(&candles);
 
-        
         let baseline = stc(&input)?;
 
-        
         let mut out = vec![0.0f64; baseline.values.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         stc_into(&input, &mut out)?;
-        #[cfg(feature = "wasm")]
-        stc_into_slice(&mut out, &input, Kernel::Auto)?; 
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+        stc_into_slice(&mut out, &input, Kernel::Auto)?;
 
         assert_eq!(out.len(), baseline.values.len());
 
@@ -2641,9 +2510,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            StcParams::default(), 
+            StcParams::default(),
             StcParams {
                 fast_period: Some(2),
                 slow_period: Some(3),
@@ -2692,7 +2560,6 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            
             StcParams {
                 fast_period: Some(2),
                 slow_period: Some(2),
@@ -2701,7 +2568,6 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            
             StcParams {
                 fast_period: Some(25),
                 slow_period: Some(15),
@@ -2718,12 +2584,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2779,7 +2644,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_stc_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_stc_tests {
@@ -2824,16 +2689,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 3, 15, 3, 2, 8, 2, 1, 3, 1), 
-            (5, 25, 5, 10, 50, 10, 5, 15, 5, 2, 5, 1), 
-            (20, 40, 10, 40, 80, 20, 10, 20, 5, 3, 6, 1), 
-            (2, 5, 1, 3, 6, 1, 2, 4, 1, 1, 2, 1),   
-            (10, 10, 0, 20, 20, 0, 10, 10, 0, 3, 3, 0), 
-            (15, 30, 5, 30, 60, 10, 7, 14, 7, 3, 5, 2), 
-            (50, 100, 25, 100, 200, 50, 20, 30, 10, 5, 10, 5), 
+            (2, 10, 2, 3, 15, 3, 2, 8, 2, 1, 3, 1),
+            (5, 25, 5, 10, 50, 10, 5, 15, 5, 2, 5, 1),
+            (20, 40, 10, 40, 80, 20, 10, 20, 5, 3, 6, 1),
+            (2, 5, 1, 3, 6, 1, 2, 4, 1, 1, 2, 1),
+            (10, 10, 0, 20, 20, 0, 10, 10, 0, 3, 3, 0),
+            (15, 30, 5, 30, 60, 10, 7, 14, 7, 3, 5, 2),
+            (50, 100, 25, 100, 200, 50, 20, 30, 10, 5, 10, 5),
         ];
 
         for (
@@ -2872,7 +2735,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2934,7 +2796,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {

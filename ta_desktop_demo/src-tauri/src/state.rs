@@ -5,7 +5,7 @@ use my_project::utilities::data_loader::{read_candles_from_csv, Candles};
 
 #[derive(Default)]
 pub struct AppState {
-    pub candles: Mutex<HashMap<String, Candles>>, 
+    pub candles: Mutex<HashMap<String, Candles>>,
 }
 
 impl AppState {

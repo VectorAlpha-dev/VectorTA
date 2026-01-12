@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::buff_averages::{
     buff_averages_batch_with_kernel, buff_averages_with_kernel, BuffAveragesBatchRange,
     BuffAveragesInput, BuffAveragesParams,
@@ -67,9 +65,7 @@ fn buff_averages_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Erro
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let volume_f32: Vec<f32> = volume.iter().map(|&v| v as f32).collect();
     let cuda = CudaBuffAverages::new(0).expect("CudaBuffAverages::new");
-    let (fast_dev, slow_dev) = match cuda
-        .buff_averages_batch_dev(&price_f32, &volume_f32, &sweep)
-    {
+    let (fast_dev, slow_dev) = match cuda.buff_averages_batch_dev(&price_f32, &volume_f32, &sweep) {
         Ok(v) => v,
         Err(e) => {
             let msg = e.to_string();
@@ -150,7 +146,6 @@ fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
     let fast = 10usize;
     let slow = 21usize;
 
-    
     let mut cpu_fast_tm = vec![f64::NAN; cols * rows];
     let mut cpu_slow_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -181,16 +176,14 @@ fn buff_averages_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn 
     let price_tm_f32: Vec<f32> = price_tm.iter().map(|&v| v as f32).collect();
     let volume_tm_f32: Vec<f32> = volume_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaBuffAverages::new(0).expect("CudaBuffAverages::new");
-    let (fast_dev_tm, slow_dev_tm) = match cuda
-        .buff_averages_many_series_one_param_time_major_dev(
-            &price_tm_f32,
-            &volume_tm_f32,
-            cols,
-            rows,
-            fast,
-            slow,
-        )
-    {
+    let (fast_dev_tm, slow_dev_tm) = match cuda.buff_averages_many_series_one_param_time_major_dev(
+        &price_tm_f32,
+        &volume_tm_f32,
+        cols,
+        rows,
+        fast,
+        slow,
+    ) {
         Ok(v) => v,
         Err(e) => {
             let msg = e.to_string();

@@ -1,9 +1,6 @@
+use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
-use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
-
-
-
 
 #[cfg(feature = "python")]
 use crate::indicators::acosc::{acosc_batch_py, acosc_py, AcoscStreamPy};
@@ -187,12 +184,12 @@ use crate::indicators::donchian::{donchian_batch_py, donchian_py, DonchianStream
 use crate::indicators::donchian::{
     donchian_cuda_batch_dev_py, donchian_cuda_many_series_one_param_dev_py,
 };
+#[cfg(feature = "cuda")]
+use crate::indicators::dpo::DpoDeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::indicators::dpo::{dpo_batch_py, dpo_py, DpoStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::dpo::{dpo_cuda_batch_dev_py, dpo_cuda_many_series_one_param_dev_py};
-#[cfg(feature = "cuda")]
-use crate::indicators::dpo::DpoDeviceArrayF32Py;
 #[cfg(feature = "python")]
 use crate::indicators::dti::{dti_batch_py, dti_py, DtiStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -661,9 +658,6 @@ use crate::indicators::moving_averages::volatility_adjusted_ma::{
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::volume_adjusted_ma as vama_volu;
 
-
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama")]
 #[pyo3(signature = (*args, **kwargs))]
@@ -672,7 +666,6 @@ fn vama_unified_py<'py>(
     args: &'py Bound<'py, pyo3::types::PyTuple>,
     kwargs: Option<&'py Bound<'py, pyo3::types::PyDict>>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    // Decide variant: volume-adjusted if a second ndarray is present or 'volume' kw is provided
     let is_volume_variant = || -> PyResult<bool> {
         if args.len() >= 2 {
             if args.get_item(1)?.downcast::<PyArray1<f64>>().is_ok() {
@@ -690,28 +683,26 @@ fn vama_unified_py<'py>(
     }()?;
 
     if is_volume_variant {
-        // Expect: (data, volume, [length, vi_factor, strict, sample_period, kernel]) with kw overrides
         let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
-        
+
         let volume: PyReadonlyArray1<'_, f64> = if args.len() >= 2 {
             args.get_item(1)?.extract()?
         } else {
             kwargs
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "vama: missing volume array",
-                ))?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("vama: missing volume array")
+                })?
                 .get_item("volume")?
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "vama: missing volume array",
-                ))?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>("vama: missing volume array")
+                })?
                 .extract()?
         };
 
-        // helpers to read either kw or positional with defaults
         let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
             kwargs.and_then(|k| k.get_item(name).ok().flatten())
         };
-        let mut idx = 2usize; 
+        let mut idx = 2usize;
         let length: usize = if let Some(v) = get_kw("length") {
             v.extract()?
         } else if args.len() > idx {
@@ -764,7 +755,6 @@ fn vama_unified_py<'py>(
         return Ok(arr.into_any());
     }
 
-    
     let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
     let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
         kwargs.and_then(|k| k.get_item(name).ok().flatten())
@@ -773,7 +763,6 @@ fn vama_unified_py<'py>(
     let base_period: usize = if let Some(v) = get_kw("base_period") {
         v.extract()?
     } else if let Some(v) = get_kw("length") {
-        
         v.extract()?
     } else if args.len() > idx && args.get_item(idx)?.extract::<usize>().is_ok() {
         let out: usize = args.get_item(idx)?.extract()?;
@@ -821,7 +810,15 @@ fn vama_unified_py<'py>(
     let kernel_s: Option<String> = get_kw("kernel").map(|v| v.extract()).transpose()?;
     let kernel = kernel_s.as_deref();
     let arr = vama_vol::vama_py(
-        py, data, Some(base_period), vol_period, smoothing, smooth_type, smooth_period, kernel, None,
+        py,
+        data,
+        Some(base_period),
+        vol_period,
+        smoothing,
+        smooth_type,
+        smooth_period,
+        kernel,
+        None,
     )?;
     Ok(arr.into_any())
 }
@@ -849,19 +846,22 @@ fn vama_batch_unified_py<'py>(
     }()?;
 
     if is_volume_variant {
-        // (data, volume, length_range=(...), vi_factor_range=(...), sample_period_range=(...), strict=None, kernel=None)
         let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
         let volume: PyReadonlyArray1<'_, f64> = if args.len() >= 2 {
             args.get_item(1)?.extract()?
         } else {
             kwargs
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "vama_batch: missing volume array",
-                ))?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "vama_batch: missing volume array",
+                    )
+                })?
                 .get_item("volume")?
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    "vama_batch: missing volume array",
-                ))?
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "vama_batch: missing volume array",
+                    )
+                })?
                 .extract()?
         };
         let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
@@ -894,7 +894,6 @@ fn vama_batch_unified_py<'py>(
         );
     }
 
-    
     let data: PyReadonlyArray1<'_, f64> = args.get_item(0)?.extract()?;
     let get_kw = |name: &str| -> Option<Bound<'_, pyo3::types::PyAny>> {
         kwargs.and_then(|k| k.get_item(name).ok().flatten())
@@ -902,7 +901,13 @@ fn vama_batch_unified_py<'py>(
     let base_period_range: (usize, usize, usize) = get_kw("base_period_range")
         .map(|v| v.extract())
         .transpose()?
-        .or_else(|| get_kw("length_range").map(|v| v.extract()).transpose().ok().flatten())
+        .or_else(|| {
+            get_kw("length_range")
+                .map(|v| v.extract())
+                .transpose()
+                .ok()
+                .flatten()
+        })
         .unwrap_or((100, 130, 10));
     let vol_period_range: (usize, usize, usize) = get_kw("vol_period_range")
         .map(|v| v.extract())
@@ -910,9 +915,15 @@ fn vama_batch_unified_py<'py>(
         .unwrap_or((40, 60, 10));
     let kernel_s: Option<String> = get_kw("kernel").map(|v| v.extract()).transpose()?;
     let kernel = kernel_s.as_deref();
-    vama_vol::vama_batch_py(py, data, Some(base_period_range), vol_period_range, kernel, None)
+    vama_vol::vama_batch_py(
+        py,
+        data,
+        Some(base_period_range),
+        vol_period_range,
+        kernel,
+        None,
+    )
 }
-
 
 #[cfg(feature = "python")]
 #[pyclass(name = "VamaStream")]
@@ -942,7 +953,6 @@ impl VamaStreamUnifiedPy {
         smooth_type: Option<usize>,
         smooth_period: Option<usize>,
     ) -> PyResult<Self> {
-        
         if length.is_some() || vi_factor.is_some() || strict.is_some() || sample_period.is_some() {
             let s = vama_volu::VolumeAdjustedMaStream::try_new(vama_volu::VolumeAdjustedMaParams {
                 length: Some(length.unwrap_or(13)),
@@ -951,9 +961,11 @@ impl VamaStreamUnifiedPy {
                 sample_period: Some(sample_period.unwrap_or(0)),
             })
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-            return Ok(Self { inner: VamaStreamKind::Volume(s) });
+            return Ok(Self {
+                inner: VamaStreamKind::Volume(s),
+            });
         }
-        
+
         let s = vama_vol::VamaStream::try_new(vama_vol::VamaParams {
             base_period: Some(base_period.unwrap_or(113)),
             vol_period: Some(vol_period.unwrap_or(51)),
@@ -962,10 +974,11 @@ impl VamaStreamUnifiedPy {
             smooth_period: Some(smooth_period.unwrap_or(5)),
         })
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-        Ok(Self { inner: VamaStreamKind::Volatility(s) })
+        Ok(Self {
+            inner: VamaStreamKind::Volatility(s),
+        })
     }
 
-    /// Update with one (price) or two (price, volume) arguments.
     #[pyo3(signature = (price, volume=None))]
     fn update(&mut self, price: f64, volume: Option<f64>) -> Option<f64> {
         match &mut self.inner {
@@ -1135,10 +1148,10 @@ use crate::indicators::squeeze_momentum::{
 use crate::indicators::squeeze_momentum::{
     squeeze_momentum_cuda_batch_dev_py, squeeze_momentum_cuda_many_series_one_param_dev_py,
 };
-#[cfg(feature = "python")]
-use crate::indicators::srsi::{srsi_batch_py, srsi_py, SrsiStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::srsi::SrsiDeviceArrayF32Py;
+#[cfg(feature = "python")]
+use crate::indicators::srsi::{srsi_batch_py, srsi_py, SrsiStreamPy};
 #[cfg(feature = "python")]
 use crate::indicators::stc::{stc_batch_py, stc_py, StcStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1261,8 +1274,6 @@ use crate::indicators::zscore::{
     zscore_cuda_batch_dev_py, zscore_cuda_many_series_one_param_dev_py,
 };
 
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1280,7 +1291,6 @@ use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::types::PyDict;
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "tsf_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1294,7 +1304,9 @@ pub fn tsf_cuda_batch_dev_py_bindings<'py>(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice_in = data_f32.as_slice()?;
-    let sweep = TsfBatchRange { period: period_range };
+    let sweep = TsfBatchRange {
+        period: period_range,
+    };
     let (inner, combos) = py.allow_threads(|| {
         let cuda = CudaTsf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsf_batch_dev(slice_in, &sweep)
@@ -1322,15 +1334,17 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
     let flat_in = data_tm_f32.as_slice()?;
     let rows = data_tm_f32.shape()[0];
     let cols = data_tm_f32.shape()[1];
-    let expected = cols
-        .checked_mul(rows)
-        .ok_or_else(|| PyValueError::new_err("tsf_cuda_many_series_one_param_dev: rows*cols overflow"))?;
+    let expected = cols.checked_mul(rows).ok_or_else(|| {
+        PyValueError::new_err("tsf_cuda_many_series_one_param_dev: rows*cols overflow")
+    })?;
     if flat_in.len() != expected {
         return Err(PyValueError::new_err(
             "tsf_cuda_many_series_one_param_dev: time-major input length mismatch",
         ));
     }
-    let params = TsfParams { period: Some(period) };
+    let params = TsfParams {
+        period: Some(period),
+    };
     let inner = py.allow_threads(|| {
         let cuda = CudaTsf::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         cuda.tsf_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
@@ -1339,16 +1353,13 @@ pub fn tsf_cuda_many_series_one_param_dev_py_bindings(
     Ok(make_device_array_py(device_id, inner)?)
 }
 
-
-
 #[pymodule]
 fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // Register AD functions with their user-facing names
     m.add_function(wrap_pyfunction!(ad_py, m)?)?;
     m.add_function(wrap_pyfunction!(ad_batch_py, m)?)?;
     m.add_class::<AdStreamPy>()?;
-#[cfg(feature = "cuda")]
-{
+    #[cfg(feature = "cuda")]
+    {
         use crate::cuda::moving_averages::ma_selector::{
             ma_selector_cuda_sweep_to_device_py, ma_selector_cuda_to_device_py,
         };
@@ -1356,7 +1367,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(ad_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register ADX functions with their user-facing names
     m.add_function(wrap_pyfunction!(adx_py, m)?)?;
     m.add_function(wrap_pyfunction!(adx_batch_py, m)?)?;
     m.add_class::<AdxStreamPy>()?;
@@ -1366,19 +1376,16 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(adx_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register DM CUDA (CPU registration appears later in this file)
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(dm_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(dm_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register ADOSC functions with their user-facing names
     m.add_function(wrap_pyfunction!(adosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(adosc_batch_py, m)?)?;
     m.add_class::<AdoscStreamPy>()?;
 
-    // Register ADXR functions with their user-facing names
     m.add_function(wrap_pyfunction!(adxr_py, m)?)?;
     m.add_function(wrap_pyfunction!(adxr_batch_py, m)?)?;
     m.add_class::<AdxrStreamPy>()?;
@@ -1388,7 +1395,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(adxr_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register ACOSC functions with their user-facing names
     m.add_function(wrap_pyfunction!(acosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(acosc_batch_py, m)?)?;
     m.add_class::<AcoscStreamPy>()?;
@@ -1399,12 +1405,11 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
             acosc_cuda_many_series_one_param_dev_py,
             m
         )?)?;
-        // Ensure ACOSC device array class is exported (CAI v3 + __dlpack_device__)
+
         use crate::indicators::acosc::AcoscDeviceArrayF32Py;
         m.add_class::<AcoscDeviceArrayF32Py>()?;
     }
 
-    // Register APO functions with their user-facing names
     m.add_function(wrap_pyfunction!(apo_py, m)?)?;
     m.add_function(wrap_pyfunction!(apo_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1414,7 +1419,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<ApoStreamPy>()?;
 
-    // Register Band-Pass functions with their user-facing names
     m.add_function(wrap_pyfunction!(bandpass_py, m)?)?;
     m.add_function(wrap_pyfunction!(bandpass_batch_py, m)?)?;
     m.add_class::<BandPassStreamPy>()?;
@@ -1427,7 +1431,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Alligator functions with their user-facing names
     m.add_function(wrap_pyfunction!(alligator_py, m)?)?;
     m.add_function(wrap_pyfunction!(alligator_batch_py, m)?)?;
     m.add_class::<AlligatorStreamPy>()?;
@@ -1440,24 +1443,23 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register ALMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(alma_py, m)?)?;
     m.add_function(wrap_pyfunction!(alma_batch_py, m)?)?;
     m.add_class::<AlmaStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
+        use crate::cuda::moving_averages::ma_selector::{
+            ma_selector_cuda_sweep_to_device_py, ma_selector_cuda_to_device_py,
+        };
         use crate::indicators::moving_averages::supersmoother::{
             supersmoother_cuda_batch_dev_py, supersmoother_cuda_many_series_one_param_dev_py,
         };
         use crate::indicators::moving_averages::trendflex::{
             trendflex_cuda_batch_dev_py, trendflex_cuda_many_series_one_param_dev_py,
         };
-        use crate::cuda::moving_averages::ma_selector::{
-            ma_selector_cuda_sweep_to_device_py, ma_selector_cuda_to_device_py,
-        };
         m.add_function(wrap_pyfunction!(alma_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(alma_cuda_many_series_one_param_dev_py, m)?)?;
-        // MA selector (price-only dispatcher) helpers
+
         m.add_function(wrap_pyfunction!(ma_selector_cuda_to_device_py, m)?)?;
         m.add_function(wrap_pyfunction!(ma_selector_cuda_sweep_to_device_py, m)?)?;
         m.add_function(wrap_pyfunction!(linreg_cuda_batch_dev_py, m)?)?;
@@ -1489,19 +1491,18 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
             zlema_cuda_many_series_one_param_dev_py,
             m
         )?)?;
-        // MEDIUM_AD CUDA
+
         m.add_function(wrap_pyfunction!(medium_ad_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             medium_ad_cuda_many_series_one_param_dev_py,
             m
         )?)?;
         m.add_class::<MediumAdDeviceArrayF32Py>()?;
-        // ADOSC CUDA
+
         use crate::indicators::adosc::{
-            adosc_cuda_batch_dev_py, adosc_cuda_many_series_one_param_dev_py,
-            DeviceArrayF32AdoscPy,
+            adosc_cuda_batch_dev_py, adosc_cuda_many_series_one_param_dev_py, DeviceArrayF32AdoscPy,
         };
-        // Export the device handle class so consumers can isinstance-check or import it
+
         m.add_class::<DeviceArrayF32AdoscPy>()?;
         m.add_function(wrap_pyfunction!(adosc_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
@@ -1525,7 +1526,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register AlphaTrend CUDA functions
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(alphatrend_cuda_batch_dev_py, m)?)?;
@@ -1535,7 +1535,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register AroonOsc functions with their user-facing names
     m.add_function(wrap_pyfunction!(aroon_osc_py, m)?)?;
     m.add_function(wrap_pyfunction!(aroon_osc_batch_py, m)?)?;
     m.add_class::<AroonOscStreamPy>()?;
@@ -1546,12 +1545,11 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
             aroonosc_cuda_many_series_one_param_dev_py,
             m
         )?)?;
-        // Export AroonOsc device array class (CAI v3 + DLPack)
+
         use crate::indicators::aroonosc::AroonOscDeviceArrayF32Py;
         m.add_class::<AroonOscDeviceArrayF32Py>()?;
     }
 
-    // Register Bollinger Bands functions with their user-facing names
     m.add_function(wrap_pyfunction!(bollinger_bands_py, m)?)?;
     m.add_function(wrap_pyfunction!(bollinger_bands_batch_py, m)?)?;
     m.add_class::<BollingerBandsStreamPy>()?;
@@ -1569,7 +1567,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<BollingerDeviceArrayF32Py>()?;
     }
 
-    // Register CWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(cwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(cwma_batch_py, m)?)?;
     m.add_class::<CwmaStreamPy>()?;
@@ -1579,7 +1576,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cwma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register DEMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(dema_py, m)?)?;
     m.add_function(wrap_pyfunction!(dema_batch_py, m)?)?;
     m.add_class::<DemaStreamPy>()?;
@@ -1589,7 +1585,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(dema_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register EDCF functions with their user-facing names
     m.add_function(wrap_pyfunction!(edcf_py, m)?)?;
     m.add_function(wrap_pyfunction!(edcf_batch_py, m)?)?;
     m.add_class::<EdcfStreamPy>()?;
@@ -1599,7 +1594,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(edcf_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register EMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(ema_py, m)?)?;
     m.add_function(wrap_pyfunction!(ema_batch_py, m)?)?;
     m.add_class::<EmaStreamPy>()?;
@@ -1610,7 +1604,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(ema_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Ehlers ITrend functions with their user-facing names
     m.add_function(wrap_pyfunction!(ehlers_itrend_py, m)?)?;
     m.add_function(wrap_pyfunction!(ehlers_itrend_batch_py, m)?)?;
     m.add_class::<EhlersITrendStreamPy>()?;
@@ -1623,7 +1616,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register EPMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(epma_py, m)?)?;
     m.add_function(wrap_pyfunction!(epma_batch_py, m)?)?;
     m.add_class::<EpmaStreamPy>()?;
@@ -1633,12 +1625,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(epma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register FRAMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(frama_py, m)?)?;
     m.add_function(wrap_pyfunction!(frama_batch_py, m)?)?;
     m.add_class::<FramaStreamPy>()?;
 
-    // Register FWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(fwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(fwma_batch_py, m)?)?;
     m.add_class::<FwmaStreamPy>()?;
@@ -1648,7 +1638,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(fwma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Gaussian functions with their user-facing names
     m.add_function(wrap_pyfunction!(gaussian_py, m)?)?;
     m.add_function(wrap_pyfunction!(gaussian_batch_py, m)?)?;
     m.add_class::<GaussianStreamPy>()?;
@@ -1662,7 +1651,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register HighPass2 functions with their user-facing names
     m.add_function(wrap_pyfunction!(highpass_2_pole_py, m)?)?;
     m.add_function(wrap_pyfunction!(highpass_2_pole_batch_py, m)?)?;
     m.add_class::<HighPass2StreamPy>()?;
@@ -1675,7 +1663,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register HighPass functions with their user-facing names
     m.add_function(wrap_pyfunction!(highpass_py, m)?)?;
     m.add_function(wrap_pyfunction!(highpass_batch_py, m)?)?;
     m.add_class::<HighPassStreamPy>()?;
@@ -1688,12 +1675,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register HMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(hma_py, m)?)?;
     m.add_function(wrap_pyfunction!(hma_batch_py, m)?)?;
     m.add_class::<HmaStreamPy>()?;
 
-    // Register HWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(hwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(hwma_batch_py, m)?)?;
     m.add_class::<HwmaStreamPy>()?;
@@ -1703,7 +1688,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(hwma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register JMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(jma_py, m)?)?;
     m.add_function(wrap_pyfunction!(jma_batch_py, m)?)?;
     m.add_class::<JmaStreamPy>()?;
@@ -1713,7 +1697,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(jma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register JSA functions with their user-facing names
     m.add_function(wrap_pyfunction!(jsa_py, m)?)?;
     m.add_function(wrap_pyfunction!(jsa_batch_py, m)?)?;
     m.add_class::<JsaStreamPy>()?;
@@ -1723,7 +1706,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(jsa_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register KAMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(kama_py, m)?)?;
     m.add_function(wrap_pyfunction!(kama_batch_py, m)?)?;
     m.add_class::<KamaStreamPy>()?;
@@ -1735,7 +1717,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(kama_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Ehlers KAMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(ehlers_kama_py, m)?)?;
     m.add_function(wrap_pyfunction!(ehlers_kama_batch_py, m)?)?;
     m.add_class::<EhlersKamaStreamPy>()?;
@@ -1748,12 +1729,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register LinReg functions with their user-facing names
     m.add_function(wrap_pyfunction!(linreg_py, m)?)?;
     m.add_function(wrap_pyfunction!(linreg_batch_py, m)?)?;
     m.add_class::<LinRegStreamPy>()?;
 
-    // Register LinearRegSlope functions with their user-facing names
     m.add_function(wrap_pyfunction!(linearreg_slope_py, m)?)?;
     m.add_function(wrap_pyfunction!(linearreg_slope_batch_py, m)?)?;
     m.add_class::<LinearRegSlopeStreamPy>()?;
@@ -1766,12 +1745,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register MediumAd functions with their user-facing names
     m.add_function(wrap_pyfunction!(medium_ad_py, m)?)?;
     m.add_function(wrap_pyfunction!(medium_ad_batch_py, m)?)?;
     m.add_class::<MediumAdStreamPy>()?;
 
-    // Register MinMax functions with their user-facing names
     m.add_function(wrap_pyfunction!(minmax_py, m)?)?;
     m.add_function(wrap_pyfunction!(minmax_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1785,7 +1762,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<MinmaxStreamPy>()?;
 
-    // Register MAAQ functions with their user-facing names
     m.add_function(wrap_pyfunction!(maaq_py, m)?)?;
     m.add_function(wrap_pyfunction!(maaq_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1795,7 +1771,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<MaaqStreamPy>()?;
 
-    // Register MAMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(mama_py, m)?)?;
     m.add_function(wrap_pyfunction!(mama_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1805,7 +1780,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<MamaStreamPy>()?;
 
-    // Register MWDX functions with their user-facing names
     m.add_function(wrap_pyfunction!(mwdx_py, m)?)?;
     m.add_function(wrap_pyfunction!(mwdx_batch_py, m)?)?;
     m.add_class::<MwdxStreamPy>()?;
@@ -1815,12 +1789,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(mwdx_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register NMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(nma_py, m)?)?;
     m.add_function(wrap_pyfunction!(nma_batch_py, m)?)?;
     m.add_class::<NmaStreamPy>()?;
 
-    // Register NVI functions with their user-facing names
     m.add_function(wrap_pyfunction!(nvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(nvi_batch_py, m)?)?;
     m.add_class::<NviStreamPy>()?;
@@ -1830,7 +1802,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(nvi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register PVI functions with their user-facing names
     m.add_function(wrap_pyfunction!(pvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(pvi_batch_py, m)?)?;
     m.add_class::<PviStreamPy>()?;
@@ -1841,7 +1812,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<PviDeviceArrayF32Py>()?;
     }
 
-    // Register RSMK functions with their user-facing names
     m.add_function(wrap_pyfunction!(rsmk_py, m)?)?;
     m.add_function(wrap_pyfunction!(rsmk_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1851,7 +1821,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<RsmkStreamPy>()?;
 
-    // Register SRSI functions with their user-facing names
     m.add_function(wrap_pyfunction!(srsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(srsi_batch_py, m)?)?;
     m.add_class::<SrsiStreamPy>()?;
@@ -1868,7 +1837,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<SrsiDeviceArrayF32Py>()?;
     }
 
-    // Register TSF functions with their user-facing names
     m.add_function(wrap_pyfunction!(tsf_py, m)?)?;
     m.add_function(wrap_pyfunction!(tsf_batch_py, m)?)?;
     m.add_class::<TsfStreamPy>()?;
@@ -1881,7 +1849,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register VI functions with their user-facing names
     m.add_function(wrap_pyfunction!(vi_py, m)?)?;
     m.add_function(wrap_pyfunction!(vi_batch_py, m)?)?;
     m.add_class::<ViStreamPy>()?;
@@ -1891,7 +1858,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register VPT functions with their user-facing names
     m.add_function(wrap_pyfunction!(vpt_py, m)?)?;
     m.add_function(wrap_pyfunction!(vpt_batch_py, m)?)?;
     m.add_class::<VptStreamPy>()?;
@@ -1904,7 +1870,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vpt_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register PWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(pwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(pwma_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1914,7 +1879,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<PwmaStreamPy>()?;
 
-    // Register PFE functions with their user-facing names
     m.add_function(wrap_pyfunction!(pfe_py, m)?)?;
     m.add_function(wrap_pyfunction!(pfe_batch_py, m)?)?;
     m.add_class::<PfeStreamPy>()?;
@@ -1924,14 +1888,12 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(pfe_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register PMA CUDA functions (non-lag PMA variant)
     #[cfg(feature = "cuda")]
     {
         m.add_function(wrap_pyfunction!(pma_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(pma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register ROC functions with their user-facing names
     m.add_function(wrap_pyfunction!(roc_py, m)?)?;
     m.add_function(wrap_pyfunction!(roc_batch_py, m)?)?;
     m.add_class::<RocStreamPy>()?;
@@ -1947,7 +1909,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register RVI functions with their user-facing names
     m.add_function(wrap_pyfunction!(rvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(rvi_batch_py, m)?)?;
     m.add_class::<RviStreamPy>()?;
@@ -1957,7 +1918,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(rvi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Reflex functions with their user-facing names
     m.add_function(wrap_pyfunction!(reflex_py, m)?)?;
     m.add_function(wrap_pyfunction!(reflex_batch_py, m)?)?;
     m.add_class::<ReflexStreamPy>()?;
@@ -1970,7 +1930,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register SINWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(sinwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(sinwma_batch_py, m)?)?;
     m.add_class::<SinWmaStreamPy>()?;
@@ -1983,12 +1942,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register SMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(sma_py, m)?)?;
     m.add_function(wrap_pyfunction!(sma_batch_py, m)?)?;
     m.add_class::<SmaStreamPy>()?;
 
-    // Register SMMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(smma_py, m)?)?;
     m.add_function(wrap_pyfunction!(smma_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -1998,7 +1955,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<SmmaStreamPy>()?;
 
-    // Register SQWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(sqwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(sqwma_batch_py, m)?)?;
     m.add_class::<SqwmaStreamPy>()?;
@@ -2011,7 +1967,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register SRWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(srwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(srwma_batch_py, m)?)?;
     m.add_class::<SrwmaStreamPy>()?;
@@ -2024,7 +1979,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register StdDev functions with their user-facing names
     m.add_function(wrap_pyfunction!(stddev_py, m)?)?;
     m.add_function(wrap_pyfunction!(stddev_batch_py, m)?)?;
     m.add_class::<StdDevStreamPy>()?;
@@ -2037,7 +1991,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register SuperSmoother3Pole functions with their user-facing names
     m.add_function(wrap_pyfunction!(supersmoother_3_pole_py, m)?)?;
     m.add_function(wrap_pyfunction!(supersmoother_3_pole_batch_py, m)?)?;
     m.add_class::<SuperSmoother3PoleStreamPy>()?;
@@ -2050,12 +2003,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register SuperSmoother functions with their user-facing names
     m.add_function(wrap_pyfunction!(supersmoother_py, m)?)?;
     m.add_function(wrap_pyfunction!(supersmoother_batch_py, m)?)?;
     m.add_class::<SuperSmootherStreamPy>()?;
 
-    // Register SWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(swma_py, m)?)?;
     m.add_function(wrap_pyfunction!(swma_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2065,7 +2016,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<SwmaStreamPy>()?;
 
-    // Register TEMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(tema_py, m)?)?;
     m.add_function(wrap_pyfunction!(tema_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2074,7 +2024,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(tema_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register TRIMA functions
     m.add_function(wrap_pyfunction!(trima_py, m)?)?;
     m.add_function(wrap_pyfunction!(trima_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2088,7 +2037,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<TrimaStreamPy>()?;
     m.add_class::<TemaStreamPy>()?;
 
-    // Register Tilson functions with their user-facing names
     m.add_function(wrap_pyfunction!(tilson_py, m)?)?;
     m.add_function(wrap_pyfunction!(tilson_batch_py, m)?)?;
     m.add_class::<TilsonStreamPy>()?;
@@ -2101,12 +2049,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register TrendFlex functions with their user-facing names
     m.add_function(wrap_pyfunction!(trendflex_py, m)?)?;
     m.add_function(wrap_pyfunction!(trendflex_batch_py, m)?)?;
     m.add_class::<TrendFlexStreamPy>()?;
 
-    // Register TTM Trend functions with their user-facing names
     m.add_function(wrap_pyfunction!(ttm_trend_py, m)?)?;
     m.add_function(wrap_pyfunction!(ttm_trend_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2124,7 +2070,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<TtmTrendStreamPy>()?;
 
-    // Register VLMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(vlma_py, m)?)?;
     m.add_function(wrap_pyfunction!(vlma_batch_py, m)?)?;
     m.add_class::<VlmaStreamPy>()?;
@@ -2134,7 +2079,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vlma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Wilders functions with their user-facing names
     m.add_function(wrap_pyfunction!(wilders_py, m)?)?;
     m.add_function(wrap_pyfunction!(wilders_batch_py, m)?)?;
     m.add_class::<WildersStreamPy>()?;
@@ -2147,7 +2091,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register VWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(vwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(vwma_batch_py, m)?)?;
     m.add_class::<VwmaStreamPy>()?;
@@ -2157,7 +2100,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vwma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register VWMACD functions with their user-facing names
     m.add_function(wrap_pyfunction!(vwmacd_py, m)?)?;
     m.add_function(wrap_pyfunction!(vwmacd_batch_py, m)?)?;
     m.add_class::<VwmacdStreamPy>()?;
@@ -2173,7 +2115,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register VWAP functions with their user-facing names
     m.add_function(wrap_pyfunction!(vwap_py, m)?)?;
     m.add_function(wrap_pyfunction!(vwap_batch_py, m)?)?;
     m.add_class::<VwapStreamPy>()?;
@@ -2183,17 +2124,14 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vwap_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register ZLEMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(zlema_py, m)?)?;
     m.add_function(wrap_pyfunction!(zlema_batch_py, m)?)?;
     m.add_class::<ZlemaStreamPy>()?;
 
-    // Register VPWMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(vpwma_py, m)?)?;
     m.add_function(wrap_pyfunction!(vpwma_batch_py, m)?)?;
     m.add_class::<VpwmaStreamPy>()?;
 
-    // Register WMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(wma_py, m)?)?;
     m.add_function(wrap_pyfunction!(wma_batch_py, m)?)?;
     m.add_class::<WmaStreamPy>()?;
@@ -2203,10 +2141,8 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(wma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register MA dispatcher function
     m.add_function(wrap_pyfunction!(ma_py, m)?)?;
 
-    // Register CoRa Wave functions with their user-facing names
     m.add_function(wrap_pyfunction!(cora_wave_py, m)?)?;
     m.add_function(wrap_pyfunction!(cora_wave_batch_py, m)?)?;
     m.add_class::<CoraWaveStreamPy>()?;
@@ -2219,7 +2155,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Ehlers PMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(ehlers_pma_py, m)?)?;
     m.add_function(wrap_pyfunction!(ehlers_pma_flat_py, m)?)?;
     m.add_function(wrap_pyfunction!(ehlers_pma_batch_py, m)?)?;
@@ -2233,7 +2168,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Chandelier Exit functions with their user-facing names
     m.add_function(wrap_pyfunction!(chandelier_exit_py, m)?)?;
     m.add_function(wrap_pyfunction!(chandelier_exit_batch_py, m)?)?;
     m.add_class::<ChandelierExitStreamPy>()?;
@@ -2249,12 +2183,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Percentile Nearest Rank functions with their user-facing names
     m.add_function(wrap_pyfunction!(percentile_nearest_rank_py, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_nearest_rank_batch_py, m)?)?;
     m.add_class::<PercentileNearestRankStreamPy>()?;
 
-    // Register UMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(uma_py, m)?)?;
     m.add_function(wrap_pyfunction!(uma_batch_py, m)?)?;
     m.add_class::<UmaStreamPy>()?;
@@ -2264,7 +2196,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(uma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register OTTO functions with their user-facing names
     m.add_function(wrap_pyfunction!(otto_py, m)?)?;
     m.add_function(wrap_pyfunction!(otto_batch_py, m)?)?;
     m.add_class::<OttoStreamPy>()?;
@@ -2280,7 +2211,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Aroon functions with their user-facing names
     m.add_function(wrap_pyfunction!(aroon_py, m)?)?;
     m.add_function(wrap_pyfunction!(aroon_batch_py, m)?)?;
     m.add_class::<AroonStreamPy>()?;
@@ -2296,7 +2226,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register TRADJEMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(tradjema_py, m)?)?;
     m.add_function(wrap_pyfunction!(tradjema_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2309,7 +2238,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<TradjemaStreamPy>()?;
 
-    // Register ASO functions with their user-facing names
     m.add_function(wrap_pyfunction!(aso_py, m)?)?;
     m.add_function(wrap_pyfunction!(aso_batch_py, m)?)?;
     m.add_class::<AsoStreamPy>()?;
@@ -2319,7 +2247,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(aso_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register MAC-Z functions with their user-facing names
     m.add_function(wrap_pyfunction!(macz_py, m)?)?;
     m.add_function(wrap_pyfunction!(macz_batch_py, m)?)?;
     m.add_class::<MaczStreamPy>()?;
@@ -2335,7 +2262,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register OTT functions with their user-facing names
     m.add_function(wrap_pyfunction!(ott_py, m)?)?;
     m.add_function(wrap_pyfunction!(ott_batch_py, m)?)?;
     m.add_class::<OttStreamPy>()?;
@@ -2351,7 +2277,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register DVDIQQE function
     m.add_function(wrap_pyfunction!(dvdiqqe_py, m)?)?;
     m.add_function(wrap_pyfunction!(dvdiqqe_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2366,7 +2291,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register PRB functions
     m.add_function(wrap_pyfunction!(prb_py, m)?)?;
     m.add_function(wrap_pyfunction!(prb_batch_py, m)?)?;
     m.add_class::<PrbStreamPy>()?;
@@ -2376,7 +2300,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(prb_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register LPC functions
     m.add_function(wrap_pyfunction!(lpc_py, m)?)?;
     m.add_function(wrap_pyfunction!(lpc_batch_py, m)?)?;
     m.add_class::<LpcStreamPy>()?;
@@ -2386,7 +2309,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(lpc_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Bollinger Bands Width functions with their user-facing names
     m.add_function(wrap_pyfunction!(bollinger_bands_width_py, m)?)?;
     m.add_function(wrap_pyfunction!(bollinger_bands_width_batch_py, m)?)?;
     m.add_class::<BollingerBandsWidthStreamPy>()?;
@@ -2402,7 +2324,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register CG functions with their user-facing names
     m.add_function(wrap_pyfunction!(cg_py, m)?)?;
     m.add_function(wrap_pyfunction!(cg_batch_py, m)?)?;
     m.add_class::<CgStreamPy>()?;
@@ -2412,12 +2333,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cg_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Coppock functions with their user-facing names
     m.add_function(wrap_pyfunction!(coppock_py, m)?)?;
     m.add_function(wrap_pyfunction!(coppock_batch_py, m)?)?;
     m.add_class::<CoppockStreamPy>()?;
 
-    // Register CMO functions with their user-facing names
     m.add_function(wrap_pyfunction!(cmo_py, m)?)?;
     m.add_function(wrap_pyfunction!(cmo_batch_py, m)?)?;
     m.add_class::<CmoStreamPy>()?;
@@ -2427,7 +2346,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cmo_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register CKSP functions with their user-facing names
     m.add_function(wrap_pyfunction!(cksp_py, m)?)?;
     m.add_function(wrap_pyfunction!(cksp_batch_py, m)?)?;
     m.add_class::<CkspStreamPy>()?;
@@ -2437,7 +2355,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cksp_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register CHOP functions with their user-facing names
     m.add_function(wrap_pyfunction!(chop_py, m)?)?;
     m.add_function(wrap_pyfunction!(chop_batch_py, m)?)?;
     m.add_class::<ChopStreamPy>()?;
@@ -2450,7 +2367,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(chop_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Correlation Cycle functions with their user-facing names
     m.add_function(wrap_pyfunction!(correlation_cycle_py, m)?)?;
     m.add_function(wrap_pyfunction!(correlation_cycle_batch_py, m)?)?;
     m.add_class::<CorrelationCycleStreamPy>()?;
@@ -2463,7 +2379,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Correl HL functions with their user-facing names
     m.add_function(wrap_pyfunction!(correl_hl_py, m)?)?;
     m.add_function(wrap_pyfunction!(correl_hl_batch_py, m)?)?;
     m.add_class::<CorrelHlStreamPy>()?;
@@ -2477,7 +2392,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Deviation functions with their user-facing names
     m.add_function(wrap_pyfunction!(deviation_py, m)?)?;
     m.add_function(wrap_pyfunction!(deviation_batch_py, m)?)?;
     m.add_class::<DeviationStreamPy>()?;
@@ -2490,7 +2404,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register DevStop functions with their user-facing names
     m.add_function(wrap_pyfunction!(devstop_py, m)?)?;
     m.add_function(wrap_pyfunction!(devstop_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2502,7 +2415,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register DTI functions with their user-facing names
     m.add_function(wrap_pyfunction!(dti_py, m)?)?;
     m.add_function(wrap_pyfunction!(dti_batch_py, m)?)?;
     m.add_class::<DtiStreamPy>()?;
@@ -2512,7 +2424,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(dti_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register ERI functions with their user-facing names
     m.add_function(wrap_pyfunction!(eri_py, m)?)?;
     m.add_function(wrap_pyfunction!(eri_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2522,7 +2433,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<EriStreamPy>()?;
 
-    // Register KDJ functions with their user-facing names
     m.add_function(wrap_pyfunction!(kdj_py, m)?)?;
     m.add_function(wrap_pyfunction!(kdj_batch_py, m)?)?;
     m.add_class::<KdjStreamPy>()?;
@@ -2532,7 +2442,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(kdj_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Decycler functions with their user-facing names
     m.add_function(wrap_pyfunction!(decycler_py, m)?)?;
     m.add_function(wrap_pyfunction!(decycler_batch_py, m)?)?;
     m.add_class::<DecyclerStreamPy>()?;
@@ -2545,11 +2454,9 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register DevStop functions with their user-facing names
     m.add_function(wrap_pyfunction!(devstop_py, m)?)?;
     m.add_function(wrap_pyfunction!(devstop_batch_py, m)?)?;
 
-    // Register DPO functions with their user-facing names
     m.add_function(wrap_pyfunction!(dpo_py, m)?)?;
     m.add_function(wrap_pyfunction!(dpo_batch_py, m)?)?;
     m.add_class::<DpoStreamPy>()?;
@@ -2560,23 +2467,19 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<DpoDeviceArrayF32Py>()?;
     }
 
-    // Register ER functions with their user-facing names
     m.add_function(wrap_pyfunction!(er_py, m)?)?;
     m.add_function(wrap_pyfunction!(er_batch_py, m)?)?;
     m.add_class::<ErStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
         use crate::indicators::er::{
-            er_cuda_batch_dev_py,
-            er_cuda_many_series_one_param_dev_py,
-            DeviceArrayF32ErPy,
+            er_cuda_batch_dev_py, er_cuda_many_series_one_param_dev_py, DeviceArrayF32ErPy,
         };
         m.add_class::<DeviceArrayF32ErPy>()?;
         m.add_function(wrap_pyfunction!(er_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(er_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Kaufmanstop functions with their user-facing names
     m.add_function(wrap_pyfunction!(kaufmanstop_py, m)?)?;
     m.add_function(wrap_pyfunction!(kaufmanstop_batch_py, m)?)?;
     m.add_class::<KaufmanstopStreamPy>()?;
@@ -2592,12 +2495,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Linear Regression Angle functions with their user-facing names
     m.add_function(wrap_pyfunction!(linearreg_angle_py, m)?)?;
     m.add_function(wrap_pyfunction!(linearreg_angle_batch_py, m)?)?;
     m.add_class::<Linearreg_angleStreamPy>()?;
 
-    // Register MarketEFI functions with their user-facing names
     m.add_function(wrap_pyfunction!(marketefi_py, m)?)?;
     m.add_function(wrap_pyfunction!(marketefi_batch_py, m)?)?;
     m.add_class::<MarketefiStreamPy>()?;
@@ -2612,12 +2513,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<MarketefiDeviceArrayF32Py>()?;
     }
 
-    // Register Midpoint functions with their user-facing names
     m.add_function(wrap_pyfunction!(midpoint_py, m)?)?;
     m.add_function(wrap_pyfunction!(midpoint_batch_py, m)?)?;
     m.add_class::<MidpointStreamPy>()?;
 
-    // Register Decycler Oscillator functions with their user-facing names
     m.add_function(wrap_pyfunction!(dec_osc_py, m)?)?;
     m.add_function(wrap_pyfunction!(dec_osc_batch_py, m)?)?;
     #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2633,7 +2532,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<DecOscStreamPy>()?;
 
-    // Register Donchian Channel functions with their user-facing names
     m.add_function(wrap_pyfunction!(donchian_py, m)?)?;
     m.add_function(wrap_pyfunction!(donchian_batch_py, m)?)?;
     m.add_class::<DonchianStreamPy>()?;
@@ -2646,7 +2544,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register EMV functions with their user-facing names
     m.add_function(wrap_pyfunction!(emv_py, m)?)?;
     m.add_function(wrap_pyfunction!(emv_batch_py, m)?)?;
     m.add_class::<EmvStreamPy>()?;
@@ -2656,7 +2553,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(emv_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register IFT RSI functions with their user-facing names
     m.add_function(wrap_pyfunction!(ift_rsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(ift_rsi_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2669,7 +2565,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<IftRsiStreamPy>()?;
 
-    // Register KVO functions with their user-facing names
     m.add_function(wrap_pyfunction!(kvo_py, m)?)?;
     m.add_function(wrap_pyfunction!(kvo_batch_py, m)?)?;
     m.add_class::<KvoStreamPy>()?;
@@ -2682,22 +2577,19 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(kvo_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register MACD functions with their user-facing names
     m.add_function(wrap_pyfunction!(macd_py, m)?)?;
     m.add_function(wrap_pyfunction!(macd_batch_py, m)?)?;
     m.add_class::<MacdStreamPy>()?;
     #[cfg(all(feature = "python", feature = "cuda"))]
     {
         use crate::indicators::macd::{
-            macd_cuda_batch_dev_py, macd_cuda_many_series_one_param_dev_py,
-            DeviceArrayF32MacdPy,
+            macd_cuda_batch_dev_py, macd_cuda_many_series_one_param_dev_py, DeviceArrayF32MacdPy,
         };
         m.add_class::<DeviceArrayF32MacdPy>()?;
         m.add_function(wrap_pyfunction!(macd_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(macd_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register MFI functions with their user-facing names
     m.add_function(wrap_pyfunction!(mfi_py, m)?)?;
     m.add_function(wrap_pyfunction!(mfi_batch_py, m)?)?;
     m.add_class::<MfiStreamPy>()?;
@@ -2708,7 +2600,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<MfiDeviceArrayF32Py>()?;
     }
 
-    // Register NATR functions with their user-facing names
     m.add_function(wrap_pyfunction!(natr_py, m)?)?;
     m.add_function(wrap_pyfunction!(natr_batch_py, m)?)?;
     m.add_class::<NatrStreamPy>()?;
@@ -2718,7 +2609,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(natr_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register PPO functions with their user-facing names
     m.add_function(wrap_pyfunction!(ppo_py, m)?)?;
     m.add_function(wrap_pyfunction!(ppo_batch_py, m)?)?;
     m.add_class::<PpoStreamPy>()?;
@@ -2731,7 +2621,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(ppo_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register RSI functions with their user-facing names
     m.add_function(wrap_pyfunction!(rsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(rsi_batch_py, m)?)?;
     m.add_class::<RsiStreamPy>()?;
@@ -2740,12 +2629,11 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         use crate::indicators::rsi::{
             rsi_cuda_batch_dev_py, rsi_cuda_many_series_one_param_dev_py,
         };
-        // DeviceArrayF32Py is already exported in other CUDA sections (e.g., RSX/ALMA)
+
         m.add_function(wrap_pyfunction!(rsi_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(rsi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register RSX functions with their user-facing names
     m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
     m.add_function(wrap_pyfunction!(rsx_batch_py, m)?)?;
     m.add_class::<RsxStreamPy>()?;
@@ -2764,7 +2652,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(rsx_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Squeeze Momentum functions with their user-facing names
     m.add_function(wrap_pyfunction!(squeeze_momentum_py, m)?)?;
     m.add_function(wrap_pyfunction!(squeeze_momentum_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2777,7 +2664,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<SqueezeMomentumStreamPy>()?;
 
-    // Register TRIX functions with their user-facing names
     m.add_function(wrap_pyfunction!(trix_py, m)?)?;
     m.add_function(wrap_pyfunction!(trix_batch_py, m)?)?;
     m.add_class::<TrixStreamPy>()?;
@@ -2787,22 +2673,19 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(trix_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register VAR functions with their user-facing names
     m.add_function(wrap_pyfunction!(var_py, m)?)?;
     m.add_function(wrap_pyfunction!(var_batch_py, m)?)?;
     m.add_class::<VarStreamPy>()?;
     #[cfg(feature = "cuda")]
     {
         use crate::indicators::var::{
-            var_cuda_batch_dev_py, var_cuda_many_series_one_param_dev_py,
-            VarDeviceArrayF32Py,
+            var_cuda_batch_dev_py, var_cuda_many_series_one_param_dev_py, VarDeviceArrayF32Py,
         };
         m.add_class::<VarDeviceArrayF32Py>()?;
         m.add_function(wrap_pyfunction!(var_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(var_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register VPCI functions with their user-facing names
     m.add_function(wrap_pyfunction!(vpci_py, m)?)?;
     m.add_function(wrap_pyfunction!(vpci_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2811,7 +2694,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vpci_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register WCLPRICE functions with their user-facing names
     m.add_function(wrap_pyfunction!(wclprice_py, m)?)?;
     m.add_function(wrap_pyfunction!(wclprice_batch_py, m)?)?;
     m.add_class::<WclpriceStreamPy>()?;
@@ -2825,7 +2707,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Damiani Volatmeter functions with their user-facing names
     m.add_function(wrap_pyfunction!(damiani_py, m)?)?;
     m.add_function(wrap_pyfunction!(damiani_batch_py, m)?)?;
     m.add_class::<DamianiVolatmeterStreamPy>()?;
@@ -2833,8 +2714,7 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "cuda")]
     {
         use crate::indicators::damiani_volatmeter::{
-            damiani_cuda_batch_dev_py,
-            damiani_cuda_many_series_one_param_dev_py,
+            damiani_cuda_batch_dev_py, damiani_cuda_many_series_one_param_dev_py,
             DeviceArrayF32DamianiPy,
         };
         m.add_class::<DeviceArrayF32DamianiPy>()?;
@@ -2845,7 +2725,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register EMD functions with their user-facing names
     m.add_function(wrap_pyfunction!(emd_py, m)?)?;
     m.add_function(wrap_pyfunction!(emd_batch_py, m)?)?;
     m.add_class::<EmdStreamPy>()?;
@@ -2855,7 +2734,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(emd_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register CVI functions with their user-facing names
     m.add_function(wrap_pyfunction!(cvi_py, m)?)?;
     m.add_function(wrap_pyfunction!(cvi_batch_py, m)?)?;
     m.add_class::<CviStreamPy>()?;
@@ -2865,7 +2743,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cvi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register DI functions with their user-facing names
     m.add_function(wrap_pyfunction!(di_py, m)?)?;
     m.add_function(wrap_pyfunction!(di_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -2875,12 +2752,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<DiStreamPy>()?;
 
-    // Register DM functions with their user-facing names
     m.add_function(wrap_pyfunction!(dm_py, m)?)?;
     m.add_function(wrap_pyfunction!(dm_batch_py, m)?)?;
     m.add_class::<DmStreamPy>()?;
 
-    // Register EFI functions with their user-facing names
     m.add_function(wrap_pyfunction!(efi_py, m)?)?;
     m.add_function(wrap_pyfunction!(efi_batch_py, m)?)?;
     m.add_class::<EfiStreamPy>()?;
@@ -2891,7 +2766,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(efi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register FOSC functions with their user-facing names
     m.add_function(wrap_pyfunction!(fosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(fosc_batch_py, m)?)?;
     m.add_class::<FoscStreamPy>()?;
@@ -2901,7 +2775,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(fosc_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register DX functions with their user-facing names
     m.add_function(wrap_pyfunction!(dx_py, m)?)?;
     m.add_function(wrap_pyfunction!(dx_batch_py, m)?)?;
     m.add_class::<DxStreamPy>()?;
@@ -2909,12 +2782,11 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         m.add_function(wrap_pyfunction!(dx_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(dx_cuda_many_series_one_param_dev_py, m)?)?;
-        // Export DX device array class (with CAI v3 + DLPack + context guard)
+
         use crate::indicators::dx::DxDeviceArrayF32Py;
         m.add_class::<DxDeviceArrayF32Py>()?;
     }
 
-    // Register Fisher functions
     m.add_function(wrap_pyfunction!(fisher_py, m)?)?;
     m.add_function(wrap_pyfunction!(fisher_batch_py, m)?)?;
     m.add_class::<FisherStreamPy>()?;
@@ -2928,7 +2800,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Keltner functions
     m.add_function(wrap_pyfunction!(keltner_py, m)?)?;
     m.add_function(wrap_pyfunction!(keltner_batch_py, m)?)?;
     m.add_class::<KeltnerStreamPy>()?;
@@ -2943,7 +2814,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<KeltnerDeviceArrayF32Py>()?;
     }
 
-    // Register AO functions with their user-facing names
     m.add_function(wrap_pyfunction!(ao_py, m)?)?;
     m.add_function(wrap_pyfunction!(ao_batch_py, m)?)?;
     m.add_class::<AoStreamPy>()?;
@@ -2953,17 +2823,16 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         use crate::indicators::coppock::*;
         m.add_function(wrap_pyfunction!(ao_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(ao_cuda_many_series_one_param_dev_py, m)?)?;
-        // Coppock CUDA entrypoints
+
         m.add_function(wrap_pyfunction!(coppock_cuda_batch_dev_py, m)?)?;
         m.add_function(wrap_pyfunction!(
             coppock_cuda_many_series_one_param_dev_py,
             m
         )?)?;
-        // Export Coppock CUDA device handle (CAI v3 + DLPack v1.x)
+
         m.add_class::<CoppockDeviceArrayF32Py>()?;
     }
 
-    // Register ATR functions with their user-facing names
     m.add_function(wrap_pyfunction!(atr_py, m)?)?;
     m.add_function(wrap_pyfunction!(atr_batch_py, m)?)?;
     m.add_class::<AtrStreamPy>()?;
@@ -2973,7 +2842,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(atr_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register AVSL functions with their user-facing names
     m.add_function(wrap_pyfunction!(avsl_py, m)?)?;
     m.add_function(wrap_pyfunction!(avsl_batch_py, m)?)?;
     m.add_class::<AvslStreamPy>()?;
@@ -2983,7 +2851,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(avsl_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register DMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(dma_py, m)?)?;
     m.add_function(wrap_pyfunction!(dma_batch_py, m)?)?;
     m.add_class::<DmaStreamPy>()?;
@@ -2993,7 +2860,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(dma_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Range Filter functions with their user-facing names
     m.add_function(wrap_pyfunction!(range_filter_py, m)?)?;
     m.add_function(wrap_pyfunction!(range_filter_batch_py, m)?)?;
     m.add_class::<RangeFilterStreamPy>()?;
@@ -3007,7 +2873,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register SAMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(sama_py, m)?)?;
     m.add_function(wrap_pyfunction!(sama_batch_py, m)?)?;
     m.add_class::<SamaStreamPy>()?;
@@ -3017,12 +2882,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(sama_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register WTO functions with their user-facing names
     m.add_function(wrap_pyfunction!(wto_py, m)?)?;
     m.add_function(wrap_pyfunction!(wto_batch_py, m)?)?;
     m.add_class::<WtoStreamPy>()?;
 
-    // Register EHMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(ehma_py, m)?)?;
     m.add_function(wrap_pyfunction!(ehma_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -3032,7 +2895,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<EhmaStreamPy>()?;
 
-    // Register NAMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(nama_py, m)?)?;
     m.add_function(wrap_pyfunction!(nama_batch_py, m)?)?;
     m.add_class::<NamaStreamPy>()?;
@@ -3042,7 +2904,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(nama_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register CCI functions with their user-facing names
     m.add_function(wrap_pyfunction!(cci_py, m)?)?;
     m.add_function(wrap_pyfunction!(cci_batch_py, m)?)?;
     m.add_class::<CciStreamPy>()?;
@@ -3053,7 +2914,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cci_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register CCI Cycle functions
     m.add_function(wrap_pyfunction!(cci_cycle_py, m)?)?;
     m.add_function(wrap_pyfunction!(cci_cycle_batch_py, m)?)?;
     m.add_class::<CciCycleStreamPy>()?;
@@ -3066,9 +2926,8 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register HalfTrend functions
     m.add_function(wrap_pyfunction!(halftrend_py, m)?)?;
-    m.add_function(wrap_pyfunction!(halftrend_tuple_py, m)?)?; // Compatibility function for tuple return
+    m.add_function(wrap_pyfunction!(halftrend_tuple_py, m)?)?;
     m.add_function(wrap_pyfunction!(halftrend_batch_py, m)?)?;
     m.add_class::<HalfTrendStreamPy>()?;
     #[cfg(feature = "cuda")]
@@ -3080,7 +2939,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register unified VAMA (Volatility/Volume Adjusted MA combined under `vama`)
     m.add_function(wrap_pyfunction!(vama_unified_py, m)?)?;
     m.add_function(wrap_pyfunction!(vama_batch_unified_py, m)?)?;
     m.add_class::<VamaStreamUnifiedPy>()?;
@@ -3090,7 +2948,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vama_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register FVG Trailing Stop functions
     m.add_function(wrap_pyfunction!(fvg_trailing_stop_py, m)?)?;
     m.add_function(wrap_pyfunction!(fvg_trailing_stop_batch_py, m)?)?;
     m.add_class::<FvgTrailingStopStreamPy>()?;
@@ -3103,7 +2960,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register NET MyRSI functions
     m.add_function(wrap_pyfunction!(net_myrsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(net_myrsi_batch_py, m)?)?;
     m.add_class::<NetMyrsiStreamPy>()?;
@@ -3116,7 +2972,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Reverse RSI functions
     m.add_function(wrap_pyfunction!(reverse_rsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(reverse_rsi_batch_py, m)?)?;
     m.add_class::<ReverseRsiStreamPy>()?;
@@ -3132,7 +2987,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Ehlers Error Correcting EMA functions
     m.add_function(wrap_pyfunction!(ehlers_ecema_py, m)?)?;
     m.add_function(wrap_pyfunction!(ehlers_ecema_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -3145,7 +2999,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<EhlersEcemaStreamPy>()?;
 
-    // Register CFO functions with their user-facing names
     m.add_function(wrap_pyfunction!(cfo_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfo_batch_py, m)?)?;
     m.add_class::<CfoStreamPy>()?;
@@ -3155,7 +3008,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(cfo_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register BOP functions with their user-facing names
     m.add_function(wrap_pyfunction!(bop_py, m)?)?;
     m.add_function(wrap_pyfunction!(bop_batch_py, m)?)?;
     m.add_class::<BopStreamPy>()?;
@@ -3165,7 +3017,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(bop_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Buff Averages
     m.add_function(wrap_pyfunction!(buff_averages_py, m)?)?;
     m.add_function(wrap_pyfunction!(buff_averages_batch_py, m)?)?;
     m.add_class::<BuffAveragesStreamPy>()?;
@@ -3178,7 +3029,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // QQE
     m.add_function(wrap_pyfunction!(qqe_py, m)?)?;
     m.add_function(wrap_pyfunction!(qqe_batch_py, m)?)?;
     m.add_class::<QqeStreamPy>()?;
@@ -3188,7 +3038,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(qqe_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Volume Adjusted MA (explicit API)
     m.add_function(wrap_pyfunction!(vama_volu::volume_adjusted_ma_py, m)?)?;
     m.add_function(wrap_pyfunction!(vama_volu::volume_adjusted_ma_batch_py, m)?)?;
     m.add_class::<vama_volu::VolumeAdjustedMaStreamPy>()?;
@@ -3201,7 +3050,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Nadaraya-Watson Envelope
     m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_py, m)?)?;
     m.add_function(wrap_pyfunction!(nadaraya_watson_envelope_batch_py, m)?)?;
     m.add_class::<NweStreamPy>()?;
@@ -3214,7 +3062,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(crate::indicators::nadaraya_watson_envelope::nadaraya_watson_envelope_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // TTM Squeeze
     m.add_function(wrap_pyfunction!(ttm_squeeze_py, m)?)?;
     m.add_function(wrap_pyfunction!(ttm_squeeze_batch_py, m)?)?;
     m.add_class::<TtmSqueezeStreamPy>()?;
@@ -3230,7 +3077,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Modified God Mode
     m.add_function(wrap_pyfunction!(mod_god_mode_py, m)?)?;
     m.add_function(wrap_pyfunction!(mod_god_mode_batch_py, m)?)?;
     m.add_class::<ModGodModeStreamPy>()?;
@@ -3246,7 +3092,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Linear Regression Intercept functions with their user-facing names
     m.add_function(wrap_pyfunction!(linearreg_intercept_py, m)?)?;
     m.add_function(wrap_pyfunction!(linearreg_intercept_batch_py, m)?)?;
     m.add_class::<LinearRegInterceptStreamPy>()?;
@@ -3261,7 +3106,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<LinearRegInterceptDeviceArrayF32Py>()?;
     }
 
-    // Register Mass Index functions with their user-facing names
     m.add_function(wrap_pyfunction!(mass_py, m)?)?;
     m.add_function(wrap_pyfunction!(mass_batch_py, m)?)?;
     #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3277,12 +3121,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<MassStreamPy>()?;
 
-    // Register Midprice functions with their user-facing names
     m.add_function(wrap_pyfunction!(midprice_py, m)?)?;
     m.add_function(wrap_pyfunction!(midprice_batch_py, m)?)?;
     m.add_class::<MidpriceStreamPy>()?;
 
-    // Register OBV functions with their user-facing names
     m.add_function(wrap_pyfunction!(obv_py, m)?)?;
     m.add_function(wrap_pyfunction!(obv_batch_py, m)?)?;
     m.add_class::<ObvStreamPy>()?;
@@ -3292,7 +3134,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(obv_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Qstick functions with their user-facing names
     m.add_function(wrap_pyfunction!(qstick_py, m)?)?;
     m.add_function(wrap_pyfunction!(qstick_batch_py, m)?)?;
     m.add_class::<QstickStreamPy>()?;
@@ -3308,12 +3149,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register RSX functions with their user-facing names
     m.add_function(wrap_pyfunction!(rsx_py, m)?)?;
     m.add_function(wrap_pyfunction!(rsx_batch_py, m)?)?;
     m.add_class::<RsxStreamPy>()?;
 
-    // Register STC functions with their user-facing names
     m.add_function(wrap_pyfunction!(stc_py, m)?)?;
     m.add_function(wrap_pyfunction!(stc_batch_py, m)?)?;
     m.add_class::<StcStreamPy>()?;
@@ -3326,7 +3165,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(stc_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register TSI functions with their user-facing names
     m.add_function(wrap_pyfunction!(tsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(tsi_batch_py, m)?)?;
     m.add_class::<TsiStreamPy>()?;
@@ -3337,7 +3175,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(tsi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register VIDYA functions with their user-facing names
     m.add_function(wrap_pyfunction!(vidya_py, m)?)?;
     m.add_function(wrap_pyfunction!(vidya_batch_py, m)?)?;
     m.add_class::<VidyaStreamPy>()?;
@@ -3351,7 +3188,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<VidyaDeviceArrayF32Py>()?;
     }
 
-    // Register WILLR functions with their user-facing names
     m.add_function(wrap_pyfunction!(willr_py, m)?)?;
     m.add_function(wrap_pyfunction!(willr_batch_py, m)?)?;
     m.add_class::<WillrStreamPy>()?;
@@ -3365,16 +3201,13 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<WillrDeviceArrayF32Py>()?;
     }
 
-    // Register ZSCORE functions with their user-facing names
     m.add_function(wrap_pyfunction!(zscore_py, m)?)?;
     m.add_function(wrap_pyfunction!(zscore_batch_py, m)?)?;
     m.add_class::<ZscoreStreamPy>()?;
 
-    // Register AlphaTrend functions with their user-facing names
     m.add_function(wrap_pyfunction!(alphatrend_py, m)?)?;
     m.add_class::<AlphaTrendStreamPy>()?;
 
-    // Register GatorOsc functions with their user-facing names
     m.add_function(wrap_pyfunction!(gatorosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(gatorosc_batch_py, m)?)?;
     m.add_class::<GatorOscStreamPy>()?;
@@ -3392,7 +3225,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Kurtosis functions with their user-facing names
     m.add_function(wrap_pyfunction!(kurtosis_py, m)?)?;
     m.add_function(wrap_pyfunction!(kurtosis_batch_py, m)?)?;
     #[cfg(feature = "cuda")]
@@ -3405,7 +3237,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
     m.add_class::<KurtosisStreamPy>()?;
 
-    // Register MAB functions with their user-facing names
     m.add_function(wrap_pyfunction!(mab_py, m)?)?;
     m.add_function(wrap_pyfunction!(mab_batch_py, m)?)?;
     m.add_class::<MabStreamPy>()?;
@@ -3415,7 +3246,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(mab_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register medprice functions
     m.add_function(wrap_pyfunction!(medprice_py, m)?)?;
     m.add_function(wrap_pyfunction!(medprice_batch_py, m)?)?;
     m.add_class::<MedpriceStreamPy>()?;
@@ -3429,7 +3259,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register MSW functions with their user-facing names
     m.add_function(wrap_pyfunction!(msw_py, m)?)?;
     m.add_function(wrap_pyfunction!(msw_batch_py, m)?)?;
     m.add_class::<MswStreamPy>()?;
@@ -3439,12 +3268,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(msw_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register PMA functions with their user-facing names
     m.add_function(wrap_pyfunction!(pma_py, m)?)?;
     m.add_function(wrap_pyfunction!(pma_batch_py, m)?)?;
     m.add_class::<PmaStreamPy>()?;
 
-    // Register ROCR functions with their user-facing names
     m.add_function(wrap_pyfunction!(rocr_py, m)?)?;
     m.add_function(wrap_pyfunction!(rocr_batch_py, m)?)?;
     m.add_class::<RocrStreamPy>()?;
@@ -3455,7 +3282,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<RocrDeviceArrayF32Py>()?;
     }
 
-    // Register SAR functions with their user-facing names
     m.add_function(wrap_pyfunction!(sar_py, m)?)?;
     m.add_function(wrap_pyfunction!(sar_batch_py, m)?)?;
     m.add_class::<SarStreamPy>()?;
@@ -3466,7 +3292,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(sar_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register SuperTrend functions with their user-facing names
     m.add_function(wrap_pyfunction!(supertrend_py, m)?)?;
     m.add_function(wrap_pyfunction!(supertrend_batch_py, m)?)?;
     m.add_class::<SuperTrendStreamPy>()?;
@@ -3480,7 +3305,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_class::<SupertrendDeviceArrayF32Py>()?;
     }
 
-    // Register UltOsc functions with their user-facing names
     m.add_function(wrap_pyfunction!(ultosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(ultosc_batch_py, m)?)?;
     m.add_class::<UltOscStreamPy>()?;
@@ -3496,7 +3320,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Voss functions with their user-facing names
     m.add_function(wrap_pyfunction!(voss_py, m)?)?;
     m.add_function(wrap_pyfunction!(voss_batch_py, m)?)?;
     m.add_class::<VossStreamPy>()?;
@@ -3512,7 +3335,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Wavetrend functions with their user-facing names
     m.add_function(wrap_pyfunction!(wavetrend_py, m)?)?;
     m.add_function(wrap_pyfunction!(wavetrend_batch_py, m)?)?;
     m.add_class::<WavetrendStreamPy>()?;
@@ -3528,12 +3350,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register KST functions with their user-facing names
     m.add_function(wrap_pyfunction!(kst_py, m)?)?;
     m.add_function(wrap_pyfunction!(kst_batch_py, m)?)?;
     m.add_class::<KstStreamPy>()?;
 
-    // Register LRSI functions with their user-facing names
     m.add_function(wrap_pyfunction!(lrsi_py, m)?)?;
     m.add_function(wrap_pyfunction!(lrsi_batch_py, m)?)?;
     m.add_class::<LrsiStreamPy>()?;
@@ -3543,7 +3363,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(lrsi_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Mean AD functions with their user-facing names
     m.add_function(wrap_pyfunction!(mean_ad_py, m)?)?;
     m.add_function(wrap_pyfunction!(mean_ad_batch_py, m)?)?;
     m.add_class::<MeanAdStreamPy>()?;
@@ -3556,7 +3375,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register MOM functions with their user-facing names
     m.add_function(wrap_pyfunction!(mom_py, m)?)?;
     m.add_function(wrap_pyfunction!(mom_batch_py, m)?)?;
     m.add_class::<MomStreamPy>()?;
@@ -3566,7 +3384,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(mom_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register Pivot functions with their user-facing names
     m.add_function(wrap_pyfunction!(pivot_py, m)?)?;
     m.add_function(wrap_pyfunction!(pivot_batch_py, m)?)?;
     m.add_class::<PivotStreamPy>()?;
@@ -3582,7 +3399,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register ROCP functions with their user-facing names
     m.add_function(wrap_pyfunction!(rocp_py, m)?)?;
     m.add_function(wrap_pyfunction!(rocp_batch_py, m)?)?;
     m.add_class::<RocpStreamPy>()?;
@@ -3592,7 +3408,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(rocp_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register SafeZoneStop functions with their user-facing names
     m.add_function(wrap_pyfunction!(safezonestop_py, m)?)?;
     m.add_function(wrap_pyfunction!(safezonestop_batch_py, m)?)?;
     m.add_class::<SafeZoneStopStreamPy>()?;
@@ -3605,7 +3420,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register Stoch functions with their user-facing names
     m.add_function(wrap_pyfunction!(stoch_py, m)?)?;
     m.add_function(wrap_pyfunction!(stoch_batch_py, m)?)?;
     m.add_class::<StochStreamPy>()?;
@@ -3619,7 +3433,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register StochF functions with their user-facing names
     m.add_function(wrap_pyfunction!(stochf_py, m)?)?;
     m.add_function(wrap_pyfunction!(stochf_batch_py, m)?)?;
     m.add_class::<StochfStreamPy>()?;
@@ -3632,7 +3445,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register UI functions with their user-facing names
     m.add_function(wrap_pyfunction!(ui_py, m)?)?;
     m.add_function(wrap_pyfunction!(ui_batch_py, m)?)?;
     m.add_class::<UiStreamPy>()?;
@@ -3648,7 +3460,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         )?)?;
     }
 
-    // Register VOSC functions with their user-facing names
     m.add_function(wrap_pyfunction!(vosc_py, m)?)?;
     m.add_function(wrap_pyfunction!(vosc_batch_py, m)?)?;
     m.add_class::<VoscStreamPy>()?;
@@ -3658,16 +3469,14 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(vosc_cuda_many_series_one_param_dev_py, m)?)?;
     }
 
-    // Register WAD functions with their user-facing names
     m.add_function(wrap_pyfunction!(wad_py, m)?)?;
     m.add_function(wrap_pyfunction!(wad_batch_py, m)?)?;
     m.add_class::<WadStreamPy>()?;
 
-    // Register Chande functions with their user-facing names
     m.add_function(wrap_pyfunction!(chande_py, m)?)?;
     m.add_function(wrap_pyfunction!(chande_batch_py, m)?)?;
     m.add_class::<ChandeStreamPy>()?;
-    // CUDA (feature-gated)
+
     #[cfg(all(feature = "python", feature = "cuda"))]
     {
         use crate::indicators::chande::DeviceArrayF32ChandePy;
@@ -3681,8 +3490,6 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
             m
         )?)?;
     }
-
-    // Add other indicators here as you implement their Python bindings
 
     Ok(())
 }

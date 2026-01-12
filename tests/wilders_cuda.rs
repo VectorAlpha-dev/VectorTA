@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::wilders::{
     wilders_batch_with_kernel, WildersBatchRange,
 };
@@ -85,11 +83,10 @@ fn wilders_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
-        
         for t in s..rows {
             let x = (t as f64) + (s as f64) * 0.25;
             data_tm[t * cols + s] = (x * 0.0027).sin() + 0.00019 * x;
@@ -98,7 +95,6 @@ fn wilders_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
 
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

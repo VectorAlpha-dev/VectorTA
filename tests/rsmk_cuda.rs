@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::rsmk::{
     rsmk_batch_with_kernel, rsmk_with_kernel, RsmkBatchRange, RsmkData, RsmkInput, RsmkParams,
 };
@@ -110,7 +108,6 @@ fn rsmk_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let period = 3usize;
     let sigp = 10usize;
 
-    
     let mut cpu_ind_tm = vec![f64::NAN; cols * rows];
     let mut cpu_sig_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

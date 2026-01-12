@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::macd::{macd, MacdBatchBuilder, MacdBatchRange, MacdInput, MacdParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -105,7 +103,6 @@ fn macd_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let slow = 26usize;
     let signal = 9usize;
 
-    
     let mut cpu_macd = vec![f64::NAN; cols * rows];
     let mut cpu_signal = vec![f64::NAN; cols * rows];
     let mut cpu_hist = vec![f64::NAN; cols * rows];

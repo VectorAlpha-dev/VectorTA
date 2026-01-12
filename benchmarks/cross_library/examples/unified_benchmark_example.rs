@@ -8,19 +8,19 @@ use std::path::Path;
 fn main() {
     println!("🚀 Unified Three-Tier Benchmark System Demo\n");
 
-    
+
     let mut runner = UnifiedBenchmarkRunner::new();
 
-    
+
     println!("Step 1: Profiling FFI overhead...");
     runner.profile_ffi_overhead(10000, 1000);
 
-    
+
     let data_path = Path::new("../../src/data/10kCandles.csv");
     let data = if data_path.exists() {
         CandleData::from_csv(data_path).expect("Failed to load data")
     } else {
-        
+
         println!("Using synthetic data for demo...");
         CandleData {
             timestamps: vec![0; 10000],
@@ -35,7 +35,7 @@ fn main() {
     println!("\nStep 2: Running benchmarks (once per library)...");
     let iterations = 100;
 
-    
+
     println!("  • Benchmarking Rust Native SMA...");
     runner.benchmark(
         "SMA",
@@ -48,7 +48,7 @@ fn main() {
         },
     );
 
-    
+
     println!("  • Benchmarking Rust FFI SMA...");
     let mut rust_output = vec![0.0; data.len()];
     runner.benchmark(
@@ -68,7 +68,7 @@ fn main() {
         },
     );
 
-    
+
     println!("  • Benchmarking Tulip SMA...");
     let mut tulip_output = vec![0.0; data.len()];
     runner.benchmark(
@@ -92,7 +92,7 @@ fn main() {
         },
     );
 
-    
+
     println!("\nStep 3: Generating three-tier analysis from single measurement set...");
 
     println!("\n{}", "=".repeat(80));
@@ -129,10 +129,10 @@ fn main() {
         );
     }
 
-    
+
     println!("{}", runner.get_statistics());
 
-    
+
     println!("\n📄 Full Report:");
     println!("{}", runner.generate_full_report());
 

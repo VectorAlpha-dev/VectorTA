@@ -1,36 +1,5 @@
-//! # Dynamic Trend Index (DTI) by William Blau
-//!
-//! A momentum-based indicator that computes the difference between upward and downward
-//! price movements, then applies a triple EMA smoothing to that difference (and its
-//! absolute value), producing a value typically scaled between `-100` and `100`.
-//!
-//! ## Parameters
-//! - **r**: The period of the first EMA smoothing (default: 14)
-//! - **s**: The period of the second EMA smoothing (default: 10)
-//! - **u**: The period of the third EMA smoothing (default: 5)
-//!
-//! ## Returns
-//! - **`Ok(DtiOutput)`** containing a `Vec<f64>` of DTI values ranging from -100 to 100
-//!
-//! **Decision log**: SIMD (AVX2/AVX512) and CUDA wrappers are enabled; CUDA paths return VRAM handles used by Python via CAI v3 + DLPack v1.x, and all paths preserve existing numerical outputs.
-//!
-//! ## Developer Notes
-//! ### Implementation Status
-//! - AVX2/AVX512: Enabled. Dual-chain 2-lane vectorization for numerator/denominator EMAs.
-//!   AVX512 currently reuses the AVX2 path (sequential in time, lane-widening not beneficial).
-//!   Benchmarks show AVX2/AVX512 > scalar by >5% at 100k on `target-cpu=native`.
-//! - Streaming Update: O(1), matches batch numerics within tight tolerances.
-//!   Uses EMA residual form (`e += α*(x - e)`) with `mul_add` for FMA-friendly performance.
-//! - Memory: Uses `alloc_with_nan_prefix` and batch `make_uninit_matrix`/`init_matrix_prefixes`.
-//! - Batch: Adds row-specific optimization by precomputing base series `x` and `|x|` once and
-//!   reusing across rows to reduce redundant work. Selection maps through the usual kernel API.
-//!
-//! ### TODO - Performance Improvements
-//! - [x] Implement AVX2 SIMD kernel (2-lane dual-chain)
-//! - [x] AVX512 reuses AVX2 path (sequential dependency across time)
-//! - [x] Row-specific batch variant via `x`/`|x|` precompute
-//! - [ ] Further micro-opts are possible if profiling suggests
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -39,12 +8,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -76,7 +43,10 @@ pub struct DtiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct DtiParams {
     pub r: Option<usize>,
     pub s: Option<usize>,
@@ -229,7 +199,11 @@ pub enum DtiError {
     #[error("dti: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("dti: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 }
 
 #[inline]
@@ -237,12 +211,7 @@ pub fn dti(input: &DtiInput) -> Result<DtiOutput, DtiError> {
     dti_with_kernel(input, Kernel::Auto)
 }
 
-/// Zero-allocation native API that writes results into a caller-provided buffer.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-/// - Uses `Kernel::Auto` for dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dti_into(input: &DtiInput, out: &mut [f64]) -> Result<(), DtiError> {
     dti_into_slice(out, input, Kernel::Auto)
@@ -274,7 +243,10 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
         });
     }
     if dst.len() != len {
-        return Err(DtiError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(DtiError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let first_valid_idx = (0..len)
@@ -311,7 +283,7 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
                 Kernel::Scalar | Kernel::ScalarBatch => {
                     dti_simd128(high, low, r, s, u, first_valid_idx, dst)
                 }
-                _ => dti_scalar(high, low, r, s, u, first_valid_idx, dst), 
+                _ => dti_scalar(high, low, r, s, u, first_valid_idx, dst),
             }
         }
         #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
@@ -329,7 +301,6 @@ pub fn dti_into_slice(dst: &mut [f64], input: &DtiInput, kern: Kernel) -> Result
         }
     }
 
-    
     for v in &mut dst[..=first_valid_idx] {
         *v = f64::NAN;
     }
@@ -398,7 +369,7 @@ pub fn dti_with_kernel(input: &DtiInput, kernel: Kernel) -> Result<DtiOutput, Dt
                 Kernel::Scalar | Kernel::ScalarBatch => {
                     dti_simd128(high, low, r, s, u, first_valid_idx, &mut out)
                 }
-                _ => dti_scalar(high, low, r, s, u, first_valid_idx, &mut out), 
+                _ => dti_scalar(high, low, r, s, u, first_valid_idx, &mut out),
             }
             return Ok(DtiOutput { values: out });
         }
@@ -484,9 +455,6 @@ unsafe fn dti_simd128(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    
-    
-    
     dti_scalar(high, low, r, s, u, first_valid_idx, out);
 }
 
@@ -524,7 +492,6 @@ pub fn dti_avx2(
         let vs_b = _mm_set1_pd(as1);
         let vu_b = _mm_set1_pd(au1);
 
-        
         let mut v_er = _mm_set1_pd(0.0);
         let mut v_es = _mm_set1_pd(0.0);
         let mut v_eu = _mm_set1_pd(0.0);
@@ -544,11 +511,11 @@ pub fn dti_avx2(
 
             let dh = hi0 - hi_1;
             let dl = lo0 - lo_1;
-            
+
             let x = half * (dh.abs() + dh) - half * (dl.abs() - dl);
             let ax = x.abs();
 
-            let vx = _mm_set_pd(ax, x); 
+            let vx = _mm_set_pd(ax, x);
 
             v_er = _mm_add_pd(_mm_mul_pd(vr_a, vx), _mm_mul_pd(vr_b, v_er));
             v_es = _mm_add_pd(_mm_mul_pd(vs_a, v_er), _mm_mul_pd(vs_b, v_es));
@@ -581,7 +548,6 @@ pub fn dti_avx512(
     first_valid_idx: usize,
     out: &mut [f64],
 ) {
-    
     dti_avx2(high, low, r, s, u, first_valid_idx, out)
 }
 
@@ -759,7 +725,6 @@ fn dti_row_avx512_from_base(
     start: usize,
     out: &mut [f64],
 ) {
-    
     dti_row_avx2_from_base(x, ax, r, s, u, start, out)
 }
 
@@ -818,10 +783,6 @@ pub fn dti_row_avx512_long(
 ) {
     unsafe { dti_avx512_long(high, low, r, s, u, first_valid_idx, out) }
 }
-
-
-
-
 
 /*
     use core::arch::wasm32::*;
@@ -1008,7 +969,6 @@ pub fn dti_row_avx512_long(
     }
 */
 
-
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline(always)]
 pub fn dti_row_simd128(
@@ -1094,7 +1054,6 @@ impl DtiStream {
             let x_price = x_hmu - x_lmd;
             let x_price_abs = x_price.abs();
 
-            
             self.e0_r = (x_price - self.e0_r).mul_add(self.alpha_r, self.e0_r);
             self.e0_s = (self.e0_r - self.e0_s).mul_add(self.alpha_s, self.e0_s);
             self.e0_u = (self.e0_s - self.e0_u).mul_add(self.alpha_u, self.e0_u);
@@ -1119,7 +1078,6 @@ impl DtiStream {
         }
     }
 
-    /// Resets EMA state and warm-up.
     #[inline(always)]
     pub fn reset(&mut self) {
         self.e0_r = 0.0;
@@ -1133,8 +1091,6 @@ impl DtiStream {
         self.initialized = false;
     }
 
-    /// Optional O(1) update when deltas (dh, dl) are already known.
-    /// Returns `None` until the stream is seeded by at least one `update`/`update_delta` call.
     #[inline(always)]
     pub fn update_delta(&mut self, dh: f64, dl: f64) -> Option<f64> {
         if let (Some(prev_h), Some(prev_l)) = (self.last_high, self.last_low) {
@@ -1170,9 +1126,8 @@ impl DtiStream {
 
 #[inline(always)]
 fn fast_div_approx(num: f64, den: f64) -> f64 {
-    
     debug_assert!(den != 0.0);
-    
+
     let ad = den.abs();
     if ad <= f32::MAX as f64 && ad >= f32::MIN_POSITIVE as f64 {
         let r0 = (1.0f32 / den as f32) as f64;
@@ -1319,14 +1274,12 @@ pub fn dti_batch_py<'py>(
     Ok(dict)
 }
 
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaDti;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::dti_wrapper::DeviceArrayF32Dti;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaDti;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -1350,13 +1303,12 @@ impl DtiDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted; wrapper synchronizes before returning
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
-        // Discover allocation device from pointer attributes; fall back to current device.
         let mut device_ordinal: i32 = self.inner.device_id as i32;
         unsafe {
             let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
@@ -1384,8 +1336,7 @@ impl DtiDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1405,10 +1356,9 @@ impl DtiDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let ctx_arc = self.inner.ctx.clone();
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32Dti {
@@ -1635,7 +1585,9 @@ fn expand_grid(r: &DtiBatchRange) -> Vec<DtiParams> {
                 v.push(cur);
                 match cur.checked_add(step) {
                     Some(nxt) => {
-                        if nxt > end { break; }
+                        if nxt > end {
+                            break;
+                        }
                         cur = nxt;
                     }
                     None => break,
@@ -1644,12 +1596,18 @@ fn expand_grid(r: &DtiBatchRange) -> Vec<DtiParams> {
         } else {
             let mut cur = start;
             loop {
-                if cur < end { break; }
+                if cur < end {
+                    break;
+                }
                 v.push(cur);
-                if cur == end { break; }
+                if cur == end {
+                    break;
+                }
                 match cur.checked_sub(step) {
                     Some(nxt) => {
-                        if nxt < end { break; }
+                        if nxt < end {
+                            break;
+                        }
                         cur = nxt;
                     }
                     None => break,
@@ -1672,7 +1630,11 @@ fn expand_grid(r: &DtiBatchRange) -> Vec<DtiParams> {
     for &rv in &rr {
         for &sv in &ss {
             for &uv in &uu {
-                out.push(DtiParams { r: Some(rv), s: Some(sv), u: Some(uv) });
+                out.push(DtiParams {
+                    r: Some(rv),
+                    s: Some(sv),
+                    u: Some(uv),
+                });
             }
         }
     }
@@ -1730,7 +1692,11 @@ fn dti_batch_inner(
 ) -> Result<DtiBatchOutput, DtiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DtiError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(DtiError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let len = high.len();
     if low.len() != len {
@@ -1761,18 +1727,14 @@ fn dti_batch_inner(
         step: 0,
     })?;
 
-    // Calculate warmup periods for each combo (first_valid + 1 since DTI needs at least 2 points)
     let warmup_periods: Vec<usize> = combos.iter().map(|_| first_valid + 1).collect();
 
-    // Use uninitialized memory with NaN prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
     let uninit_ptr = buf_mu.as_mut_ptr();
     let values = unsafe { std::slice::from_raw_parts_mut(uninit_ptr as *mut f64, expected) };
 
-    // Precompute base x and |x| once across rows to reduce redundant work
     let start = first_valid + 1;
     let (x_base, ax_base) = dti_precompute_base(high, low, start);
 
@@ -1856,10 +1818,7 @@ fn dti_batch_inner(
         }
     }
 
-    // Convert back to Vec for output
-    let values = unsafe {
-        Vec::from_raw_parts(uninit_ptr as *mut f64, expected, expected)
-    };
+    let values = unsafe { Vec::from_raw_parts(uninit_ptr as *mut f64, expected, expected) };
     std::mem::forget(buf_mu);
 
     Ok(DtiBatchOutput {
@@ -1881,7 +1840,11 @@ pub fn dti_batch_inner_into(
 ) -> Result<Vec<DtiParams>, DtiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(DtiError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(DtiError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let len = high.len();
     if low.len() != len {
@@ -1907,14 +1870,18 @@ pub fn dti_batch_inner_into(
 
     let rows = combos.len();
     let cols = len;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(DtiError::InvalidRange { start: 0, end: 0, step: 0 })?;
+    let expected = rows.checked_mul(cols).ok_or(DtiError::InvalidRange {
+        start: 0,
+        end: 0,
+        step: 0,
+    })?;
     if out.len() != expected {
-        return Err(DtiError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(DtiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    // Prefix-init using helpers, zero extra copies
     let warm: Vec<usize> = vec![first_valid + 1; rows];
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
@@ -1924,7 +1891,6 @@ pub fn dti_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Compute into the same buffer
     let values: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
 
@@ -2011,11 +1977,7 @@ pub fn expand_grid_dti(r: &DtiBatchRange) -> Vec<DtiParams> {
     expand_grid(r)
 }
 
-// ############################################
-// WASM Bindings
-// ############################################
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dti_js(
     high: &[f64],
@@ -2032,14 +1994,13 @@ pub fn dti_js(
     let data = DtiData::Slices { high, low };
     let input = DtiInput { data, params };
 
-    // Use dti_with_kernel to get properly allocated output
     let output =
         dti_with_kernel(&input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output.values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dti_into(
     high_ptr: *const f64,
@@ -2065,7 +2026,6 @@ pub fn dti_into(
         let data = DtiData::Slices { high, low };
         let input = DtiInput { data, params };
 
-        // Check for aliasing (if output pointer equals either input pointer)
         if out_ptr as *const f64 == high_ptr || out_ptr as *const f64 == low_ptr {
             let mut temp = vec![0.0; len];
             dti_into_slice(&mut temp, &input, Kernel::Auto)
@@ -2081,7 +2041,7 @@ pub fn dti_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dti_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2090,7 +2050,7 @@ pub fn dti_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dti_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2100,7 +2060,7 @@ pub fn dti_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DtiBatchConfig {
     pub r_range: (usize, usize, usize),
@@ -2108,7 +2068,7 @@ pub struct DtiBatchConfig {
     pub u_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DtiBatchJsOutput {
     pub values: Vec<f64>,
@@ -2117,7 +2077,7 @@ pub struct DtiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dti_batch)]
 pub fn dti_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: DtiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2142,7 +2102,7 @@ pub fn dti_batch_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dti_batch_into(
     high_ptr: *const f64,
@@ -2173,10 +2133,15 @@ pub fn dti_batch_into(
             u: (u_start, u_end, u_step),
         };
 
-        // Calculate total combinations (robust; reversed bounds supported; zero step -> static)
         fn axis_count(start: usize, end: usize, step: usize) -> usize {
-            if step == 0 || start == end { return 1; }
-            if start < end { ((end - start) / step) + 1 } else { ((start - end) / step) + 1 }
+            if step == 0 || start == end {
+                return 1;
+            }
+            if start < end {
+                ((end - start) / step) + 1
+            } else {
+                ((start - end) / step) + 1
+            }
         }
         let r_count = axis_count(r_start, r_end, r_step);
         let s_count = axis_count(s_start, s_end, s_step);
@@ -2184,16 +2149,16 @@ pub fn dti_batch_into(
         let total_rows = r_count
             .checked_mul(s_count)
             .and_then(|x| x.checked_mul(u_count))
-            .ok_or(JsValue::from_str("range expansion overflow in dti_batch_into"))?;
+            .ok_or(JsValue::from_str(
+                "range expansion overflow in dti_batch_into",
+            ))?;
         let total_len = total_rows
             .checked_mul(len)
             .ok_or(JsValue::from_str("size overflow in dti_batch_into"))?;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_len);
 
-        // Check for aliasing
         if out_ptr as *const f64 == high_ptr || out_ptr as *const f64 == low_ptr {
-            // Need temporary buffer for aliased operation
             let mut temp_values = vec![0.0; total_len];
             let combos =
                 dti_batch_inner_into(high, low, &sweep, Kernel::Auto, false, &mut temp_values)
@@ -2366,13 +2331,11 @@ mod tests {
     fn check_dti_length_mismatch(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Test length mismatch between high and low arrays
         let high = vec![10.0, 11.0, 12.0];
-        let low = vec![9.0, 10.0]; // Different length
+        let low = vec![9.0, 10.0];
         let params = DtiParams::default();
         let input = DtiInput::from_slices(&high, &low, params);
 
-        // Test dti_with_kernel
         let result = dti_with_kernel(&input, kernel);
         assert!(
             result.is_err(),
@@ -2391,7 +2354,6 @@ mod tests {
             ),
         }
 
-        // Test dti_into_slice
         let mut out = vec![0.0; high.len()];
         let result = dti_into_slice(&mut out, &input, kernel);
         assert!(
@@ -2411,7 +2373,6 @@ mod tests {
             ),
         }
 
-        // Test batch functions
         let sweep = DtiBatchRange::default();
         let result = dti_batch_inner(&high, &low, &sweep, kernel, false);
         assert!(
@@ -2439,16 +2400,13 @@ mod tests {
         test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        // Test that on WASM, passing AVX kernels gracefully falls back to scalar
         let high = vec![10.0, 11.0, 12.0, 13.0, 14.0];
         let low = vec![9.0, 10.0, 11.0, 12.0, 13.0];
         let params = DtiParams::default();
         let input = DtiInput::from_slices(&high, &low, params);
 
-        // Get reference result using scalar kernel
         let scalar_result = dti_with_kernel(&input, Kernel::Scalar)?;
 
-        // Try with AVX2 kernel - should fallback to scalar on WASM and not panic
         let avx2_result = dti_with_kernel(&input, Kernel::Avx2)?;
         assert_eq!(
             scalar_result.values.len(),
@@ -2475,7 +2433,6 @@ mod tests {
             );
         }
 
-        // Try with AVX512 kernel - should fallback to scalar on WASM and not panic
         let avx512_result = dti_with_kernel(&input, Kernel::Avx512)?;
         assert_eq!(
             scalar_result.values.len(),
@@ -2502,12 +2459,11 @@ mod tests {
             );
         }
 
-        // Also test dti_into_slice
         let mut out_scalar = vec![0.0; high.len()];
         let mut out_avx = vec![0.0; high.len()];
 
         dti_into_slice(&mut out_scalar, &input, Kernel::Scalar)?;
-        dti_into_slice(&mut out_avx, &input, Kernel::Avx2)?; // Should not panic
+        dti_into_slice(&mut out_avx, &input, Kernel::Avx2)?;
 
         for (i, (s, a)) in out_scalar.iter().zip(out_avx.iter()).enumerate() {
             if s.is_nan() && a.is_nan() {
@@ -2529,7 +2485,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        Ok(()) // Skip on non-WASM targets
+        Ok(())
     }
 
     #[cfg(debug_assertions)]
@@ -2539,54 +2495,53 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            DtiParams::default(), // r: 14, s: 10, u: 5
+            DtiParams::default(),
             DtiParams {
                 r: Some(1),
                 s: Some(1),
                 u: Some(1),
-            }, // minimum values
+            },
             DtiParams {
                 r: Some(5),
                 s: Some(5),
                 u: Some(5),
-            }, // small values
+            },
             DtiParams {
                 r: Some(20),
                 s: Some(15),
                 u: Some(10),
-            }, // medium values
+            },
             DtiParams {
                 r: Some(50),
                 s: Some(30),
                 u: Some(20),
-            }, // large values
+            },
             DtiParams {
                 r: Some(100),
                 s: Some(50),
                 u: Some(25),
-            }, // very large values
+            },
             DtiParams {
                 r: Some(14),
                 s: Some(5),
                 u: Some(20),
-            }, // asymmetric - u > r
+            },
             DtiParams {
                 r: Some(30),
                 s: Some(10),
                 u: Some(5),
-            }, // asymmetric - r > s > u
+            },
             DtiParams {
                 r: Some(10),
                 s: Some(20),
                 u: Some(15),
-            }, // asymmetric - s > u > r
+            },
             DtiParams {
                 r: Some(2),
                 s: Some(10),
                 u: Some(5),
-            }, // small r, normal s and u
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2595,12 +2550,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2653,7 +2607,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_dti_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2664,25 +2618,20 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating test data with realistic high/low prices
         let strat = (2usize..=50)
             .prop_flat_map(|max_period| {
-                let min_len = max_period * 3; // Ensure sufficient data for warmup
+                let min_len = max_period * 3;
                 (
-                    // Base price level and volatility
                     (100.0f64..5000.0f64, 0.01f64..0.1f64),
-                    // Generate parameters r, s, u
                     (
                         1usize..=max_period,
                         1usize..=max_period,
                         1usize..=max_period,
                     ),
-                    // Data length
                     min_len..400,
                 )
             })
             .prop_flat_map(|((base_price, volatility), (r, s, u), len)| {
-                // Generate realistic high/low price data using proptest strategies
                 let price_changes = prop::collection::vec((-1.0f64..1.0f64), len);
 
                 (
@@ -2698,11 +2647,9 @@ mod tests {
                 let mut current_price = base_price;
 
                 for change_factor in changes {
-                    // Random walk with trend
                     let change = change_factor * volatility * current_price;
-                    current_price = (current_price + change).max(10.0); // Ensure positive
+                    current_price = (current_price + change).max(10.0);
 
-                    // Generate high/low around current price
                     let daily_range = current_price * volatility * (0.5 + change_factor.abs());
                     let mid_adjustment = change_factor * daily_range * 0.25;
 
@@ -2710,7 +2657,7 @@ mod tests {
                     let daily_low = current_price - daily_range / 2.0 + mid_adjustment;
 
                     high.push(daily_high);
-                    low.push(daily_low.max(1.0)); // Ensure low is positive and less than high
+                    low.push(daily_low.max(1.0));
                 }
 
                 (high, low, r, s, u)
@@ -2725,25 +2672,17 @@ mod tests {
                 };
                 let input = DtiInput::from_slices(&high, &low, params);
 
-                // Test with specified kernel
                 let result = dti_with_kernel(&input, kernel);
                 prop_assert!(result.is_ok(), "DTI computation failed: {:?}", result);
                 let DtiOutput { values: out } = result.unwrap();
 
-                // Test with scalar reference
                 let DtiOutput { values: ref_out } =
                     dti_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Output length matches input
                 prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
 
-                // Property 2: Early values should be NaN (warmup period)
-                // DTI needs at least 2 values to compute differences
                 prop_assert!(out[0].is_nan(), "First value should be NaN");
-                // Note: out[1] can be non-NaN and non-zero if there's a price difference
 
-                
-                
                 let finite_values: Vec<f64> =
                     out.iter().copied().filter(|v| v.is_finite()).collect();
                 if !finite_values.is_empty() {
@@ -2752,7 +2691,6 @@ mod tests {
                         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                     let min_val = finite_values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
 
-                    
                     prop_assert!(
                         max_val <= 100.0001 && min_val >= -100.0001,
                         "DTI values exceed mathematical bounds: [{:.6}, {:.6}]",
@@ -2761,7 +2699,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -2790,8 +2727,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let is_strong_uptrend = high
                     .windows(5)
                     .all(|w| w.windows(2).all(|pair| pair[1] > pair[0] * 1.001))
@@ -2831,7 +2766,6 @@ mod tests {
                     }
                 }
 
-                
                 #[cfg(debug_assertions)]
                 for (i, &val) in out.iter().enumerate() {
                     if val.is_nan() {
@@ -2849,8 +2783,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 if r == 1 && s == 1 && u == 1 && out.len() > 10 {
                     let responsive_values: Vec<f64> = out[2..10]
                         .iter()
@@ -2863,8 +2795,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let is_zero_volatility = high
                     .iter()
                     .zip(low.iter())
@@ -2882,8 +2812,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if high.len() >= 10 {
                     let spreads: Vec<f64> =
                         high.iter().zip(low.iter()).map(|(h, l)| h - l).collect();
@@ -2892,7 +2820,6 @@ mod tests {
                         .iter()
                         .all(|&s| (s - first_spread).abs() < first_spread * 0.01);
 
-                    
                     let high_changes: Vec<f64> =
                         high.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
                     let low_changes: Vec<f64> =
@@ -2921,8 +2848,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if high.len() >= 10 {
                     let high_rising = high
                         .windows(5)
@@ -3057,19 +2982,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (1, 5, 1, 1, 5, 1, 1, 5, 1),    
-            (5, 15, 5, 5, 15, 5, 5, 15, 5), 
-            (10, 30, 10, 10, 20, 10, 5, 15, 5), 
-            (14, 14, 0, 10, 10, 0, 1, 10, 1), 
-            (1, 20, 5, 10, 10, 0, 5, 5, 0), 
-            (20, 50, 15, 15, 30, 15, 10, 20, 10), 
-            (2, 6, 2, 8, 12, 2, 3, 9, 3),   
-            (50, 100, 25, 30, 60, 30, 20, 40, 20), 
-            (14, 14, 0, 5, 20, 5, 5, 20, 5), 
-            (5, 5, 0, 5, 5, 0, 1, 10, 1),   
+            (1, 5, 1, 1, 5, 1, 1, 5, 1),
+            (5, 15, 5, 5, 15, 5, 5, 15, 5),
+            (10, 30, 10, 10, 20, 10, 5, 15, 5),
+            (14, 14, 0, 10, 10, 0, 1, 10, 1),
+            (1, 20, 5, 10, 10, 0, 5, 5, 0),
+            (20, 50, 15, 15, 30, 15, 10, 20, 10),
+            (2, 6, 2, 8, 12, 2, 3, 9, 3),
+            (50, 100, 25, 30, 60, 30, 20, 40, 20),
+            (14, 14, 0, 5, 20, 5, 5, 20, 5),
+            (5, 5, 0, 5, 5, 0, 1, 10, 1),
         ];
 
         for (cfg_idx, &(r_start, r_end, r_step, s_start, s_end, s_step, u_start, u_end, u_step)) in
@@ -3092,7 +3015,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3151,7 +3073,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -3178,8 +3100,7 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_dti_into_matches_api() -> Result<(), Box<dyn Error>> {
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
@@ -3190,10 +3111,8 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
         let input = DtiInput::with_default_candles(&candles);
 
-        
         let baseline = dti(&input)?;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
         dti_into(&input, &mut out)?;
 

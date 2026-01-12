@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::chandelier_exit::{
     ce_batch_with_kernel, CeBatchRange, ChandelierExitBuilder, ChandelierExitData,
     ChandelierExitInput, ChandelierExitParams,
@@ -34,7 +32,6 @@ fn chandelier_exit_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
         return Ok(());
     }
 
-    
     let len = 8192usize;
     let mut close = vec![f64::NAN; len];
     for i in 4..len {
@@ -57,7 +54,6 @@ fn chandelier_exit_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     };
     let cpu = ce_batch_with_kernel(&high, &low, &close, &sweep, Kernel::ScalarBatch)?;
 
-    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let close_f32: Vec<f32> = close.iter().map(|&v| v as f32).collect();
@@ -68,7 +64,6 @@ fn chandelier_exit_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Er
     assert_eq!(combos.len() * 2, dev.rows);
     assert_eq!(cpu.cols, dev.cols);
 
-    
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
     let tol = 5e-4;
@@ -123,7 +118,6 @@ fn chandelier_exit_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
     let mult = 3.0f64;
     let use_close = true;
 
-    
     let mut cpu_long_tm = vec![f64::NAN; cols * rows];
     let mut cpu_short_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -160,7 +154,6 @@ fn chandelier_exit_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         }
     }
 
-    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let close_tm_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

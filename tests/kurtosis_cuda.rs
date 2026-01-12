@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::kurtosis::{
     kurtosis_batch_with_kernel, kurtosis_with_kernel, KurtosisBatchRange, KurtosisInput,
     KurtosisParams,
@@ -40,7 +38,7 @@ fn kurtosis_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut data = vec![f64::NAN; len];
     for i in 6..len {
         let x = i as f64;
-        
+
         let base = (x * 0.2).sin() + 0.25 * (x * 0.13).cos();
         data[i] = base + 0.01 * ((i % 13) as f64 - 6.0);
         if i % 257 == 0 {
@@ -67,7 +65,7 @@ fn kurtosis_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = vec![0f32; dev_arr.len()];
     dev_arr.buf.copy_to(&mut gpu)?;
 
-    let tol = 1.5e-1; 
+    let tol = 1.5e-1;
     for (idx, (&cpu_val, &gpu_val)) in cpu.values.iter().zip(gpu.iter()).enumerate() {
         assert!(
             approx_eq(cpu_val, gpu_val as f64, tol),
@@ -98,7 +96,6 @@ fn kurtosis_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     }
     let period = 15usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

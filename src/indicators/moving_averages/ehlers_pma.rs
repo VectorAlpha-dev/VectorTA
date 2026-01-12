@@ -1,59 +1,12 @@
-//! # Ehlers Predictive Moving Average (Ehlers PMA)
-//!
-//! A predictive moving average developed by John Ehlers that uses double smoothing
-//! with weighted moving averages to create a predictive signal and trigger line.
-//!
-//! ## Algorithm
-//! The indicator computes two weighted moving averages (WMAs) with fixed weights:
-//! 1. First WMA: 7-period weighted average with weights [7,6,5,4,3,2,1]/28
-//! 2. Second WMA: Same weighted average applied to the first WMA
-//! 3. Predict: 2 × WMA1 - WMA2 (extrapolation)
-//! 4. Trigger: 4-period weighted average of Predict with weights [4,3,2,1]/10
-//!
-//! ## Parameters
-//! This indicator has no configurable parameters. The weights and periods are fixed
-//! as per Ehlers' original specification.
-//!
-//! ## Inputs
-//! - **data**: Time series data as a slice of f64 values or Candles with source selection.
-//!
-//! ## Returns
-//! - **`Ok(EhlersPmaOutput)`** containing:
-//!   - `predict`: Leading indicator line with NaN values during warmup (first 12 values)
-//!   - `trigger`: Smoothed signal line for crossover detection with NaN values during warmup (first 15 values)
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub only - delegates to scalar (no proven win)
-//! - **AVX512 kernel**: ❌ Stub only - delegates to scalar (no proven win)
-//! - **Streaming update**: ✅ O(1) low-constant recurrences (A,S,A1,S1,A2,T)
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
-//! - Decision: SIMD not enabled — per-iteration dot products are already efficiently
-//!   auto-vectorized by the compiler; explicit AVX2/AVX512 showed no consistent >5% win
-//!   vs scalar while matching reference tolerances. Stubs remain for future revisits.
-//!
-//! ## Example
-//! ```rust
-//! use vector_ta::indicators::moving_averages::ehlers_pma::*;
-//!
-//! let data = vec![100.0; 20]; // Sample data
-//! let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
-//! let output = ehlers_pma(&input).unwrap();
-//! assert_eq!(output.predict.len(), data.len());
-//! assert_eq!(output.trigger.len(), data.len());
-//! ```
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaEhlersPma};
-// For CUDA Python interop we provide an ehlers-specific handle implementing
-// CAI v3 + DLPack and keeping the CUDA context alive.
+
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -64,17 +17,17 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, detect_best_kernel,
-};
+use crate::utilities::helpers::{alloc_with_nan_prefix, detect_best_kernel};
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
@@ -95,7 +48,10 @@ pub struct EhlersPmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct EhlersPmaParams;
 
 impl Default for EhlersPmaParams {
@@ -105,11 +61,6 @@ impl Default for EhlersPmaParams {
     }
 }
 
-/// Dummy sweep descriptor used for CUDA/API parity with other moving averages.
-///
-/// `EhlersPma` has fixed coefficients, so `combos` controls how many identical
-/// rows are produced when exercising the batch CUDA kernel (mirroring ALMA's
-/// "one series × many params" surface).
 #[derive(Debug, Clone)]
 pub struct EhlersPmaBatchRange {
     pub combos: usize,
@@ -128,7 +79,9 @@ pub fn expand_grid(range: &EhlersPmaBatchRange) -> Vec<EhlersPmaParams> {
     if count == 0 {
         return Vec::new();
     }
-    core::iter::repeat(EhlersPmaParams::default()).take(count).collect()
+    core::iter::repeat(EhlersPmaParams::default())
+        .take(count)
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -163,10 +116,12 @@ impl<'a> EhlersPmaInput<'a> {
     }
 }
 
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyo3::pyclass(module = "ta_indicators.cuda", name = "EhlersPmaDeviceArrayF32", unsendable)]
+#[pyo3::pyclass(
+    module = "ta_indicators.cuda",
+    name = "EhlersPmaDeviceArrayF32",
+    unsendable
+)]
 pub struct EhlersPmaDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -190,7 +145,7 @@ impl EhlersPmaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Async semantics: kernels are not synchronized here; include real stream handle per CAI v3.
+
         if self.stream != 0 {
             d.set_item("stream", self.stream)?;
         }
@@ -213,7 +168,6 @@ impl EhlersPmaDeviceArrayF32Py {
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
         let (kdl, alloc_dev) = slf.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -227,22 +181,24 @@ impl EhlersPmaDeviceArrayF32Py {
                             "device copy not implemented for __dlpack__",
                         ));
                     } else {
-                        return Err(PyValueError::new_err(
-                            "dl_device mismatch for __dlpack__",
-                        ));
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                     }
                 }
             }
         }
 
-        
-        
         let _ = stream;
 
-        
         let dummy = cust::memory::DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let inner = std::mem::replace(&mut slf.inner, DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 });
+        let inner = std::mem::replace(
+            &mut slf.inner,
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
+        );
 
         let rows = inner.rows;
         let cols = inner.cols;
@@ -325,7 +281,11 @@ pub enum EhlersPmaError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("ehlers_pma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("ehlers_pma: invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -334,34 +294,11 @@ pub enum EhlersPmaError {
     SizeOverflow { rows: usize, cols: usize },
 }
 
-/// Computes the Ehlers Predictive Moving Average with automatic kernel selection.
-///
-/// This is the main entry point for calculating the indicator. It automatically
-/// detects and uses the best available SIMD kernel for your CPU architecture.
-///
-/// # Arguments
-/// * `input` - Input data containing price series and parameters
-///
-/// # Returns
-/// * `Ok(EhlersPmaOutput)` - Predict and trigger arrays on success
-/// * `Err(EhlersPmaError)` - Error if input validation fails
 #[inline]
 pub fn ehlers_pma(input: &EhlersPmaInput) -> Result<EhlersPmaOutput, EhlersPmaError> {
     ehlers_pma_with_kernel(input, Kernel::Auto)
 }
 
-/// Computes the Ehlers Predictive Moving Average with explicit kernel selection.
-///
-/// This variant allows manual selection of the computation kernel for testing
-/// or when specific performance characteristics are required.
-///
-/// # Arguments
-/// * `input` - Input data containing price series and parameters
-/// * `kernel` - Explicit kernel selection (Scalar, AVX2, AVX512, or Auto)
-///
-/// # Returns
-/// * `Ok(EhlersPmaOutput)` - Predict and trigger arrays on success
-/// * `Err(EhlersPmaError)` - Error if input validation fails
 pub fn ehlers_pma_with_kernel(
     input: &EhlersPmaInput,
     kernel: Kernel,
@@ -378,9 +315,6 @@ pub fn ehlers_pma_with_kernel(
         .position(|x| !x.is_nan())
         .ok_or(EhlersPmaError::AllValuesNaN)?;
 
-    
-    
-    
     const MIN_REQUIRED: usize = 14;
     if len - first_valid < MIN_REQUIRED {
         return Err(EhlersPmaError::NotEnoughValidData {
@@ -389,43 +323,60 @@ pub fn ehlers_pma_with_kernel(
         });
     }
 
-    
     let warm_wma1 = first_valid + 7;
     let warm_wma2 = first_valid + 13;
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    
     let mut predict = alloc_with_nan_prefix(len, warm_predict);
     let mut trigger = alloc_with_nan_prefix(len, warm_trigger);
 
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
-    
     unsafe {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match chosen {
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                ehlers_pma_avx512(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger)
-            }
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                ehlers_pma_avx2(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger)
-            }
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                ehlers_pma_scalar_direct(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => ehlers_pma_avx512(
+                data,
+                &mut predict,
+                &mut trigger,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            ),
+            Kernel::Avx2 | Kernel::Avx2Batch => ehlers_pma_avx2(
+                data,
+                &mut predict,
+                &mut trigger,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            ),
+            Kernel::Scalar | Kernel::ScalarBatch => ehlers_pma_scalar_direct(
+                data,
+                &mut predict,
+                &mut trigger,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            ),
             Kernel::Auto => unreachable!(),
         }
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            
-            let _ = chosen; 
-            ehlers_pma_scalar_direct(data, &mut predict, &mut trigger, warm_wma1, warm_wma2, warm_trigger);
+            let _ = chosen;
+            ehlers_pma_scalar_direct(
+                data,
+                &mut predict,
+                &mut trigger,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            );
         }
     }
 
@@ -452,12 +403,10 @@ fn ehlers_pma_scalar_direct(
     let inv28 = 1.0 / 28.0;
     let inv10 = 1.0 / 10.0;
 
-    
     let mut w_ring = [0.0f64; 7];
     let mut w_head = 0usize;
 
     for i in warm_wma1..len {
-        
         let w1 = (7.0 * data[i - 1]
             + 6.0 * data[i - 2]
             + 5.0 * data[i - 3]
@@ -473,12 +422,10 @@ fn ehlers_pma_scalar_direct(
             w_head = 0;
         }
 
-        
         if i < warm_wma2 {
             continue;
         }
 
-        
         let k0 = if w_head == 0 { 6 } else { w_head - 1 };
         let k1 = if k0 == 0 { 6 } else { k0 - 1 };
         let k2 = if k1 == 0 { 6 } else { k1 - 1 };
@@ -496,11 +443,9 @@ fn ehlers_pma_scalar_direct(
             + 1.0 * w_ring[k6])
             * inv28;
 
-        
         let p = 2.0 * w1 - w2;
         predict[i] = p;
 
-        
         if i >= warm_trigger {
             trigger[i] =
                 (4.0 * p + 3.0 * predict[i - 1] + 2.0 * predict[i - 2] + 1.0 * predict[i - 3])
@@ -508,7 +453,6 @@ fn ehlers_pma_scalar_direct(
         }
     }
 }
-
 
 #[inline]
 pub fn ehlers_pma_scalar(
@@ -530,7 +474,6 @@ pub fn ehlers_pma_scalar(
     let inv28 = 1.0 / 28.0;
     let inv10 = 1.0 / 10.0;
 
-    
     for i in warm_wma1..len {
         wma1[i] = (7.0 * data[i - 1]
             + 6.0 * data[i - 2]
@@ -542,7 +485,6 @@ pub fn ehlers_pma_scalar(
             * inv28;
     }
 
-    
     for i in warm_wma2..len {
         wma2[i] = (7.0 * wma1[i]
             + 6.0 * wma1[i - 1]
@@ -554,19 +496,16 @@ pub fn ehlers_pma_scalar(
             * inv28;
     }
 
-    
     for i in warm_predict..len {
         predict[i] = 2.0 * wma1[i] - wma2[i];
     }
 
-    
     for i in warm_trigger..len {
         trigger[i] =
             (4.0 * predict[i] + 3.0 * predict[i - 1] + 2.0 * predict[i - 2] + 1.0 * predict[i - 3])
                 * inv10;
     }
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
@@ -578,11 +517,8 @@ unsafe fn ehlers_pma_avx2(
     warm_wma2: usize,
     warm_trigger: usize,
 ) {
-    
-    
     ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
@@ -594,11 +530,8 @@ unsafe fn ehlers_pma_avx512(
     warm_wma2: usize,
     warm_trigger: usize,
 ) {
-    
-    
     ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger)
 }
-
 
 #[inline]
 pub fn ehlers_pma_into_flat_with_kernel(
@@ -642,7 +575,6 @@ pub fn ehlers_pma_into_flat_with_kernel(
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    
     for v in &mut predict_flat[..warm_predict.min(len)] {
         *v = f64::NAN;
     }
@@ -658,28 +590,49 @@ pub fn ehlers_pma_into_flat_with_kernel(
     unsafe {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         match chosen {
-            Kernel::Avx512 | Kernel::Avx512Batch => {
-                ehlers_pma_avx512(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger)
-            }
-            Kernel::Avx2 | Kernel::Avx2Batch => {
-                ehlers_pma_avx2(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger)
-            }
-            Kernel::Scalar | Kernel::ScalarBatch => {
-                ehlers_pma_scalar_direct(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger)
-            }
+            Kernel::Avx512 | Kernel::Avx512Batch => ehlers_pma_avx512(
+                data,
+                predict_flat,
+                trigger_flat,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            ),
+            Kernel::Avx2 | Kernel::Avx2Batch => ehlers_pma_avx2(
+                data,
+                predict_flat,
+                trigger_flat,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            ),
+            Kernel::Scalar | Kernel::ScalarBatch => ehlers_pma_scalar_direct(
+                data,
+                predict_flat,
+                trigger_flat,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            ),
             Kernel::Auto => unreachable!(),
         }
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            let _ = chosen; 
-            ehlers_pma_scalar_direct(data, predict_flat, trigger_flat, warm_wma1, warm_wma2, warm_trigger);
+            let _ = chosen;
+            ehlers_pma_scalar_direct(
+                data,
+                predict_flat,
+                trigger_flat,
+                warm_wma1,
+                warm_wma2,
+                warm_trigger,
+            );
         }
     }
 
     Ok((rows, cols))
 }
-
 
 #[inline]
 pub fn ehlers_pma_into_flat(
@@ -688,7 +641,6 @@ pub fn ehlers_pma_into_flat(
 ) -> Result<(usize, usize), EhlersPmaError> {
     ehlers_pma_into_flat_with_kernel(out, input, Kernel::Auto)
 }
-
 
 #[inline]
 pub fn ehlers_pma_into_slices_with_kernel(
@@ -726,7 +678,6 @@ pub fn ehlers_pma_into_slices_with_kernel(
     let warm_predict = warm_wma2;
     let warm_trigger = warm_wma2 + 3;
 
-    
     for v in &mut predict[..warm_predict.min(len)] {
         *v = f64::NAN;
     }
@@ -756,13 +707,12 @@ pub fn ehlers_pma_into_slices_with_kernel(
 
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            let _ = chosen; 
+            let _ = chosen;
             ehlers_pma_scalar_direct(data, predict, trigger, warm_wma1, warm_wma2, warm_trigger);
         }
     }
     Ok(())
 }
-
 
 #[inline]
 pub fn ehlers_pma_into_slices(
@@ -773,11 +723,7 @@ pub fn ehlers_pma_into_slices(
     ehlers_pma_into_slices_with_kernel(predict, trigger, input, Kernel::Auto)
 }
 
-/// Write Ehlers PMA outputs into caller-provided buffers without allocations.
-///
-/// - Preserves the NaN warmup prefixes exactly like the Vec-returning API.
-/// - `predict.len()` and `trigger.len()` must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ehlers_pma_into(
     input: &EhlersPmaInput,
@@ -787,35 +733,28 @@ pub fn ehlers_pma_into(
     ehlers_pma_into_slices_with_kernel(predict, trigger, input, Kernel::Auto)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct EhlersPmaStream {
-    
     prev: Option<f64>,
 
-    
-    x_ring: [f64; 7], 
-    w_ring: [f64; 7], 
-    p_ring: [f64; 4], 
+    x_ring: [f64; 7],
+    w_ring: [f64; 7],
+    p_ring: [f64; 4],
 
-    
     x_head: usize,
     w_head: usize,
     p_head: usize,
 
-    
-    filled_x: usize, 
-    filled_w: usize, 
-    filled_p: usize, 
+    filled_x: usize,
+    filled_w: usize,
+    filled_p: usize,
 
-    
-    
     A: f64,
     S: f64,
-    
+
     A1: f64,
     S1: f64,
-    
+
     A2: f64,
     T: f64,
 }
@@ -845,16 +784,14 @@ impl EhlersPmaStream {
 
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<(f64, f64)> {
-        
         if value.is_nan() {
             return None;
         }
 
-        
         let src_lag = match self.prev {
             None => {
                 self.prev = Some(value);
-                return None; 
+                return None;
             }
             Some(p) => {
                 self.prev = Some(value);
@@ -862,10 +799,9 @@ impl EhlersPmaStream {
             }
         };
 
-        const INV_28: f64 = 1.0 / 28.0; 
-        const INV_10: f64 = 1.0 / 10.0; 
+        const INV_28: f64 = 1.0 / 28.0;
+        const INV_10: f64 = 1.0 / 10.0;
 
-        
         if self.filled_x < 7 {
             self.x_ring[self.x_head] = src_lag;
             self.x_head += 1;
@@ -878,12 +814,9 @@ impl EhlersPmaStream {
                 return None;
             }
 
-            
             let x = &self.x_ring;
             self.A = ((x[0] + x[1]) + (x[2] + x[3])) + ((x[4] + x[5]) + x[6]);
 
-            
-            
             self.S = 7.0 * x[6]
                 + 6.0 * x[5]
                 + 5.0 * x[4]
@@ -892,11 +825,10 @@ impl EhlersPmaStream {
                 + 2.0 * x[1]
                 + 1.0 * x[0];
 
-            
             let w1 = self.S * INV_28;
 
-            let old_A1 = self.A1; 
-            let w_old = self.w_ring[self.w_head]; 
+            let old_A1 = self.A1;
+            let w_old = self.w_ring[self.w_head];
             self.S1 = self.S1 + 7.0 * w1 - old_A1;
             self.A1 = self.A1 + w1 - w_old;
 
@@ -905,13 +837,11 @@ impl EhlersPmaStream {
             if self.w_head == 7 {
                 self.w_head = 0;
             }
-            self.filled_w = 1; 
+            self.filled_w = 1;
 
-            
             return None;
         }
 
-        
         let x_old = self.x_ring[self.x_head];
         let old_A = self.A;
         self.A = self.A + src_lag - x_old;
@@ -921,8 +851,8 @@ impl EhlersPmaStream {
         if self.x_head == 7 {
             self.x_head = 0;
         }
-        
-        let i0 = if self.x_head == 0 { 6 } else { self.x_head - 1 }; 
+
+        let i0 = if self.x_head == 0 { 6 } else { self.x_head - 1 };
         let i1 = if i0 == 0 { 6 } else { i0 - 1 };
         let i2 = if i1 == 0 { 6 } else { i1 - 1 };
         let i3 = if i2 == 0 { 6 } else { i2 - 1 };
@@ -938,7 +868,6 @@ impl EhlersPmaStream {
             + 1.0 * self.x_ring[i6];
         let w1 = w1_num * INV_28;
 
-        
         let old_A1 = self.A1;
         let w_old = self.w_ring[self.w_head];
         self.S1 = self.S1 + 7.0 * w1 - old_A1;
@@ -952,12 +881,10 @@ impl EhlersPmaStream {
             self.filled_w += 1;
         }
         if self.filled_w < 7 {
-            
             return None;
         }
 
-        
-        let k0 = if self.w_head == 0 { 6 } else { self.w_head - 1 }; 
+        let k0 = if self.w_head == 0 { 6 } else { self.w_head - 1 };
         let k1 = if k0 == 0 { 6 } else { k0 - 1 };
         let k2 = if k1 == 0 { 6 } else { k1 - 1 };
         let k3 = if k2 == 0 { 6 } else { k2 - 1 };
@@ -974,7 +901,6 @@ impl EhlersPmaStream {
         let w2 = w2_num * INV_28;
         let predict = 2.0 * w1 - w2;
 
-        
         let old_A2 = self.A2;
         let p_old = self.p_ring[self.p_head];
         self.T = self.T + 4.0 * predict - old_A2;
@@ -992,8 +918,7 @@ impl EhlersPmaStream {
             return Some((predict, f64::NAN));
         }
 
-        
-        let j0 = if self.p_head == 0 { 3 } else { self.p_head - 1 }; 
+        let j0 = if self.p_head == 0 { 3 } else { self.p_head - 1 };
         let j1 = if j0 == 0 { 3 } else { j0 - 1 };
         let j2 = if j1 == 0 { 3 } else { j1 - 1 };
         let j3 = if j2 == 0 { 3 } else { j2 - 1 };
@@ -1026,15 +951,14 @@ impl EhlersPmaStream {
     }
 }
 
-
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct RollingLwma<const N: usize> {
     buf: [f64; N],
     head: usize,
     filled: usize,
-    total: f64, 
-    num: f64,   
+    total: f64,
+    num: f64,
 }
 
 #[allow(dead_code)]
@@ -1057,7 +981,7 @@ impl<const N: usize> RollingLwma<N> {
         self.total = 0.0;
         self.num = 0.0;
     }
-    /// Push `x`. Returns Some(lwma) once `N` samples are available.
+
     #[inline]
     fn push(&mut self, x: f64) -> Option<f64> {
         if self.filled < N {
@@ -1065,11 +989,10 @@ impl<const N: usize> RollingLwma<N> {
             self.head = (self.head + 1) % N;
             self.filled += 1;
             if self.filled == N {
-                
                 let mut w = 1.0;
                 let mut acc = 0.0;
                 let mut sum = 0.0;
-                let mut i = self.head; 
+                let mut i = self.head;
                 for _ in 0..N {
                     let v = self.buf[i];
                     acc += w * v;
@@ -1087,7 +1010,7 @@ impl<const N: usize> RollingLwma<N> {
             }
             return None;
         }
-        
+
         let x_old = self.buf[self.head];
         let total_old = self.total;
         self.buf[self.head] = x;
@@ -1100,7 +1023,6 @@ impl<const N: usize> RollingLwma<N> {
         Some(self.num / den)
     }
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ehlers_pma")]
@@ -1146,7 +1068,7 @@ pub fn ehlers_pma_flat_py<'py>(
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item("rows", rows)?;
     dict.set_item("cols", cols)?;
-    // add names for downstream parity with multi-output indicators
+
     dict.set_item("lines", vec!["predict", "trigger"])?;
     Ok(dict)
 }
@@ -1165,8 +1087,6 @@ pub fn ehlers_pma_batch_py<'py>(
     ehlers_pma_flat_py(py, data, kernel)
 }
 
-// Robust usize range expansion for batch-style sweeps.
-// step == 0 => singleton; reversed bounds allowed (inclusive count).
 #[inline]
 fn usize_range_len(range: (usize, usize, usize)) -> Result<usize, EhlersPmaError> {
     let (start, end, step) = range;
@@ -1218,8 +1138,18 @@ pub fn ehlers_pma_cuda_batch_dev_py(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
-        EhlersPmaDeviceArrayF32Py { inner: predict, _ctx: ctx_arc.clone(), device_id: dev_id, stream: stream_handle },
-        EhlersPmaDeviceArrayF32Py { inner: trigger, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle },
+        EhlersPmaDeviceArrayF32Py {
+            inner: predict,
+            _ctx: ctx_arc.clone(),
+            device_id: dev_id,
+            stream: stream_handle,
+        },
+        EhlersPmaDeviceArrayF32Py {
+            inner: trigger,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+            stream: stream_handle,
+        },
     ))
 }
 
@@ -1257,8 +1187,18 @@ pub fn ehlers_pma_cuda_many_series_one_param_dev_py(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     Ok((
-        EhlersPmaDeviceArrayF32Py { inner: predict, _ctx: ctx_arc.clone(), device_id: dev_id, stream: stream_handle },
-        EhlersPmaDeviceArrayF32Py { inner: trigger, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle },
+        EhlersPmaDeviceArrayF32Py {
+            inner: predict,
+            _ctx: ctx_arc.clone(),
+            device_id: dev_id,
+            stream: stream_handle,
+        },
+        EhlersPmaDeviceArrayF32Py {
+            inner: trigger,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+            stream: stream_handle,
+        },
     ))
 }
 
@@ -1274,7 +1214,6 @@ impl EhlersPmaStreamPy {
     #[new]
     #[pyo3(signature = (period=None, offset=None, sigma=None))]
     fn new(period: Option<usize>, offset: Option<f64>, sigma: Option<f64>) -> PyResult<Self> {
-        // Ignore the parameters - they're just for API parity
         let _ = (period, offset, sigma);
         let stream = EhlersPmaStream::try_new(EhlersPmaParams::default())
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1290,16 +1229,15 @@ impl EhlersPmaStreamPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EhlersPmaJsOutput {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ehlers_pma)]
 pub fn ehlers_pma_js(data: &[f64]) -> Result<JsValue, JsValue> {
     let input = EhlersPmaInput::from_slice(data, EhlersPmaParams::default());
@@ -1311,7 +1249,7 @@ pub fn ehlers_pma_js(data: &[f64]) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_pma_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(2 * len);
@@ -1320,7 +1258,7 @@ pub fn ehlers_pma_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ehlers_pma_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1328,7 +1266,7 @@ pub fn ehlers_pma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ehlers_pma_into)]
 pub fn ehlers_pma_into_js(
     in_ptr: *const f64,
@@ -1342,7 +1280,6 @@ pub fn ehlers_pma_into_js(
         let data = core::slice::from_raw_parts(in_ptr, len);
         let out = core::slice::from_raw_parts_mut(out_ptr, 2 * len);
 
-        
         if core::ptr::eq(in_ptr, out_ptr as *const f64) {
             let mut tmp = vec![0.0f64; 2 * len];
             let input = EhlersPmaInput::from_slice(data, EhlersPmaParams::default());
@@ -1367,7 +1304,6 @@ mod tests {
     use proptest::prelude::*;
     use std::error::Error;
 
-    
     fn check_ehlers_pma_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
@@ -1376,7 +1312,6 @@ mod tests {
 
         let out = ehlers_pma_with_kernel(&input, kernel)?;
 
-        
         let expected_predict_last_five = [
             59161.97066327,
             59240.51785714,
@@ -1392,7 +1327,6 @@ mod tests {
             59220.78227041,
         ];
 
-        
         let start = out.predict.len().saturating_sub(5);
         for (i, &val) in out.predict[start..].iter().enumerate() {
             let diff = (val - expected_predict_last_five[i]).abs();
@@ -1407,7 +1341,6 @@ mod tests {
             );
         }
 
-        
         for (i, &val) in out.trigger[start..].iter().enumerate() {
             let diff = (val - expected_trigger_last_five[i]).abs();
             assert!(
@@ -1525,7 +1458,6 @@ mod tests {
         assert_eq!(res.predict.len(), candles.close.len());
         assert_eq!(res.trigger.len(), candles.close.len());
 
-        
         if res.predict.len() > 20 {
             for (i, &val) in res.predict[20..].iter().enumerate() {
                 assert!(
@@ -1554,7 +1486,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let hl2: Vec<f64> = candles
             .high
             .iter()
@@ -1562,11 +1493,9 @@ mod tests {
             .map(|(h, l)| (h + l) / 2.0)
             .collect();
 
-        
         let input = EhlersPmaInput::from_slice(&hl2, EhlersPmaParams::default());
         let batch_output = ehlers_pma_with_kernel(&input, kernel)?;
 
-        
         let mut stream = EhlersPmaStream::try_new(EhlersPmaParams::default())?;
         let mut stream_predict = Vec::with_capacity(hl2.len());
         let mut stream_trigger = Vec::with_capacity(hl2.len());
@@ -1584,7 +1513,6 @@ mod tests {
             }
         }
 
-        
         assert_eq!(batch_output.predict.len(), stream_predict.len());
         assert_eq!(batch_output.trigger.len(), stream_trigger.len());
 
@@ -1632,7 +1560,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let hl2: Vec<f64> = candles
             .high
             .iter()
@@ -1643,7 +1570,6 @@ mod tests {
         let first_input = EhlersPmaInput::from_slice(&hl2, EhlersPmaParams::default());
         let first_result = ehlers_pma_with_kernel(&first_input, kernel)?;
 
-        
         let second_input =
             EhlersPmaInput::from_slice(&first_result.predict, EhlersPmaParams::default());
         let second_result = ehlers_pma_with_kernel(&second_input, kernel)?;
@@ -1708,7 +1634,7 @@ mod tests {
 
         let strat = prop::collection::vec(
             (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-            14..400, 
+            14..400,
         );
 
         proptest::test_runner::TestRunner::default()
@@ -1718,11 +1644,9 @@ mod tests {
                 let result = ehlers_pma_with_kernel(&input, kernel).unwrap();
                 let ref_result = ehlers_pma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(result.predict.len(), data.len());
                 prop_assert_eq!(result.trigger.len(), data.len());
 
-                
                 for i in 0..data.len() {
                     let p = result.predict[i];
                     let t = result.trigger[i];
@@ -1779,7 +1703,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_ehlers_pma_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1828,7 +1751,6 @@ mod tests {
         Ok(())
     }
 
-    
     generate_all_ehlers_pma_tests!(
         check_ehlers_pma_accuracy,
         check_ehlers_pma_default_candles,
@@ -1846,7 +1768,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_ehlers_pma_tests!(check_ehlers_pma_property);
 
-    
     #[test]
     fn test_ehlers_pma_basic() {
         let data = vec![
@@ -1866,27 +1787,23 @@ mod tests {
             59280.0,
             59270.0,
             59250.0,
-            59300.0, 
+            59300.0,
         ];
 
         let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
         let result = ehlers_pma(&input).unwrap();
 
-        
         assert_eq!(result.predict.len(), data.len());
         assert_eq!(result.trigger.len(), data.len());
 
-        
         for i in 0..13 {
             assert!(result.predict[i].is_nan());
         }
 
-        
         for i in 0..16 {
             assert!(result.trigger[i].is_nan());
         }
 
-        
         assert!(!result.predict[13].is_nan());
         assert!(!result.trigger[16].is_nan());
     }
@@ -1910,7 +1827,7 @@ mod tests {
             59280.0,
             59270.0,
             59250.0,
-            59300.0, 
+            59300.0,
         ];
 
         let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
@@ -1920,15 +1837,12 @@ mod tests {
         assert_eq!(rows, 2);
         assert_eq!(cols, data.len());
 
-        
         let (predict_flat, trigger_flat) = output.split_at(data.len());
 
-        
         for i in 0..13 {
             assert!(predict_flat[i].is_nan());
         }
 
-        
         for i in 0..16 {
             assert!(trigger_flat[i].is_nan());
         }
@@ -1968,21 +1882,17 @@ mod tests {
 
     #[test]
     fn test_ehlers_pma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 256usize;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
-            
             let v = 1000.0 + (i as f64) * 0.25 + ((i % 7) as f64 - 3.0) * 0.75;
             data.push(v);
         }
 
         let input = EhlersPmaInput::from_slice(&data, EhlersPmaParams::default());
 
-        
         let baseline = ehlers_pma(&input)?;
 
-        
         let mut predict = vec![0.0; len];
         let mut trigger = vec![0.0; len];
         ehlers_pma_into(&input, &mut predict, &mut trigger)?;
@@ -1990,7 +1900,6 @@ mod tests {
         assert_eq!(predict.len(), baseline.predict.len());
         assert_eq!(trigger.len(), baseline.trigger.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

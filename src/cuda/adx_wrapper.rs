@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for ADX (Average Directional Index)
-//!
-//! Parity goals
-//! - Stream NON_BLOCKING
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/adx_kernel.ptx"))
-//! - API mirrors ALMA-style device+host helpers
-//! - Warmup/NaN semantics match scalar: before first + 2*period - 1 -> NaN
-//! - VRAM sanity check + simple chunking guardrails
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::adx::{AdxBatchRange, AdxParams};
 use cust::context::Context;
@@ -30,13 +21,24 @@ pub enum CudaAdxError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -79,7 +81,9 @@ pub struct CudaAdx {
 
 impl CudaAdx {
     #[inline(always)]
-    fn div_up(n: u32, d: u32) -> u32 { (n + d - 1) / d }
+    fn div_up(n: u32, d: u32) -> u32 {
+        (n + d - 1) / d
+    }
 
     pub fn new(device_id: usize) -> Result<Self, CudaAdxError> {
         cust::init(CudaFlags::empty())?;
@@ -96,11 +100,17 @@ impl CudaAdx {
         )
         .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
         .or_else(|_| Module::from_ptx(ptx, &[]))?;
-        
+
         let pr = cust::context::CurrentContext::get_stream_priority_range()?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, Some(pr.greatest))?;
 
-        Ok(Self { module, stream, ctx: Arc::new(context), device_id: device_id as u32, policy: CudaAdxPolicy::default() })
+        Ok(Self {
+            module,
+            stream,
+            ctx: Arc::new(context),
+            device_id: device_id as u32,
+            policy: CudaAdxPolicy::default(),
+        })
     }
 
     pub fn set_policy(&mut self, policy: CudaAdxPolicy) {
@@ -108,16 +118,24 @@ impl CudaAdx {
     }
 
     #[inline]
-    pub fn ctx(&self) -> std::sync::Arc<Context> { std::sync::Arc::clone(&self.ctx) }
+    pub fn ctx(&self) -> std::sync::Arc<Context> {
+        std::sync::Arc::clone(&self.ctx)
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> Result<(), CudaAdxError> {
         if let Ok((free, _)) = mem_get_info() {
             if required.saturating_add(headroom) > free {
-                return Err(CudaAdxError::OutOfMemory { required, free, headroom });
+                return Err(CudaAdxError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             }
         }
         Ok(())
@@ -136,7 +154,7 @@ impl CudaAdx {
         let first_valid = (0..len)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
             .ok_or_else(|| CudaAdxError::InvalidInput("all values are NaN".into()))?;
-        
+
         let (start, end, step) = sweep.period;
         let periods: Vec<usize> = if start == end || step == 0 {
             vec![start]
@@ -148,9 +166,13 @@ impl CudaAdx {
             let s = step.max(1);
             while cur >= end {
                 v.push(cur);
-                if cur < s { break; }
+                if cur < s {
+                    break;
+                }
                 cur -= s;
-                if cur == usize::MAX { break; }
+                if cur == usize::MAX {
+                    break;
+                }
             }
             v
         };
@@ -184,7 +206,6 @@ impl CudaAdx {
         let (combos, first_valid, len, _max_p) = Self::prepare_batch(high, low, close, sweep)?;
         let rows = combos.len();
 
-        
         let el = std::mem::size_of::<f32>();
         let req = len
             .checked_mul(3)
@@ -198,7 +219,6 @@ impl CudaAdx {
             .checked_mul(len)
             .ok_or_else(|| CudaAdxError::InvalidInput("rows*len overflow".into()))?;
 
-        
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &self.stream) }?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..len], &self.stream) }?;
@@ -247,7 +267,7 @@ impl CudaAdx {
                 expected
             )));
         }
-        
+
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }?;
         self.stream.synchronize()?;
@@ -266,10 +286,11 @@ impl CudaAdx {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaAdxError> {
-        let func = self
-            .module
-            .get_function("adx_batch_f32")
-            .map_err(|_| CudaAdxError::MissingKernelSymbol { name: "adx_batch_f32" })?;
+        let func = self.module.get_function("adx_batch_f32").map_err(|_| {
+            CudaAdxError::MissingKernelSymbol {
+                name: "adx_batch_f32",
+            }
+        })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 32,
@@ -278,12 +299,19 @@ impl CudaAdx {
         let grid_x = Self::div_up(n_combos as u32, block_x);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         if block_x > max_threads || grid_x > max_grid_x {
-            return Err(CudaAdxError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaAdxError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         unsafe {
             let mut h = d_high.as_device_ptr().as_raw();
@@ -327,7 +355,7 @@ impl CudaAdx {
         if high_tm.len() != expected || low_tm.len() != expected || close_tm.len() != expected {
             return Err(CudaAdxError::InvalidInput("matrix shape mismatch".into()));
         }
-        
+
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -339,7 +367,7 @@ impl CudaAdx {
                 }
             }
         }
-        
+
         for &fv in &first_valids {
             if fv as usize + period >= rows {
                 return Err(CudaAdxError::InvalidInput(
@@ -402,7 +430,9 @@ impl CudaAdx {
         if out_tm.len() != expected {
             return Err(CudaAdxError::InvalidInput("out slice wrong length".into()));
         }
-        let arr = self.adx_many_series_one_param_time_major_dev(high_tm, low_tm, close_tm, cols, rows, period)?;
+        let arr = self.adx_many_series_one_param_time_major_dev(
+            high_tm, low_tm, close_tm, cols, rows, period,
+        )?;
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(expected) }?;
         unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream) }?;
         self.stream.synchronize()?;
@@ -424,8 +454,13 @@ impl CudaAdx {
         let func = self
             .module
             .get_function("adx_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaAdxError::MissingKernelSymbol { name: "adx_many_series_one_param_time_major_f32" })?;
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32) };
+            .map_err(|_| CudaAdxError::MissingKernelSymbol {
+                name: "adx_many_series_one_param_time_major_f32",
+            })?;
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         let grid_x = Self::div_up(cols as u32, block_x);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -433,7 +468,14 @@ impl CudaAdx {
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         if block_x > max_threads || grid_x > max_grid_x {
-            return Err(CudaAdxError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaAdxError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         unsafe {
             let mut h = d_high.as_device_ptr().as_raw();
@@ -459,7 +501,6 @@ impl CudaAdx {
         Ok(())
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -516,7 +557,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("adx many-series kernel");
-            self.cuda.stream.synchronize().expect("adx many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("adx many-series sync");
         }
     }
 
@@ -558,14 +602,9 @@ pub mod benches {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
             .unwrap_or(LEN_1M);
 
-        
-        let periods_host: Vec<i32> = (0..PARAM_SWEEP_250)
-            .map(|i| (8 + 8 * i) as i32)
-            .collect();
+        let periods_host: Vec<i32> = (0..PARAM_SWEEP_250).map(|i| (8 + 8 * i) as i32).collect();
         let n_combos = periods_host.len();
 
-        
-        
         let d_high = DeviceBuffer::from_slice(&high).unwrap();
         let d_low = DeviceBuffer::from_slice(&low).unwrap();
         let d_close = DeviceBuffer::from_slice(&close).unwrap();
@@ -590,7 +629,7 @@ pub mod benches {
 
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaAdx::new(0).expect("cuda adx");
-        
+
         let cols = COLS_512;
         let rows = ROWS_16K;
         let close_tm = {

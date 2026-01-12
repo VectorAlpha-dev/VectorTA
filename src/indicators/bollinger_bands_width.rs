@@ -1,28 +1,3 @@
-//! # Bollinger Bands Width (BBW)
-//!
-//! Decision note: Streaming path now uses an O(1) rolling-sum/sumsq kernel for stddev with SMA/EMA; SIMD remains disabled by default due to underperformance vs scalar.
-//!
-//! Bollinger Bands Width (sometimes called Bandwidth) shows the relative distance between
-//! the upper and lower Bollinger Bands compared to the middle band.
-//! It is typically calculated as: `(upper_band - lower_band) / middle_band`
-//!
-//! ## Parameters
-//! - **period**: Underlying MA window (default: 20)
-//! - **devup**: Upward multiplier (default: 2.0)
-//! - **devdn**: Downward multiplier (default: 2.0)
-//! - **matype**: MA type as string (default: "sma")
-//! - **devtype**: 0 = stddev, 1 = mean_ad, 2 = median_ad (default: 0)
-//!
-//! ## Returns
-//! - **`Ok(BollingerBandsWidthOutput)`**: Vec<f64> of same length as input
-//! - **`Err(BollingerBandsWidthError)`** otherwise
-//!
-//! ## Developer Notes
-//! - SIMD implemented for initial-window reduction only; loop-carried deps limit gains.
-//! - Runtime selection short-circuits to Scalar for Auto: AVX2/AVX512 underperform for typical periods.
-//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - Batch operations: ✅ Implemented with parallel processing support
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -32,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -70,27 +45,24 @@ impl<'a> AsRef<[f64]> for BollingerBandsWidthInput<'a> {
     }
 }
 
-/// O(1) streaming Bollinger Band Width for devtype=0 (stddev) with SMA/EMA middle.
-/// Exact population-σ math, matching classic scalar kernels.
-/// NaN/non-finite input resets state and returns None on that tick.
 #[derive(Clone, Debug)]
 pub struct BollingerBandsWidthStream {
     period: usize,
     u_plus_d: f64,
     kind: BBWMiddle,
-    devtype: usize, 
-    
+    devtype: usize,
+
     buf: Box<[f64]>,
-    head: usize,   
-    filled: usize, 
-    
+    head: usize,
+    filled: usize,
+
     sum: f64,
     sumsq: f64,
-    
+
     ema: f64,
     alpha: f64,
     beta: f64,
-    ema_seeded: bool, 
+    ema_seeded: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -134,11 +106,8 @@ impl BollingerBandsWidthStream {
         self.sumsq = 0.0;
         self.ema = 0.0;
         self.ema_seeded = false;
-        
     }
 
-    /// Feed one sample. Returns None until warm-up completes (period samples).
-    /// On devtype != 0, this returns None (O(1) path supports stddev only).
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
         if !x.is_finite() {
@@ -150,7 +119,6 @@ impl BollingerBandsWidthStream {
         }
 
         if self.filled == self.period {
-            
             let old = self.buf[self.head];
             self.sum += x - old;
             self.sumsq += x * x - old * old;
@@ -160,7 +128,6 @@ impl BollingerBandsWidthStream {
                 self.head = 0;
             }
         } else {
-            
             self.buf[self.head] = x;
             self.head += 1;
             if self.head == self.period {
@@ -186,12 +153,10 @@ impl BollingerBandsWidthStream {
             BBWMiddle::Sma => (mu, var_w),
             BBWMiddle::Ema => {
                 if !self.ema_seeded {
-                    
                     self.ema = mu;
                     self.ema_seeded = true;
                     (self.ema, var_w)
                 } else {
-                    
                     self.ema = self.alpha * x + self.beta * self.ema;
                     let diff = mu - self.ema;
                     (self.ema, var_w + diff * diff)
@@ -206,7 +171,6 @@ impl BollingerBandsWidthStream {
 
 #[inline(always)]
 fn fast_sqrt64(x: f64) -> f64 {
-    
     if x <= 0.0 {
         0.0
     } else {
@@ -229,7 +193,10 @@ pub struct BollingerBandsWidthOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct BollingerBandsWidthParams {
     pub period: Option<usize>,
     pub devup: Option<f64>,
@@ -450,7 +417,6 @@ pub fn bollinger_bands_width_with_kernel(
         });
     }
 
-    
     let warmup_period = first_valid_idx + period - 1;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_period);
 
@@ -458,8 +424,6 @@ pub fn bollinger_bands_width_with_kernel(
     Ok(BollingerBandsWidthOutput { values: out })
 }
 
-/// Compute Bollinger Bands Width directly into a pre-allocated buffer.
-/// This is the zero-copy variant used by Python/WASM bindings.
 pub fn bollinger_bands_width_compute_into(
     data: &[f64],
     input: &BollingerBandsWidthInput,
@@ -493,10 +457,6 @@ pub fn bollinger_bands_width_compute_into(
         });
     }
 
-    
-    
-
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -520,12 +480,7 @@ pub fn bollinger_bands_width_compute_into(
     }
 }
 
-/// Compute Bollinger Bands Width into a caller-provided buffer (no allocations).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API by pre-filling the
-///   warmup prefix with a quiet-NaN (same bit pattern as `alloc_with_nan_prefix`).
-/// - `out.len()` must equal the input length; otherwise an error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn bollinger_bands_width_into(
     input: &BollingerBandsWidthInput,
     out: &mut [f64],
@@ -561,19 +516,15 @@ pub fn bollinger_bands_width_into(
         });
     }
 
-    
     let warmup = first_valid_idx + period - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warmup] {
         *v = qnan;
     }
 
-    
     bollinger_bands_width_compute_into(data, input, out, Kernel::Auto)
 }
 
-/// Write Bollinger Bands Width directly to output slice - no allocations.
-/// This function follows the alma.rs pattern for WASM bindings.
 #[inline]
 pub fn bollinger_bands_width_into_slice(
     dst: &mut [f64],
@@ -613,16 +564,12 @@ pub fn bollinger_bands_width_into_slice(
         });
     }
 
-    
     let warmup_period = first_valid_idx + period - 1;
 
-    
     for v in &mut dst[..warmup_period] {
         *v = f64::NAN;
     }
 
-    
-    
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -672,9 +619,7 @@ pub unsafe fn bollinger_bands_width_scalar_into(
     let matype = input.get_matype();
     let devtype = input.get_devtype();
 
-    
     if devtype == 0 {
-        
         if matype.eq_ignore_ascii_case("sma") {
             return bollinger_bands_width_scalar_classic_sma(
                 data,
@@ -696,7 +641,6 @@ pub unsafe fn bollinger_bands_width_scalar_into(
         }
     }
 
-    
     let ma_data = match &input.data {
         BollingerBandsWidthData::Candles { candles, source } => {
             crate::indicators::moving_averages::ma::MaData::Candles { candles, source }
@@ -716,7 +660,7 @@ pub unsafe fn bollinger_bands_width_scalar_into(
     );
     let dev = crate::indicators::deviation::deviation(&dev_input)
         .map_err(|e| BollingerBandsWidthError::UnderlyingFunctionFailed(e.to_string()))?;
-    let dev_values = &dev.values; 
+    let dev_values = &dev.values;
 
     let start = first_valid_idx + period - 1;
     let u_plus_d = devup + devdn;
@@ -731,7 +675,6 @@ pub unsafe fn bollinger_bands_width_scalar_into(
     Ok(())
 }
 
-/// Optimized Bollinger Bands Width calculation with inline SMA and standard deviation
 #[inline]
 pub unsafe fn bollinger_bands_width_scalar_classic_sma(
     data: &[f64],
@@ -747,16 +690,14 @@ pub unsafe fn bollinger_bands_width_scalar_classic_sma(
     let start = first_valid_idx + n - 1;
     let u_plus_d = devup + devdn;
 
-    
     let mut sum = 0.0f64;
-    let mut sq_sum = 0.0f64; 
+    let mut sq_sum = 0.0f64;
     for i in 0..n {
         let x = *data.get_unchecked(first_valid_idx + i);
         sum += x;
         sq_sum = x.mul_add(x, sq_sum);
     }
 
-    
     let mut mean = sum * inv_n;
     let mut var = (sq_sum * inv_n) - mean * mean;
     if var < 0.0 {
@@ -766,7 +707,6 @@ pub unsafe fn bollinger_bands_width_scalar_classic_sma(
     let mut mid = mean;
     *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
 
-    
     let len = data.len();
     let mut i = start + 1;
     while i < len {
@@ -788,7 +728,6 @@ pub unsafe fn bollinger_bands_width_scalar_classic_sma(
     Ok(())
 }
 
-/// Optimized Bollinger Bands Width calculation with inline EMA and standard deviation
 #[inline]
 pub unsafe fn bollinger_bands_width_scalar_classic_ema(
     data: &[f64],
@@ -806,15 +745,14 @@ pub unsafe fn bollinger_bands_width_scalar_classic_ema(
     let alpha = 2.0 / (n as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    
     let mut sum = 0.0f64;
-    let mut sq_sum = 0.0f64; 
+    let mut sq_sum = 0.0f64;
     for i in 0..n {
         let x = *data.get_unchecked(first_valid_idx + i);
         sum += x;
         sq_sum = x.mul_add(x, sq_sum);
     }
-    
+
     let mut ema = sum * inv_n;
     let mut mu_w = ema;
     let mut var_w = (sq_sum * inv_n) - mu_w * mu_w;
@@ -825,7 +763,6 @@ pub unsafe fn bollinger_bands_width_scalar_classic_ema(
     let mut std = var_about_ema.sqrt();
     *out.get_unchecked_mut(start) = (u_plus_d * std) / ema;
 
-    
     let len = data.len();
     let mut i = start + 1;
     while i < len {
@@ -893,7 +830,6 @@ pub unsafe fn bollinger_bands_width_avx512_into(
     let devdn = input.get_devdn();
     let u_plus_d = devup + devdn;
 
-    
     let mut v_sum = _mm512_setzero_pd();
     let mut v_sumsq = _mm512_setzero_pd();
     let base = first_valid_idx;
@@ -919,7 +855,6 @@ pub unsafe fn bollinger_bands_width_avx512_into(
         idx += 1;
     }
 
-    
     let mut mu_w = sum * inv_n;
     let mut ema = mu_w;
     let mut var_w = (sumsq * inv_n) - mu_w * mu_w;
@@ -944,7 +879,6 @@ pub unsafe fn bollinger_bands_width_avx512_into(
     };
     *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
 
-    
     let alpha = 2.0 / (n as f64 + 1.0);
     let beta = 1.0 - alpha;
     let len = data.len();
@@ -1020,7 +954,6 @@ pub unsafe fn bollinger_bands_width_avx2_into(
     let devdn = input.get_devdn();
     let u_plus_d = devup + devdn;
 
-    
     let mut v_sum = _mm256_setzero_pd();
     let mut v_sumsq = _mm256_setzero_pd();
     let base = first_valid_idx;
@@ -1046,7 +979,6 @@ pub unsafe fn bollinger_bands_width_avx2_into(
         idx += 1;
     }
 
-    
     let mut mu_w = sum * inv_n;
     let mut ema = mu_w;
     let mut var_w = (sumsq * inv_n) - mu_w * mu_w;
@@ -1071,7 +1003,6 @@ pub unsafe fn bollinger_bands_width_avx2_into(
     };
     *out.get_unchecked_mut(start) = (u_plus_d * std) / mid;
 
-    
     let alpha = 2.0 / (n as f64 + 1.0);
     let beta = 1.0 - alpha;
     let len = data.len();
@@ -1159,7 +1090,7 @@ pub fn bollinger_bands_width_row_scalar(
         },
     );
     let dev = crate::indicators::deviation::deviation(&dev_input).unwrap();
-    let dev_values = &dev.values; 
+    let dev_values = &dev.values;
     for i in (first_valid_idx + period - 1)..data.len() {
         let m = middle[i];
         let u = m + devup * dev_values[i];
@@ -1309,7 +1240,9 @@ impl BollingerBandsWidthBatchOutput {
 fn expand_grid_checked(
     r: &BollingerBandsWidthBatchRange,
 ) -> Result<Vec<BollingerBandsWidthParams>, BollingerBandsWidthError> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, BollingerBandsWidthError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, BollingerBandsWidthError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1318,10 +1251,12 @@ fn expand_grid_checked(
             let mut x = start;
             while x <= end {
                 v.push(x);
-                match x.checked_add(step) { Some(n) => x = n, None => break }
+                match x.checked_add(step) {
+                    Some(n) => x = n,
+                    None => break,
+                }
             }
         } else {
-            
             let mut x = start as i64;
             let step_i = step as i64;
             while x >= end as i64 {
@@ -1356,7 +1291,7 @@ fn expand_grid_checked(
                 let mut x = start;
                 while x >= end - 1e-12 {
                     v.push(x);
-                    x += step; 
+                    x += step;
                 }
             }
         }
@@ -1449,12 +1384,10 @@ fn bollinger_bands_width_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
     if cols == 0 {
         return Err(BollingerBandsWidthError::AllValuesNaN);
     }
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1477,31 +1410,29 @@ fn bollinger_bands_width_batch_inner(
         });
     }
 
-    
     let _ = rows
         .checked_mul(cols)
-        .ok_or(BollingerBandsWidthError::InvalidRange { start: rows as i64, end: cols as i64, step: 0 })?;
+        .ok_or(BollingerBandsWidthError::InvalidRange {
+            start: rows as i64,
+            end: cols as i64,
+            step: 0,
+        })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     bollinger_bands_width_batch_inner_into(data, sweep, kern, parallel, values_slice)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1518,8 +1449,6 @@ fn bollinger_bands_width_batch_inner(
     })
 }
 
-/// Compute batch Bollinger Bands Width directly into a pre-allocated buffer.
-/// This is the zero-copy variant used by Python bindings for batch operations.
 #[inline(always)]
 pub fn bollinger_bands_width_batch_inner_into(
     data: &[f64],
@@ -1530,7 +1459,11 @@ pub fn bollinger_bands_width_batch_inner_into(
 ) -> Result<Vec<BollingerBandsWidthParams>, BollingerBandsWidthError> {
     let combos = expand_grid_checked(sweep)?;
     if combos.is_empty() {
-        return Err(BollingerBandsWidthError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(BollingerBandsWidthError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     let first = data
         .iter()
@@ -1558,18 +1491,18 @@ pub fn bollinger_bands_width_batch_inner_into(
     let rows = combos.len();
     let expected = rows
         .checked_mul(cols)
-        .ok_or(BollingerBandsWidthError::InvalidRange { start: rows as i64, end: cols as i64, step: 0 })?;
+        .ok_or(BollingerBandsWidthError::InvalidRange {
+            start: rows as i64,
+            end: cols as i64,
+            step: 0,
+        })?;
     if out.len() != expected {
-        return Err(BollingerBandsWidthError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(BollingerBandsWidthError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
-    
-    
-    
-    
-    
-    
     let kern = match kern {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -1591,7 +1524,6 @@ pub fn bollinger_bands_width_batch_inner_into(
             continue;
         }
 
-        
         if group_rows == 1 {
             let prm = &combos[group_start];
             let devup = prm.devup.unwrap();
@@ -1599,12 +1531,13 @@ pub fn bollinger_bands_width_batch_inner_into(
             let off = group_start * cols;
             let out_row = &mut out[off..off + cols];
             unsafe {
-                bollinger_bands_width_scalar_classic_sma(data, period, devup, devdn, first, out_row)?;
+                bollinger_bands_width_scalar_classic_sma(
+                    data, period, devup, devdn, first, out_row,
+                )?;
             }
             continue;
         }
 
-        
         if ratio.is_none() {
             ratio = Some(vec![0.0; cols]);
         }
@@ -1713,8 +1646,7 @@ pub fn bollinger_bands_width_batch_inner_into(
                                 i += 8;
                             }
                             while i < cols {
-                                *out_row.get_unchecked_mut(i) =
-                                    u_plus_d * *ratio.get_unchecked(i);
+                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
                                 i += 1;
                             }
                         },
@@ -1729,19 +1661,17 @@ pub fn bollinger_bands_width_batch_inner_into(
                                 i += 4;
                             }
                             while i < cols {
-                                *out_row.get_unchecked_mut(i) =
-                                    u_plus_d * *ratio.get_unchecked(i);
+                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
                                 i += 1;
                             }
                         },
                         _ => unsafe {
                             let mut i = time_start;
                             while i < cols {
-                                *out_row.get_unchecked_mut(i) =
-                                    u_plus_d * *ratio.get_unchecked(i);
+                                *out_row.get_unchecked_mut(i) = u_plus_d * *ratio.get_unchecked(i);
                                 i += 1;
                             }
-                        }
+                        },
                     }
                 }
                 #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -1767,31 +1697,27 @@ mod tests {
 
     #[test]
     fn test_bollinger_bands_width_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let data: Vec<f64> = (0..256)
             .map(|i| ((i as f64).sin() + 2.0) * (1.0 + (i as f64).cos() * 0.05))
             .collect();
 
-        let input = BollingerBandsWidthInput::from_slice(&data, BollingerBandsWidthParams::default());
+        let input =
+            BollingerBandsWidthInput::from_slice(&data, BollingerBandsWidthParams::default());
 
-        
         let baseline = bollinger_bands_width_with_kernel(&input, Kernel::Auto)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             bollinger_bands_width_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             bollinger_bands_width_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1910,7 +1836,6 @@ mod tests {
         let check_index = 240;
         if result.values.len() > check_index {
             for i in check_index..result.values.len() {
-                
                 if !result.values[i].is_nan() {
                     return Ok(());
                 }
@@ -1923,7 +1848,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_batch_default_row(
         test_name: &str,
         kernel: Kernel,
@@ -1940,7 +1864,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_bollinger_bands_width_no_poison(
         test_name: &str,
@@ -1951,11 +1874,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             BollingerBandsWidthParams::default(),
-            
             BollingerBandsWidthParams {
                 period: Some(5),
                 devup: Some(1.0),
@@ -1963,7 +1883,6 @@ mod tests {
                 matype: Some("sma".to_string()),
                 devtype: Some(0),
             },
-            
             BollingerBandsWidthParams {
                 period: Some(50),
                 devup: Some(3.0),
@@ -1971,7 +1890,6 @@ mod tests {
                 matype: Some("ema".to_string()),
                 devtype: Some(1),
             },
-            
             BollingerBandsWidthParams {
                 period: Some(15),
                 devup: Some(2.5),
@@ -1979,7 +1897,6 @@ mod tests {
                 matype: Some("wma".to_string()),
                 devtype: Some(2),
             },
-            
             BollingerBandsWidthParams {
                 period: Some(2),
                 devup: Some(0.5),
@@ -1989,7 +1906,6 @@ mod tests {
             },
         ];
 
-        
         let sources = vec!["close", "hl2", "hlc3", "ohlc4"];
 
         for params in test_params {
@@ -1998,16 +1914,13 @@ mod tests {
                     BollingerBandsWidthInput::from_candles(&candles, source, params.clone());
                 let output = bollinger_bands_width_with_kernel(&input, kernel)?;
 
-                
                 for (i, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
@@ -2019,7 +1932,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
@@ -2031,7 +1943,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params: period={}, devup={}, devdn={}, source={}",
@@ -2049,7 +1960,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_bollinger_bands_width_no_poison(
         _test_name: &str,
@@ -2058,7 +1968,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2066,17 +1975,11 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            
             (2, 50, 5, 1.0, 3.0, 0.5, 1.0, 3.0, 0.5),
-            
             (5, 15, 2, 0.5, 3.5, 0.25, 0.5, 3.5, 0.25),
-            
             (40, 100, 10, 1.5, 2.5, 0.1, 1.5, 2.5, 0.1),
-            
             (10, 30, 5, 1.0, 4.0, 1.0, 0.5, 2.0, 0.5),
-            
             (2, 5, 1, 0.1, 5.0, 0.5, 0.1, 5.0, 0.5),
         ];
 
@@ -2102,9 +2005,7 @@ mod tests {
                     .devdn_range(devdn_start, devdn_end, devdn_step)
                     .apply_candles(&c, source)?;
 
-                
                 for (idx, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
@@ -2113,10 +2014,8 @@ mod tests {
                     let row = idx / output.cols;
                     let col = idx % output.cols;
 
-                    
                     let params = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, devup={}, devdn={}, source={}",
@@ -2128,7 +2027,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, devup={}, devdn={}, source={}",
@@ -2140,7 +2038,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with params: period={}, devup={}, devdn={}, source={}",
@@ -2158,7 +2055,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2175,7 +2071,6 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         use proptest::prelude::*;
 
-        
         let random_data_strat =
             (10usize..=30, 1.0f64..=3.0, 1.0f64..=3.0).prop_flat_map(|(period, devup, devdn)| {
                 let len = period * 3..400;
@@ -2191,7 +2086,6 @@ mod tests {
                 )
             });
 
-        
         let constant_data_strat =
             (10usize..=25, 1.0f64..=2.5, 1.0f64..=2.5).prop_flat_map(|(period, devup, devdn)| {
                 let len = period * 2..200;
@@ -2204,13 +2098,11 @@ mod tests {
                 )
             });
 
-        
         let volatile_data_strat =
             (10usize..=25, 1.5f64..=2.5, 1.5f64..=2.5).prop_flat_map(|(period, devup, devdn)| {
                 let len = period * 3..300;
                 (
                     prop::collection::vec(0f64..1000f64, len).prop_map(|v| {
-                        
                         v.into_iter()
                             .enumerate()
                             .map(|(i, val)| if i % 2 == 0 { val + 500.0 } else { val })
@@ -2223,7 +2115,6 @@ mod tests {
                 )
             });
 
-        
         let edge_case_strat =
             (2usize..=5, 0.5f64..=4.0, 0.5f64..=4.0).prop_flat_map(|(period, devup, devdn)| {
                 let len = period * 4..100;
@@ -2239,7 +2130,6 @@ mod tests {
                 )
             });
 
-        
         let combined_strat = prop_oneof![
             random_data_strat,
             constant_data_strat,
@@ -2256,25 +2146,21 @@ mod tests {
                         devup: Some(devup),
                         devdn: Some(devdn),
                         matype: Some("sma".to_string()),
-                        devtype: Some(0), 
+                        devtype: Some(0),
                     };
                     let input = BollingerBandsWidthInput::from_slice(&data, params.clone());
 
-                    
                     let result = bollinger_bands_width_with_kernel(&input, kernel);
                     prop_assert!(result.is_ok(), "BBW calculation failed: {:?}", result);
                     let out = result.unwrap().values;
 
-                    
                     let ref_input = BollingerBandsWidthInput::from_slice(&data, params);
                     let ref_result = bollinger_bands_width_with_kernel(&ref_input, Kernel::Scalar);
                     prop_assert!(ref_result.is_ok(), "Reference BBW calculation failed");
                     let ref_out = ref_result.unwrap().values;
 
-                    
                     prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                    
                     for i in 0..(period - 1) {
                         prop_assert!(
                             out[i].is_nan(),
@@ -2284,7 +2170,6 @@ mod tests {
                         );
                     }
 
-                    
                     for (i, &val) in out.iter().enumerate() {
                         if !val.is_nan() {
                             prop_assert!(
@@ -2296,7 +2181,6 @@ mod tests {
                         }
                     }
 
-                    
                     if data_type == "constant" {
                         for (i, &val) in out.iter().enumerate().skip(period - 1) {
                             prop_assert!(
@@ -2308,12 +2192,10 @@ mod tests {
                         }
                     }
 
-                    
                     for i in 0..out.len() {
                         let y = out[i];
                         let r = ref_out[i];
 
-                        
                         if y.is_nan() && r.is_nan() {
                             continue;
                         }
@@ -2327,7 +2209,6 @@ mod tests {
                         );
 
                         if y.is_finite() && r.is_finite() {
-                            
                             let y_bits = y.to_bits();
                             let r_bits = r.to_bits();
                             let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -2344,9 +2225,7 @@ mod tests {
                         }
                     }
 
-                    
                     if data_type == "volatile" && out.len() > period * 2 {
-                        
                         let valid_values: Vec<f64> = out
                             .iter()
                             .skip(period - 1)
@@ -2357,7 +2236,7 @@ mod tests {
                         if valid_values.len() > 10 {
                             let avg_bbw =
                                 valid_values.iter().sum::<f64>() / valid_values.len() as f64;
-                            
+
                             prop_assert!(
                                 avg_bbw > 0.1,
                                 "BBW should be substantial for volatile data: avg={}",
@@ -2366,11 +2245,7 @@ mod tests {
                         }
                     }
 
-                    
-                    
-                    
                     if data_type == "random" && out.len() > period * 2 {
-                        
                         let params_double = BollingerBandsWidthParams {
                             period: Some(period),
                             devup: Some(devup * 2.0),
@@ -2386,12 +2261,11 @@ mod tests {
                         if let Ok(out_double) = result_double {
                             let out_double = out_double.values;
 
-                            
                             for i in (period - 1)..out.len().min(period * 3) {
                                 if out[i].is_finite() && out_double[i].is_finite() && out[i] > 1e-6
                                 {
                                     let ratio = out_double[i] / out[i];
-                                    
+
                                     prop_assert!(
                                         (ratio - 2.0).abs() < 0.2,
                                         "BBW scaling issue at index {}: ratio={} (expected ~2.0)",
@@ -2501,12 +2375,10 @@ pub fn bollinger_bands_width_py<'py>(
     };
     let bbw_in = BollingerBandsWidthInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| bollinger_bands_width_with_kernel(&bbw_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2537,7 +2409,6 @@ impl BollingerBandsWidthStreamPy {
         })
     }
 
-    /// O(1) update; returns None until warm-up completes.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.inner.update(value)
     }
@@ -2578,7 +2449,6 @@ pub fn bollinger_bands_width_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -2596,7 +2466,7 @@ pub fn bollinger_bands_width_batch_py<'py>(
                 Kernel::Auto => detect_best_batch_kernel(),
                 other => other,
             };
-            
+
             let simd = match k {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2673,7 +2543,7 @@ pub fn bollinger_bands_width_cuda_batch_dev_py<'py>(
     let uplusd_len = uplusd.len();
     dict.set_item("periods", periods.into_pyarray(py))?;
     dict.set_item("u_plus_d", uplusd.into_pyarray(py))?;
-    
+
     dict.set_item("ma_types", PyList::new(py, vec!["sma"; uplusd_len])?)?;
     dict.set_item("devtypes", vec![0u64; uplusd_len].into_pyarray(py))?;
 
@@ -2716,7 +2586,7 @@ pub fn bollinger_bands_width_cuda_many_series_one_param_dev_py<'py>(
     make_device_array_py(dev_id as usize, inner)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bbw_alloc(len: usize) -> *mut f64 {
     let mut v: Vec<f64> = Vec::with_capacity(len);
@@ -2725,7 +2595,7 @@ pub fn bbw_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bbw_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2733,7 +2603,7 @@ pub fn bbw_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bollinger_bands_width_js(
     data: &[f64],
@@ -2757,7 +2627,7 @@ pub fn bollinger_bands_width_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bollinger_bands_width_batch_js(
     data: &[f64],
@@ -2782,7 +2652,7 @@ pub fn bollinger_bands_width_batch_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bollinger_bands_width_batch_metadata_js(
     period_start: usize,
@@ -2813,8 +2683,7 @@ pub fn bollinger_bands_width_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct BollingerBandsWidthBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2824,7 +2693,7 @@ pub struct BollingerBandsWidthBatchConfig {
     pub devtype: Option<usize>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct BollingerBandsWidthBatchJsOutput {
     pub values: Vec<f64>,
@@ -2833,13 +2702,12 @@ pub struct BollingerBandsWidthBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = bollinger_bands_width_batch)]
 pub fn bollinger_bands_width_batch_unified_js(
     data: &[f64],
     config: JsValue,
 ) -> Result<JsValue, JsValue> {
-    // Deserialize the configuration object from JavaScript
     let config: BollingerBandsWidthBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -2849,18 +2717,15 @@ pub fn bollinger_bands_width_batch_unified_js(
         devdn: config.devdn_range,
     };
 
-    // Run the existing core logic
     let mut output =
         bollinger_bands_width_batch_inner(data, &sweep, detect_best_batch_kernel(), false)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Update combos with matype and devtype
     for combo in &mut output.combos {
         combo.matype = config.matype.clone().or_else(|| Some("sma".to_string()));
         combo.devtype = config.devtype.or(Some(0));
     }
 
-    // Create the structured output
     let js_output = BollingerBandsWidthBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2868,13 +2733,11 @@ pub fn bollinger_bands_width_batch_unified_js(
         cols: output.cols,
     };
 
-    // Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Fast API for WASM bindings - handles aliasing
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bollinger_bands_width_into(
     in_ptr: *const f64,
@@ -2913,8 +2776,7 @@ pub fn bollinger_bands_width_into(
     Ok(())
 }
 
-// Fast batch API for WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bollinger_bands_width_batch_into(
     in_ptr: *const f64,
@@ -2945,8 +2807,7 @@ pub fn bollinger_bands_width_batch_into(
             devdn: (devdn_start, devdn_end, devdn_step),
         };
 
-        let combos = expand_grid_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -2955,7 +2816,6 @@ pub fn bollinger_bands_width_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Initialize NaN prefixes for each row based on warmup period
         let first = data
             .iter()
             .position(|x| !x.is_nan())

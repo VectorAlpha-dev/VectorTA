@@ -1,6 +1,8 @@
 #![cfg(feature = "cuda")]
 
 use cust::memory::CopyDestination;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
 use vector_ta::cuda::cuda_available;
 use vector_ta::cuda::oscillators::CudaStoch;
 use vector_ta::indicators::stoch::{
@@ -8,8 +10,6 @@ use vector_ta::indicators::stoch::{
 };
 use vector_ta::utilities::data_loader::Candles;
 use vector_ta::utilities::enums::Kernel;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 
 static CUDA_TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
@@ -65,7 +65,6 @@ fn stoch_cuda_batch_matches_cpu() {
     let cpu = stoch_batch_with_kernel(&high, &low, &close, &sweep, Kernel::ScalarBatch)
         .expect("cpu batch");
 
-    
     let mut k_gpu = vec![0f32; batch.k.rows * batch.k.cols];
     let mut d_gpu = vec![0f32; batch.d.rows * batch.d.cols];
     batch.k.buf.copy_to(&mut k_gpu).unwrap();
@@ -74,7 +73,6 @@ fn stoch_cuda_batch_matches_cpu() {
     assert_eq!(cpu.rows * cpu.cols, k_gpu.len());
     assert_eq!(cpu.rows * cpu.cols, d_gpu.len());
 
-    
     for i in 0..(cpu.rows * cpu.cols) {
         let k_ref = cpu.k[i] as f32;
         let d_ref = cpu.d[i] as f32;
@@ -141,7 +139,6 @@ fn stoch_cuda_many_series_time_major_matches_cpu() {
     k_tm.buf.copy_to(&mut k_gpu).unwrap();
     d_tm.buf.copy_to(&mut d_gpu).unwrap();
 
-    
     for s in 0..cols {
         let mut close = vec![0f64; rows];
         let mut high = vec![0f64; rows];

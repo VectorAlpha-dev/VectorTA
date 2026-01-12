@@ -1,12 +1,3 @@
-//! CUDA scaffolding for the Linear Regression (LINREG) indicator.
-//!
-//! ALMA-aligned wrapper with:
-//! - Policy enums for kernel selection (kept simple for LINREG: 1D kernels).
-//! - PTX JIT options with DetermineTargetFromContext and O2, with fallbacks.
-//! - VRAM estimation with 64MB headroom and early failure on OOM risk.
-//! - Warmup/NaN behavior identical to the scalar reference.
-//! - Public APIs for one-series×many-params and many-series×one-param.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -20,34 +11,26 @@ use cust::memory::{AsyncCopyDestination, CopyDestination, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use thiserror::Error;
 use std::env;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-
-
+use thiserror::Error;
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    /// 1D launch, `block_x` threads per block
-    Plain {
-        block_x: u32,
-    },
-    /// Prefix path: compute FP64 prefixes once, then a 2D launch (grid.y = combos)
-    Prefix {
-        block_x: u32,
-    },
+
+    Plain { block_x: u32 },
+
+    Prefix { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    /// 1D launch across series, `block_x` threads per block
-    OneD {
-        block_x: u32,
-    },
+
+    OneD { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -83,13 +66,24 @@ pub enum CudaLinregError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -108,7 +102,7 @@ pub struct CudaLinreg {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    sm_count: i32, // number of SMs on the active device
+    sm_count: i32,
 }
 
 impl CudaLinreg {
@@ -119,7 +113,7 @@ impl CudaLinreg {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/linreg_kernel.ptx"));
-        // Prefer DetermineTargetFromContext with OptLevel O4 (most optimized).
+
         let module = match Module::from_ptx(
             ptx,
             &[
@@ -149,7 +143,6 @@ impl CudaLinreg {
         })
     }
 
-    /// Create with explicit policy.
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaLinregPolicy,
@@ -164,9 +157,13 @@ impl CudaLinreg {
         self.policy = policy;
     }
     #[inline]
-    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    pub fn ctx(&self) -> Arc<Context> {
+        Arc::clone(&self.ctx)
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
     pub fn policy(&self) -> &CudaLinregPolicy {
         &self.policy
@@ -180,12 +177,10 @@ impl CudaLinreg {
         self.last_many
     }
 
-    /// Optional synchronizer for benches/tests.
     pub fn synchronize(&self) -> Result<(), CudaLinregError> {
         self.stream.synchronize().map_err(CudaLinregError::from)
     }
 
-    /// Expose the producing stream handle for CUDA Array Interface (v3) interop.
     pub fn stream_handle_u64(&self) -> u64 {
         self.stream.as_inner() as u64
     }
@@ -230,7 +225,6 @@ impl CudaLinreg {
         }
     }
 
-    // --------------- VRAM checks ---------------
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -243,7 +237,10 @@ impl CudaLinreg {
         cust::memory::mem_get_info().ok()
     }
     #[inline]
-    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaLinregError> {
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaLinregError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -251,13 +248,19 @@ impl CudaLinreg {
             Some(v) => v,
             None => return Ok(()),
         };
-        let need = required_bytes
-            .checked_add(headroom_bytes)
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "required_bytes + headroom_bytes" })?;
+        let need = required_bytes.checked_add(headroom_bytes).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "required_bytes + headroom_bytes",
+            },
+        )?;
         if need <= free {
             Ok(())
         } else {
-            Err(CudaLinregError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            Err(CudaLinregError::OutOfMemory {
+                required: required_bytes,
+                free,
+                headroom: headroom_bytes,
+            })
         }
     }
 
@@ -358,11 +361,12 @@ impl CudaLinreg {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaLinregError> {
-        let func = self
-            .module
-            .get_function("linreg_batch_f32")
-            .map_err(|_| CudaLinregError::MissingKernelSymbol { name: "linreg_batch_f32" })?;
-        // Kernel policy selection (only Plain supported for LINREG currently)
+        let func = self.module.get_function("linreg_batch_f32").map_err(|_| {
+            CudaLinregError::MissingKernelSymbol {
+                name: "linreg_batch_f32",
+            }
+        })?;
+
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(256),
@@ -421,18 +425,24 @@ impl CudaLinreg {
         let func = self
             .module
             .get_function("linreg_exclusive_prefix_y_yi_f64")
-            .map_err(|_| {
-                CudaLinregError::MissingKernelSymbol { name: "linreg_exclusive_prefix_y_yi_f64" }
+            .map_err(|_| CudaLinregError::MissingKernelSymbol {
+                name: "linreg_exclusive_prefix_y_yi_f64",
             })?;
 
-        // Single-thread prefix kernel.
         let grid: GridSize = (1u32, 1u32, 1u32).into();
         let block: BlockSize = (1u32, 1u32, 1u32).into();
 
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if 1u32 > max_threads {
-            return Err(CudaLinregError::LaunchConfigTooLarge { gx: 1, gy: 1, gz: 1, bx: 1, by: 1, bz: 1 });
+            return Err(CudaLinregError::LaunchConfigTooLarge {
+                gx: 1,
+                gy: 1,
+                gz: 1,
+                bx: 1,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -472,7 +482,9 @@ impl CudaLinreg {
         let func = self
             .module
             .get_function("linreg_batch_from_prefix_f64")
-            .map_err(|_| CudaLinregError::MissingKernelSymbol { name: "linreg_batch_from_prefix_f64" })?;
+            .map_err(|_| CudaLinregError::MissingKernelSymbol {
+                name: "linreg_batch_from_prefix_f64",
+            })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => match env::var("LINREG_PREFIX_BLOCK_X").ok().as_deref() {
@@ -507,15 +519,36 @@ impl CudaLinreg {
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if block_x > max_threads {
-            return Err(CudaLinregError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaLinregError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         if grid_x > max_grid_x {
-            return Err(CudaLinregError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaLinregError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let max_grid_y = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
         if grid_y > max_grid_y {
-            return Err(CudaLinregError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaLinregError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -560,43 +593,59 @@ impl CudaLinreg {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaLinregError> {
-        // VRAM estimate and early check
-        let prices_bytes = len
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "len * sizeof(f32)" })?;
+        let prices_bytes = len.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "len * sizeof(f32)",
+            },
+        )?;
         let per_combo = std::mem::size_of::<i32>()
             .checked_add(std::mem::size_of::<f32>() * 3)
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "per_combo bytes" })?;
-        let params_bytes = combos_len
-            .checked_mul(per_combo)
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * per_combo" })?;
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "per_combo bytes",
+            })?;
+        let params_bytes =
+            combos_len
+                .checked_mul(per_combo)
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "combos_len * per_combo",
+                })?;
         let out_elems = combos_len
             .checked_mul(len)
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * len" })?;
-        let out_bytes = out_elems
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "combos_len * len",
+            })?;
+        let out_bytes = out_elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "out_elems * sizeof(f32)",
+            },
+        )?;
 
         let required = if matches!(self.policy.batch, BatchKernelPolicy::Plain { .. }) {
             prices_bytes
                 .checked_add(params_bytes)
                 .and_then(|x| x.checked_add(out_bytes))
-                .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "total required bytes",
+                })?
         } else {
             let prefix_elems = len
                 .checked_add(1)
                 .ok_or(CudaLinregError::ArithmeticOverflow { what: "len + 1" })?;
             let prefix_bytes = prefix_elems
                 .checked_mul(std::mem::size_of::<f64>())
-                .and_then(|x| x.checked_mul(2)) // prefix_y + prefix_yi
-                .ok_or(CudaLinregError::ArithmeticOverflow { what: "(len+1) * sizeof(f64) * 2" })?;
+                .and_then(|x| x.checked_mul(2))
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "(len+1) * sizeof(f64) * 2",
+                })?;
             prices_bytes
                 .checked_add(params_bytes)
                 .and_then(|x| x.checked_add(prefix_bytes))
                 .and_then(|x| x.checked_add(out_bytes))
-                .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?
+                .ok_or(CudaLinregError::ArithmeticOverflow {
+                    what: "total required bytes",
+                })?
         };
-        let headroom = 64 * 1024 * 1024; // 64MB safety margin
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
@@ -607,7 +656,9 @@ impl CudaLinreg {
 
         let elems = combos_len
             .checked_mul(len)
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "combos_len * len" })?;
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "combos_len * len",
+            })?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
         match self.policy.batch {
@@ -673,7 +724,7 @@ impl CudaLinreg {
             first_valid,
             len,
         )?;
-        // Preserve prior semantics: synchronize before returning device buffer
+
         self.stream.synchronize()?;
         Ok((dev, combos))
     }
@@ -705,7 +756,7 @@ impl CudaLinreg {
             first_valid,
             len,
         )?;
-        // Single sync at the API boundary, then a blocking pageable copy
+
         self.stream.synchronize()?;
         dev.buf.copy_to(out)?;
         Ok((combos.len(), len, combos))
@@ -798,7 +849,9 @@ impl CudaLinreg {
         let func = self
             .module
             .get_function("linreg_many_series_one_param_f32")
-            .map_err(|_| CudaLinregError::MissingKernelSymbol { name: "linreg_many_series_one_param_f32" })?;
+            .map_err(|_| CudaLinregError::MissingKernelSymbol {
+                name: "linreg_many_series_one_param_f32",
+            })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(256),
@@ -852,23 +905,32 @@ impl CudaLinreg {
         denom_inv: f32,
         inv_period: f32,
     ) -> Result<DeviceArrayF32, CudaLinregError> {
-        // VRAM estimate and check
         let elems = cols
             .checked_mul(rows)
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "cols * rows" })?;
-        let prices_bytes = elems
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "elems * sizeof(f32)" })?;
-        let first_bytes = cols
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "cols * sizeof(i32)" })?;
-        let out_bytes = elems
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "elems * sizeof(f32)" })?;
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "cols * rows",
+            })?;
+        let prices_bytes = elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "elems * sizeof(f32)",
+            },
+        )?;
+        let first_bytes = cols.checked_mul(std::mem::size_of::<i32>()).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "cols * sizeof(i32)",
+            },
+        )?;
+        let out_bytes = elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaLinregError::ArithmeticOverflow {
+                what: "elems * sizeof(f32)",
+            },
+        )?;
         let required = prices_bytes
             .checked_add(first_bytes)
             .and_then(|x| x.checked_add(out_bytes))
-            .ok_or(CudaLinregError::ArithmeticOverflow { what: "total required bytes" })?;
+            .ok_or(CudaLinregError::ArithmeticOverflow {
+                what: "total required bytes",
+            })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
@@ -904,7 +966,7 @@ impl CudaLinreg {
             denom_inv,
             inv_period,
         )?;
-        // Synchronize before returning device buffer
+
         self.stream.synchronize()?;
         Ok(dev)
     }
@@ -936,14 +998,13 @@ impl CudaLinreg {
             denom_inv,
             inv_period,
         )?;
-        // Single sync then blocking pageable copy
+
         self.stream.synchronize()?;
         dev.buf
             .copy_to(out_tm)
             .map_err(|e| CudaLinregError::Cuda(e))
     }
 
-    // Compute a right-sized grid for grid-stride 1D kernels
     #[inline]
     fn grid_1d_for(&self, work_items: usize, block_x: u32) -> GridSize {
         let blocks_needed = ((work_items as u32).saturating_add(block_x - 1)) / block_x;
@@ -952,8 +1013,6 @@ impl CudaLinreg {
         (grid_x, 1, 1).into()
     }
 
-    /// Optional fast path: copy Device -> pinned host asynchronously, then sync once.
-    /// Caller benefits when they can reuse `LockedBuffer` across runs.
     pub fn linreg_batch_into_locked_host_f32(
         &self,
         data_f32: &[f32],
@@ -981,13 +1040,13 @@ impl CudaLinreg {
             len,
         )?;
         unsafe {
-            dev.buf.async_copy_to(pinned_out.as_mut_slice(), &self.stream)?;
+            dev.buf
+                .async_copy_to(pinned_out.as_mut_slice(), &self.stream)?;
         }
         self.stream.synchronize()?;
         Ok((combos.len(), len, combos))
     }
 
-    /// Skip CPU scan for first_valids when already computed by the caller.
     pub fn linreg_multi_series_one_param_time_major_dev_with_first_valids(
         &self,
         data_tm_f32: &[f32],
@@ -1042,8 +1101,6 @@ impl CudaLinreg {
         Ok(dev)
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
@@ -1105,15 +1162,8 @@ pub mod benches {
         let sweep = crate::indicators::moving_averages::linreg::LinRegBatchRange {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
         };
-        let (
-            _combos,
-            first_valid,
-            series_len,
-            periods_i32,
-            x_sums,
-            denom_invs,
-            inv_periods,
-        ) = CudaLinreg::prepare_batch_inputs(&price, &sweep).expect("linreg prepare batch");
+        let (_combos, first_valid, series_len, periods_i32, x_sums, denom_invs, inv_periods) =
+            CudaLinreg::prepare_batch_inputs(&price, &sweep).expect("linreg prepare batch");
         let n_combos = periods_i32.len();
 
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
@@ -1121,9 +1171,10 @@ pub mod benches {
         let d_x_sums = DeviceBuffer::from_slice(&x_sums).expect("d_x_sums");
         let d_denom_invs = DeviceBuffer::from_slice(&denom_invs).expect("d_denom_invs");
         let d_inv_periods = DeviceBuffer::from_slice(&inv_periods).expect("d_inv_periods");
-        let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size")) }
-                .expect("d_out");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(BatchDevState {

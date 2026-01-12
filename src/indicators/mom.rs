@@ -1,26 +1,3 @@
-//! # Momentum (MOM)
-//!
-//! MOM measures the amount that a security's price has changed over a given time span.
-//! It is calculated by subtracting the previous price (from the chosen period) from the
-//! current price, i.e., `momentum[i] = data[i] - data[i - period]`.
-//!
-//! ## Parameters
-//! - **period**: The lookback window size (number of data points). Defaults to 10.
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **values**: Vector of momentum values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - **AVX2/AVX512 Kernels**: Stubs that call scalar implementation
-//! - **Streaming**: Implemented with O(1) update performance
-//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-// Decision log: SIMD implemented but short-circuited for Auto (memory-bound; <5% gain vs scalar);
-// CUDA wrapper present for batch and many-series paths; Python CUDA bindings return VRAM handles
-// with CAI v3 + DLPack v1.x capsules while preserving scalar numerical outputs.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -59,7 +36,10 @@ pub struct MomOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MomParams {
     pub period: Option<usize>,
 }
@@ -176,7 +156,11 @@ pub enum MomError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("mom: invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("mom: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -189,7 +173,6 @@ pub enum MomError {
 pub fn mom(input: &MomInput) -> Result<MomOutput, MomError> {
     mom_with_kernel(input, Kernel::Auto)
 }
-
 
 #[inline(always)]
 fn mom_prepare<'a>(
@@ -221,7 +204,6 @@ fn mom_prepare<'a>(
     }
 
     let chosen = match kernel {
-        // Disable SIMD selection by default; see decision note above.
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -242,7 +224,6 @@ fn mom_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
     }
 }
 
-// Refactored mom_with_kernel to use the helpers
 pub fn mom_with_kernel(input: &MomInput, kernel: Kernel) -> Result<MomOutput, MomError> {
     let (data, period, first, chosen) = mom_prepare(input, kernel)?;
     let warm = first + period;
@@ -251,11 +232,7 @@ pub fn mom_with_kernel(input: &MomInput, kernel: Kernel) -> Result<MomOutput, Mo
     Ok(MomOutput { values: out })
 }
 
-/// Writes MOM results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn mom_into(input: &MomInput, out: &mut [f64]) -> Result<(), MomError> {
     let (data, period, first, chosen) = mom_prepare(input, Kernel::Auto)?;
@@ -267,7 +244,6 @@ pub fn mom_into(input: &MomInput, out: &mut [f64]) -> Result<(), MomError> {
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let warm = first + period;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let n = warm.min(out.len());
@@ -275,7 +251,6 @@ pub fn mom_into(input: &MomInput, out: &mut [f64]) -> Result<(), MomError> {
         *v = qnan;
     }
 
-    // Compute into the destination buffer for the valid range
     mom_compute_into(data, period, first, chosen, out);
 
     Ok(())
@@ -422,9 +397,6 @@ pub struct MomStream {
 }
 
 impl MomStream {
-    // Decision: Streaming optimized (no `%`, mask when power-of-two; period==1 fast path).
-    // Rationale: MOM is bandwidth-bound; drop constant costs while keeping scalar path safe.
-    // Outputs unchanged vs batch; warmup semantics preserved.
     pub fn try_new(params: MomParams) -> Result<Self, MomError> {
         let period = params.period.unwrap_or(10);
         if period == 0 {
@@ -443,13 +415,12 @@ impl MomStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Fast path for period == 1: adjacent difference
         if self.period == 1 {
             let prev = self.buffer[0];
             self.buffer[0] = value;
 
             if !self.filled {
-                self.filled = true; // warm on next tick
+                self.filled = true;
                 return None;
             }
             return Some(value - prev);
@@ -459,10 +430,8 @@ impl MomStream {
         let prev = self.buffer[idx];
         self.buffer[idx] = value;
 
-        // Advance head without `%` when possible.
         let next = idx + 1;
         if self.period.is_power_of_two() {
-            // power-of-two capacity: cheaper than modulo
             let mask = self.period - 1;
             self.head = next & mask;
         } else if next == self.period {
@@ -471,7 +440,6 @@ impl MomStream {
             self.head = next;
         }
 
-        // Warmup: None until the first wrap completes
         if !self.filled {
             if self.head == 0 {
                 self.filled = true;
@@ -482,7 +450,6 @@ impl MomStream {
         Some(value - prev)
     }
 
-    /// Optional helper: reset warmup on NaN input to mirror batch semantics
     #[inline(always)]
     pub fn update_reset_on_nan(&mut self, value: f64) -> Option<f64> {
         if value.is_nan() {
@@ -554,7 +521,6 @@ pub fn mom_batch_with_kernel(
     k: Kernel,
 ) -> Result<MomBatchOutput, MomError> {
     let kernel = match k {
-        // Disable SIMD selection by default; see decision note at top of module.
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MomError::InvalidKernelForBatch(other)),
@@ -682,18 +648,15 @@ fn mom_batch_inner(
         .checked_mul(cols)
         .ok_or(MomError::InvalidInput("rows*cols overflow"))?;
 
-    // allocate uninit and write NaN warm prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // keep MaybeUninit for compute to avoid any UB window
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_mu: &mut [std::mem::MaybeUninit<f64>] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr(), guard.len()) };
 
     let simd = match kern {
-        // Disable SIMD selection by default; see decision note above.
         Kernel::Auto => Kernel::Scalar,
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -726,7 +689,6 @@ fn mom_batch_inner(
         }
     }
 
-    // materialize Vec<f64> without copy
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -778,7 +740,6 @@ unsafe fn mom_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     mom_row_scalar(data, first, period, out)
 }
 
-// Helper function for batch operations writing directly to output
 #[inline(always)]
 pub fn mom_batch_inner_into(
     data: &[f64],
@@ -816,7 +777,6 @@ pub fn mom_batch_inner_into(
         });
     }
 
-    // view caller buffer as MaybeUninit and write NaN warm prefixes via helper
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             output.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -827,7 +787,6 @@ pub fn mom_batch_inner_into(
     init_matrix_prefixes(out_mu, cols, &warm);
 
     let simd = match kern {
-        // Disable SIMD selection by default; see decision note above.
         Kernel::Auto => Kernel::Scalar,
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -871,14 +830,12 @@ mod tests {
     #[cfg(feature = "proptest")]
     use proptest::prelude::*;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_mom_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Small but non-trivial input with a NaN prefix to exercise warmup logic
         let mut data = Vec::with_capacity(256);
         data.push(f64::NAN);
         for i in 0..255 {
-            // some variation, not strictly linear
             let x = (i as f64).sin() * 10.0 + (i as f64) * 0.5;
             data.push(x);
         }
@@ -886,16 +843,13 @@ mod tests {
         let params = MomParams { period: Some(10) };
         let input = MomInput::from_slice(&data, params);
 
-        // Baseline via existing Vec-returning API
         let base = mom(&input)?.values;
 
-        // into API output
         let mut into_out = vec![0.0; data.len()];
         mom_into(&input, &mut into_out)?;
 
         assert_eq!(base.len(), into_out.len());
 
-        // Equality check: NaN == NaN; otherwise exact equality
         for (i, (a, b)) in base.iter().zip(into_out.iter()).enumerate() {
             let ok = (a.is_nan() && b.is_nan()) || (a == b);
             assert!(ok, "mismatch at index {}: base={}, into={}", i, a, b);
@@ -1128,15 +1082,15 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            MomParams::default(),            // period: 10
-            MomParams { period: Some(2) },   // minimum viable
-            MomParams { period: Some(5) },   // small
-            MomParams { period: Some(7) },   // small
-            MomParams { period: Some(14) },  // medium
-            MomParams { period: Some(20) },  // medium
-            MomParams { period: Some(50) },  // large
-            MomParams { period: Some(100) }, // very large
-            MomParams { period: Some(200) }, // edge case large
+            MomParams::default(),
+            MomParams { period: Some(2) },
+            MomParams { period: Some(5) },
+            MomParams { period: Some(7) },
+            MomParams { period: Some(14) },
+            MomParams { period: Some(20) },
+            MomParams { period: Some(50) },
+            MomParams { period: Some(100) },
+            MomParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1145,12 +1099,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1200,7 +1153,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1211,7 +1164,6 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy: generate period from 1 to 64, then data with length from period to 400
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1229,18 +1181,14 @@ mod tests {
                 };
                 let input = MomInput::from_slice(&data, params.clone());
 
-                // Get output from the kernel under test
                 let MomOutput { values: out } = mom_with_kernel(&input, kernel).unwrap();
 
-                // Get reference output from scalar kernel for consistency check
                 let MomOutput { values: ref_out } =
                     mom_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Find first valid index (first non-NaN in data)
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup_period = first_valid + period;
 
-                // Property 1: Warmup period - first 'warmup_period' values should be NaN
                 for i in 0..warmup_period.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1251,7 +1199,6 @@ mod tests {
                     );
                 }
 
-                // Property 2: Exact formula - momentum[i] = data[i] - data[i - period]
                 for i in warmup_period..data.len() {
                     let expected = data[i] - data[i - period];
                     let actual = out[i];
@@ -1268,12 +1215,10 @@ mod tests {
                     }
                 }
 
-                // Property 3: Kernel consistency - all kernels should produce identical results
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Check bit-exact equality for NaN/infinite values
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -1284,7 +1229,6 @@ mod tests {
                             r
                         );
                     } else {
-                        // For finite values, allow small numerical difference or ULP difference
                         let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                         prop_assert!(
                             (y - r).abs() <= 1e-10 || ulp_diff <= 4,
@@ -1298,7 +1242,6 @@ mod tests {
                     }
                 }
 
-                // Property 4: Constant data produces zero momentum
                 let all_same = data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
                 if all_same && data.len() > period {
                     for i in warmup_period..out.len() {
@@ -1312,8 +1255,6 @@ mod tests {
                     }
                 }
 
-                // Property 5: Linear data produces constant momentum
-                // Check if data is approximately linear (consecutive differences are constant)
                 if data.len() > period + 2 {
                     let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
                     let is_linear = diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
@@ -1332,9 +1273,7 @@ mod tests {
                     }
                 }
 
-                // Property 6: Symmetry - negating input negates output
                 if data.len() < 100 {
-                    // Only test on smaller datasets for efficiency
                     let neg_data: Vec<f64> = data.iter().map(|&x| -x).collect();
                     let neg_input = MomInput::from_slice(&neg_data, params);
                     let MomOutput { values: neg_out } =
@@ -1354,7 +1293,6 @@ mod tests {
                     }
                 }
 
-                // Property 7: Period=1 gives adjacent differences
                 if period == 1 && data.len() > 1 {
                     for i in 1..data.len() {
                         let expected = data[i] - data[i - 1];
@@ -1368,7 +1306,6 @@ mod tests {
                     }
                 }
 
-                // Property 8: Output magnitude bounded by max difference in data
                 if data.len() > period {
                     let min_val = data
                         .iter()
@@ -1471,12 +1408,12 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),     // Small periods
-            (5, 25, 5),     // Medium periods
-            (30, 60, 15),   // Large periods
-            (2, 5, 1),      // Dense small range
-            (10, 50, 10),   // Wide range with medium step
-            (100, 200, 50), // Very large periods
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 50, 10),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1495,7 +1432,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1551,7 +1487,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -1578,8 +1514,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-/// Core helper for zero-allocation WASM API
-/// Writes directly to output slice - no intermediate allocations
 #[inline(always)]
 pub fn mom_into_slice(dst: &mut [f64], input: &MomInput, kernel: Kernel) -> Result<(), MomError> {
     let (data, period, first, chosen) = mom_prepare(input, kernel)?;
@@ -1597,14 +1531,12 @@ pub fn mom_into_slice(dst: &mut [f64], input: &MomInput, kernel: Kernel) -> Resu
     Ok(())
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-// WASM Safe API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mom_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = MomParams {
@@ -1612,15 +1544,14 @@ pub fn mom_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = MomInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
     mom_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// WASM Fast API with aliasing detection
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mom_into(
     in_ptr: *const f64,
@@ -1640,7 +1571,6 @@ pub fn mom_into(
         let input = MomInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
             let mut temp = vec![0.0; len];
             mom_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1655,8 +1585,7 @@ pub fn mom_into(
     }
 }
 
-// WASM Memory Management
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mom_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1665,7 +1594,7 @@ pub fn mom_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mom_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1675,14 +1604,13 @@ pub fn mom_free(ptr: *mut f64, len: usize) {
     }
 }
 
-// WASM Batch API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MomBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MomBatchJsOutput {
     pub values: Vec<f64>,
@@ -1691,7 +1619,7 @@ pub struct MomBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = mom_batch)]
 pub fn mom_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MomBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1715,7 +1643,7 @@ pub fn mom_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mom_batch_into(
     in_ptr: *const f64,
@@ -1736,8 +1664,7 @@ pub fn mom_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -1746,7 +1673,6 @@ pub fn mom_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Use mom_batch_inner_into for direct output
         mom_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1754,7 +1680,6 @@ pub fn mom_batch_into(
     }
 }
 
-// Python bindings
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -1806,8 +1731,7 @@ pub fn mom_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid_checked(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
     let total = rows
@@ -1824,7 +1748,6 @@ pub fn mom_batch_py<'py>(
                 k => k,
             };
 
-            // For mom, we use mom_batch_inner_into
             mom_batch_inner_into(slice_in, &sweep, kernel, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1873,11 +1796,10 @@ pub fn register_mom_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaMom;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaMom;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1913,7 +1835,7 @@ impl MomDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Producer stream is synchronized before returning, so omit "stream".
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1931,7 +1853,6 @@ impl MomDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1945,16 +1866,13 @@ impl MomDeviceArrayF32Py {
                             "device copy not implemented for __dlpack__",
                         ));
                     } else {
-                        return Err(PyValueError::new_err(
-                            "dl_device mismatch for __dlpack__",
-                        ));
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                     }
                 }
             }
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let inner = self
             .inner
             .take()
@@ -1991,8 +1909,7 @@ pub fn mom_cuda_batch_dev_py(
         period: period_range,
     };
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaMom::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaMom::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id() as i32;
         let arr = cuda
@@ -2030,8 +1947,7 @@ pub fn mom_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaMom::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaMom::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id() as i32;
         let arr = cuda

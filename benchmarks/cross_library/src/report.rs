@@ -83,7 +83,7 @@ impl ReportGenerator {
     <p>Comparing Rust-TA indicators against Tulip C and TA-Lib</p>
 "#);
 
-        
+
         let mut grouped: HashMap<(String, String), HashMap<String, BenchmarkResult>> = HashMap::new();
 
         for result in &self.results {
@@ -93,7 +93,7 @@ impl ReportGenerator {
                 .insert(result.library.clone(), result.clone());
         }
 
-        
+
         html.push_str("<h2>Performance Comparison</h2>\n<table>\n");
         html.push_str("<tr><th>Indicator</th><th>Data Size</th><th>Rust (ms)</th><th>Rust FFI (ms)</th>");
         html.push_str("<th>Tulip (ms)</th><th>TA-Lib (ms)</th><th>Rust/Tulip</th><th>FFI Overhead %</th></tr>\n");
@@ -128,17 +128,17 @@ impl ReportGenerator {
 
         html.push_str("</table>\n");
 
-        
+
         html.push_str("<h2>Performance Charts</h2>\n");
 
-        
+
         #[cfg(feature = "html-reports")]
         {
             self.generate_comparison_chart("comparison_chart.png")?;
             html.push_str("<img src='comparison_chart.png' alt='Performance Comparison Chart'>\n");
         }
 
-        
+
         html.push_str("<h2>Summary</h2>\n<ul>\n");
 
         let rust_wins = grouped.iter()
@@ -157,7 +157,7 @@ impl ReportGenerator {
         html.push_str(&format!("<li>Rust outperforms Tulip in {}/{} cases ({:.1}%)</li>\n",
                                rust_wins, total_comparisons, win_percentage));
 
-        
+
         let speedups: Vec<f64> = grouped.iter()
             .filter_map(|(_, libs)| {
                 if let (Some(rust), Some(tulip)) = (libs.get("rust"), libs.get("tulip")) {
@@ -201,13 +201,13 @@ impl ReportGenerator {
             .y_desc("Time (ms)")
             .draw()?;
 
-        
+
 
         root.present()?;
         Ok(())
     }
 
-    
+
     #[cfg(not(feature = "html-reports"))]
     fn generate_comparison_chart(&self, _filename: &str) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())

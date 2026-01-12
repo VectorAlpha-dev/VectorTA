@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::ttm_squeeze::{
     ttm_squeeze_batch_with_kernel, ttm_squeeze_with_kernel, TtmSqueezeBatchRange, TtmSqueezeData,
     TtmSqueezeInput, TtmSqueezeParams,
@@ -72,12 +70,30 @@ fn ttm_squeeze_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
     let mut sq_g = vec![0f32; sq_dev.len()];
     sq_dev.buf.copy_to(&mut sq_g)?;
 
-    let tol = 1e-2; 
-    for idx in 0..cpu.rows*cpu.cols {
-        let cm = cpu.momentum[idx]; let gm = mo_g[idx] as f64;
-        let cs = cpu.squeeze[idx];  let gs = sq_g[idx] as f64;
-        if !(cm.is_nan() || gm.is_nan()) { assert!(approx_eq(cm, gm, tol), "momentum mismatch at {} (cpu={} gpu={})", idx, cm, gm); }
-        if !(cs.is_nan() || gs.is_nan()) { assert!(approx_eq(cs, gs, 1e-6),  "squeeze mismatch at {} (cpu={} gpu={})", idx, cs, gs); }
+    let tol = 1e-2;
+    for idx in 0..cpu.rows * cpu.cols {
+        let cm = cpu.momentum[idx];
+        let gm = mo_g[idx] as f64;
+        let cs = cpu.squeeze[idx];
+        let gs = sq_g[idx] as f64;
+        if !(cm.is_nan() || gm.is_nan()) {
+            assert!(
+                approx_eq(cm, gm, tol),
+                "momentum mismatch at {} (cpu={} gpu={})",
+                idx,
+                cm,
+                gm
+            );
+        }
+        if !(cs.is_nan() || gs.is_nan()) {
+            assert!(
+                approx_eq(cs, gs, 1e-6),
+                "squeeze mismatch at {} (cpu={} gpu={})",
+                idx,
+                cs,
+                gs
+            );
+        }
     }
     Ok(())
 }
@@ -125,7 +141,6 @@ fn ttm_squeeze_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     let kc_mid = 1.5f64;
     let kc_low = 2.0f64;
 
-    
     let mut mo_cpu = vec![f64::NAN; cols * rows];
     let mut sq_cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -160,7 +175,6 @@ fn ttm_squeeze_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
         }
     }
 
-    
     let h32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let l32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let c32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();
@@ -187,10 +201,18 @@ fn ttm_squeeze_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
     let mut sq_g = vec![0f32; sq_tm.len()];
     sq_tm.buf.copy_to(&mut sq_g)?;
 
-    let tol = 1e-2; 
-    for idx in 0..rows*cols {
-        let cm = mo_cpu[idx]; let gm = mo_g[idx] as f64; if !(cm.is_nan() || gm.is_nan()) { assert!(approx_eq(cm, gm, tol), "momentum mismatch at {}", idx); }
-        let cs = sq_cpu[idx]; let gs = sq_g[idx] as f64; if !(cs.is_nan() || gs.is_nan()) { assert!(approx_eq(cs, gs, 1e-6), "squeeze mismatch at {}", idx); }
+    let tol = 1e-2;
+    for idx in 0..rows * cols {
+        let cm = mo_cpu[idx];
+        let gm = mo_g[idx] as f64;
+        if !(cm.is_nan() || gm.is_nan()) {
+            assert!(approx_eq(cm, gm, tol), "momentum mismatch at {}", idx);
+        }
+        let cs = sq_cpu[idx];
+        let gs = sq_g[idx] as f64;
+        if !(cs.is_nan() || gs.is_nan()) {
+            assert!(approx_eq(cs, gs, 1e-6), "squeeze mismatch at {}", idx);
+        }
     }
     Ok(())
 }

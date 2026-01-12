@@ -1,28 +1,3 @@
-/// # Moving Average Dispatcher
-///
-/// A single entry-point function that dispatches the call to various moving average
-/// implementations, based on a string identifier (`ma_type`). Supported identifiers
-/// include `"sma"`, `"ema"`, `"wma"`, etc., and each corresponds to a specific
-/// underlying moving average algorithm. This allows you to switch between different
-/// moving average types at runtime with a uniform interface.
-///
-/// ## Parameters
-/// - **ma_type**: A lowercase string identifier specifying which moving average
-///   function to call (e.g., `"sma"`, `"ema"`, `"alma"`, `"kama"`, etc.).
-/// - **data**: An enum that can contain either candle data + source or a raw slice of `f64`.
-/// - **period**: The window length for the chosen moving average. Its interpretation
-///   depends on the specific MA type (e.g., a look-back period).
-///
-/// ## Errors
-/// - **`Box<dyn Error>`**: Propagates any errors returned by the specific moving average
-///   function. This may include invalid periods, missing or mismatched data fields,
-///   insufficient data length, etc. If `ma_type` does not match a known identifier,
-///   an error will also be returned.
-///
-/// ## Returns
-/// - **`Ok(Vec<f64>)`** on success, containing the computed moving average values
-///   of length matching the input data.
-/// - **`Err(Box<dyn Error>)`** otherwise.
 use crate::indicators::alma::{alma, AlmaData, AlmaInput, AlmaParams};
 use crate::indicators::cwma::{cwma, CwmaData, CwmaInput, CwmaParams};
 use crate::indicators::dema::{dema, DemaData, DemaInput, DemaParams};
@@ -90,7 +65,6 @@ use crate::utilities::enums::Kernel;
 use std::error::Error;
 use thiserror::Error;
 
-
 use crate::indicators::alma::alma_with_kernel;
 use crate::indicators::cwma::cwma_with_kernel;
 use crate::indicators::dema::dema_with_kernel;
@@ -149,9 +123,9 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -163,10 +137,6 @@ pub enum MaData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Decision: MA dispatcher provides a uniform front-end over many indicators.
-/// No SIMD/CUDA here; delegates to per-indicator kernels. Adds typed errors
-/// while preserving existing public behavior/messages used by Python tests.
-
 #[derive(Debug, Error)]
 pub enum MaError {
     #[error("Unknown moving average type: {ma_type}")]
@@ -177,7 +147,7 @@ pub enum MaError {
     RequiresVolume { indicator: &'static str },
     #[error("{indicator} returns dual outputs, use the indicator directly")]
     DualOutputNotSupported { indicator: &'static str },
-    // Additional errors for dispatcher-level validation and parity with per-indicator enums
+
     #[error("input data is empty")]
     EmptyInputData,
     #[error("all input values are NaN")]
@@ -564,10 +534,10 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "maaq" => {
-            // Guard potential overflow when doubling period
-            let slow = period
-                .checked_mul(2)
-                .ok_or(MaError::InvalidPeriod { period, data_len: 0 })?;
+            let slow = period.checked_mul(2).ok_or(MaError::InvalidPeriod {
+                period,
+                data_len: 0,
+            })?;
             let input = match data {
                 MaData::Candles { candles, source } => MaaqInput {
                     data: MaaqData::Candles { candles, source },
@@ -591,8 +561,6 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "mama" => {
-            // Use default MAMA parameters rather than trying to derive from period
-            // MAMA is an adaptive algorithm that doesn't use a fixed period
             let input = match data {
                 MaData::Candles { candles, source } => {
                     MamaInput::from_candles(candles, source, MamaParams::default())
@@ -1041,8 +1009,10 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "buff_averages" => {
-            
-            return Err(MaError::RequiresVolume { indicator: "buff_averages" }.into());
+            return Err(MaError::RequiresVolume {
+                indicator: "buff_averages",
+            }
+            .into());
         }
 
         "dma" => {
@@ -1109,8 +1079,10 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "ehlers_pma" => {
-            
-            return Err(MaError::DualOutputNotSupported { indicator: "ehlers_pma" }.into());
+            return Err(MaError::DualOutputNotSupported {
+                indicator: "ehlers_pma",
+            }
+            .into());
         }
 
         "ehma" => {
@@ -1135,7 +1107,6 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "frama" => {
-            
             return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
         }
 
@@ -1182,12 +1153,13 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "tradjema" => {
-            
-            return Err(MaError::RequiresHighLow { indicator: "tradjema" }.into());
+            return Err(MaError::RequiresHighLow {
+                indicator: "tradjema",
+            }
+            .into());
         }
 
         "uma" => {
-            
             return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
@@ -1213,7 +1185,6 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "volume_adjusted_ma" => {
-            
             return Err(MaError::RequiresVolume {
                 indicator: "volume_adjusted_ma",
             }
@@ -2022,8 +1993,10 @@ pub fn ma_with_kernel<'a>(
         }
 
         "buff_averages" => {
-            
-            return Err(MaError::RequiresVolume { indicator: "buff_averages" }.into());
+            return Err(MaError::RequiresVolume {
+                indicator: "buff_averages",
+            }
+            .into());
         }
 
         "dma" => {
@@ -2090,8 +2063,10 @@ pub fn ma_with_kernel<'a>(
         }
 
         "ehlers_pma" => {
-            
-            return Err(MaError::DualOutputNotSupported { indicator: "ehlers_pma" }.into());
+            return Err(MaError::DualOutputNotSupported {
+                indicator: "ehlers_pma",
+            }
+            .into());
         }
 
         "ehma" => {
@@ -2116,7 +2091,6 @@ pub fn ma_with_kernel<'a>(
         }
 
         "frama" => {
-            
             return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
         }
 
@@ -2163,12 +2137,13 @@ pub fn ma_with_kernel<'a>(
         }
 
         "tradjema" => {
-            
-            return Err(MaError::RequiresHighLow { indicator: "tradjema" }.into());
+            return Err(MaError::RequiresHighLow {
+                indicator: "tradjema",
+            }
+            .into());
         }
 
         "uma" => {
-            
             return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
@@ -2194,7 +2169,6 @@ pub fn ma_with_kernel<'a>(
         }
 
         "volume_adjusted_ma" => {
-            
             return Err(MaError::RequiresVolume {
                 indicator: "volume_adjusted_ma",
             }
@@ -2225,14 +2199,11 @@ pub fn ma_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| -> Result<Vec<f64>, Box<dyn Error + Send + Sync>> {
-            
             match ma_with_kernel(ma_type, MaData::Slice(slice_in), period, kern) {
                 Ok(result) => Ok(result),
                 Err(e) => {
-                    
                     if e.to_string().contains("Unknown moving average type") {
                         ma_with_kernel("sma", MaData::Slice(slice_in), period, kern).map_err(
                             |e| -> Box<dyn Error + Send + Sync> {
@@ -2243,7 +2214,6 @@ pub fn ma_py<'py>(
                             },
                         )
                     } else {
-                        
                         Err(Box::new(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             e.to_string(),
@@ -2254,23 +2224,19 @@ pub fn ma_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "ma")]
 pub fn ma_js(data: &[f64], ma_type: &str, period: usize) -> Result<Vec<f64>, JsValue> {
-    
     match ma(ma_type, MaData::Slice(data), period) {
         Ok(result) => Ok(result),
         Err(e) => {
-            
             if e.to_string().contains("Unknown moving average type") {
                 ma("sma", MaData::Slice(data), period)
                     .map_err(|e| JsValue::from_str(&e.to_string()))
             } else {
-                
                 Err(JsValue::from_str(&e.to_string()))
             }
         }
@@ -2347,8 +2313,6 @@ mod tests {
                 ma_type
             );
 
-            
-            
             let skip_amount = if ma_type == "mama" { 10 } else { 960 };
             for (i, &value) in candles_result.iter().enumerate().skip(skip_amount) {
                 assert!(
@@ -2359,9 +2323,6 @@ mod tests {
                 );
             }
 
-            
-            
-            
             if ma_type != "mama" {
                 let slice_result = ma(ma_type, MaData::Slice(&candles_result), 60)
                     .unwrap_or_else(|err| panic!("`ma({})` failed with error: {}", ma_type, err));

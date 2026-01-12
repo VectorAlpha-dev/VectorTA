@@ -34,7 +34,6 @@ fn tsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 8192usize;
     let mut price = vec![f64::NAN; len];
     for i in 1..len {
-        
         let x = i as f64;
         price[i] = (x * 0.00123).sin() + 0.00017 * x;
     }
@@ -57,7 +56,6 @@ fn tsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    
     let (atol, rtol) = (0.5, 5e-3);
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
@@ -82,12 +80,11 @@ fn tsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     use vector_ta::indicators::tsi::{tsi_with_kernel, TsiData, TsiInput, TsiParams};
 
-    let cols = 6usize; 
-    let rows = 2048usize; 
+    let cols = 6usize;
+    let rows = 2048usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (1 + s)..rows {
-            
             let x = (t as f64) + (s as f64) * 0.2;
             price_tm[t * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
@@ -95,7 +92,6 @@ fn tsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let long = 25usize;
     let short = 13usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

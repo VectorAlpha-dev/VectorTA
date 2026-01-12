@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::dx::{dx_batch_with_kernel, DxBatchRange};
 use vector_ta::utilities::enums::Kernel;
 
@@ -50,7 +48,6 @@ fn dx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = DxBatchRange { period: (6, 30, 3) };
 
-    
     let high_q: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let low_q: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let close_q: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -72,7 +69,7 @@ fn dx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_host)?;
 
-    let tol = 2e-1; 
+    let tol = 2e-1;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -94,8 +91,8 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         eprintln!("[dx_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 16usize; 
-    let rows = 2048usize; 
+    let cols = 16usize;
+    let rows = 2048usize;
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -119,7 +116,6 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
 
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -162,7 +158,7 @@ fn dx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
 
     let mut g_tm = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut g_tm)?;
-    let tol = 1e-1; 
+    let tol = 1e-1;
     for i in 0..g_tm.len() {
         assert!(
             approx_eq(cpu_tm[i], g_tm[i] as f64, tol),

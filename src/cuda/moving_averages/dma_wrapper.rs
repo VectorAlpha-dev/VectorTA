@@ -1,17 +1,10 @@
-//! CUDA scaffolding for the DMA (Dickson Moving Average) kernels.
-//!
-//! Mirrors ALMA’s CUDA wrapper architecture: explicit policy selection,
-//! introspection, VRAM checks, chunked launches, and deterministic benches.
-//! For DMA (recursive/IIR), each thread walks time sequentially for its
-//! (series,param) while we parallelize across series/params.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
 use crate::indicators::moving_averages::dma::{DmaBatchRange, DmaParams};
 use cust::context::Context;
-use cust::error::CudaError;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer};
@@ -27,8 +20,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
     One,
@@ -41,7 +32,7 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    
+
     Tiled {
         tile: u32,
         per_thread: BatchThreadsPerOutput,
@@ -52,7 +43,7 @@ pub enum BatchKernelPolicy {
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    
+
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -70,8 +61,6 @@ impl Default for CudaDmaPolicy {
         }
     }
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -94,7 +83,11 @@ pub enum CudaDmaError {
     #[error("not implemented")]
     NotImplemented,
     #[error("out of device memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("output slice length mismatch: expected={expected}, got={got}")]
@@ -102,7 +95,14 @@ pub enum CudaDmaError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer on device {buf}, current device {current}")]
     DeviceMismatch { buf: u32, current: u32 },
 }
@@ -120,7 +120,6 @@ pub struct CudaDma {
 }
 
 impl CudaDma {
-    /// Create a new `CudaDma` on `device_id` and load the PTX module.
     pub fn new(device_id: usize) -> Result<Self, CudaDmaError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
@@ -149,7 +148,6 @@ impl CudaDma {
         })
     }
 
-    /// Create using an explicit policy (tests/benches).
     pub fn new_with_policy(device_id: usize, policy: CudaDmaPolicy) -> Result<Self, CudaDmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
@@ -168,19 +166,20 @@ impl CudaDma {
         self.last_many
     }
 
-    /// Synchronize the stream (deterministic timings in benches/tests).
     pub fn synchronize(&self) -> Result<(), CudaDmaError> {
         self.stream.synchronize()?;
         Ok(())
     }
 
-    /// Clone of the underlying CUDA context to keep it alive alongside VRAM handles.
     #[inline]
-    pub fn context(&self) -> Arc<Context> { self.ctx.clone() }
+    pub fn context(&self) -> Arc<Context> {
+        self.ctx.clone()
+    }
 
-    /// Device id for interop (__dlpack_device__).
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn maybe_enable_l2_persist_for_prices(
@@ -188,16 +187,13 @@ impl CudaDma {
         d_prices_bytes: usize,
         d_prices_ptr: u64,
     ) -> Result<(), CudaDmaError> {
-        
         unsafe {
-            
             let mut dev: cu::CUdevice = 0;
             let rc_dev = cu::cuCtxGetDevice(&mut dev as *mut _);
             if rc_dev != cu::CUresult::CUDA_SUCCESS {
                 return Ok(());
             }
 
-            
             let mut max_persist_bytes: i32 = 0;
             let _ = cu::cuDeviceGetAttribute(
                 &mut max_persist_bytes as *mut i32,
@@ -218,11 +214,9 @@ impl CudaDma {
                 return Ok(());
             }
 
-            
             let set_aside = d_prices_bytes.min(max_persist_bytes as usize);
             let _ = cu::cuCtxSetLimit(cu::CUlimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, set_aside);
 
-            
             let mut apw: cu::CUaccessPolicyWindow = zeroed();
             apw.base_ptr = d_prices_ptr as usize as *mut c_void;
             apw.num_bytes = d_prices_bytes.min(max_window as usize);
@@ -282,8 +276,6 @@ impl CudaDma {
         }
     }
 
-    
-
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -292,15 +284,27 @@ impl CudaDma {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaDmaError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _)) = Self::device_mem_info() {
-            if required_bytes.checked_add(headroom_bytes).unwrap_or(usize::MAX) <= free {
+            if required_bytes
+                .checked_add(headroom_bytes)
+                .unwrap_or(usize::MAX)
+                <= free
+            {
                 Ok(())
             } else {
-                Err(CudaDmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaDmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -315,9 +319,6 @@ impl CudaDma {
         })
     }
 
-    
-
-    /// Host input → VRAM output; batches parameter combos. Parallelizes across combos.
     pub fn dma_batch_dev(
         &self,
         data_f32: &[f32],
@@ -327,7 +328,6 @@ impl CudaDma {
         self.run_batch_with_prices_host(data_f32, &inputs)
     }
 
-    /// Device prices → VRAM output. Avoids H2D copy when prices already resident.
     pub fn dma_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -340,7 +340,6 @@ impl CudaDma {
         self.run_batch_with_prices_device(d_prices, series_len, first_valid, &combos, max_sqrt_len)
     }
 
-    /// Convenience to copy GPU output back to host and return metadata.
     pub fn dma_batch_into_host_f32(
         &self,
         data_f32: &[f32],
@@ -364,7 +363,6 @@ impl CudaDma {
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
-    /// Lower-level device path used by benches/tests.
     pub fn dma_batch_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -402,9 +400,6 @@ impl CudaDma {
         )
     }
 
-    
-
-    /// Device path for many-series one-param.
     pub fn dma_many_series_one_param_device(
         &self,
         d_prices_tm: &DeviceBuffer<f32>,
@@ -452,7 +447,6 @@ impl CudaDma {
         )
     }
 
-    /// Host path for many-series one-param (time-major).
     pub fn dma_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -507,8 +501,6 @@ impl CudaDma {
         Ok(())
     }
 
-    
-
     fn run_batch_with_prices_host(
         &self,
         data_f32: &[f32],
@@ -532,23 +524,30 @@ impl CudaDma {
             .checked_mul(size_of::<f32>())
             .ok_or_else(|| CudaDmaError::InvalidInput("output bytes overflow".into()))?;
         let required = prices_bytes
-            .checked_add(hull_bytes.checked_mul(3).ok_or_else(|| CudaDmaError::InvalidInput("param bytes overflow".into()))?)
+            .checked_add(
+                hull_bytes
+                    .checked_mul(3)
+                    .ok_or_else(|| CudaDmaError::InvalidInput("param bytes overflow".into()))?,
+            )
             .and_then(|v| v.checked_add(out_bytes))
             .and_then(|v| v.checked_add(64 * 1024 * 1024))
             .ok_or_else(|| CudaDmaError::InvalidInput("required bytes overflow".into()))?;
         Self::ensure_fit(required, 0)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
-        
+
         let _ = self.maybe_enable_l2_persist_for_prices(
             series_len * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
         );
-        let d_hulls = unsafe { DeviceBuffer::from_slice_async(&inputs.hull_lengths, &self.stream)? };
+        let d_hulls =
+            unsafe { DeviceBuffer::from_slice_async(&inputs.hull_lengths, &self.stream)? };
         let d_emas = unsafe { DeviceBuffer::from_slice_async(&inputs.ema_lengths, &self.stream)? };
-        let d_gains = unsafe { DeviceBuffer::from_slice_async(&inputs.ema_gain_limits, &self.stream)? };
+        let d_gains =
+            unsafe { DeviceBuffer::from_slice_async(&inputs.ema_gain_limits, &self.stream)? };
         let d_types = unsafe { DeviceBuffer::from_slice_async(&inputs.hull_types, &self.stream)? };
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
         self.launch_batch_kernels(
             &d_prices,
@@ -579,7 +578,7 @@ impl CudaDma {
         max_sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaDmaError> {
         let n_combos = combos.len();
-        
+
         let out_elems = n_combos
             .checked_mul(series_len)
             .ok_or_else(|| CudaDmaError::InvalidInput("rows*cols overflow".into()))?;
@@ -623,8 +622,9 @@ impl CudaDma {
         let d_emas = unsafe { DeviceBuffer::from_slice_async(&emas, &self.stream) }?;
         let d_gains = unsafe { DeviceBuffer::from_slice_async(&gains, &self.stream) }?;
         let d_types = unsafe { DeviceBuffer::from_slice_async(&types, &self.stream) }?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
-        
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
+
         let _ = self.maybe_enable_l2_persist_for_prices(
             series_len * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
@@ -662,7 +662,6 @@ impl CudaDma {
         max_sqrt_len: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDmaError> {
-        
         let has_tx128 = self
             .module
             .get_function("dma_batch_tiled_f32_tx128")
@@ -749,10 +748,11 @@ impl CudaDma {
             }
             self.maybe_log_batch_debug();
         } else {
-            let func = self
-                .module
-                .get_function("dma_batch_f32")
-                .map_err(|_| CudaDmaError::MissingKernelSymbol { name: "dma_batch_f32" })?;
+            let func = self.module.get_function("dma_batch_f32").map_err(|_| {
+                CudaDmaError::MissingKernelSymbol {
+                    name: "dma_batch_f32",
+                }
+            })?;
             let block_x = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } => block_x,
                 _ => 1,
@@ -807,7 +807,11 @@ impl CudaDma {
         let out_bytes = in_bytes;
         if let Some((free, _)) = mem_get_info().ok() {
             if in_bytes + out_bytes + 64 * 1024 * 1024 > free {
-                return Err(CudaDmaError::OutOfMemory { required: in_bytes + out_bytes + 64 * 1024 * 1024, free, headroom: 0 });
+                return Err(CudaDmaError::OutOfMemory {
+                    required: in_bytes + out_bytes + 64 * 1024 * 1024,
+                    free,
+                    headroom: 0,
+                });
             }
         }
 
@@ -815,7 +819,7 @@ impl CudaDma {
             DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)
                 .map_err(|e| CudaDmaError::Cuda(e))?
         };
-        
+
         let _ = self.maybe_enable_l2_persist_for_prices(
             elems * size_of::<f32>(),
             d_prices.as_device_ptr().as_raw(),
@@ -923,7 +927,9 @@ impl CudaDma {
             let func = self
                 .module
                 .get_function("dma_many_series_one_param_f32")
-                .map_err(|_| CudaDmaError::MissingKernelSymbol { name: "dma_many_series_one_param_f32" })?;
+                .map_err(|_| CudaDmaError::MissingKernelSymbol {
+                    name: "dma_many_series_one_param_f32",
+                })?;
             let block_x = match self.policy.many_series {
                 ManySeriesKernelPolicy::OneD { block_x } => block_x,
                 _ => 1,
@@ -956,8 +962,6 @@ impl CudaDma {
         }
         Ok(())
     }
-
-    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -1230,8 +1234,6 @@ struct BatchInputs {
     max_sqrt_len: usize,
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -1247,7 +1249,7 @@ pub mod benches {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let params_bytes = PARAM_SWEEP * 4 * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        
+
         in_bytes + params_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
@@ -1308,10 +1310,8 @@ pub mod benches {
         let d_emas = DeviceBuffer::from_slice(&inputs.ema_lengths).expect("d_emas");
         let d_gains = DeviceBuffer::from_slice(&inputs.ema_gain_limits).expect("d_gains");
         let d_types = DeviceBuffer::from_slice(&inputs.hull_types).expect("d_types");
-        let d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(n_combos * inputs.series_len)
-        }
-        .expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * inputs.series_len) }.expect("d_out");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(DmaBatchDevState {
@@ -1398,12 +1398,24 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("dma", "one_series_many_params", "dma_cuda_batch_dev", "1m_x_250", prep_one_series_many_params)
-                .with_sample_size(10)
-                .with_mem_required(bytes_one_series_many_params()),
-            CudaBenchScenario::new("dma", "many_series_one_param", "dma_cuda_many_series_one_param", "250x1m", prep_many_series_one_param)
-                .with_sample_size(5)
-                .with_mem_required(bytes_many_series_one_param()),
+            CudaBenchScenario::new(
+                "dma",
+                "one_series_many_params",
+                "dma_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "dma",
+                "many_series_one_param",
+                "dma_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
         ]
     }
 }

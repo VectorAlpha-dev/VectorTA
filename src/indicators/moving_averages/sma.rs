@@ -1,24 +1,3 @@
-//! # Simple Moving Average (SMA)
-//!
-//! The most basic form of moving average, summing the last `period` points
-//! and dividing by `period`. Useful for smoothing data and trend detection.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points).
-//!
-//! ## Returns
-//! - **`Ok(SmaOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(SmaError)`** otherwise.
-//!
-//! ## Developer Status
-//! - SIMD: AVX-512 enabled; >5% faster than scalar at 100k.
-//! - AVX2 implemented but disabled by default (underperforms scalar on test HW).
-//! - Streaming update: O(1) via rolling sum; zero-copy alloc helpers in use.
-//! - CUDA: VRAM-first wrapper with typed errors; interop via CAI v3 and DLPack v1.x (versioned/legacy capsules).
-//!
-//! Decision: Streaming kernel optimized (cached reciprocal, branchless mask wrap for power-of-two
-//! periods). Behavior unchanged; returns Some on first valid output (period == 1 returns immediately).
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -38,6 +17,10 @@ use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::{CudaSma, DeviceArrayF32};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2};
 #[cfg(feature = "python")]
@@ -47,15 +30,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for SmaInput<'a> {
@@ -83,7 +62,10 @@ pub struct SmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SmaParams {
     pub period: Option<usize>,
 }
@@ -196,7 +178,11 @@ pub enum SmaError {
     #[error("sma: Output buffer size mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("sma: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("sma: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -213,15 +199,7 @@ pub fn sma_with_kernel(input: &SmaInput, kernel: Kernel) -> Result<SmaOutput, Sm
     Ok(SmaOutput { values: out })
 }
 
-/// Compute SMA into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup prefix exactly like the Vec-returning API
-///   (uses the same quiet-NaN pattern).
-/// - The output slice length must match the input length.
-///
-/// This native function is hidden when the `wasm` feature is enabled to avoid
-/// colliding with the wasm-bindgen export of the same name.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn sma_into(input: &SmaInput, out: &mut [f64]) -> Result<(), SmaError> {
     let (data, period, first, chosen) = sma_prepare(input, Kernel::Auto)?;
@@ -233,24 +211,19 @@ pub fn sma_into(input: &SmaInput, out: &mut [f64]) -> Result<(), SmaError> {
         });
     }
 
-    
     let warm = (first + period - 1).min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     sma_compute_into(data, period, first, chosen, out);
     Ok(())
 }
 
-/// Write SMA directly to output slice - zero allocation pattern for WASM
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result<(), SmaError> {
     let (data, period, first, chosen) = sma_prepare(input, kern)?;
 
-    
     if dst.len() != data.len() {
         return Err(SmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -258,13 +231,11 @@ pub fn sma_into_slice(dst: &mut [f64], input: &SmaInput, kern: Kernel) -> Result
         });
     }
 
-    
     let warmup = first + period - 1;
     for v in &mut dst[..warmup] {
         *v = f64::NAN;
     }
 
-    
     sma_compute_into(data, period, first, chosen, dst);
 
     Ok(())
@@ -307,7 +278,6 @@ fn sma_prepare<'a>(
     Ok((data, period, first, chosen))
 }
 
-/// Compute SMA into a pre-allocated output buffer for zero-copy operations
 #[inline]
 fn sma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, out: &mut [f64]) {
     unsafe {
@@ -317,8 +287,6 @@ fn sma_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, o
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                // AVX2 underperforms scalar on typical targets; short-circuit to scalar.
-                // SIMD code remains available for experimentation/feature forcing.
                 sma_scalar(data, period, first, out);
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -339,8 +307,6 @@ pub unsafe fn sma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f
     let dp = data.as_ptr();
     let op = out.as_mut_ptr();
 
-    // Special case for period=1: SMA is just the input value
-    // This avoids floating-point accumulation errors
     if period == 1 {
         for i in first..len {
             *op.add(i) = *dp.add(i);
@@ -374,7 +340,6 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
     let dp = data.as_ptr();
     let op = out.as_mut_ptr();
 
-    // period == 1: copy-through into output (no extra buffers)
     if period == 1 {
         let mut i = first;
         while i < len {
@@ -384,7 +349,6 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         return;
     }
 
-    // --- initial window sum (vector + horizontal reduction) ---
     let mut acc256 = _mm256_setzero_pd();
     let mut k = 0usize;
     let base = first;
@@ -395,13 +359,13 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         acc256 = _mm256_add_pd(acc256, v);
         k += 4;
     }
-    // horizontal reduce acc256 to scalar
-    let hadd = _mm256_hadd_pd(acc256, acc256); // [x0+x1, x2+x3, x0+x1, x2+x3]
-    let lo = _mm256_castpd256_pd128(hadd); // lower 128
-    let hi = _mm256_extractf128_pd(hadd, 1); // upper 128
-    let sum128 = _mm_add_sd(lo, hi); // (x0+x1)+(x2+x3)
+
+    let hadd = _mm256_hadd_pd(acc256, acc256);
+    let lo = _mm256_castpd256_pd128(hadd);
+    let hi = _mm256_extractf128_pd(hadd, 1);
+    let sum128 = _mm_add_sd(lo, hi);
     let mut sum = _mm_cvtsd_f64(sum128);
-    // leftovers
+
     while k < period {
         sum += *dp.add(base + k);
         k += 1;
@@ -412,47 +376,36 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
     let mut warm = first + period - 1;
     *op.add(warm) = sum.mul_add(inv, 0.0);
 
-    // --- main loop: process 4 outputs per iteration via delta prefix-sum ---
     let mut i = warm + 1;
     let end = len;
     let stride = 4usize;
 
     while i + stride - 1 < end {
-        // d = [x[i] - x[i-p], x[i+1] - x[i+1-p], x[i+2] - x[i+2-p], x[i+3] - x[i+3-p]]
         let v_new = _mm256_loadu_pd(dp.add(i));
         let v_old = _mm256_loadu_pd(dp.add(i - period));
         let d = _mm256_sub_pd(v_new, v_old);
 
-        // inclusive scan of d across 4 lanes:
-        // do two 128-bit scans and add cross-carry
-        let d_lo = _mm256_castpd256_pd128(d); // [d0, d1]
-        let d_hi = _mm256_extractf128_pd(d, 1); // [d2, d3]
+        let d_lo = _mm256_castpd256_pd128(d);
+        let d_hi = _mm256_extractf128_pd(d, 1);
 
-        // prefix for low 128: [d0, d0+d1]
-        let t_lo = _mm_unpacklo_pd(_mm_setzero_pd(), d_lo); // [0, d0]
-        let p_lo = _mm_add_pd(d_lo, t_lo); // [d0, d0+d1]
+        let t_lo = _mm_unpacklo_pd(_mm_setzero_pd(), d_lo);
+        let p_lo = _mm_add_pd(d_lo, t_lo);
 
-        // prefix for high 128: [d2, d2+d3]
-        let t_hi = _mm_unpacklo_pd(_mm_setzero_pd(), d_hi); // [0, d2]
-        let mut p_hi = _mm_add_pd(d_hi, t_hi); // [d2, d2+d3]
+        let t_hi = _mm_unpacklo_pd(_mm_setzero_pd(), d_hi);
+        let mut p_hi = _mm_add_pd(d_hi, t_hi);
 
-        // carry from low (replicate high lane of p_lo)
-        let carry = _mm_permute_pd(p_lo, 0b11); // [p_lo[1], p_lo[1]]
-        p_hi = _mm_add_pd(p_hi, carry); // [d0+d1+d2, d0+d1+d2+d3]
+        let carry = _mm_permute_pd(p_lo, 0b11);
+        p_hi = _mm_add_pd(p_hi, carry);
 
-        // combine back into 256
         let mut prefix = _mm256_castpd128_pd256(p_lo);
         prefix = _mm256_insertf128_pd(prefix, p_hi, 1);
 
-        // sums for the next 4 outputs
         let sum_v = _mm256_set1_pd(sum);
         let sums = _mm256_add_pd(sum_v, prefix);
 
-        // store outputs
         let out_v = _mm256_mul_pd(sums, inv_v);
         _mm256_storeu_pd(op.add(i), out_v);
 
-        // update running sum (last lane of sums)
         let sums_hi = _mm256_extractf128_pd(sums, 1);
         let last = _mm_unpackhi_pd(sums_hi, sums_hi);
         sum = _mm_cvtsd_f64(last);
@@ -460,7 +413,6 @@ pub unsafe fn sma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         i += stride;
     }
 
-    // tail
     while i < end {
         sum += *dp.add(i) - *dp.add(i - period);
         *op.add(i) = sum.mul_add(inv, 0.0);
@@ -482,7 +434,6 @@ pub fn sma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[target_feature(enable = "avx512f")]
 #[inline]
 pub unsafe fn sma_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // AVX-512 kernel identical for short/long; kept split to match public API.
     sma_avx512_long(data, period, first, out);
 }
 
@@ -507,7 +458,6 @@ pub unsafe fn sma_avx512_long(data: &[f64], period: usize, first: usize, out: &m
         return;
     }
 
-    // --- initial window sum (vector + horizontal reduction) ---
     let mut acc512 = _mm512_setzero_pd();
     let mut k = 0usize;
     let base = first;
@@ -519,7 +469,6 @@ pub unsafe fn sma_avx512_long(data: &[f64], period: usize, first: usize, out: &m
         k += 8;
     }
 
-    // Reduce 512 → 256 → 128 → scalar
     let acc_lo256 = _mm512_castpd512_pd256(acc512);
     let acc_hi256 = _mm512_extractf64x4_pd(acc512, 1);
     let acc256 = _mm256_add_pd(acc_lo256, acc_hi256);
@@ -540,24 +489,20 @@ pub unsafe fn sma_avx512_long(data: &[f64], period: usize, first: usize, out: &m
     let warm = first + period - 1;
     *op.add(warm) = sum.mul_add(inv, 0.0);
 
-    // Pre-baked index vectors for masked left-shifts (inclusive scan)
-    // shift-by-1: dst[i]=src[i-1] for i>=1, lane0=0
     let idx_sl1 = _mm512_set_epi64(6, 5, 4, 3, 2, 1, 0, 0);
-    // shift-by-2: dst[i]=src[i-2] for i>=2, lanes 0..1=0
+
     let idx_sl2 = _mm512_set_epi64(5, 4, 3, 2, 1, 0, 0, 0);
-    // shift-by-4: dst[i]=src[i-4] for i>=4, lanes 0..3=0
+
     let idx_sl4 = _mm512_set_epi64(3, 2, 1, 0, 0, 0, 0, 0);
 
     let mut i = warm + 1;
     let end = len;
 
     while i + 7 < end {
-        // d = [x[i..i+7]] - [x[i-p..i-p+7]]
         let v_new = _mm512_loadu_pd(dp.add(i));
         let v_old = _mm512_loadu_pd(dp.add(i - period));
         let d = _mm512_sub_pd(v_new, v_old);
 
-        // Inclusive scan over 8 lanes via masked permutes (<<1,<<2,<<4)
         let mut pref = d;
         let sh1 = _mm512_maskz_permutexvar_pd(0b1111_1110, idx_sl1, pref);
         pref = _mm512_add_pd(pref, sh1);
@@ -568,23 +513,19 @@ pub unsafe fn sma_avx512_long(data: &[f64], period: usize, first: usize, out: &m
         let sh4 = _mm512_maskz_permutexvar_pd(0b1111_0000, idx_sl4, pref);
         pref = _mm512_add_pd(pref, sh4);
 
-        // sums for next 8 outputs
         let sums = _mm512_add_pd(_mm512_set1_pd(sum), pref);
 
-        // write outputs
         let out_v = _mm512_mul_pd(sums, inv_v);
         _mm512_storeu_pd(op.add(i), out_v);
 
-        // update running sum with last lane
-        let sums_hi256 = _mm512_extractf64x4_pd(sums, 1); // lanes 4..7
-        let sums_hi128 = _mm256_extractf128_pd(sums_hi256, 1); // lanes 6..7
+        let sums_hi256 = _mm512_extractf64x4_pd(sums, 1);
+        let sums_hi128 = _mm256_extractf128_pd(sums_hi256, 1);
         let last = _mm_unpackhi_pd(sums_hi128, sums_hi128);
         sum = _mm_cvtsd_f64(last);
 
         i += 8;
     }
 
-    // tail
     while i < end {
         sum += *dp.add(i) - *dp.add(i - period);
         *op.add(i) = sum.mul_add(inv, 0.0);
@@ -598,9 +539,9 @@ pub struct SmaStream {
     buffer: Vec<f64>,
     head: usize,
     sum: f64,
-    count: usize, // number of samples seen so far (caps at period)
-    inv: f64,     // cached reciprocal of period
-    // micro-optimization: use bitmask wrap if period is power-of-two
+    count: usize,
+    inv: f64,
+
     use_mask: bool,
     mask: usize,
 }
@@ -628,8 +569,6 @@ impl SmaStream {
         })
     }
 
-    /// Advance the ring index without `%` in the hot path.
-    /// Uses `& mask` when `period` is power-of-two, else branch to zero.
     #[inline(always)]
     fn advance_head(&mut self) {
         if self.use_mask {
@@ -640,10 +579,8 @@ impl SmaStream {
         }
     }
 
-    /// O(1) streaming update. Returns `None` until the window is filled.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Fast-path: period == 1 -> average is just the last value
         if self.period == 1 {
             self.sum = value;
             self.buffer[0] = value;
@@ -652,7 +589,6 @@ impl SmaStream {
         }
 
         if self.count < self.period {
-            // Warmup phase: accumulate until the ring is filled
             self.sum += value;
             self.buffer[self.head] = value;
             self.advance_head();
@@ -663,7 +599,6 @@ impl SmaStream {
             return None;
         }
 
-        // Steady-state: subtract the outgoing sample, add the new one
         let old = self.buffer[self.head];
         self.sum += value - old;
         self.buffer[self.head] = value;
@@ -769,7 +704,6 @@ impl SmaBatchOutput {
 #[inline(always)]
 pub fn expand_grid_sma(r: &SmaBatchRange) -> Result<Vec<SmaParams>, SmaError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SmaError> {
-        // Treat zero step as static; allow reversed bounds; error on empty.
         if step == 0 {
             return Ok(vec![start]);
         }
@@ -783,22 +717,29 @@ pub fn expand_grid_sma(r: &SmaBatchRange) -> Result<Vec<SmaParams>, SmaError> {
                 vals.push(v);
                 match v.checked_add(step) {
                     Some(next) => {
-                        if next == v { break; }
+                        if next == v {
+                            break;
+                        }
                         v = next;
                     }
                     None => break,
                 }
             }
         } else {
-            // reversed bounds: count down by step
             let mut v = start;
             while v >= end {
                 vals.push(v);
-                if v == 0 { break; }
+                if v == 0 {
+                    break;
+                }
                 let next = v.saturating_sub(step);
-                if next == v { break; }
+                if next == v {
+                    break;
+                }
                 v = next;
-                if v < end { break; }
+                if v < end {
+                    break;
+                }
             }
         }
         if vals.is_empty() {
@@ -858,27 +799,21 @@ fn sma_batch_inner(
     }
 
     let rows = combos.len();
-    // Checked arithmetic for rows * cols to avoid overflow in downstream alloc
-    rows
-        .checked_mul(cols)
-        .ok_or(SmaError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
 
-    // 1) allocate rows×cols uninit
+    rows.checked_mul(cols).ok_or(SmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // 2) view as &mut [f64] without copy
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // 3) compute in-place
     sma_batch_inner_into(data, sweep, kern, parallel, out_slice)?;
 
-    // 4) reconstruct Vec<f64> with zero copy
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -997,15 +932,12 @@ fn sma_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    rows
-        .checked_mul(cols)
-        .ok_or(SmaError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    rows.checked_mul(cols).ok_or(SmaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    // Map Auto and Batch to a concrete non-batch kernel (ALMA parity)
     let actual_kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -1017,20 +949,16 @@ fn sma_batch_inner_into(
         other => other,
     };
 
-    // Work over MaybeUninit rows to avoid re-writing warmup
     let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Initialize warmup cells with NaN
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap_or(9) - 1)
         .collect();
     init_matrix_prefixes(out_uninit, cols, &warm);
 
-    // Row-specific batch: precompute prefix sum once and reuse across periods.
-    // ps[i] = sum(data[first..=i]); ps[j]=0.0 for j < first
     let mut ps = vec![0.0_f64; cols];
     if first < cols {
         ps[first] = data[first];
@@ -1042,15 +970,13 @@ fn sma_batch_inner_into(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let warm = first + period - 1;
-        // cast this row to &mut [f64]
+
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         if warm >= cols {
             return;
         }
         let inv = (period as f64).recip();
 
-        // First computable output may have i < period (e.g., first=0 => warm=period-1).
-        // For those, treat the lower prefix as 0.0.
         let s_hi = *ps.get_unchecked(warm);
         let s_lo = if warm >= period {
             *ps.get_unchecked(warm - period)
@@ -1064,7 +990,6 @@ fn sma_batch_inner_into(
             return;
         }
 
-        // For i >= warm+1, we always have i >= period, so ps[i-period] is in-bounds.
         let dst_ptr = dst.as_mut_ptr();
         match actual_kern {
             Kernel::Scalar => sma_batch_row_prefixsum_scalar(&ps, period, i, cols, inv, dst_ptr),
@@ -1128,37 +1053,10 @@ unsafe fn sma_row_avx512_long(data: &[f64], period: usize, first: usize, out: &m
     sma_avx512_long(data, period, first, out);
 }
 
-// ============================================================================
-// Python Bindings
-// ============================================================================
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "sma")]
 #[pyo3(signature = (data, period, kernel=None))]
-/// Compute the Simple Moving Average (SMA) of the input data.
-///
-/// The SMA is the average of the last N data points, where N is the period.
-/// It is a lagging indicator that smooths price data.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Number of data points in the moving average window.
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of SMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (empty data, invalid period, etc).
+
 pub fn sma_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
@@ -1167,14 +1065,12 @@ pub fn sma_py<'py>(
 ) -> PyResult<Bound<'py, PyArray1<f64>>> {
     use numpy::IntoPyArray;
 
-    // Validate kernel with CPU feature detection
     let kern = validate_kernel(kernel, false)?;
 
     let params = SmaParams {
         period: Some(period),
     };
 
-    // Prefer zero-copy for contiguous input; fallback to minimal copy for non-contiguous views.
     let result_vec: Vec<f64> = if let Ok(data_slice) = data.as_slice() {
         let input = SmaInput::from_slice(data_slice, params);
         py.allow_threads(|| sma_with_kernel(&input, kern).map(|o| o.values))
@@ -1189,28 +1085,13 @@ pub fn sma_py<'py>(
             .map_err(|e| PyValueError::new_err(e.to_string()))?
     };
 
-    // Use zero-copy transfer to Python
     Ok(result_vec.into_pyarray(py))
 }
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "sma_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
-/// Compute SMA for multiple period values in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'periods' (list of periods).
+
 pub fn sma_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
@@ -1220,7 +1101,6 @@ pub fn sma_batch_py<'py>(
     use numpy::IntoPyArray;
     use pyo3::types::PyDict;
 
-    // Validate kernel with CPU feature detection
     let kern = validate_kernel(kernel, true)?;
 
     let data_slice = data.as_slice()?;
@@ -1228,25 +1108,21 @@ pub fn sma_batch_py<'py>(
         period: period_range,
     };
 
-    // Validate and prepare
-    let combos = expand_grid_sma(&range)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_sma(&range).map_err(|e| PyValueError::new_err(e.to_string()))?;
     if data_slice.is_empty() {
         return Err(PyValueError::new_err("Empty data"));
     }
 
     let rows = combos.len();
     let cols = data_slice.len();
-    // Checked arithmetic to avoid overflow in allocation length
+
     let nelems = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [nelems], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Perform batch computation with zero-copy directly into NumPy array
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -1259,16 +1135,14 @@ pub fn sma_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => unreachable!(),
             };
-            // pass &mut [f64]; inner converts to MaybeUninit
+
             sma_batch_inner_into(data_slice, &range, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Create result dictionary
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    // Extract periods into a numpy array
     dict.set_item(
         "periods",
         combos
@@ -1308,8 +1182,7 @@ pub fn sma_cuda_batch_dev_py<'py>(
         let (dev, combos) = cuda
             .sma_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .synchronize()
+        cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, combos, cuda.context_arc_clone(), cuda.device_id()))
     })?;
@@ -1318,7 +1191,14 @@ pub fn sma_cuda_batch_dev_py<'py>(
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((SmaDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id }, dict))
+    Ok((
+        SmaDeviceArrayF32Py {
+            inner,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1349,16 +1229,18 @@ pub fn sma_cuda_many_series_one_param_dev_py(
         let dev = cuda
             .sma_multi_series_one_param_time_major_dev(flat_in, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .synchronize()
+        cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
 
-    Ok(SmaDeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id })
+    Ok(SmaDeviceArrayF32Py {
+        inner,
+        _ctx: ctx_arc,
+        device_id: dev_id,
+    })
 }
 
-// Python wrapper that keeps the CUDA context alive for returned VRAM handles
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "SmaDeviceArrayF32", unsendable)]
 pub struct SmaDeviceArrayF32Py {
@@ -1373,7 +1255,7 @@ impl SmaDeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        
+
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item(
@@ -1384,12 +1266,14 @@ impl SmaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1400,7 +1284,6 @@ impl SmaDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1421,12 +1304,15 @@ impl SmaDeviceArrayF32Py {
         }
         let _ = stream;
 
-        
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -1448,23 +1334,7 @@ impl SmaDeviceArrayF32Py {
 
 #[cfg(feature = "python")]
 #[pyclass(name = "SmaStream")]
-/// Streaming SMA calculator that processes values one at a time.
-///
-/// This is useful for real-time data processing where you receive
-/// price updates incrementally.
-///
-/// Parameters:
-/// -----------
-/// period : int
-///     Number of values in the moving average window.
-///
-/// Example:
-/// --------
-/// >>> stream = SmaStream(14)
-/// >>> for price in prices:
-/// ...     sma_value = stream.update(price)
-/// ...     if sma_value is not None:
-/// ...         print(f"SMA: {sma_value}")
+
 pub struct SmaStreamPy {
     inner: SmaStream,
 }
@@ -1482,62 +1352,45 @@ impl SmaStreamPy {
         Ok(Self { inner })
     }
 
-    /// Update the SMA with a new value.
-    ///
-    /// Parameters:
-    /// -----------
-    /// value : float
-    ///     New price value to add to the stream.
-    ///
-    /// Returns:
-    /// --------
-    /// float or None
-    ///     The current SMA value, or None if not enough data yet.
     pub fn update(&mut self, value: f64) -> Option<f64> {
         self.inner.update(value)
     }
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "sma")]
-/// Compute Simple Moving Average (SMA) for the given data
+
 pub fn sma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SmaParams {
         period: Some(period),
     };
     let input = SmaInput::from_slice(data, params);
 
-    
     let mut output = vec![0.0; data.len()];
 
-    
     sma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SmaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SmaBatchJsOutput {
     pub values: Vec<f64>,
     pub combos: Vec<SmaParams>,
-    pub periods: Vec<usize>, 
+    pub periods: Vec<usize>,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "sma_batch")]
 pub fn sma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: SmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1565,8 +1418,7 @@ pub fn sma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "smaBatch")]
 #[deprecated(since = "1.0.0", note = "Use sma_batch instead")]
 pub fn sma_batch_js(
@@ -1584,7 +1436,7 @@ pub fn sma_batch_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "smaBatchMetadata")]
 #[deprecated(since = "1.0.0", note = "Use sma_batch which returns metadata")]
 pub fn sma_batch_metadata_js(
@@ -1599,7 +1451,7 @@ pub fn sma_batch_metadata_js(
     combos.iter().map(|c| c.period.unwrap_or(9)).collect()
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "smaBatchRowsCols")]
 #[deprecated(since = "1.0.0", note = "Use sma_batch which returns rows and cols")]
 pub fn sma_batch_rows_cols_js(
@@ -1615,22 +1467,18 @@ pub fn sma_batch_rows_cols_js(
     vec![combos.len(), data_len]
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sma_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sma_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1638,7 +1486,7 @@ pub fn sma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sma_into(
     in_ptr: *const f64,
@@ -1646,13 +1494,11 @@ pub fn sma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
         let params = SmaParams {
@@ -1660,18 +1506,14 @@ pub fn sma_into(
         };
         let input = SmaInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr as *const f64 {
-            
             let mut temp = vec![0.0; len];
             sma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             sma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1681,9 +1523,7 @@ pub fn sma_into(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sma_batch_into(
     in_ptr: *const f64,
@@ -1710,7 +1550,6 @@ pub fn sma_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        
         let kernel = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1733,7 +1572,6 @@ mod tests {
 
     #[test]
     fn test_sma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253u32 {
@@ -1744,20 +1582,16 @@ mod tests {
         let params = SmaParams::default();
         let input = SmaInput::from_slice(&data, params);
 
-        
         let base = sma_with_kernel(&input, Kernel::Auto)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             sma_into(&input, &mut out)?;
         }
 
-        
         assert_eq!(base.len(), out.len());
 
-        
         for (i, (a, b)) in base.iter().zip(out.iter()).enumerate() {
             let ok = if a.is_nan() && b.is_nan() {
                 true
@@ -1954,7 +1788,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_sma_no_poison(
         test_name: &str,
@@ -1965,7 +1798,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_periods = vec![5, 9, 14, 20, 30, 50];
 
         for period in test_periods {
@@ -1975,16 +1807,13 @@ mod tests {
             let input = SmaInput::from_candles(&candles, "close", params);
             let output = sma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={})",
@@ -1992,7 +1821,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={})",
@@ -2000,7 +1828,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={})",
@@ -2013,7 +1840,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_sma_no_poison(
         _test_name: &str,
@@ -2031,7 +1857,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2049,12 +1874,10 @@ mod tests {
                 };
                 let input = SmaInput::from_slice(&data, params);
 
-                
                 let SmaOutput { values: out } = sma_with_kernel(&input, kernel).unwrap();
                 let SmaOutput { values: ref_out } =
                     sma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2064,76 +1887,65 @@ mod tests {
                     );
                 }
 
-                
                 for i in (period - 1)..data.len() {
                     let window_start = i + 1 - period;
                     let window = &data[window_start..=i];
 
-                    
                     let expected_sum: f64 = window.iter().sum();
                     let expected_mean = expected_sum / period as f64;
 
-                    
-                    
-	                    let abs_tolerance = 1e-8_f64;
-	                    let rel_tolerance = 1e-12_f64;
-	                    let tolerance = abs_tolerance.max(expected_mean.abs() * rel_tolerance);
-	                    
-	                    
-	                    let kernel_tol = 5e-8_f64.max(tolerance);
-	                    prop_assert!(
-	                        (out[i] - expected_mean).abs() <= tolerance,
-	                        "SMA mismatch at index {}: expected {}, got {} (diff: {})",
-	                        i,
+                    let abs_tolerance = 1e-8_f64;
+                    let rel_tolerance = 1e-12_f64;
+                    let tolerance = abs_tolerance.max(expected_mean.abs() * rel_tolerance);
+
+                    let kernel_tol = 5e-8_f64.max(tolerance);
+                    prop_assert!(
+                        (out[i] - expected_mean).abs() <= tolerance,
+                        "SMA mismatch at index {}: expected {}, got {} (diff: {})",
+                        i,
                         expected_mean,
                         out[i],
                         (out[i] - expected_mean).abs()
                     );
 
-                    
-	                    let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
-	                    let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
-	                    prop_assert!(
-	                        out[i] >= window_min - kernel_tol && out[i] <= window_max + kernel_tol,
-	                        "SMA out of bounds at index {}: {} not in [{}, {}]",
-	                        i,
-	                        out[i],
-	                        window_min,
+                    prop_assert!(
+                        out[i] >= window_min - kernel_tol && out[i] <= window_max + kernel_tol,
+                        "SMA out of bounds at index {}: {} not in [{}, {}]",
+                        i,
+                        out[i],
+                        window_min,
                         window_max
                     );
 
-	                    
-	                    if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
-	                        let tolerance = kernel_tol.max(if period == 1 { 1e-8 } else { 1e-9 });
-	                        prop_assert!(
-	                            (out[i] - window[0]).abs() <= tolerance,
-	                            "Constant input property failed at index {}: expected {}, got {}",
-	                            i,
+                    if window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) {
+                        let tolerance = kernel_tol.max(if period == 1 { 1e-8 } else { 1e-9 });
+                        prop_assert!(
+                            (out[i] - window[0]).abs() <= tolerance,
+                            "Constant input property failed at index {}: expected {}, got {}",
+                            i,
                             window[0],
                             out[i]
                         );
                     }
 
-                    
-                    
-	                    if period >= 3 {
-	                        let diffs: Vec<f64> = window.windows(2).map(|w| w[1] - w[0]).collect();
-	                        let is_linear = diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
+                    if period >= 3 {
+                        let diffs: Vec<f64> = window.windows(2).map(|w| w[1] - w[0]).collect();
+                        let is_linear = diffs.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
 
-	                        if is_linear && !diffs.is_empty() {
-	                            
-	                            let midpoint_value = window[period / 2];
-	                            let tolerance = if period % 2 == 0 {
-	                                
-	                                (window[period / 2 - 1] - window[period / 2]).abs() / 2.0
-	                                    + kernel_tol
-	                            } else {
-	                                kernel_tol
-	                            };
+                        if is_linear && !diffs.is_empty() {
+                            let midpoint_value = window[period / 2];
+                            let tolerance = if period % 2 == 0 {
+                                (window[period / 2 - 1] - window[period / 2]).abs() / 2.0
+                                    + kernel_tol
+                            } else {
+                                kernel_tol
+                            };
 
-	                            prop_assert!(
-	                                (out[i] - midpoint_value).abs() <= tolerance,
+                            prop_assert!(
+                                (out[i] - midpoint_value).abs() <= tolerance,
                                 "Linear trend property failed at index {}: expected ~{}, got {}",
                                 i,
                                 midpoint_value,
@@ -2142,30 +1954,26 @@ mod tests {
                         }
                     }
 
-	                    
-	                    prop_assert!(
-	                        (out[i] - ref_out[i]).abs() <= kernel_tol
-	                            || (out[i].is_nan() && ref_out[i].is_nan()),
-	                        "Kernel mismatch at index {}: {} ({:?}) vs {} (Scalar)",
-	                        i,
+                    prop_assert!(
+                        (out[i] - ref_out[i]).abs() <= kernel_tol
+                            || (out[i].is_nan() && ref_out[i].is_nan()),
+                        "Kernel mismatch at index {}: {} ({:?}) vs {} (Scalar)",
+                        i,
                         out[i],
                         kernel,
                         ref_out[i]
                     );
 
-                    
-                    
-                    
-	                    if i >= period {
-	                        let new_value = data[i];
-	                        let old_value = data[i - period];
-	                        let expected_sma_change = (new_value - old_value) / period as f64;
-	                        let actual_sma_change = out[i] - out[i - 1];
-	                        let lag_tol = (expected_sma_change.abs() * rel_tolerance)
-	                            .max(5e-8_f64)
-	                            .max(2.0 * kernel_tol);
+                    if i >= period {
+                        let new_value = data[i];
+                        let old_value = data[i - period];
+                        let expected_sma_change = (new_value - old_value) / period as f64;
+                        let actual_sma_change = out[i] - out[i - 1];
+                        let lag_tol = (expected_sma_change.abs() * rel_tolerance)
+                            .max(5e-8_f64)
+                            .max(2.0 * kernel_tol);
 
-	                        prop_assert!(
+                        prop_assert!(
 								(actual_sma_change - expected_sma_change).abs() <= lag_tol,
 								"Lag property failed at index {}: SMA change {} should be {} (new: {}, old: {})",
 								i,
@@ -2176,7 +1984,6 @@ mod tests {
 						);
                     }
 
-                    
                     #[cfg(debug_assertions)]
                     {
                         let bits = out[i].to_bits();
@@ -2192,7 +1999,6 @@ mod tests {
                     }
                 }
 
-                
                 if period == 1 {
                     for i in 0..data.len() {
                         prop_assert!(
@@ -2274,7 +2080,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2282,13 +2087,7 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
-        let test_configs = vec![
-            (5, 15, 5),   
-            (10, 30, 10), 
-            (20, 50, 15), 
-            (2, 10, 2),   
-        ];
+        let test_configs = vec![(5, 15, 5), (10, 30, 10), (20, 50, 15), (2, 10, 2)];
 
         for (start, end, step) in test_configs {
             let output = SmaBatchBuilder::new()
@@ -2296,9 +2095,7 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2308,7 +2105,6 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2316,7 +2112,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2324,7 +2119,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}, period={})",
@@ -2337,7 +2131,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,

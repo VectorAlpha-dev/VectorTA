@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::correl_hl::{
     correl_hl_batch_with_kernel, correl_hl_with_kernel, CorrelHlBatchRange, CorrelHlData,
     CorrelHlInput, CorrelHlParams,
@@ -40,22 +38,18 @@ fn correl_hl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
     for i in 8..len {
-        
         let x = i as f64;
         high[i] = (x * 0.00123).sin() + 0.0001 * x;
         low[i] = (x * 0.00079).cos() + 0.00005 * x;
     }
     let sweep = CorrelHlBatchRange { period: (9, 64, 1) };
 
-    
-    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let high_q: Vec<f64> = high_f32.iter().map(|&v| v as f64).collect();
     let low_q: Vec<f64> = low_f32.iter().map(|&v| v as f64).collect();
     let cpu = correl_hl_batch_with_kernel(&high_q, &low_q, &sweep, Kernel::ScalarBatch)?;
 
-    
     let cuda = CudaCorrelHl::new(0).expect("CudaCorrelHl::new");
     let (dev, _combos) = cuda
         .correl_hl_batch_dev(&high_f32, &low_f32, &sweep)
@@ -91,13 +85,12 @@ fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 4096usize; 
+    let cols = 8usize;
+    let rows = 4096usize;
     let mut high_tm = vec![f64::NAN; rows * cols];
     let mut low_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         for t in (s)..rows {
-            
             let x = (t as f64) + (s as f64) * 0.5;
             high_tm[t * cols + s] = (x * 0.0021).sin() + 0.0002 * x;
             low_tm[t * cols + s] = (x * 0.0017).cos() + 0.0001 * x;
@@ -106,7 +99,6 @@ fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let period = 21usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];
@@ -128,7 +120,6 @@ fn correl_hl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
-    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaCorrelHl::new(0).expect("CudaCorrelHl::new");

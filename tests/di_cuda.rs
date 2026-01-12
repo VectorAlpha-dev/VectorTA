@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::di::{
     di_batch_with_kernel, di_with_kernel, DiBatchRange, DiData, DiInput, DiParams,
 };
@@ -72,7 +70,7 @@ fn di_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     plus_dev.buf.copy_to(&mut g_plus)?;
     minus_dev.buf.copy_to(&mut g_minus)?;
 
-    let tol = 1e-3; 
+    let tol = 1e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c_pl = cpu.plus[idx];
         let g_pl = g_plus[idx] as f64;
@@ -103,8 +101,8 @@ fn di_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         eprintln!("[di_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; 
-    let rows = 4096usize; 
+    let cols = 8usize;
+    let rows = 4096usize;
     let mut close_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -128,7 +126,6 @@ fn di_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
 
     let period = 14usize;
 
-    
     let mut cpu_plus_tm = vec![f64::NAN; cols * rows];
     let mut cpu_minus_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

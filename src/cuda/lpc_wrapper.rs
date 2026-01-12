@@ -1,29 +1,21 @@
-//! CUDA wrapper for the Low Pass Channel (LPC) indicator.
-//!
-//! Parity goals (per Agents Guide):
-//! - ALMA-style PTX load (DetermineTargetFromContext + O2 fallback), NON_BLOCKING stream
-//! - VRAM checks + ~64MB headroom; chunk grid.y if needed
-//! - Batch: one-series × many-params; optional host-precomputed dominant cycle reused across rows
-//! - Many-series × one-param (time-major): per-series sequential scan (fixed cutoff only for now)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::cuda::wto_wrapper::DeviceArrayF32Triplet;
 use crate::indicators::lpc::{dom_cycle, LpcBatchRange, LpcParams};
-use cust::error::CudaError;
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use thiserror::Error;
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::Arc;
+use thiserror::Error;
 
 #[inline]
 fn alpha_from_period_f32(p: i32) -> f32 {
@@ -47,7 +39,11 @@ pub enum CudaLpcError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -55,11 +51,22 @@ pub enum CudaLpcError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("not implemented")]
     NotImplemented,
 }
@@ -137,7 +144,6 @@ impl CudaLpc {
         })
     }
 
-    
     pub fn set_policy(&mut self, p: CudaLpcPolicy) {
         self.policy = p;
     }
@@ -236,9 +242,7 @@ impl CudaLpc {
                 CudaLpcError::InvalidInput("dom buffer required for adaptive cutoff".into())
             })?;
             if d_dom.len() != series_len {
-                return Err(CudaLpcError::InvalidInput(
-                    "dom buffer wrong length".into(),
-                ));
+                return Err(CudaLpcError::InvalidInput("dom buffer wrong length".into()));
             }
         }
         if let Some(d_alpha) = d_alpha_lut_opt {
@@ -249,10 +253,11 @@ impl CudaLpc {
             }
         }
 
-        let func = self
-            .module
-            .get_function("lpc_batch_f32_v2")
-            .map_err(|_| CudaLpcError::MissingKernelSymbol { name: "lpc_batch_f32_v2" })?;
+        let func = self.module.get_function("lpc_batch_f32_v2").map_err(|_| {
+            CudaLpcError::MissingKernelSymbol {
+                name: "lpc_batch_f32_v2",
+            }
+        })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -269,7 +274,6 @@ impl CudaLpc {
             });
         }
 
-        
         let grid_x_full = ((n_combos as u32) + block_x - 1) / block_x;
         let grid_x = grid_x_full.clamp(1, 65_535);
 
@@ -410,17 +414,11 @@ impl CudaLpc {
                 }
             }
             if vals.is_empty() {
-                return Err(CudaLpcError::InvalidRange {
-                    start,
-                    end,
-                    step,
-                });
+                return Err(CudaLpcError::InvalidRange { start, end, step });
             }
             Ok(vals)
         }
-        fn axis_f64(
-            (start, end, step): (f64, f64, f64),
-        ) -> Result<Vec<f64>, CudaLpcError> {
+        fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaLpcError> {
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return Ok(vec![start]);
             }
@@ -509,7 +507,6 @@ impl CudaLpc {
             ));
         }
 
-        
         let combos = Self::expand_grid(range)?;
         if combos.is_empty() {
             return Err(CudaLpcError::InvalidInput(
@@ -526,7 +523,6 @@ impl CudaLpc {
         let n = len;
         let rows = combos.len();
 
-        
         let item_bytes = std::mem::size_of::<f32>();
         let inputs_elems = high
             .len()
@@ -539,7 +535,7 @@ impl CudaLpc {
             .ok_or_else(|| CudaLpcError::InvalidInput("input bytes overflow".into()))?;
         let bytes_params = rows
             .checked_mul(3 * item_bytes)
-            .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?; 
+            .ok_or_else(|| CudaLpcError::InvalidInput("params bytes overflow".into()))?;
         let bytes_outputs = rows
             .checked_mul(n)
             .and_then(|v| v.checked_mul(3 * item_bytes))
@@ -547,7 +543,6 @@ impl CudaLpc {
         let mut bytes_dom = 0usize;
         let cutoff_adaptive = range.cutoff_type.eq_ignore_ascii_case("adaptive");
         let dom_host_f32: Option<Vec<f32>> = if cutoff_adaptive {
-            
             let src64: Vec<f64> = src.iter().map(|&v| v as f64).collect();
             let dc = dom_cycle(&src64, range.max_cycle_limit);
             let v32: Vec<f32> = dc.iter().map(|&v| v as f32).collect();
@@ -566,13 +561,11 @@ impl CudaLpc {
             .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        
         let d_h = DeviceBuffer::from_slice(high)?;
         let d_l = DeviceBuffer::from_slice(low)?;
         let d_c = DeviceBuffer::from_slice(close)?;
         let d_s = DeviceBuffer::from_slice(src)?;
 
-        
         fn host_true_range_f32(h: &[f32], l: &[f32], c: &[f32]) -> Vec<f32> {
             let n = h.len();
             let mut tr = vec![0f32; n];
@@ -594,10 +587,14 @@ impl CudaLpc {
         let tr_host = host_true_range_f32(high, low, close);
         let d_tr = DeviceBuffer::from_slice(&tr_host)?;
 
-        
-        let periods: Vec<i32> =
-            combos.iter().map(|p| p.fixed_period.unwrap() as i32).collect();
-        let cms: Vec<f32> = combos.iter().map(|p| p.cycle_mult.unwrap() as f32).collect();
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fixed_period.unwrap() as i32)
+            .collect();
+        let cms: Vec<f32> = combos
+            .iter()
+            .map(|p| p.cycle_mult.unwrap() as f32)
+            .collect();
         let tms: Vec<f32> = combos.iter().map(|p| p.tr_mult.unwrap() as f32).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let d_cms = DeviceBuffer::from_slice(&cms)?;
@@ -608,7 +605,6 @@ impl CudaLpc {
             None
         };
 
-        
         let (d_alpha_lut, alpha_lut_len_i32, alpha_lut_pmin_i32) = if cutoff_adaptive {
             let p_min = 3i32;
             let max_fixed = *periods.iter().max().unwrap_or(&p_min);
@@ -618,16 +614,23 @@ impl CudaLpc {
                 .map(|v| v.iter().copied().fold(0.0f32, f32::max))
                 .unwrap_or(0.0f32);
             let mut from_dom = (dom_max * cm_max).ceil() as i32;
-            let max_cap = if range.max_cycle_limit > 0 { range.max_cycle_limit as i32 } else { i32::MAX };
-            if from_dom > max_cap { from_dom = max_cap; }
+            let max_cap = if range.max_cycle_limit > 0 {
+                range.max_cycle_limit as i32
+            } else {
+                i32::MAX
+            };
+            if from_dom > max_cap {
+                from_dom = max_cap;
+            }
             let p_max = max_fixed.max(from_dom.max(p_min));
             let (lut, pmin) = build_alpha_lut(p_min, p_max);
             let len_i32 = lut.len() as i32;
             let buf = DeviceBuffer::from_slice(&lut)?;
             (Some(buf), len_i32, pmin)
-        } else { (None, 0, 0) };
+        } else {
+            (None, 0, 0)
+        };
 
-        
         let out_elems = rows
             .checked_mul(n)
             .ok_or_else(|| CudaLpcError::InvalidInput("output length overflow".into()))?;
@@ -635,7 +638,6 @@ impl CudaLpc {
         let mut d_hi = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
         let mut d_lo = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        
         let selected = self.launch_batch_f32_v2(
             &d_h,
             &d_l,
@@ -661,9 +663,21 @@ impl CudaLpc {
         self.stream.synchronize()?;
 
         let triplet = DeviceArrayF32Triplet {
-            wt1: DeviceArrayF32 { buf: d_f, rows, cols: n },
-            wt2: DeviceArrayF32 { buf: d_hi, rows, cols: n },
-            hist: DeviceArrayF32 { buf: d_lo, rows, cols: n },
+            wt1: DeviceArrayF32 {
+                buf: d_f,
+                rows,
+                cols: n,
+            },
+            wt2: DeviceArrayF32 {
+                buf: d_hi,
+                rows,
+                cols: n,
+            },
+            hist: DeviceArrayF32 {
+                buf: d_lo,
+                rows,
+                cols: n,
+            },
         };
         unsafe {
             (*(self as *const _ as *mut CudaLpc)).last_batch = Some(selected);
@@ -712,7 +726,6 @@ impl CudaLpc {
         }
         let tr_mult = params.tr_mult.unwrap_or(1.0) as f32;
 
-        
         let item_bytes = std::mem::size_of::<f32>();
         let prices_bytes = cols
             .checked_mul(rows)
@@ -731,7 +744,6 @@ impl CudaLpc {
             .ok_or_else(|| CudaLpcError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -752,7 +764,6 @@ impl CudaLpc {
             firsts[s] = fv;
         }
 
-        
         let d_h = DeviceBuffer::from_slice(high_tm)?;
         let d_l = DeviceBuffer::from_slice(low_tm)?;
         let d_c = DeviceBuffer::from_slice(close_tm)?;
@@ -800,8 +811,7 @@ impl CudaLpc {
                 )
             )?;
         }
-        self.stream
-            .synchronize()?;
+        self.stream.synchronize()?;
         let triplet = DeviceArrayF32Triplet {
             wt1: DeviceArrayF32 {
                 buf: d_f,
@@ -835,7 +845,6 @@ impl CudaLpc {
         Ok(triplet)
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -936,8 +945,14 @@ pub mod benches {
         }
         let tr_host = host_true_range_f32(&h, &l, &c);
 
-        let periods: Vec<i32> = combos.iter().map(|p| p.fixed_period.unwrap() as i32).collect();
-        let cms: Vec<f32> = combos.iter().map(|p| p.cycle_mult.unwrap() as f32).collect();
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|p| p.fixed_period.unwrap() as i32)
+            .collect();
+        let cms: Vec<f32> = combos
+            .iter()
+            .map(|p| p.cycle_mult.unwrap() as f32)
+            .collect();
         let tms: Vec<f32> = combos.iter().map(|p| p.tr_mult.unwrap() as f32).collect();
 
         let d_h = DeviceBuffer::from_slice(&h).expect("d_h");

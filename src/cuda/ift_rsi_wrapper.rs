@@ -1,13 +1,3 @@
-//! CUDA wrapper for IFT RSI (Inverse Fisher Transform of RSI).
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/ift_rsi_kernel.ptx"))
-//! - Non-blocking stream; DetermineTargetFromContext + O2 with fallbacks
-//! - VRAM checks (with ~64 MB headroom) and simple grid policies
-//! - Public device entry points:
-//!     - `ift_rsi_batch_dev(&[f32], &IftRsiBatchRange) -> (DeviceArrayF32, Vec<IftRsiParams>)`
-//!     - `ift_rsi_many_series_one_param_time_major_dev(&[f32], cols, rows, &IftRsiParams)`
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -31,15 +21,30 @@ pub enum CudaIftRsiError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -50,16 +55,20 @@ pub enum CudaIftRsiError {
 pub enum BatchKernelPolicy {
     #[default]
     Auto,
-    /// One block per combo; thread 0 performs the scan. `block_x` kept small.
-    Plain { block_x: u32 },
+
+    Plain {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub enum ManySeriesKernelPolicy {
     #[default]
     Auto,
-    /// 1D launch over series; dynamic shared memory sized to `block_x * wma_period * 4`.
-    OneD { block_x: u32 },
+
+    OneD {
+        block_x: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -87,7 +96,7 @@ pub struct CudaIftRsi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    
+
     sm_count: u32,
     max_smem_per_block: usize,
     warp_size: u32,
@@ -100,11 +109,12 @@ impl CudaIftRsi {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        
         let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
-        let max_smem_per_block = device.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
+        let max_smem_per_block =
+            device.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
         let warp_size = device.get_attribute(DeviceAttribute::WarpSize)? as u32;
-        let max_threads_per_block = device.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_threads_per_block =
+            device.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ift_rsi_kernel.ptx"));
         let jit_opts = &[
@@ -134,21 +144,35 @@ impl CudaIftRsi {
     }
 
     #[inline]
-    pub fn synchronize(&self) -> Result<(), CudaIftRsiError> { self.stream.synchronize().map_err(Into::into) }
+    pub fn synchronize(&self) -> Result<(), CudaIftRsiError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
-    pub fn stream_handle_usize(&self) -> usize { self.stream.as_inner() as usize }
+    pub fn stream_handle_usize(&self) -> usize {
+        self.stream.as_inner() as usize
+    }
 
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaIftRsiPolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaIftRsiPolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -158,15 +182,23 @@ impl CudaIftRsi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaIftRsiError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaIftRsiError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaIftRsiError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -174,7 +206,11 @@ impl CudaIftRsi {
     }
 
     #[inline]
-    fn validate_launch_dims(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaIftRsiError> {
+    fn validate_launch_dims(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaIftRsiError> {
         let dev = Device::get_device(self.device_id)?;
         let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
@@ -182,23 +218,39 @@ impl CudaIftRsi {
         let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
         let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
         let max_bz = dev.get_attribute(DeviceAttribute::MaxBlockDimZ)? as u32;
-        let (gx, gy, gz) = grid; let (bx, by, bz) = block;
+        let (gx, gy, gz) = grid;
+        let (bx, by, bz) = block;
         if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
-            return Err(CudaIftRsiError::InvalidInput("zero-sized grid or block".into()));
+            return Err(CudaIftRsiError::InvalidInput(
+                "zero-sized grid or block".into(),
+            ));
         }
         if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
-            return Err(CudaIftRsiError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaIftRsiError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
 
     #[inline]
     fn expand_grid(r: &IftRsiBatchRange) -> Result<Vec<IftRsiParams>, CudaIftRsiError> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaIftRsiError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaIftRsiError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
             }
-            let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+            let (lo, hi) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             let vals: Vec<usize> = (lo..=hi).step_by(step).collect();
             if vals.is_empty() {
                 return Err(CudaIftRsiError::InvalidRange { start, end, step });
@@ -207,16 +259,23 @@ impl CudaIftRsi {
         }
         let rsi = axis_usize(r.rsi_period)?;
         let wma = axis_usize(r.wma_period)?;
-        let cap = rsi
-            .len()
-            .checked_mul(wma.len())
-            .ok_or_else(|| CudaIftRsiError::InvalidRange {
-                start: r.rsi_period.0,
-                end: r.rsi_period.1,
-                step: r.rsi_period.2,
-            })?;
+        let cap =
+            rsi.len()
+                .checked_mul(wma.len())
+                .ok_or_else(|| CudaIftRsiError::InvalidRange {
+                    start: r.rsi_period.0,
+                    end: r.rsi_period.1,
+                    step: r.rsi_period.2,
+                })?;
         let mut out = Vec::with_capacity(cap);
-        for &rp in &rsi { for &wp in &wma { out.push(IftRsiParams { rsi_period: Some(rp), wma_period: Some(wp) }); } }
+        for &rp in &rsi {
+            for &wp in &wma {
+                out.push(IftRsiParams {
+                    rsi_period: Some(rp),
+                    wma_period: Some(wp),
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -239,7 +298,8 @@ impl CudaIftRsi {
                 break;
             }
         }
-        let first_valid = first_valid.ok_or_else(|| CudaIftRsiError::InvalidInput("all values are NaN".into()))?;
+        let first_valid = first_valid
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep)?;
         let max_rp = combos.iter().map(|c| c.rsi_period.unwrap()).max().unwrap();
         let max_wp = combos.iter().map(|c| c.wma_period.unwrap()).max().unwrap();
@@ -270,7 +330,6 @@ impl CudaIftRsi {
     ) -> Result<(DeviceArrayF32, Vec<IftRsiParams>), CudaIftRsiError> {
         let (combos, first_valid, len, max_wp) = Self::prepare_batch_inputs(data_f32, sweep)?;
 
-        
         let bytes_in = len
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
@@ -317,13 +376,12 @@ impl CudaIftRsi {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        let func = self
-            .module
-            .get_function("ift_rsi_batch_f32")
-            .map_err(|_| CudaIftRsiError::MissingKernelSymbol { name: "ift_rsi_batch_f32" })?;
+        let func = self.module.get_function("ift_rsi_batch_f32").map_err(|_| {
+            CudaIftRsiError::MissingKernelSymbol {
+                name: "ift_rsi_batch_f32",
+            }
+        })?;
 
-        
-        
         let shmem_bytes_usize: usize = max_wp
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
@@ -334,7 +392,6 @@ impl CudaIftRsi {
             )));
         }
 
-        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => self.warp_size.max(32),
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
@@ -345,7 +402,13 @@ impl CudaIftRsi {
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
-        unsafe { (*(self as *const _ as *mut CudaIftRsi)).last_batch = Some(BatchKernelSelected::Plain { block_x, shmem_bytes }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaIftRsi)).last_batch =
+                Some(BatchKernelSelected::Plain {
+                    block_x,
+                    shmem_bytes,
+                });
+        }
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
             let mut series_len_i = len as i32;
@@ -369,7 +432,11 @@ impl CudaIftRsi {
         self.maybe_log_batch_debug();
 
         Ok((
-            DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len },
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
             combos,
         ))
     }
@@ -381,17 +448,24 @@ impl CudaIftRsi {
         rows: usize,
         params: &IftRsiParams,
     ) -> Result<DeviceArrayF32, CudaIftRsiError> {
-        if cols == 0 || rows == 0 { return Err(CudaIftRsiError::InvalidInput("empty matrix".into())); }
-        if data_tm_f32.len() != cols * rows { return Err(CudaIftRsiError::InvalidInput("bad shape".into())); }
-        if cols == 0 || rows == 0 { return Err(CudaIftRsiError::InvalidInput("empty matrix".into())); }
-        if data_tm_f32.len() != cols * rows { return Err(CudaIftRsiError::InvalidInput("bad shape".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaIftRsiError::InvalidInput("empty matrix".into()));
+        }
+        if data_tm_f32.len() != cols * rows {
+            return Err(CudaIftRsiError::InvalidInput("bad shape".into()));
+        }
+        if cols == 0 || rows == 0 {
+            return Err(CudaIftRsiError::InvalidInput("empty matrix".into()));
+        }
+        if data_tm_f32.len() != cols * rows {
+            return Err(CudaIftRsiError::InvalidInput("bad shape".into()));
+        }
         let rsi_p = params.rsi_period.unwrap_or(5);
         let wma_p = params.wma_period.unwrap_or(9);
         if rsi_p == 0 || wma_p == 0 || rsi_p > rows || wma_p > rows {
             return Err(CudaIftRsiError::InvalidInput("invalid periods".into()));
         }
 
-        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -409,25 +483,37 @@ impl CudaIftRsi {
             first_valids[s] = fv;
         }
 
-        
-        let elems = cols.checked_mul(rows).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
-        let bytes_in = elems.checked_mul(core::mem::size_of::<f32>()).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
-        let bytes_first = cols.checked_mul(core::mem::size_of::<i32>()).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
-        let bytes_out = elems.checked_mul(core::mem::size_of::<f32>()).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
-        let required = bytes_in.checked_add(bytes_first).and_then(|v| v.checked_add(bytes_out)).ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
+        let bytes_in = elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
+        let bytes_first = cols
+            .checked_mul(core::mem::size_of::<i32>())
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
+        let bytes_out = elems
+            .checked_mul(core::mem::size_of::<f32>())
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
+        let required = bytes_in
+            .checked_add(bytes_first)
+            .and_then(|v| v.checked_add(bytes_out))
+            .ok_or_else(|| CudaIftRsiError::InvalidInput("size overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
         let d_in = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
         let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
         let func = self
             .module
             .get_function("ift_rsi_many_series_one_param_f32")
-            .map_err(|_| CudaIftRsiError::MissingKernelSymbol { name: "ift_rsi_many_series_one_param_f32" })?;
+            .map_err(|_| CudaIftRsiError::MissingKernelSymbol {
+                name: "ift_rsi_many_series_one_param_f32",
+            })?;
 
-        
         let bytes_per_thread = wma_p
             .checked_mul(core::mem::size_of::<f32>())
             .ok_or_else(|| CudaIftRsiError::InvalidInput("wma_period too large".into()))?;
@@ -456,7 +542,13 @@ impl CudaIftRsi {
         let block: BlockSize = (block_x, 1, 1).into();
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
         self.validate_launch_dims((grid_x.max(1), 1, 1), (block_x, 1, 1))?;
-        unsafe { (*(self as *const _ as *mut CudaIftRsi)).last_many = Some(ManySeriesKernelSelected::OneD { block_x, shmem_bytes }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaIftRsi)).last_many =
+                Some(ManySeriesKernelSelected::OneD {
+                    block_x,
+                    shmem_bytes,
+                });
+        }
         unsafe {
             let mut in_ptr = d_in.as_device_ptr().as_raw();
             let mut first_ptr = d_first.as_device_ptr().as_raw();
@@ -477,7 +569,11 @@ impl CudaIftRsi {
             self.stream.launch(&func, grid, block, shmem_bytes, args)?;
         }
         self.maybe_log_many_debug();
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[inline]
@@ -529,7 +625,6 @@ impl CudaIftRsi {
         }
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -592,7 +687,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaIftRsi::new(0).expect("CudaIftRsi");
         let mut data = gen_series(ONE_SERIES_LEN);
-        // NaNs at start for warmup semantics
+
         for i in 0..16 {
             data[i] = f32::NAN;
         }
@@ -618,7 +713,8 @@ pub mod benches {
         let d_rp = unsafe { DeviceBuffer::from_slice_async(&rsi_i32, &cuda.stream) }.expect("d_rp");
         let d_wp = unsafe { DeviceBuffer::from_slice_async(&wma_i32, &cuda.stream) }.expect("d_wp");
         let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }.expect("d_out");
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }
+                .expect("d_out");
 
         let func = cuda
             .module

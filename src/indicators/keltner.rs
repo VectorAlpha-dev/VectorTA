@@ -1,25 +1,3 @@
-//! # Keltner Channels
-//!
-//! Volatility-based envelope indicator using MA and ATR.
-//! Middle band is MA of source, upper/lower bands are MA ± (multiplier × ATR).
-//!
-//! ## Parameters
-//! - **period**: Window for both MA and ATR (default: 20)
-//! - **multiplier**: ATR multiplier for bands (default: 2.0)
-//! - **ma_type**: Moving average type (default: "ema")
-//!
-//! ## Returns
-//! - **`Ok(KeltnerOutput)`** on success (`upper_band`, `middle_band`, `lower_band` vectors)
-//! - **`Err(KeltnerError)`** on failure (typed errors for empty input, NaNs, invalid periods/ranges, and batch misuse)
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to scalar. Due to time-recursive EMA/SMA/ATR, SIMD offers marginal gains; runtime short-circuits to scalar.
-//! - **Scalar**: Loop-jammed EMA/SMA + ATR RMA in a single pass; uses mul_add and unchecked indexing in tight loops.
-//! - **Batch**: Row-specific optimization precomputes TR once and reuses per row; >5% faster at 100k vs non-shared TR with checked sweep ranges.
-//! - **Streaming**: Enabled. Exact EMA seeding (SMA of first n) + Wilder RMA with fused mul_add; matches batch outputs to ~1e-9 in tests.
-//! - **CUDA/Python**: CUDA batch/many-series wrappers with VRAM handles exposing CUDA Array Interface v3 + DLPack v1.x for CuPy/PyTorch/JAX interop.
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix) with checked sizes for batch matrices.
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -31,9 +9,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -50,7 +28,6 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::keltner_wrapper::CudaKeltner;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -62,15 +39,13 @@ use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-
-
 #[derive(Debug, Clone)]
 pub enum KeltnerData<'a> {
     Candles {
         candles: &'a Candles,
         source: &'a str,
     },
-    Slice(&'a [f64], &'a [f64], &'a [f64], &'a [f64]), // high, low, close, source
+    Slice(&'a [f64], &'a [f64], &'a [f64], &'a [f64]),
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +56,10 @@ pub struct KeltnerOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct KeltnerParams {
     pub period: Option<usize>,
     pub multiplier: Option<f64>,
@@ -237,8 +215,6 @@ impl KeltnerBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum KeltnerError {
     #[error("keltner: empty data provided.")]
@@ -252,7 +228,11 @@ pub enum KeltnerError {
     #[error("keltner: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("keltner: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("keltner: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("keltner: invalid input: {0}")]
@@ -260,8 +240,6 @@ pub enum KeltnerError {
     #[error("keltner: MA error: {0}")]
     MaError(String),
 }
-
-
 
 #[inline]
 pub fn keltner(input: &KeltnerInput) -> Result<KeltnerOutput, KeltnerError> {
@@ -373,12 +351,7 @@ pub fn keltner_with_kernel(
     })
 }
 
-/// Writes Keltner Channels into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmup prefix identical to `keltner()`/`keltner_with_kernel()`.
-/// - All output slices must have the same length as the input series.
-/// - Uses runtime kernel selection (`Kernel::Auto`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline(always)]
 pub fn keltner_into(
     input: &KeltnerInput,
@@ -389,7 +362,6 @@ pub fn keltner_into(
     keltner_into_slice(upper_dst, middle_dst, lower_dst, input, Kernel::Auto)
 }
 
-/// Write keltner output directly to pre-allocated slices - zero allocations
 #[inline(always)]
 pub fn keltner_into_slice(
     upper_dst: &mut [f64],
@@ -515,7 +487,6 @@ pub fn keltner_into_slice(
         }
     }
 
-    
     let warm = first + period - 1;
     for i in 0..warm {
         upper_dst[i] = f64::NAN;
@@ -526,10 +497,8 @@ pub fn keltner_into_slice(
     Ok(())
 }
 
-
-
 #[inline]
-/// Classic kernel - optimized loop-jammed implementation for SMA
+
 pub fn keltner_scalar_classic_sma(
     high: &[f64],
     low: &[f64],
@@ -549,7 +518,6 @@ pub fn keltner_scalar_classic_sma(
         return;
     }
 
-    
     let alpha = 1.0 / (period as f64);
     let mut sum_tr = 0.0;
     let mut rma = f64::NAN;
@@ -577,16 +545,13 @@ pub fn keltner_scalar_classic_sma(
         }
     }
 
-    
     let mut sum = 0.0;
 
-    
     for j in 0..period {
         sum += source[first + j];
     }
     let mut sma_val = sum / period as f64;
 
-    
     if warm < len {
         middle[warm] = sma_val;
         let atr_v = atr_values[warm];
@@ -596,13 +561,10 @@ pub fn keltner_scalar_classic_sma(
         }
     }
 
-    
     for i in (warm + 1)..len {
-        
         sum += source[i] - source[i - period];
         sma_val = sum / period as f64;
 
-        
         middle[i] = sma_val;
         let atr_v = atr_values[i];
         if !atr_v.is_nan() {
@@ -612,7 +574,6 @@ pub fn keltner_scalar_classic_sma(
     }
 }
 
-/// Classic kernel - optimized loop-jammed implementation for EMA
 pub fn keltner_scalar_classic_ema(
     high: &[f64],
     low: &[f64],
@@ -632,7 +593,6 @@ pub fn keltner_scalar_classic_ema(
         return;
     }
 
-    
     let alpha = 1.0 / (period as f64);
     let mut sum_tr = 0.0;
     let mut rma = f64::NAN;
@@ -660,18 +620,15 @@ pub fn keltner_scalar_classic_ema(
         }
     }
 
-    
     let ema_alpha = 2.0 / (period as f64 + 1.0);
     let ema_alpha_1 = 1.0 - ema_alpha;
 
-    
     let mut sum = 0.0;
     for j in 0..period {
         sum += source[first + j];
     }
     let mut ema_val = sum / period as f64;
 
-    
     if warm < len {
         middle[warm] = ema_val;
         let atr_v = atr_values[warm];
@@ -681,12 +638,9 @@ pub fn keltner_scalar_classic_ema(
         }
     }
 
-    
     for i in (warm + 1)..len {
-        
         ema_val = ema_alpha * source[i] + ema_alpha_1 * ema_val;
 
-        
         middle[i] = ema_val;
         let atr_v = atr_values[i];
         if !atr_v.is_nan() {
@@ -696,7 +650,6 @@ pub fn keltner_scalar_classic_ema(
     }
 }
 
-/// Regular kernel - uses function calls for flexibility
 pub fn keltner_scalar(
     high: &[f64],
     low: &[f64],
@@ -710,24 +663,19 @@ pub fn keltner_scalar(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    
-    
     let len = close.len();
     let warm = first + period - 1;
     if warm >= len {
         return;
     }
 
-    
     let pf = period as f64;
     let rma_alpha = 1.0 / pf;
 
-    
     let mut atr: f64;
     unsafe {
-        
         atr = *high.get_unchecked(0) - *low.get_unchecked(0);
-        
+
         let mut i = 1usize;
         while i < period {
             let hi = *high.get_unchecked(i);
@@ -739,9 +687,8 @@ pub fn keltner_scalar(
             atr += hl.max(hc).max(lc);
             i += 1;
         }
-        atr /= pf; 
+        atr /= pf;
 
-        
         let mut k = period;
         while k <= warm {
             let hi = *high.get_unchecked(k);
@@ -758,7 +705,6 @@ pub fn keltner_scalar(
 
     let m = multiplier;
 
-    
     if ma_type.eq_ignore_ascii_case("ema") {
         let mut ema: f64 = 0.0;
         unsafe {
@@ -779,7 +725,6 @@ pub fn keltner_scalar(
         unsafe {
             let mut i = warm + 1;
             while i < len {
-                
                 let hi = *high.get_unchecked(i);
                 let lo = *low.get_unchecked(i);
                 let pc = *close.get_unchecked(i - 1);
@@ -789,11 +734,9 @@ pub fn keltner_scalar(
                 let tr = hl.max(hc).max(lc);
                 atr = (tr - atr).mul_add(rma_alpha, atr);
 
-                
                 let xi = *source.get_unchecked(i);
                 ema = (xi - ema).mul_add(ema_alpha, ema);
 
-                
                 middle[i] = ema;
                 upper[i] = m.mul_add(atr, ema);
                 lower[i] = (-m).mul_add(atr, ema);
@@ -803,7 +746,6 @@ pub fn keltner_scalar(
         return;
     }
 
-    
     if ma_type.eq_ignore_ascii_case("sma") {
         let mut sum: f64 = 0.0;
         unsafe {
@@ -821,7 +763,6 @@ pub fn keltner_scalar(
         unsafe {
             let mut i = warm + 1;
             while i < len {
-                
                 let hi = *high.get_unchecked(i);
                 let lo = *low.get_unchecked(i);
                 let pc = *close.get_unchecked(i - 1);
@@ -831,7 +772,6 @@ pub fn keltner_scalar(
                 let tr = hl.max(hc).max(lc);
                 atr = (tr - atr).mul_add(rma_alpha, atr);
 
-                
                 let new_x = *source.get_unchecked(i);
                 let old_x = *source.get_unchecked(i - period);
                 sum += new_x - old_x;
@@ -846,7 +786,6 @@ pub fn keltner_scalar(
         return;
     }
 
-    
     let mut atr = crate::utilities::helpers::alloc_with_nan_prefix(len, warm);
     let alpha = 1.0 / (period as f64);
     let mut sum_tr = 0.0;
@@ -923,8 +862,6 @@ pub fn keltner_scalar(
     }
 }
 
-
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn keltner_avx2(
@@ -944,8 +881,6 @@ pub fn keltner_avx2(
         high, low, close, source, period, multiplier, ma_type, first, upper, middle, lower,
     )
 }
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -1017,8 +952,6 @@ pub unsafe fn keltner_avx512_long(
     )
 }
 
-
-
 #[inline(always)]
 pub fn keltner_row_scalar(
     high: &[f64],
@@ -1033,7 +966,6 @@ pub fn keltner_row_scalar(
     middle: &mut [f64],
     lower: &mut [f64],
 ) {
-    
     keltner_scalar(
         high, low, close, source, period, multiplier, ma_type, first, upper, middle, lower,
     );
@@ -1118,8 +1050,6 @@ pub unsafe fn keltner_row_avx512_long(
         high, low, close, source, period, multiplier, ma_type, first, upper, middle, lower,
     )
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct KeltnerBatchRange {
@@ -1340,10 +1270,12 @@ pub fn keltner_batch_with_kernel(
 ) -> Result<KeltnerBatchOutput, KeltnerError> {
     let kernel = match k {
         Kernel::Auto => {
-            
-            
             let best = detect_best_batch_kernel();
-            if best == Kernel::Avx512Batch { Kernel::Avx2Batch } else { best }
+            if best == Kernel::Avx512Batch {
+                Kernel::Avx2Batch
+            } else {
+                best
+            }
         }
         other if other.is_batch() => other,
         _ => {
@@ -1412,15 +1344,13 @@ fn keltner_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    rows
-        .checked_mul(cols)
+    rows.checked_mul(cols)
         .ok_or_else(|| KeltnerError::InvalidRange {
             start: rows.to_string(),
             end: cols.to_string(),
             step: "rows*cols".into(),
         })?;
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -1435,7 +1365,6 @@ fn keltner_batch_inner(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    
     let mut upper_mu = make_uninit_matrix(rows, cols);
     let mut middle_mu = make_uninit_matrix(rows, cols);
     let mut lower_mu = make_uninit_matrix(rows, cols);
@@ -1444,7 +1373,6 @@ fn keltner_batch_inner(
     init_matrix_prefixes(&mut middle_mu, cols, &warm);
     init_matrix_prefixes(&mut lower_mu, cols, &warm);
 
-    
     let mut upper_guard = core::mem::ManuallyDrop::new(upper_mu);
     let mut middle_guard = core::mem::ManuallyDrop::new(middle_mu);
     let mut lower_guard = core::mem::ManuallyDrop::new(lower_mu);
@@ -1459,7 +1387,6 @@ fn keltner_batch_inner(
         core::slice::from_raw_parts_mut(lower_guard.as_mut_ptr() as *mut f64, lower_guard.len())
     };
 
-    
     let mut tr: Vec<f64> = vec![0.0; cols];
     unsafe {
         let mut i = 0usize;
@@ -1480,7 +1407,6 @@ fn keltner_batch_inner(
         }
     }
 
-    
     let ps: Option<Vec<f64>> = if ma_type.unwrap_or("ema").eq_ignore_ascii_case("sma") {
         let mut buf = vec![0.0; cols + 1];
         unsafe {
@@ -1510,7 +1436,6 @@ fn keltner_batch_inner(
         let pf = period as f64;
         let alpha_rma = 1.0 / pf;
 
-        
         let mut atr = 0.0f64;
         unsafe {
             let mut j = 0usize;
@@ -1530,7 +1455,6 @@ fn keltner_batch_inner(
         }
 
         if ma.eq_ignore_ascii_case("ema") {
-            
             let mut acc = 0.0f64;
             unsafe {
                 let mut j = 0usize;
@@ -1550,13 +1474,12 @@ fn keltner_batch_inner(
             unsafe {
                 let mut i = row_warm + 1;
                 while i < cols {
-                    
                     let tri = *tr.get_unchecked(i);
                     atr = (tri - atr).mul_add(alpha_rma, atr);
-                    
+
                     let xi = *source.get_unchecked(i);
                     ema = (xi - ema).mul_add(alpha_ema, ema);
-                    
+
                     *mid.get_unchecked_mut(i) = ema;
                     *up.get_unchecked_mut(i) = mult.mul_add(atr, ema);
                     *low_out.get_unchecked_mut(i) = (-mult).mul_add(atr, ema);
@@ -1565,7 +1488,7 @@ fn keltner_batch_inner(
             }
         } else if ma.eq_ignore_ascii_case("sma") {
             let ps = ps.as_ref().expect("prefix sums computed for SMA");
-            
+
             let start = row_warm + 1 - period;
             let end = row_warm + 1;
             let mut sm = unsafe { (*ps.get_unchecked(end) - *ps.get_unchecked(start)) / pf };
@@ -1589,7 +1512,6 @@ fn keltner_batch_inner(
                 }
             }
         } else {
-            
             keltner_row_scalar(
                 high, low, close, source, period, mult, ma, first, up, mid, low_out,
             );
@@ -1625,7 +1547,7 @@ fn keltner_batch_inner(
             do_row(row, u, m, l);
         }
     }
-    
+
     let upper = unsafe {
         let ptr = upper_guard.as_mut_ptr() as *mut f64;
         let len = upper_guard.len();
@@ -1660,41 +1582,35 @@ fn keltner_batch_inner(
     })
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct KeltnerStream {
     period: usize,
-    rcp_period: f64, 
+    rcp_period: f64,
     multiplier: f64,
 
-    
     ma_impl: MaImpl,
 
-    
-    atr: f64,       
-    atr_sum: f64,   
-    rma_alpha: f64, 
+    atr: f64,
+    atr_sum: f64,
+    rma_alpha: f64,
 
-    
     count: usize,
     prev_close: f64,
 }
 
 #[derive(Debug, Clone)]
 enum MaImpl {
-    
     Ema {
-        alpha: f64,    
-        value: f64,    
-        seed_sum: f64, 
+        alpha: f64,
+        value: f64,
+        seed_sum: f64,
     },
-    
+
     Sma {
         buffer: Vec<f64>,
         sum: f64,
         idx: usize,
-        filled: bool, 
+        filled: bool,
     },
 }
 
@@ -1708,7 +1624,10 @@ impl KeltnerStream {
             .to_lowercase();
 
         if period == 0 {
-            return Err(KeltnerError::InvalidPeriod { period, data_len: 0 });
+            return Err(KeltnerError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
         let pf = period as f64;
@@ -1722,7 +1641,6 @@ impl KeltnerStream {
                 filled: false,
             }
         } else {
-            
             MaImpl::Ema {
                 alpha: 2.0 / (pf + 1.0),
                 value: 0.0,
@@ -1751,8 +1669,6 @@ impl KeltnerStream {
         close: f64,
         source: f64,
     ) -> Option<(f64, f64, f64)> {
-        
-        
         let tr = if self.count == 0 {
             high - low
         } else {
@@ -1765,12 +1681,9 @@ impl KeltnerStream {
         self.prev_close = close;
         self.count += 1;
 
-        
         if self.count < self.period {
-            
             self.atr_sum += tr;
 
-            
             match &mut self.ma_impl {
                 MaImpl::Ema { seed_sum, .. } => {
                     *seed_sum += source;
@@ -1786,17 +1699,14 @@ impl KeltnerStream {
             return None;
         }
 
-        
         if self.count == self.period {
-            
             self.atr = (self.atr_sum + tr) * self.rcp_period;
 
-            
             let mid = match &mut self.ma_impl {
                 MaImpl::Ema {
                     value, seed_sum, ..
                 } => {
-                    *seed_sum += source; 
+                    *seed_sum += source;
                     *value = *seed_sum * self.rcp_period;
                     *value
                 }
@@ -1806,7 +1716,7 @@ impl KeltnerStream {
                     idx,
                     filled,
                 } => {
-                    *sum += source; 
+                    *sum += source;
                     buffer[*idx] = source;
                     *idx = (*idx + 1) % self.period;
                     *filled = true;
@@ -1819,11 +1729,8 @@ impl KeltnerStream {
             return Some((up, mid, lo));
         }
 
-        
-        
         self.atr = (tr - self.atr).mul_add(self.rma_alpha, self.atr);
 
-        
         let mid = match &mut self.ma_impl {
             MaImpl::Ema { alpha, value, .. } => {
                 *value = (source - *value).mul_add(*alpha, *value);
@@ -2021,7 +1928,7 @@ mod tests {
             let hi = candles.high[i];
             let lo = candles.low[i];
             let cl = candles.close[i];
-            let src = candles.close[i]; 
+            let src = candles.close[i];
             match stream.update(hi, lo, cl, src) {
                 Some((up, mid, low)) => {
                     upper_stream.push(up);
@@ -2068,71 +1975,69 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            KeltnerParams::default(), 
+            KeltnerParams::default(),
             KeltnerParams {
                 period: Some(2),
                 multiplier: Some(1.0),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(5),
                 multiplier: Some(0.5),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(10),
                 multiplier: Some(1.5),
                 ma_type: Some("sma".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(20),
                 multiplier: Some(3.0),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(50),
                 multiplier: Some(2.5),
                 ma_type: Some("sma".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(100),
                 multiplier: Some(1.0),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(14),
                 multiplier: Some(2.0),
                 ma_type: Some("sma".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(7),
                 multiplier: Some(1.0),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(21),
                 multiplier: Some(1.5),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(30),
                 multiplier: Some(2.0),
                 ma_type: Some("sma".to_string()),
-            }, 
+            },
             KeltnerParams {
                 period: Some(3),
                 multiplier: Some(0.75),
                 ma_type: Some("ema".to_string()),
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = KeltnerInput::from_candles(&candles, "close", params.clone());
             let output = keltner_with_kernel(&input, kernel)?;
 
-            
             for (band_name, band_values) in [
                 ("upper", &output.upper_band),
                 ("middle", &output.middle_band),
@@ -2140,12 +2045,11 @@ mod tests {
             ] {
                 for (i, &val) in band_values.iter().enumerate() {
                     if val.is_nan() {
-                        continue; 
+                        continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2190,7 +2094,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_keltner_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
@@ -2219,16 +2123,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 0.5, 2.5, 0.5), 
-            (5, 25, 5, 1.0, 3.0, 1.0), 
-            (30, 60, 15, 2.0, 2.0, 0.0), 
-            (2, 5, 1, 1.5, 2.5, 0.25), 
-            (10, 30, 10, 0.75, 2.25, 0.75), 
-            (14, 21, 7, 1.0, 2.0, 0.5), 
-            (20, 20, 0, 0.5, 3.0, 0.5), 
+            (2, 10, 2, 0.5, 2.5, 0.5),
+            (5, 25, 5, 1.0, 3.0, 1.0),
+            (30, 60, 15, 2.0, 2.0, 0.0),
+            (2, 5, 1, 1.5, 2.5, 0.25),
+            (10, 30, 10, 0.75, 2.25, 0.75),
+            (14, 21, 7, 1.0, 2.0, 0.5),
+            (20, 20, 0, 0.5, 3.0, 0.5),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, m_start, m_end, m_step)) in
@@ -2240,7 +2142,6 @@ mod tests {
                 .multiplier_range(m_start, m_end, m_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (band_name, band_values) in [
                 ("upper", &output.upper_band),
                 ("middle", &output.middle_band),
@@ -2256,7 +2157,6 @@ mod tests {
                     let col = idx % output.cols;
                     let combo = &output.combos[row];
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2314,7 +2214,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (
             2usize..=50,
             50usize..500,
@@ -2327,19 +2226,17 @@ mod tests {
                 let mut low = Vec::with_capacity(len);
                 let mut close = Vec::with_capacity(len);
 
-                
                 let mut rng_state = seed;
                 let mut next_random = || -> f64 {
-                    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223); 
+                    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
                     (rng_state as f64) / (u64::MAX as f64)
                 };
 
                 match scenario {
                     0 => {
-                        
                         let mut prev_close = 100.0;
                         for _ in 0..len {
-                            let volatility = 0.01 + next_random() * 0.04; 
+                            let volatility = 0.01 + next_random() * 0.04;
                             let change = -volatility + next_random() * (2.0 * volatility);
                             let new_close = (prev_close * (1.0 + change)).max(0.1f64);
                             let high_val = new_close * (1.0 + next_random() * volatility);
@@ -2352,7 +2249,6 @@ mod tests {
                         }
                     }
                     1 => {
-                        
                         let start = 100.0;
                         for i in 0..len {
                             let base = start * (1.0 + 0.01 * i as f64);
@@ -2363,7 +2259,6 @@ mod tests {
                         }
                     }
                     2 => {
-                        
                         let start = 100.0;
                         for i in 0..len {
                             let base = start * (1.0 - 0.005 * i as f64).max(10.0);
@@ -2374,7 +2269,6 @@ mod tests {
                         }
                     }
                     3 => {
-                        
                         let mut price = 100.0;
                         for i in 0..len {
                             let volatility = 0.1 * (1.0 + (i as f64 * 0.1).sin());
@@ -2392,14 +2286,12 @@ mod tests {
                         }
                     }
                     4 => {
-                        
                         let constant_price = 50.0;
                         high = vec![constant_price; len];
                         low = vec![constant_price; len];
                         close = vec![constant_price; len];
                     }
                     _ => {
-                        
                         let mut price = 1000.0;
                         let mut momentum = 0.0;
 
@@ -2419,14 +2311,13 @@ mod tests {
                     }
                 }
 
-                
                 let ma_type = if next_random() > 0.5 { "ema" } else { "sma" };
                 (high, low, close, period, multiplier, ma_type.to_string())
             });
 
         proptest::test_runner::TestRunner::default()
 			.run(&strat, |(high, low, close, period, multiplier, ma_type)| {
-				
+
 				let source = close.clone();
 
 				let params = KeltnerParams {
@@ -2439,12 +2330,12 @@ mod tests {
 				let result = keltner_with_kernel(&input, kernel).unwrap();
 				let scalar_result = keltner_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				
+
 				prop_assert_eq!(result.upper_band.len(), close.len());
 				prop_assert_eq!(result.middle_band.len(), close.len());
 				prop_assert_eq!(result.lower_band.len(), close.len());
 
-				
+
 				let warmup = period - 1;
 				for i in 0..warmup.min(close.len()) {
 					prop_assert!(
@@ -2461,7 +2352,7 @@ mod tests {
 					);
 				}
 
-				
+
 				for i in warmup..close.len() {
 					let upper = result.upper_band[i];
 					let middle = result.middle_band[i];
@@ -2471,12 +2362,12 @@ mod tests {
 					let scalar_middle = scalar_result.middle_band[i];
 					let scalar_lower = scalar_result.lower_band[i];
 
-					
+
 					if upper.is_nan() || middle.is_nan() || lower.is_nan() {
 						continue;
 					}
 
-					
+
 					prop_assert!(
 						upper >= middle - 1e-10,
 						"Upper band {} must be >= middle band {} at index {}", upper, middle, i
@@ -2486,16 +2377,16 @@ mod tests {
 						"Middle band {} must be >= lower band {} at index {}", middle, lower, i
 					);
 
-					
+
 					let spread = upper - lower;
 					prop_assert!(
 						spread >= -1e-10,
 						"Spread {} must be positive at index {}", spread, i
 					);
 
-					
+
 					if i >= warmup + period {
-						
+
 						let scalar_spread = scalar_upper - scalar_lower;
 						if scalar_spread > 0.0 && spread > 0.0 {
 							let ratio = spread / scalar_spread;
@@ -2506,12 +2397,12 @@ mod tests {
 						}
 					}
 
-					
+
 					let window_start = i.saturating_sub(period - 1);
 					let window_high = high[window_start..=i].iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 					let window_low = low[window_start..=i].iter().fold(f64::INFINITY, |a, &b| a.min(b));
 
-					
+
 					prop_assert!(
 						middle <= window_high * 1.05 + 1.0,
 						"Middle band {} exceeds window high {} at index {}", middle, window_high, i
@@ -2521,7 +2412,7 @@ mod tests {
 						"Middle band {} below window low {} at index {}", middle, window_low, i
 					);
 
-					
+
 					let tolerance = 1e-9;
 					prop_assert!(
 						(upper - scalar_upper).abs() <= tolerance,
@@ -2539,7 +2430,7 @@ mod tests {
 						i, lower, scalar_lower, (lower - scalar_lower).abs()
 					);
 
-					
+
 					#[cfg(debug_assertions)]
 					{
 						let upper_bits = upper.to_bits();
@@ -2566,21 +2457,21 @@ mod tests {
 						);
 					}
 
-					
-					
+
+
 					let all_same = high[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               low[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) &&
 					               close[window_start..=i].windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
-					
+
 					let no_spread = high[window_start..=i].iter()
 						.zip(low[window_start..=i].iter())
 						.zip(close[window_start..=i].iter())
 						.all(|((h, l), c)| (h - l).abs() < 1e-10 && (h - c).abs() < 1e-10);
 
 					if all_same && no_spread && i >= warmup + period * 3 {
-						
-						
+
+
 						let band_spread = upper - lower;
 						prop_assert!(
 							band_spread < 0.01 || band_spread < middle * 0.001,
@@ -2661,7 +2552,6 @@ mod tests {
     fn test_keltner_into_matches_api() {
         use crate::utilities::data_loader::Candles;
 
-        
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -2693,7 +2583,6 @@ mod tests {
         let candles = Candles::new(ts, open, high, low, close, volume);
         let input = KeltnerInput::from_candles(&candles, "close", KeltnerParams::default());
 
-        
         let base = keltner(&input).expect("keltner baseline failed");
 
         let len = candles.close.len();
@@ -2701,7 +2590,6 @@ mod tests {
         let mut mid = vec![0.0; len];
         let mut lo = vec![0.0; len];
 
-        
         keltner_into(&input, &mut up, &mut mid, &mut lo).expect("keltner_into failed");
 
         assert_eq!(base.upper_band.len(), up.len());
@@ -2738,8 +2626,6 @@ mod tests {
     }
 }
 
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 pub struct KeltnerDeviceArrayF32 {
     pub inner: DeviceArrayF32,
@@ -2770,7 +2656,7 @@ impl KeltnerDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Producer kernels synchronize before returning, so we omit `stream` per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2789,8 +2675,8 @@ impl KeltnerDeviceArrayF32Py {
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2808,10 +2694,9 @@ impl KeltnerDeviceArrayF32Py {
                 }
             }
         }
-        // Ignore `stream`: producer kernels synchronize before returning the handle.
+
         let _ = stream;
 
-        // copy=True is not yet supported (no cross-device copy path here).
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -2821,9 +2706,8 @@ impl KeltnerDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let context = self.inner.context.clone();
         let device_id = self.inner.device_id;
         let inner = std::mem::replace(
@@ -2844,7 +2728,14 @@ impl KeltnerDeviceArrayF32Py {
 
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
 
-        export_f32_cuda_dlpack_2d(py, inner.inner.buf, rows, cols, alloc_dev, max_version_bound)
+        export_f32_cuda_dlpack_2d(
+            py,
+            inner.inner.buf,
+            rows,
+            cols,
+            alloc_dev,
+            max_version_bound,
+        )
     }
 }
 
@@ -2947,7 +2838,6 @@ pub fn keltner_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    // Run batch once to get shapes and combos
     let out = py
         .allow_threads(|| {
             keltner_batch_par_slice(
@@ -2967,7 +2857,6 @@ pub fn keltner_batch_py<'py>(
     let rows = out.rows;
     let cols = out.cols;
 
-    // Materialize into PyArrays without extra copies
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
@@ -3003,7 +2892,6 @@ pub fn keltner_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "keltner_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, source_f32, period_range, multiplier_range, ma_type="ema", device_id=0))]
@@ -3034,8 +2922,7 @@ pub fn keltner_cuda_batch_dev_py<'py>(
         multiplier: multiplier_range,
     };
     let (up, mid, low, rows, cols, ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let res = cuda
@@ -3113,7 +3000,11 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
     multiplier: f32,
     ma_type: &str,
     device_id: usize,
-) -> PyResult<(KeltnerDeviceArrayF32Py, KeltnerDeviceArrayF32Py, KeltnerDeviceArrayF32Py)> {
+) -> PyResult<(
+    KeltnerDeviceArrayF32Py,
+    KeltnerDeviceArrayF32Py,
+    KeltnerDeviceArrayF32Py,
+)> {
     use crate::cuda::cuda_available;
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
@@ -3130,8 +3021,7 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
     let (up, mid, low, ctx, dev_id) = py.allow_threads(|| {
-        let cuda =
-            CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaKeltner::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let trip = cuda
@@ -3166,17 +3056,15 @@ pub fn keltner_cuda_many_series_one_param_dev_py(
     ))
 }
 
-// WASM bindings
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KeltnerResult {
-    pub values: Vec<f64>, // [upper..., middle..., lower...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "keltner")]
 pub fn keltner_js(
     high: &[f64],
@@ -3192,7 +3080,6 @@ pub fn keltner_js(
     }
     let len = close.len();
 
-    // One contiguous buffer, no intermediate Vecs
     let mut values = vec![0.0f64; 3 * len];
     let (upper, rest) = values.split_at_mut(len);
     let (middle, lower) = rest.split_at_mut(len);
@@ -3216,8 +3103,7 @@ pub fn keltner_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-/// Fast API with aliasing detection - separate pointers for each output
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn keltner_into(
     high_ptr: *const f64,
@@ -3256,7 +3142,6 @@ pub fn keltner_into(
         };
         let input = KeltnerInput::from_slice(high, low, close, source, params);
 
-        // Check for aliasing between input and output pointers
         let input_ptrs = [
             high_ptr as *const f64,
             low_ptr as *const f64,
@@ -3274,7 +3159,6 @@ pub fn keltner_into(
             .any(|&in_ptr| output_ptrs.iter().any(|&out_ptr| in_ptr == out_ptr));
 
         if has_aliasing {
-            // Handle aliasing by using temporary buffers
             let mut temp_upper = vec![0.0; len];
             let mut temp_middle = vec![0.0; len];
             let mut temp_lower = vec![0.0; len];
@@ -3296,7 +3180,6 @@ pub fn keltner_into(
             middle_out.copy_from_slice(&temp_middle);
             lower_out.copy_from_slice(&temp_lower);
         } else {
-            // No aliasing, write directly
             let upper_out = std::slice::from_raw_parts_mut(upper_ptr, len);
             let middle_out = std::slice::from_raw_parts_mut(middle_ptr, len);
             let lower_out = std::slice::from_raw_parts_mut(lower_ptr, len);
@@ -3309,8 +3192,7 @@ pub fn keltner_into(
     }
 }
 
-/// Memory allocation for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn keltner_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3319,8 +3201,7 @@ pub fn keltner_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-/// Memory deallocation for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn keltner_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3330,7 +3211,7 @@ pub fn keltner_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KeltnerBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -3338,7 +3219,7 @@ pub struct KeltnerBatchConfig {
     pub ma_type: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KeltnerBatchJsOutput {
     pub upper: Vec<f64>,
@@ -3349,7 +3230,7 @@ pub struct KeltnerBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "keltner_batch")]
 pub fn keltner_batch_unified_js(
     high: &[f64],
@@ -3389,7 +3270,7 @@ pub fn keltner_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "keltner_into_concat")]
 pub fn keltner_into_concat(
     h_ptr: *const f64,

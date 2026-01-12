@@ -1,15 +1,3 @@
-//! CUDA wrapper for Market Facilitation Index (marketefi)
-//!
-//! Parity with ALMA/CWMA wrappers:
-//! - PTX load via include_str!(... "/marketefi_kernel.ptx") with DetermineTargetFromContext + O2
-//!   and graceful fallbacks.
-//! - NON_BLOCKING stream.
-//! - Simple policy enums and one-dimensional launches.
-//! - VRAM estimation with ~64MB headroom before async copies.
-//! - Device entry points:
-//!     - `marketefi_dev(&[f32], &[f32], &[f32]) -> DeviceArrayF32` (one-series)
-//!     - `marketefi_many_series_one_param_time_major_dev(&[f32], ... ) -> DeviceArrayF32`.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -32,16 +20,18 @@ pub enum CudaMarketefiError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge {
         gx: u32,
         gy: u32,
@@ -221,9 +211,6 @@ impl CudaMarketefi {
         }
     }
 
-    
-
-    /// One-series compute on device (paramless): returns a single row DeviceArrayF32 (1 x len)
     pub fn marketefi_batch_dev(
         &self,
         high_f32: &[f32],
@@ -243,14 +230,13 @@ impl CudaMarketefi {
             })
             .ok_or_else(|| CudaMarketefiError::InvalidInput("all values are NaN".into()))?;
 
-        
         let elem_bytes = std::mem::size_of::<f32>();
-        let per_vec = len
-            .checked_mul(elem_bytes)
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (len * elem_size)".into()))?;
-        let bytes = 4usize
-            .checked_mul(per_vec)
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (4 * len * elem_size)".into()))?;
+        let per_vec = len.checked_mul(elem_bytes).ok_or_else(|| {
+            CudaMarketefiError::InvalidInput("size overflow (len * elem_size)".into())
+        })?;
+        let bytes = 4usize.checked_mul(per_vec).ok_or_else(|| {
+            CudaMarketefiError::InvalidInput("size overflow (4 * len * elem_size)".into())
+        })?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             let free = Self::device_mem_info().map(|(free, _)| free).unwrap_or(0);
@@ -331,7 +317,6 @@ impl CudaMarketefi {
         Ok(())
     }
 
-    /// Many-series × one-param (paramless). Time-major layout (cols=num_series, rows=series_len).
     pub fn marketefi_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -343,14 +328,13 @@ impl CudaMarketefi {
         if cols == 0 || rows == 0 {
             return Err(CudaMarketefiError::InvalidInput("empty input".into()));
         }
-        let n = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (cols * rows)".into()))?;
+        let n = cols.checked_mul(rows).ok_or_else(|| {
+            CudaMarketefiError::InvalidInput("size overflow (cols * rows)".into())
+        })?;
         if high_tm_f32.len() != n || low_tm_f32.len() != n || volume_tm_f32.len() != n {
             return Err(CudaMarketefiError::InvalidInput("length mismatch".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = 0i32;
@@ -369,17 +353,20 @@ impl CudaMarketefi {
             first_valids[s] = if found { fv } else { rows as i32 };
         }
 
-        
         let f_bytes = n
             .checked_mul(std::mem::size_of::<f32>())
             .and_then(|b| b.checked_mul(4))
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow for fp32 buffers".into()))?;
+            .ok_or_else(|| {
+                CudaMarketefiError::InvalidInput("size overflow for fp32 buffers".into())
+            })?;
         let first_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow for first_valids".into()))?;
-        let bytes = f_bytes
-            .checked_add(first_bytes)
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (total bytes)".into()))?;
+            .ok_or_else(|| {
+                CudaMarketefiError::InvalidInput("size overflow for first_valids".into())
+            })?;
+        let bytes = f_bytes.checked_add(first_bytes).ok_or_else(|| {
+            CudaMarketefiError::InvalidInput("size overflow (total bytes)".into())
+        })?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             let free = Self::device_mem_info().map(|(free, _)| free).unwrap_or(0);
@@ -419,9 +406,9 @@ impl CudaMarketefi {
         rows: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMarketefiError> {
-        let n = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaMarketefiError::InvalidInput("size overflow (cols * rows)".into()))?;
+        let n = cols.checked_mul(rows).ok_or_else(|| {
+            CudaMarketefiError::InvalidInput("size overflow (cols * rows)".into())
+        })?;
         if d_high_tm.len() != n || d_low_tm.len() != n || d_vol_tm.len() != n || d_out_tm.len() != n
         {
             return Err(CudaMarketefiError::InvalidInput(
@@ -429,10 +416,11 @@ impl CudaMarketefi {
             ));
         }
         if d_first_valids.len() != cols {
-            return Err(CudaMarketefiError::InvalidInput("first_valids length mismatch".into()));
+            return Err(CudaMarketefiError::InvalidInput(
+                "first_valids length mismatch".into(),
+            ));
         }
 
-        
         let func = self
             .module
             .get_function("marketefi_many_series_one_param_f32")
@@ -440,17 +428,13 @@ impl CudaMarketefi {
                 name: "marketefi_many_series_one_param_f32",
             })?;
 
-        
-        
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         };
 
-        
         const T_TILE: u32 = 128;
 
-        
         let mut h_ptr = d_high_tm.as_device_ptr().as_raw();
         let mut l_ptr = d_low_tm.as_device_ptr().as_raw();
         let mut v_ptr = d_vol_tm.as_device_ptr().as_raw();
@@ -460,10 +444,12 @@ impl CudaMarketefi {
         let aligned16 = ((h_ptr | l_ptr | v_ptr | o_ptr | fv_ptr) & 0xF) == 0;
         let host_vec4_ok = aligned16 && ((cols & 3) == 0);
 
-        
-        let series_groups: u32 = if host_vec4_ok { (cols as u32) >> 2 } else { cols as u32 };
+        let series_groups: u32 = if host_vec4_ok {
+            (cols as u32) >> 2
+        } else {
+            cols as u32
+        };
 
-        
         let grid_x = ((rows as u32) + T_TILE - 1) / T_TILE;
         let grid_y = (series_groups + block_x - 1) / block_x;
 
@@ -485,7 +471,6 @@ impl CudaMarketefi {
             self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaMarketefi)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -494,7 +479,6 @@ impl CudaMarketefi {
         Ok(())
     }
 
-    
     pub fn marketefi_dev(
         &self,
         h: &[f32],
@@ -505,14 +489,13 @@ impl CudaMarketefi {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
-        
+
         v.push(CudaBenchScenario::new(
             "marketefi",
             "one_series",
@@ -570,7 +553,7 @@ pub mod benches {
                 })
             },
         ));
-        
+
         v.push(CudaBenchScenario::new(
             "marketefi",
             "many_series_one_param",

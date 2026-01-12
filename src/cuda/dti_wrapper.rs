@@ -1,19 +1,5 @@
-//! CUDA wrapper for Dynamic Trend Index (DTI).
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX load via `include_str!(concat!(env!("OUT_DIR"), "/dti_kernel.ptx"))`
-//! - Stream NON_BLOCKING
-//! - Simple explicit policy types and introspection
-//! - VRAM checks + headroom and basic chunking guards
-//! - Device entry points returning VRAM-resident `DeviceArrayF32`
-//!
-//! Category: Recurrence/IIR (triple EMA chains). For the batch path (one series Ã— many params),
-//! we precompute the base series x and |x| once on host and reuse across rows, mirroring the
-//! scalar batch optimization in `indicators::dti`.
-
 #![cfg(feature = "cuda")]
 
-use std::sync::Arc;
 use crate::indicators::dti::{DtiBatchRange, DtiParams};
 use cust::context::{CacheConfig, Context};
 use cust::device::Device;
@@ -25,13 +11,18 @@ use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CudaDtiError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -39,13 +30,19 @@ pub enum CudaDtiError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -64,7 +61,10 @@ pub struct CudaDtiPolicy {
 }
 impl Default for CudaDtiPolicy {
     fn default() -> Self {
-        Self { batch: BatchKernelPolicy::Auto, many_series: ManySeriesKernelPolicy::Auto }
+        Self {
+            batch: BatchKernelPolicy::Auto,
+            many_series: ManySeriesKernelPolicy::Auto,
+        }
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -76,7 +76,6 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-/// VRAM-backed array handle for DTI with context guard and device id
 pub struct DeviceArrayF32Dti {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -86,9 +85,13 @@ pub struct DeviceArrayF32Dti {
 }
 impl DeviceArrayF32Dti {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaDti {
@@ -118,7 +121,6 @@ impl CudaDti {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -137,7 +139,9 @@ impl CudaDti {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -147,10 +151,14 @@ impl CudaDti {
     }
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             bytes.saturating_add(headroom) <= free
-        } else { true }
+        } else {
+            true
+        }
     }
 
     pub fn set_policy(&mut self, policy: CudaDtiPolicy) {
@@ -165,10 +173,20 @@ impl CudaDti {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn synchronize(&self) -> Result<(), CudaDtiError> { self.stream.synchronize().map_err(Into::into) }
+    pub fn synchronize(&self) -> Result<(), CudaDtiError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
 
     #[inline]
-    fn validate_launch(&self, gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32) -> Result<(), CudaDtiError> {
+    fn validate_launch(
+        &self,
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    ) -> Result<(), CudaDtiError> {
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev
             .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)
@@ -193,8 +211,22 @@ impl CudaDti {
             .unwrap_or(65_535) as u32;
 
         let threads = bx.saturating_mul(by).saturating_mul(bz);
-        if threads > max_threads || bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
-            return Err(CudaDtiError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        if threads > max_threads
+            || bx > max_bx
+            || by > max_by
+            || bz > max_bz
+            || gx > max_gx
+            || gy > max_gy
+            || gz > max_gz
+        {
+            return Err(CudaDtiError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -255,27 +287,47 @@ impl CudaDti {
     }
 
     #[inline]
-    
 
-    
     fn expand_grid(range: &DtiBatchRange) -> Vec<DtiParams> {
         fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = t;
-            if step == 0 || start == end { return vec![start]; }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             let mut v = Vec::new();
             if start < end {
                 let mut cur = start;
                 while cur <= end {
                     v.push(cur);
-                    match cur.checked_add(step) { Some(n) => { if n > end { break; } cur = n; }, None => break }
+                    match cur.checked_add(step) {
+                        Some(n) => {
+                            if n > end {
+                                break;
+                            }
+                            cur = n;
+                        }
+                        None => break,
+                    }
                 }
             } else {
                 let mut cur = start;
                 loop {
-                    if cur < end { break; }
+                    if cur < end {
+                        break;
+                    }
                     v.push(cur);
-                    if cur == end { break; }
-                    match cur.checked_sub(step) { Some(n) => { if n < end { break; } cur = n; }, None => break }
+                    if cur == end {
+                        break;
+                    }
+                    match cur.checked_sub(step) {
+                        Some(n) => {
+                            if n < end {
+                                break;
+                            }
+                            cur = n;
+                        }
+                        None => break,
+                    }
                 }
             }
             v
@@ -312,14 +364,16 @@ impl CudaDti {
         x.fill(0.0);
         ax.fill(0.0);
         let len = high.len();
-        if start == 0 || start >= len { return; }
+        if start == 0 || start >= len {
+            return;
+        }
         for i in start..len {
             let dh = high[i] - high[i - 1];
-            let dl = low[i]  - low[i - 1];
+            let dl = low[i] - low[i - 1];
             let x_hmu = if dh > 0.0 { dh } else { 0.0 };
             let x_lmd = if dl < 0.0 { -dl } else { 0.0 };
             let v = x_hmu - x_lmd;
-            x[i]  = v;
+            x[i] = v;
             ax[i] = v.abs();
         }
     }
@@ -336,17 +390,18 @@ impl CudaDti {
         start: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaDtiError> {
-        let mut func: Function = self
-            .module
-            .get_function("dti_batch_f32")
-            .map_err(|_| CudaDtiError::MissingKernelSymbol { name: "dti_batch_f32" })?;
+        let mut func: Function = self.module.get_function("dti_batch_f32").map_err(|_| {
+            CudaDtiError::MissingKernelSymbol {
+                name: "dti_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match std::env::var("DTI_BLOCK_X").ok().as_deref() {
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
             None => {
-                let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_min_grid, suggested) =
+                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested
             }
         };
@@ -354,7 +409,7 @@ impl CudaDti {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch(grid_x.max(1), 1, 1, block_x, 1, 1)?;
-        
+
         unsafe {
             (*(self as *const _ as *mut CudaDti)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });
@@ -434,7 +489,6 @@ impl CudaDti {
         let rows = combos.len();
         let start = first_valid + 1;
 
-        
         let inputs_bytes = len
             .checked_mul(2)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
@@ -453,25 +507,41 @@ impl CudaDti {
             .checked_add(params_bytes)
             .and_then(|n| n.checked_add(out_bytes))
             .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_batch_dev".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaDtiError::OutOfMemory { required: bytes, free, headroom });
+                return Err(CudaDtiError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                });
             } else {
-                return Err(CudaDtiError::OutOfMemory { required: bytes, free: 0, headroom });
+                return Err(CudaDtiError::OutOfMemory {
+                    required: bytes,
+                    free: 0,
+                    headroom,
+                });
             }
         }
 
-        
-        let mut hx  = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
+        let mut hx = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
         let mut hax = unsafe { LockedBuffer::<f32>::uninitialized(len) }?;
-        Self::precompute_x_ax_into_locked(high_f32, low_f32, start, hx.as_mut_slice(), hax.as_mut_slice());
+        Self::precompute_x_ax_into_locked(
+            high_f32,
+            low_f32,
+            start,
+            hx.as_mut_slice(),
+            hax.as_mut_slice(),
+        );
 
-        
         let mut r_vec = Vec::with_capacity(rows);
         let mut s_vec = Vec::with_capacity(rows);
         let mut u_vec = Vec::with_capacity(rows);
-        for c in &combos { r_vec.push(c.r.unwrap() as i32); s_vec.push(c.s.unwrap() as i32); u_vec.push(c.u.unwrap() as i32); }
+        for c in &combos {
+            r_vec.push(c.r.unwrap() as i32);
+            s_vec.push(c.s.unwrap() as i32);
+            u_vec.push(c.u.unwrap() as i32);
+        }
         let hr = LockedBuffer::from_slice(&r_vec)?;
         let hs = LockedBuffer::from_slice(&s_vec)?;
         let hu = LockedBuffer::from_slice(&u_vec)?;
@@ -495,10 +565,18 @@ impl CudaDti {
         self.launch_batch_kernel(&d_x, &d_ax, &d_r, &d_s, &d_u, len, rows, start, &mut d_out)?;
         self.stream.synchronize()?;
 
-        Ok((DeviceArrayF32Dti { buf: d_out, rows, cols: len, ctx: Arc::clone(&self.context), device_id: self.device_id }, combos))
+        Ok((
+            DeviceArrayF32Dti {
+                buf: d_out,
+                rows,
+                cols: len,
+                ctx: Arc::clone(&self.context),
+                device_id: self.device_id,
+            },
+            combos,
+        ))
     }
 
-    
     fn launch_many_series_kernel(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -514,14 +592,16 @@ impl CudaDti {
         let mut func = self
             .module
             .get_function("dti_many_series_one_param_f32")
-            .map_err(|_| CudaDtiError::MissingKernelSymbol { name: "dti_many_series_one_param_f32" })?;
+            .map_err(|_| CudaDtiError::MissingKernelSymbol {
+                name: "dti_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match std::env::var("DTI_MANY_BLOCK_X").ok().as_deref() {
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
             None => {
-                let (_min, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_min, suggested) =
+                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested
             }
         };
@@ -585,7 +665,6 @@ impl CudaDti {
         let s = params.s.unwrap_or(10);
         let u = params.u.unwrap_or(5);
 
-        
         let mut first_valids = vec![rows as i32; cols];
         for series in 0..cols {
             let mut fv = rows as i32;
@@ -605,50 +684,77 @@ impl CudaDti {
             first_valids[series] = fv;
         }
 
-        
         let inputs_bytes = elems
             .checked_mul(2)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_many_series_one_param_time_major_dev".into()))?;
+            .ok_or_else(|| {
+                CudaDtiError::InvalidInput(
+                    "size overflow in dti_many_series_one_param_time_major_dev".into(),
+                )
+            })?;
         let first_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_many_series_one_param_time_major_dev".into()))?;
+            .ok_or_else(|| {
+                CudaDtiError::InvalidInput(
+                    "size overflow in dti_many_series_one_param_time_major_dev".into(),
+                )
+            })?;
         let out_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_many_series_one_param_time_major_dev".into()))?;
+            .ok_or_else(|| {
+                CudaDtiError::InvalidInput(
+                    "size overflow in dti_many_series_one_param_time_major_dev".into(),
+                )
+            })?;
         let bytes = inputs_bytes
             .checked_add(first_bytes)
             .and_then(|n| n.checked_add(out_bytes))
-            .ok_or_else(|| CudaDtiError::InvalidInput("size overflow in dti_many_series_one_param_time_major_dev".into()))?;
+            .ok_or_else(|| {
+                CudaDtiError::InvalidInput(
+                    "size overflow in dti_many_series_one_param_time_major_dev".into(),
+                )
+            })?;
         if !Self::will_fit(bytes, 64 * 1024 * 1024) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaDtiError::OutOfMemory { required: bytes, free, headroom: 64 * 1024 * 1024 });
+                return Err(CudaDtiError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom: 64 * 1024 * 1024,
+                });
             } else {
-                return Err(CudaDtiError::OutOfMemory { required: bytes, free: 0, headroom: 64 * 1024 * 1024 });
+                return Err(CudaDtiError::OutOfMemory {
+                    required: bytes,
+                    free: 0,
+                    headroom: 64 * 1024 * 1024,
+                });
             }
         }
 
-        
-        let h_high  = LockedBuffer::from_slice(high_tm_f32)?;
-        let h_low   = LockedBuffer::from_slice(low_tm_f32 )?;
+        let h_high = LockedBuffer::from_slice(high_tm_f32)?;
+        let h_low = LockedBuffer::from_slice(low_tm_f32)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 
-        
-        let mut d_high  = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
-        let mut d_low   = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_high = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_low = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
         let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         unsafe {
-            d_high .async_copy_from(&h_high,  &self.stream)?;
-            d_low  .async_copy_from(&h_low,   &self.stream)?;
+            d_high.async_copy_from(&h_high, &self.stream)?;
+            d_low.async_copy_from(&h_low, &self.stream)?;
             d_first.async_copy_from(&h_first, &self.stream)?;
         }
 
         self.launch_many_series_kernel(&d_high, &d_low, &d_first, cols, rows, r, s, u, &mut d_out)?;
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32Dti { buf: d_out, rows, cols, ctx: Arc::clone(&self.context), device_id: self.device_id })
+        Ok(DeviceArrayF32Dti {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: Arc::clone(&self.context),
+            device_id: self.device_id,
+        })
     }
 }
 
@@ -658,13 +764,13 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 180; 
+    const PARAM_SWEEP: usize = 180;
     const MANY_SERIES_COLS: usize = 192;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>(); 
-        let pre_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>(); 
+        let in_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>();
+        let pre_bytes = ONE_SERIES_LEN * 2 * std::mem::size_of::<f32>();
         let params = PARAM_SWEEP * 3 * std::mem::size_of::<i32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + pre_bytes + params + out_bytes + 64 * 1024 * 1024
@@ -717,7 +823,7 @@ pub mod benches {
             high[i] = x.max(prev) + 0.7;
             low[i] = x.min(prev) - 0.7;
         }
-        
+
         let sweep = DtiBatchRange {
             r: (8, 18, 2),
             s: (6, 14, 2),
@@ -733,7 +839,13 @@ pub mod benches {
 
         let mut x = vec![0f32; len];
         let mut ax = vec![0f32; len];
-        CudaDti::precompute_x_ax_into_locked(&high, &low, start, x.as_mut_slice(), ax.as_mut_slice());
+        CudaDti::precompute_x_ax_into_locked(
+            &high,
+            &low,
+            start,
+            x.as_mut_slice(),
+            ax.as_mut_slice(),
+        );
 
         let mut r_vec = Vec::with_capacity(rows);
         let mut s_vec = Vec::with_capacity(rows);
@@ -809,7 +921,7 @@ pub mod benches {
                 if m.is_nan() {
                     continue;
                 }
-                
+
                 high_tm[t * cols + s] = m + 0.6;
                 low_tm[t * cols + s] = m - 0.6;
             }

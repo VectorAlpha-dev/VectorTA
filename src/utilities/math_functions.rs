@@ -4,8 +4,6 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, LN_2, PI};
 
 #[inline(always)]
 pub fn atan_fast(z: f64) -> f64 {
-    
-    
     const C0: f64 = 0.2447;
     const C1: f64 = 0.0663;
     const PIO4: f64 = std::f64::consts::FRAC_PI_4;
@@ -13,10 +11,9 @@ pub fn atan_fast(z: f64) -> f64 {
 
     let a = z.abs();
     if a <= 1.0 {
-        let t = C1.mul_add(a, C0); 
-        PIO4.mul_add(z, z.mul_add(a - 1.0, t)) 
+        let t = C1.mul_add(a, C0);
+        PIO4.mul_add(z, z.mul_add(a - 1.0, t))
     } else {
-        
         let inv = 1.0 / z;
         let t = C1.mul_add(inv.abs(), C0);
         let base = PIO4.mul_add(inv, inv.mul_add(inv.abs() - 1.0, t));

@@ -46,7 +46,6 @@ fn ecema_cuda_variants_batch_plain_and_tiled_match_cpu() -> Result<(), Box<dyn s
     };
     let cpu = ehlers_ecema_batch_with_kernel(&data_quant, &sweep, Kernel::ScalarBatch)?;
 
-    
     let mut cuda_plain = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {
@@ -64,7 +63,6 @@ fn ecema_cuda_variants_batch_plain_and_tiled_match_cpu() -> Result<(), Box<dyn s
     let mut gpu_plain = vec![0f32; handle_plain.len()];
     handle_plain.buf.copy_to(&mut gpu_plain)?;
 
-    
     let mut cuda_tiled = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {
@@ -85,7 +83,7 @@ fn ecema_cuda_variants_batch_plain_and_tiled_match_cpu() -> Result<(), Box<dyn s
     assert_eq!(cpu.cols, handle_tiled.cols);
 
     let tol_plain = 3e-5;
-    let tol_tiled = 1e-4; 
+    let tol_tiled = 1e-4;
     for i in 0..cpu.values.len() {
         let c = cpu.values[i];
         let p = gpu_plain[i] as f64;
@@ -137,7 +135,6 @@ fn ecema_cuda_variants_many_series_1d_and_2d_match_cpu() -> Result<(), Box<dyn s
         confirmed_only: Some(false),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -151,7 +148,6 @@ fn ecema_cuda_variants_many_series_1d_and_2d_match_cpu() -> Result<(), Box<dyn s
         }
     }
 
-    
     let mut cuda_1d = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {
@@ -164,7 +160,6 @@ fn ecema_cuda_variants_many_series_1d_and_2d_match_cpu() -> Result<(), Box<dyn s
     let mut gpu_1d = vec![0f32; handle_1d.len()];
     handle_1d.buf.copy_to(&mut gpu_1d)?;
 
-    
     let mut cuda_2d = CudaEhlersEcema::new_with_policy(
         0,
         CudaEhlersEcemaPolicy {

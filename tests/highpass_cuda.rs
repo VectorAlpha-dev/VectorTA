@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::highpass::{
     highpass_batch_with_kernel, highpass_with_kernel, HighPassBatchRange, HighPassInput,
     HighPassParams,

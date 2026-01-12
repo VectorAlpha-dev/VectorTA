@@ -1,20 +1,3 @@
-//! # Money Flow Index (MFI)
-//!
-//! Momentum indicator measuring money inflow/outflow using price and volume.
-//!
-//! ## Parameters
-//! - **typical_price**: Typical price data (usually HLC/3)
-//! - **volume**: Volume data
-//! - **period**: Window size (default: 14)
-//!
-//! ## Returns
-//! - `Vec<f64>` - MFI values (0-100 scale) matching input length
-//!
-//! ## Developer Status / Decision Log
-//! **SIMD**: Present but intentionally disabled for single-series; AVX2/AVX512 stubs delegate to the scalar path due to loop-carried dependencies and no measured speedup.
-//! **CUDA**: Enabled via `CudaMfi` (one-series × many-params and many-series × one-param) with VRAM-backed outputs, typed errors, and Python CAI v3 + DLPack v1.x interop.
-//! **Batch/Streaming**: Batch uses shared pos/neg-flow prefixes when beneficial; streaming uses branchless classification and a ring buffer. Scalar remains the reference path; numerical outputs match historical tests exactly.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -24,11 +7,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde_wasm_bindgen;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -79,7 +62,10 @@ pub struct MfiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MfiParams {
     pub period: Option<usize>,
 }
@@ -140,7 +126,11 @@ pub enum MfiError {
     #[error("mfi: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("mfi: Invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("mfi: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -249,21 +239,13 @@ pub unsafe fn mfi_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    // Assumptions validated by mfi_prepare / callers:
-    // - typical_price.len() == volume.len() == out.len()
-    // - period > 0
-    // - first + period <= len
-    // - Warmup prefix (..first+period-1) is already prefilled by the caller when needed.
     let len = typical_price.len();
     if len == 0 {
         return;
     }
 
-    // Ring buffers for rolling sums (always zero-initialized).
-    // Use one allocation and split it into (pos, neg) halves to reduce allocator overhead.
     let mut ring_buf = vec![0.0f64; period * 2];
 
-    // Raw pointers to avoid bounds checks in hot loops
     let tp_ptr = typical_price.as_ptr();
     let vol_ptr = volume.as_ptr();
     let out_ptr = out.as_mut_ptr();
@@ -273,31 +255,23 @@ pub unsafe fn mfi_scalar(
     let mut pos_sum = 0.0f64;
     let mut neg_sum = 0.0f64;
 
-    // Keep previous typical price (first valid)
     let mut prev = *tp_ptr.add(first);
     let mut ring = 0usize;
 
-    // ---- Seed window: fill the first (period - 1) money-flow slots ----
-    // We deliberately start at `first + 1` because the classification requires a previous bar.
-    // This exactly matches the existing semantics and unit tests.
     let seed_start = first + 1;
-    let seed_end = first + period; // exclusive; last index written is first+period-1
+    let seed_end = first + period;
     let mut i = seed_start;
     while i < seed_end {
-        // diff and flow for bar i
         let tp_i = *tp_ptr.add(i);
         let flow = tp_i * *vol_ptr.add(i);
         let diff = tp_i - prev;
         prev = tp_i;
 
-        // Branchless classification into positive / negative buckets
-        // (true as i32 -> 1/0 -> cast to f64)
         let gt = (diff > 0.0) as i32 as f64;
         let lt = (diff < 0.0) as i32 as f64;
         let pos_new = flow * gt;
         let neg_new = flow * lt;
 
-        // Write into ring and update sums
         *pos_ptr.add(ring) = pos_new;
         *neg_ptr.add(ring) = neg_new;
         pos_sum += pos_new;
@@ -310,11 +284,10 @@ pub unsafe fn mfi_scalar(
         i += 1;
     }
 
-    // ---- First MFI value at index first + period - 1 ----
-    let idx0 = seed_end - 1; // == first + period - 1
+    let idx0 = seed_end - 1;
     if idx0 < len {
         let total = pos_sum + neg_sum;
-        // Same zero-denominator handling as before
+
         let val = if total < 1e-14 {
             0.0
         } else {
@@ -323,34 +296,28 @@ pub unsafe fn mfi_scalar(
         *out_ptr.add(idx0) = val;
     }
 
-    // ---- Rolling window for the remainder ----
     i = seed_end;
     while i < len {
-        // Remove the element that falls out of the window
         let old_pos = *pos_ptr.add(ring);
         let old_neg = *neg_ptr.add(ring);
         pos_sum -= old_pos;
         neg_sum -= old_neg;
 
-        // Compute flow and direction for the new bar
         let tp_i = *tp_ptr.add(i);
         let flow = tp_i * *vol_ptr.add(i);
         let diff = tp_i - prev;
         prev = tp_i;
 
-        // Branchless classification
         let gt = (diff > 0.0) as i32 as f64;
         let lt = (diff < 0.0) as i32 as f64;
         let pos_new = flow * gt;
         let neg_new = flow * lt;
 
-        // Insert into ring & update sums
         *pos_ptr.add(ring) = pos_new;
         *neg_ptr.add(ring) = neg_new;
         pos_sum += pos_new;
         neg_sum += neg_new;
 
-        // Write output
         let total = pos_sum + neg_sum;
         let val = if total < 1e-14 {
             0.0
@@ -359,7 +326,6 @@ pub unsafe fn mfi_scalar(
         };
         *out_ptr.add(i) = val;
 
-        // Advance ring head (branch instead of modulo to avoid div)
         ring += 1;
         if ring == period {
             ring = 0;
@@ -522,29 +488,22 @@ impl MfiStream {
 
     #[inline(always)]
     pub fn update(&mut self, typical_price: f64, volume: f64) -> Option<f64> {
-        // First sample: seed 'prev_typical' and wait for the next bar (no flow yet).
         if self.index == 0 {
             self.prev_typical = typical_price;
             self.index = 1;
             return None;
         }
 
-        // ----- Compute one-bar flow -----
-        // diff determines sign (pos/neg flow), flow is TP * Volume.
         let diff = typical_price - self.prev_typical;
         self.prev_typical = typical_price;
 
-        // Prefer FMA when available; this compiles to one FMA on FMA-capable CPUs.
-        let flow = typical_price.mul_add(volume, 0.0); // == typical_price * volume
+        let flow = typical_price.mul_add(volume, 0.0);
 
-        // Branchless classification: gt/lt are 1.0 or 0.0
         let gt = (diff > 0.0) as i32 as f64;
         let lt = (diff < 0.0) as i32 as f64;
         let pos_new = flow * gt;
         let neg_new = flow * lt;
 
-        // Evict old bucket values at head and update rolling sums (O(1))
-        // Use unchecked indexing to avoid bounds checks in the hot path.
         unsafe {
             let old_pos = *self.pos_buf.get_unchecked(self.head);
             let old_neg = *self.neg_buf.get_unchecked(self.head);
@@ -556,25 +515,21 @@ impl MfiStream {
             *self.neg_buf.get_unchecked_mut(self.head) = neg_new;
         }
 
-        // Advance ring WITHOUT modulo (avoid integer division in hot loop).
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
-            self.filled = true; // first time we wrap, the window is full
+            self.filled = true;
         }
         self.index += 1;
 
-        // Match existing warmup behavior: no value until the ring has wrapped.
         if !self.filled {
             return None;
         }
 
-        // ----- Emit MFI for the current window -----
         let total = self.pos_sum + self.neg_sum;
         if total <= 1e-14 {
             Some(0.0)
         } else {
-            // Multiply by reciprocal to dodge a scalar FP divide
             Some(100.0 * self.pos_sum * total.recip())
         }
     }
@@ -775,7 +730,6 @@ fn mfi_batch_inner(
         return Err(MfiError::EmptyInputData);
     }
 
-    // Use uninitialized memory with NaN prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warmup_periods: Vec<usize> = combos
         .iter()
@@ -783,15 +737,13 @@ fn mfi_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to mutable slice for computation
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Heuristic: use shared prefix-sum path only when row count is large enough to amortize precompute
     let rows = combos.len();
-    let use_prefix = rows >= 8; // tuned threshold; adjust if needed
+    let use_prefix = rows >= 8;
 
     let (pos_prefix, neg_prefix) = if use_prefix {
         let (pp, np) =
@@ -838,7 +790,6 @@ fn mfi_batch_inner(
         }
     }
 
-    // Convert back to owned Vec
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -896,7 +847,6 @@ fn mfi_batch_inner_into(
         return Err(MfiError::EmptyInputData);
     }
 
-    // Heuristic: only precompute prefixes if many rows; always fill warmup per row in into-slice variant
     let rows = combos.len();
     let use_prefix = rows >= 8;
     let (pos_prefix, neg_prefix) = if use_prefix {
@@ -909,7 +859,7 @@ fn mfi_batch_inner_into(
 
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
-        // Warmup fill
+
         let warmup_end = first + period - 1;
         for v in &mut out_row[..warmup_end] {
             *v = f64::NAN;
@@ -962,7 +912,6 @@ unsafe fn precompute_flow_prefixes_scalar(
     let tp_ptr = typical_price.as_ptr();
     let vol_ptr = volume.as_ptr();
 
-    // Positive/negative flow prefix sums (exclusive at index 0)
     let mut pos_prefix = vec![0.0f64; len];
     let mut neg_prefix = vec![0.0f64; len];
 
@@ -977,23 +926,20 @@ unsafe fn precompute_flow_prefixes_scalar(
         let flow = tp_i * *vol_ptr.add(i);
         let diff = tp_i - prev;
         prev = tp_i;
-        // Branchless classify
+
         let gt = (diff > 0.0) as i32 as f64;
         let lt = (diff < 0.0) as i32 as f64;
         let pos = flow * gt;
         let neg = flow * lt;
 
-        // Build prefix sums
         pos_prefix[i] = pos_prefix[i - 1] + pos;
         neg_prefix[i] = neg_prefix[i - 1] + neg;
         i += 1;
     }
 
-    // Fill the region before `first+1` with zeros (already zeroed) and also carry forward prefix at `first`
     if first > 0 {
         pos_prefix[first] = 0.0;
         neg_prefix[first] = 0.0;
-        // ensure continuity: for j in 1..=first-1 already zeros
     }
 
     (pos_prefix, neg_prefix)
@@ -1030,10 +976,9 @@ unsafe fn precompute_flow_prefixes_avx2(
         return (pos_prefix, neg_prefix);
     }
 
-    // Running sums to build prefix directly
     let mut pos_sum = 0.0f64;
     let mut neg_sum = 0.0f64;
-    // Ensure prefix at 'first' is zero (flows start after first)
+
     if first < len {
         pos_prefix[first] = 0.0;
         neg_prefix[first] = 0.0;
@@ -1045,45 +990,40 @@ unsafe fn precompute_flow_prefixes_avx2(
     let zero = _mm256_set1_pd(0.0);
 
     while i + 4 <= len {
-        // Load current tp and previous tp
         let tp_cur = _mm256_loadu_pd(tp_ptr.add(i));
         let tp_prev = _mm256_loadu_pd(tp_ptr.add(i - 1));
         let vol_cur = _mm256_loadu_pd(vol_ptr.add(i));
 
-        // flow = tp * vol
         let flow = _mm256_mul_pd(tp_cur, vol_cur);
-        // diff = tp[i] - tp[i-1]
+
         let diff = _mm256_sub_pd(tp_cur, tp_prev);
-        // masks
+
         let m_gt = _mm256_cmp_pd(diff, zero, _CMP_GT_OQ);
         let m_lt = _mm256_cmp_pd(diff, zero, _CMP_LT_OQ);
-        // classify
+
         let pos_v = _mm256_and_pd(flow, m_gt);
         let neg_v = _mm256_and_pd(flow, m_lt);
 
-        // Store to temporaries and build prefix scalarly within the chunk
         let mut pos_tmp = [0.0f64; 4];
         let mut neg_tmp = [0.0f64; 4];
         _mm256_storeu_pd(pos_tmp.as_mut_ptr(), pos_v);
         _mm256_storeu_pd(neg_tmp.as_mut_ptr(), neg_v);
 
-        // Unrolled accumulation for the 4-lane chunk
-        // Lane 0
         pos_sum += pos_tmp[0];
         neg_sum += neg_tmp[0];
         *pos_prefix.get_unchecked_mut(i) = pos_sum;
         *neg_prefix.get_unchecked_mut(i) = neg_sum;
-        // Lane 1
+
         pos_sum += pos_tmp[1];
         neg_sum += neg_tmp[1];
         *pos_prefix.get_unchecked_mut(i + 1) = pos_sum;
         *neg_prefix.get_unchecked_mut(i + 1) = neg_sum;
-        // Lane 2
+
         pos_sum += pos_tmp[2];
         neg_sum += neg_tmp[2];
         *pos_prefix.get_unchecked_mut(i + 2) = pos_sum;
         *neg_prefix.get_unchecked_mut(i + 2) = neg_sum;
-        // Lane 3
+
         pos_sum += pos_tmp[3];
         neg_sum += neg_tmp[3];
         *pos_prefix.get_unchecked_mut(i + 3) = pos_sum;
@@ -1092,7 +1032,6 @@ unsafe fn precompute_flow_prefixes_avx2(
         i += 4;
     }
 
-    // Tail
     while i < len {
         let tp_i = *tp_ptr.add(i);
         let flow = tp_i * *vol_ptr.add(i);
@@ -1125,7 +1064,7 @@ unsafe fn mfi_row_from_prefixes(
     if idx0 >= len {
         return;
     }
-    // First value uses period-1 flows: [idx0-(period-1)+1 ..= idx0] => prefix[idx0] - prefix[first]
+
     let pos0 = pos_prefix[idx0] - pos_prefix[first];
     let neg0 = neg_prefix[idx0] - neg_prefix[first];
     let tot0 = pos0 + neg0;
@@ -1135,7 +1074,6 @@ unsafe fn mfi_row_from_prefixes(
         100.0 * (pos0 / tot0)
     };
 
-    // Subsequent values use full `period` flows: [i - period + 1 ..= i] => prefix[i] - prefix[i - period]
     let mut i = idx0 + 1;
     while i < len {
         let base = i - period;
@@ -1234,12 +1172,10 @@ pub fn mfi_py<'py>(
     };
     let input = MfiInput::from_slices(typical_slice, volume_slice, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| mfi_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1248,7 +1184,6 @@ pub fn mfi_py<'py>(
 pub struct MfiStreamPy {
     inner: MfiStream,
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -1295,8 +1230,7 @@ impl MfiDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1316,7 +1250,6 @@ impl MfiDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let inner = self
             .inner
             .take()
@@ -1375,23 +1308,20 @@ pub fn mfi_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = tp.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| {
             let k = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
-            
+
             let simd = match k {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -1403,7 +1333,7 @@ pub fn mfi_batch_py<'py>(
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
-    
+
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
         "periods",
@@ -1415,7 +1345,6 @@ pub fn mfi_batch_py<'py>(
     )?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "mfi_cuda_batch_dev")]
@@ -1439,8 +1368,7 @@ pub fn mfi_cuda_batch_dev_py(
         period: period_range,
     };
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaMfi::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id() as i32;
         let (arr, _combos) = cuda
@@ -1479,8 +1407,7 @@ pub fn mfi_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("unexpected matrix size"));
     }
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaMfi::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaMfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id() as i32;
         let arr = cuda
@@ -1508,9 +1435,8 @@ pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result
 
     mfi_compute_into(typical_price, volume, period, first_valid_idx, chosen, dst);
 
-    
     let warmup_period = first_valid_idx + period - 1;
-    
+
     let nan_q = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warmup_period] {
         *v = nan_q;
@@ -1519,17 +1445,12 @@ pub fn mfi_into_slice(dst: &mut [f64], input: &MfiInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Write MFI values into a caller-provided buffer without allocating.
-///
-/// - Preserves the exact NaN warmup prefix semantics of `mfi()`/`mfi_with_kernel()`.
-/// - The output slice length must equal the input length.
-/// - Uses `Kernel::Auto` dispatch for kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn mfi_into(input: &MfiInput, out: &mut [f64]) -> Result<(), MfiError> {
     mfi_into_slice(out, input, Kernel::Auto)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mfi_js(typical_price: &[f64], volume: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = MfiParams {
@@ -1537,14 +1458,13 @@ pub fn mfi_js(typical_price: &[f64], volume: &[f64], period: usize) -> Result<Ve
     };
     let input = MfiInput::from_slices(typical_price, volume, params);
 
-    
     let result = mfi_with_kernel(&input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(result.values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mfi_into(
     typical_price_ptr: *const f64,
@@ -1565,9 +1485,7 @@ pub fn mfi_into(
         };
         let input = MfiInput::from_slices(typical_price, volume, params);
 
-        
         if typical_price_ptr == out_ptr || volume_ptr == out_ptr {
-            
             let result = mfi_with_kernel(&input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
@@ -1581,7 +1499,7 @@ pub fn mfi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mfi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1590,7 +1508,7 @@ pub fn mfi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mfi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1600,13 +1518,13 @@ pub fn mfi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MfiBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MfiBatchJsOutput {
     pub values: Vec<f64>,
@@ -1615,7 +1533,7 @@ pub struct MfiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = mfi_batch)]
 pub fn mfi_batch_unified_js(
     typical_price: &[f64],
@@ -1643,7 +1561,7 @@ pub fn mfi_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mfi_batch_into(
     typical_price_ptr: *const f64,
@@ -1671,7 +1589,6 @@ pub fn mfi_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("mfi_batch_into: rows*cols overflow"))?;
 
-        
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         mfi_batch_inner_into(tp, vol, &sweep, detect_best_kernel(), false, out)
@@ -1691,39 +1608,34 @@ mod tests {
 
     #[test]
     fn test_mfi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let mut tp = Vec::with_capacity(n);
         let mut vol = Vec::with_capacity(n);
         for i in 0..n {
             let i_f = i as f64;
-            
+
             let price = 100.0 + 0.123 * i_f + ((i % 7) as f64 - 3.0) * 0.05;
             tp.push(price);
-            
+
             vol.push(1_000.0 + ((i * 37) % 113) as f64);
         }
 
-        
         let input = MfiInput::from_slices(&tp, &vol, MfiParams::default());
 
-        
         let baseline = mfi(&input)?.values;
 
-        
         let mut out = vec![0.0f64; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             mfi_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             mfi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
-        
+
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1810,7 +1722,7 @@ mod tests {
         let input_low = [0.5, 1.5, 2.5];
         let input_close = [0.8, 1.8, 2.8];
         let input_volume = [100.0, 200.0, 300.0];
-        
+
         let typical_price: Vec<f64> = input_high
             .iter()
             .zip(&input_low)
@@ -1830,7 +1742,7 @@ mod tests {
         let input_low = [0.5];
         let input_close = [0.8];
         let input_volume = [100.0];
-        
+
         let typical_price = [(input_high[0] + input_low[0] + input_close[0]) / 3.0];
         let params = MfiParams { period: Some(14) };
         let input = MfiInput::from_slices(&typical_price, &input_volume, params);
@@ -1847,7 +1759,7 @@ mod tests {
         let first_input = MfiInput::from_candles(&candles, "hlc3", first_params);
         let first_result = mfi_with_kernel(&first_input, kernel)?;
         let second_params = MfiParams { period: Some(7) };
-        
+
         let typical_price_values: Vec<f64> = first_result.values.clone();
         let volume_values: Vec<f64> = vec![10_000.0; first_result.values.len()];
         let second_input =
@@ -1865,17 +1777,17 @@ mod tests {
         let candles = read_candles_from_csv(file_path)?;
 
         let test_params = vec![
-            MfiParams::default(),            
-            MfiParams { period: Some(2) },   
-            MfiParams { period: Some(5) },   
-            MfiParams { period: Some(7) },   
-            MfiParams { period: Some(10) },  
-            MfiParams { period: Some(14) },  
-            MfiParams { period: Some(20) },  
-            MfiParams { period: Some(30) },  
-            MfiParams { period: Some(50) },  
-            MfiParams { period: Some(100) }, 
-            MfiParams { period: Some(200) }, 
+            MfiParams::default(),
+            MfiParams { period: Some(2) },
+            MfiParams { period: Some(5) },
+            MfiParams { period: Some(7) },
+            MfiParams { period: Some(10) },
+            MfiParams { period: Some(14) },
+            MfiParams { period: Some(20) },
+            MfiParams { period: Some(30) },
+            MfiParams { period: Some(50) },
+            MfiParams { period: Some(100) },
+            MfiParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1947,83 +1859,79 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        let strat = (2usize..=50) 
-            .prop_flat_map(|period| {
-                
-                (period..=400).prop_flat_map(move |data_len| {
-					
-					prop_oneof![
-						
-						6 => (
-							
-							(10.0f64..10000.0f64),
-							
-							(0.01f64..0.2f64),
-							
-							(1000.0f64..1_000_000.0f64),
-							
-							prop::collection::vec(-1.0f64..1.0f64, data_len),
-							
-							prop::collection::vec(0.0f64..1.0f64, data_len),
-						).prop_map(move |(base_price, volatility, volume_mult, changes, vol_factors)| {
-							let mut typical_price = Vec::with_capacity(data_len);
-							let mut volume = Vec::with_capacity(data_len);
-							let mut price = base_price;
+        let strat = (2usize..=50).prop_flat_map(|period| {
+            (period..=400).prop_flat_map(move |data_len| {
+                prop_oneof![
 
-							for i in 0..data_len {
-								
-								let change = changes[i] * volatility;
-								price *= 1.0 + change;
-								price = price.max(0.01); 
-								typical_price.push(price);
+                    6 => (
 
-								
-								let vol = volume_mult * (0.5 + vol_factors[i] + change.abs() * 2.0);
-								volume.push(vol.max(0.0));
-							}
+                        (10.0f64..10000.0f64),
 
-							(typical_price, volume, period)
-						}),
+                        (0.01f64..0.2f64),
 
-						
-						15 => prop::collection::vec(100.0f64..1000.0f64, 1..=1)
-							.prop_map(move |prices| {
-								let price = prices[0];
-								let typical_price = vec![price; data_len];
-								let volume = vec![10000.0; data_len];
-								(typical_price, volume, period)
-							}),
+                        (1000.0f64..1_000_000.0f64),
 
-						
-						15 => prop::bool::ANY.prop_map(move |uptrend| {
-							let mut typical_price = Vec::with_capacity(data_len);
-							let mut volume = Vec::with_capacity(data_len);
-							let start_price = 100.0;
+                        prop::collection::vec(-1.0f64..1.0f64, data_len),
 
-							for i in 0..data_len {
-								let trend_factor = if uptrend {
-									1.0 + (i as f64 / data_len as f64) * 2.0  
-								} else {
-									1.0 - (i as f64 / data_len as f64) * 0.7  
-								};
-								typical_price.push(start_price * trend_factor);
-								
-								volume.push(10000.0 * (1.0 + i as f64 / data_len as f64) * 2.0);
-							}
+                        prop::collection::vec(0.0f64..1.0f64, data_len),
+                    ).prop_map(move |(base_price, volatility, volume_mult, changes, vol_factors)| {
+                        let mut typical_price = Vec::with_capacity(data_len);
+                        let mut volume = Vec::with_capacity(data_len);
+                        let mut price = base_price;
 
-							(typical_price, volume, period)
-						}),
+                        for i in 0..data_len {
 
-						
-						1 => Just((
-							(0..data_len).map(|i| 100.0 + (i as f64)).collect::<Vec<_>>(),
-							vec![0.0; data_len],  
-							period
-						)),
-					]
-				})
-            });
+                            let change = changes[i] * volatility;
+                            price *= 1.0 + change;
+                            price = price.max(0.01);
+                            typical_price.push(price);
+
+
+                            let vol = volume_mult * (0.5 + vol_factors[i] + change.abs() * 2.0);
+                            volume.push(vol.max(0.0));
+                        }
+
+                        (typical_price, volume, period)
+                    }),
+
+
+                    15 => prop::collection::vec(100.0f64..1000.0f64, 1..=1)
+                        .prop_map(move |prices| {
+                            let price = prices[0];
+                            let typical_price = vec![price; data_len];
+                            let volume = vec![10000.0; data_len];
+                            (typical_price, volume, period)
+                        }),
+
+
+                    15 => prop::bool::ANY.prop_map(move |uptrend| {
+                        let mut typical_price = Vec::with_capacity(data_len);
+                        let mut volume = Vec::with_capacity(data_len);
+                        let start_price = 100.0;
+
+                        for i in 0..data_len {
+                            let trend_factor = if uptrend {
+                                1.0 + (i as f64 / data_len as f64) * 2.0
+                            } else {
+                                1.0 - (i as f64 / data_len as f64) * 0.7
+                            };
+                            typical_price.push(start_price * trend_factor);
+
+                            volume.push(10000.0 * (1.0 + i as f64 / data_len as f64) * 2.0);
+                        }
+
+                        (typical_price, volume, period)
+                    }),
+
+
+                    1 => Just((
+                        (0..data_len).map(|i| 100.0 + (i as f64)).collect::<Vec<_>>(),
+                        vec![0.0; data_len],
+                        period
+                    )),
+                ]
+            })
+        });
 
         proptest::test_runner::TestRunner::default().run(
             &strat,
@@ -2033,24 +1941,18 @@ mod tests {
                 };
                 let input = MfiInput::from_slices(&typical_price, &volume, params.clone());
 
-                
                 let MfiOutput { values: out } = mfi_with_kernel(&input, kernel)?;
 
-                
                 let MfiOutput { values: ref_out } = mfi_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(out.len(), typical_price.len(), "Output length mismatch");
 
-                
                 let first_valid_idx = (0..typical_price.len())
                     .find(|&i| !typical_price[i].is_nan() && !volume[i].is_nan())
                     .unwrap_or(0);
 
                 let expected_warmup = first_valid_idx + period - 1;
 
-                
-                
                 for i in 0..out.len() {
                     if i < expected_warmup {
                         prop_assert!(
@@ -2060,7 +1962,6 @@ mod tests {
                             out[i]
                         );
                     } else if i == expected_warmup {
-                        
                         prop_assert!(
                             !out[i].is_nan(),
                             "Expected first non-NaN at index {} but got NaN",
@@ -2069,7 +1970,6 @@ mod tests {
                     }
                 }
 
-                
                 for (i, &val) in out.iter().enumerate().skip(expected_warmup) {
                     if !val.is_nan() {
                         prop_assert!(
@@ -2081,15 +1981,12 @@ mod tests {
                     }
                 }
 
-                
-                
                 let is_constant = typical_price
                     .windows(2)
                     .all(|w| (w[0] - w[1]).abs() < 1e-10);
                 if is_constant && expected_warmup < out.len() {
                     for i in expected_warmup..out.len() {
                         if !out[i].is_nan() {
-                            
                             prop_assert!(
                                 out[i].abs() < 1e-3,
                                 "Constant price MFI should be ~0, got {} at index {}",
@@ -2100,12 +1997,10 @@ mod tests {
                     }
                 }
 
-                
                 let all_zero_volume = volume.iter().all(|&v| v.abs() < 1e-14);
                 if all_zero_volume && expected_warmup < out.len() {
                     for i in expected_warmup..out.len() {
                         if !out[i].is_nan() {
-                            
                             prop_assert!(
                                 out[i].abs() < 1e-3,
                                 "Zero volume MFI should be 0, got {} at index {}",
@@ -2116,19 +2011,12 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if expected_warmup + period < typical_price.len() {
-                    
                     let check_idx = expected_warmup + period;
 
-                    
-                    
                     let window_start = check_idx - period + 1;
                     let window_end = check_idx;
 
-                    
                     let mut up_volume = 0.0;
                     let mut down_volume = 0.0;
 
@@ -2136,14 +2024,13 @@ mod tests {
                         if i > 0 && i < typical_price.len() {
                             let price_change = typical_price[i] - typical_price[i - 1];
                             if price_change > 0.0 {
-                                up_volume += volume[i] * typical_price[i]; 
+                                up_volume += volume[i] * typical_price[i];
                             } else if price_change < 0.0 {
-                                down_volume += volume[i] * typical_price[i]; 
+                                down_volume += volume[i] * typical_price[i];
                             }
                         }
                     }
 
-                    
                     if up_volume > down_volume * 2.0 && check_idx < out.len() {
                         let mfi_val = out[check_idx];
                         if !mfi_val.is_nan() && (up_volume + down_volume) > 1e-10 {
@@ -2157,7 +2044,6 @@ mod tests {
                         }
                     }
 
-                    
                     if down_volume > up_volume * 2.0 && check_idx < out.len() {
                         let mfi_val = out[check_idx];
                         if !mfi_val.is_nan() && (up_volume + down_volume) > 1e-10 {
@@ -2172,18 +2058,12 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if expected_warmup + 5 < typical_price.len() {
                     let verify_idx = expected_warmup + 5;
 
-                    
-                    
                     let mut pos_sum = 0.0;
                     let mut neg_sum = 0.0;
 
-                    
                     let window_start = verify_idx - period + 1;
 
                     for i in window_start..=verify_idx {
@@ -2196,7 +2076,6 @@ mod tests {
                             } else if price_diff < 0.0 {
                                 neg_sum += money_flow;
                             }
-                            
                         }
                     }
 
@@ -2221,44 +2100,32 @@ mod tests {
                     }
                 }
 
-                
-                
                 if period >= 5 && period <= 20 {
-                    
-                    
-                    let test_len = period * 3; 
+                    let test_len = period * 3;
                     let mut prices = Vec::with_capacity(test_len);
                     let mut increasing_vol = Vec::with_capacity(test_len);
                     let mut decreasing_vol = Vec::with_capacity(test_len);
 
-                    
                     for i in 0..test_len {
-                        prices.push(100.0 + i as f64); 
-                                                       
+                        prices.push(100.0 + i as f64);
+
                         increasing_vol.push(1000.0 * (1.0 + i as f64));
-                        
+
                         decreasing_vol.push(1000.0 * (test_len as f64 - i as f64));
                     }
 
-                    
                     let input_inc = MfiInput::from_slices(&prices, &increasing_vol, params.clone());
                     let MfiOutput { values: out_inc } = mfi_with_kernel(&input_inc, kernel)?;
 
-                    
                     let input_dec = MfiInput::from_slices(&prices, &decreasing_vol, params.clone());
                     let MfiOutput { values: out_dec } = mfi_with_kernel(&input_dec, kernel)?;
 
-                    
-                    
-                    
-                    
-                    let check_idx = period * 2; 
+                    let check_idx = period * 2;
                     if check_idx < out_inc.len() {
                         let mfi_inc = out_inc[check_idx];
                         let mfi_dec = out_dec[check_idx];
 
                         if !mfi_inc.is_nan() && !mfi_dec.is_nan() {
-                            
                             prop_assert!(
                                 mfi_inc > 90.0,
                                 "MFI with increasing volume on uptrend should be > 90, got {}",
@@ -2270,7 +2137,6 @@ mod tests {
                                 mfi_dec
                             );
 
-                            
                             prop_assert!(
 								mfi_inc > mfi_dec,
 								"MFI with increasing volume ({}) should be > MFI with decreasing volume ({}) on uptrend",
@@ -2281,12 +2147,10 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_nan() || r.is_nan() {
                         prop_assert_eq!(
                             y.is_nan(),
@@ -2299,7 +2163,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff = y_bits.abs_diff(r_bits);
@@ -2372,8 +2235,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        
-        
         let expected = [
             38.13874339324763,
             37.44139770113819,
@@ -2399,13 +2260,13 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),   
-            (5, 25, 5),   
-            (30, 60, 15), 
-            (2, 5, 1),    
-            (10, 50, 10), 
-            (7, 21, 7),   
-            (14, 14, 0),  
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 50, 10),
+            (7, 21, 7),
+            (14, 14, 0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {

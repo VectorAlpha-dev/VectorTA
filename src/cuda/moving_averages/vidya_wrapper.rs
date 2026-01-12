@@ -1,19 +1,6 @@
-//! CUDA support for VIDYA (Variable Index Dynamic Average).
-//!
-//! Mirrors the ALMA/EMA wrapper patterns:
-//! - PTX load via OUT_DIR with DetermineTargetFromContext and OptLevel::O2, with fallbacks
-//! - NON_BLOCKING stream
-//! - VRAM estimation with ~64MB headroom and grid chunking
-//! - Policy enums for batch and many-series variants
-//!
-//! Math pattern: recurrence/IIR with adaptive factor k = alpha * (short_std / long_std).
-//! Warmup/writes match the scalar path in src/indicators/vidya.rs:
-//! - warmup index = first_valid + long_period - 2
-//! - out[warm-2] = price[warm-2]; out[warm-1] uses initial k
-
 #![cfg(feature = "cuda")]
 
-use super::alma_wrapper::{DeviceArrayF32, CudaAlmaError};
+use super::alma_wrapper::{CudaAlmaError, DeviceArrayF32};
 use crate::indicators::vidya::{VidyaBatchRange, VidyaParams};
 use cust::context::Context;
 use cust::device::Device;
@@ -32,7 +19,11 @@ pub enum CudaVidyaError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -40,14 +31,19 @@ pub enum CudaVidyaError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -92,12 +88,12 @@ pub struct CudaVidya {
     context: std::sync::Arc<Context>,
     device_id: u32,
     policy: CudaVidyaPolicy,
-    
+
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    
+
     max_grid_x: usize,
 }
 
@@ -126,8 +122,7 @@ impl CudaVidya {
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        let max_grid_x =
-            device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
+        let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
 
         Ok(Self {
             module,
@@ -158,8 +153,6 @@ impl CudaVidya {
         self.device_id
     }
 
-    
-
     pub fn vidya_batch_dev(
         &self,
         data_f32: &[f32],
@@ -170,9 +163,9 @@ impl CudaVidya {
         let use_prefix = self.module.get_function("vidya_batch_prefix_f32").is_ok();
 
         let prices_bytes = prepared.series_len * std::mem::size_of::<f32>();
-        let params_bytes =
-            (prepared.short_i32.len() + prepared.long_i32.len()) * std::mem::size_of::<i32>()
-                + prepared.alpha_f32.len() * std::mem::size_of::<f32>();
+        let params_bytes = (prepared.short_i32.len() + prepared.long_i32.len())
+            * std::mem::size_of::<i32>()
+            + prepared.alpha_f32.len() * std::mem::size_of::<f32>();
         let prefix_bytes = if use_prefix {
             let elems = prepared
                 .series_len
@@ -211,18 +204,10 @@ impl CudaVidya {
             }
         }
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)?
-        };
-        let d_short = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.short_i32, &self.stream)?
-        };
-        let d_long = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.long_i32, &self.stream)?
-        };
-        let d_alpha = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.alpha_f32, &self.stream)?
-        };
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
+        let d_short = unsafe { DeviceBuffer::from_slice_async(&prepared.short_i32, &self.stream)? };
+        let d_long = unsafe { DeviceBuffer::from_slice_async(&prepared.long_i32, &self.stream)? };
+        let d_alpha = unsafe { DeviceBuffer::from_slice_async(&prepared.alpha_f32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> = unsafe {
             DeviceBuffer::uninitialized_async(n_combos * prepared.series_len, &self.stream)?
         };
@@ -230,7 +215,6 @@ impl CudaVidya {
         let mut d_prefix_sum: Option<DeviceBuffer<f64>> = None;
         let mut d_prefix_sum2: Option<DeviceBuffer<f64>> = None;
         if use_prefix {
-            
             let mut prefix_sum: Vec<f64> = Vec::with_capacity(prepared.series_len + 1);
             let mut prefix_sum2: Vec<f64> = Vec::with_capacity(prepared.series_len + 1);
             prefix_sum.push(0.0f64);
@@ -245,12 +229,10 @@ impl CudaVidya {
                 prefix_sum2.push(acc2);
             }
 
-            d_prefix_sum = Some(unsafe {
-                DeviceBuffer::from_slice_async(&prefix_sum, &self.stream)?
-            });
-            d_prefix_sum2 = Some(unsafe {
-                DeviceBuffer::from_slice_async(&prefix_sum2, &self.stream)?
-            });
+            d_prefix_sum =
+                Some(unsafe { DeviceBuffer::from_slice_async(&prefix_sum, &self.stream)? });
+            d_prefix_sum2 =
+                Some(unsafe { DeviceBuffer::from_slice_async(&prefix_sum2, &self.stream)? });
             let d_prefix_sum_ref = d_prefix_sum.as_ref().ok_or_else(|| {
                 CudaVidyaError::InvalidInput("failed to allocate prefix_sum buffer".into())
             })?;
@@ -290,8 +272,6 @@ impl CudaVidya {
             cols: prepared.series_len,
         })
     }
-
-    
 
     pub fn vidya_many_series_one_param_time_major_dev(
         &self,
@@ -336,15 +316,11 @@ impl CudaVidya {
             }
         }
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)?
-        };
-        let d_first = unsafe {
-            DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream)?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)?
-        };
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
+        let d_first =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.first_valids, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(num_series * series_len, &self.stream)? };
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -365,8 +341,6 @@ impl CudaVidya {
         })
     }
 
-    
-
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,
@@ -382,10 +356,11 @@ impl CudaVidya {
         if n_combos == 0 {
             return Ok(());
         }
-        let func = self
-            .module
-            .get_function("vidya_batch_f32")
-            .map_err(|_| CudaVidyaError::MissingKernelSymbol { name: "vidya_batch_f32" })?;
+        let func = self.module.get_function("vidya_batch_f32").map_err(|_| {
+            CudaVidyaError::MissingKernelSymbol {
+                name: "vidya_batch_f32",
+            }
+        })?;
 
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
@@ -403,7 +378,6 @@ impl CudaVidya {
         }
         self.maybe_log_batch_debug();
 
-        
         let cap = self.max_grid_x.max(1).min(usize::MAX / 2);
         for (start, len) in Self::grid_chunks(n_combos, cap) {
             let gx = len as u32;
@@ -470,9 +444,10 @@ impl CudaVidya {
         let func = self
             .module
             .get_function("vidya_batch_prefix_f32")
-            .map_err(|_| CudaVidyaError::MissingKernelSymbol { name: "vidya_batch_prefix_f32" })?;
+            .map_err(|_| CudaVidyaError::MissingKernelSymbol {
+                name: "vidya_batch_prefix_f32",
+            })?;
 
-        
         const BLOCK_X: u32 = 32;
         unsafe {
             (*(self as *const _ as *mut CudaVidya)).last_batch =
@@ -552,7 +527,6 @@ impl CudaVidya {
         }
         self.maybe_log_many_debug();
 
-        
         let gx = num_series as u32;
         let gy = 1u32;
         let gz = 1u32;
@@ -589,8 +563,6 @@ impl CudaVidya {
         }
         Ok(())
     }
-
-    
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -703,8 +675,6 @@ impl CudaVidya {
         })
     }
 
-    
-
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -781,8 +751,6 @@ impl CudaVidya {
     }
 }
 
-
-
 struct PreparedVidyaBatch {
     combos: Vec<VidyaParams>,
     first_valid: usize,
@@ -835,8 +803,6 @@ fn expand_grid(r: &VidyaBatchRange) -> Vec<VidyaParams> {
     out
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -849,7 +815,7 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * 4;
-        let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * 8; 
+        let prefix_bytes = (ONE_SERIES_LEN + 1) * 2 * 8;
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4;
         in_bytes + prefix_bytes + out_bytes + 64 * 1024 * 1024
     }
@@ -908,7 +874,6 @@ pub mod benches {
         let first_valid = price.iter().position(|&x| !x.is_nan()).unwrap_or(0);
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
 
-        
         let mut prefix_sum: Vec<f64> = Vec::with_capacity(ONE_SERIES_LEN + 1);
         let mut prefix_sum2: Vec<f64> = Vec::with_capacity(ONE_SERIES_LEN + 1);
         prefix_sum.push(0.0f64);

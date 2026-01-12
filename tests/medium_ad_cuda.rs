@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::medium_ad::{
     medium_ad_batch_with_kernel, MediumAdBatchBuilder, MediumAdBatchRange, MediumAdBuilder,
     MediumAdParams,
@@ -87,8 +85,8 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 5usize; 
-    let rows = 1024usize; 
+    let cols = 5usize;
+    let rows = 1024usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -97,7 +95,6 @@ fn medium_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
-    
     let period = 9usize;
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

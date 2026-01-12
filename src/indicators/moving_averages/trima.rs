@@ -1,34 +1,13 @@
-//! # Triangular Moving Average (TRIMA)
-//!
-//! A moving average computed by averaging an underlying Simple Moving Average (SMA) over
-//! the specified `period`, resulting in a smoother output than a single SMA.
-//! TRIMA supports different compute kernels and batch processing via builder APIs.
-//!
-//! ## Parameters
-//! - **period**: Window size (must be > 3).
-//!
-//! ## Returns
-//! - **`Ok(TrimaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(TrimaError)`** otherwise.
-//!
-//! ## Developer Status
-//! - SIMD enabled (AVX2/AVX512): vectorizes initial accumulation; rolling core remains scalar.
-//! - Streaming update: O(1) via two rolling sums; no full-size temporaries.
-//! - Memory: uses zero-copy helpers for outputs; tiny O(period) ring buffer only.
-//! - Decision: Streaming kernel tightened (no modulo; precomputed reciprocals; NaN semantics preserved).
-//! - CUDA wrapper: typed errors, VRAM checks via will_fit, CAI v3 + DLPack in Python; device context held until
-//!   buffers are freed.
-//! - Rationale: TRIMA = SMA(SMA(x, m1), m2); SIMD helps initial sums; main loop is sequential.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaTrima;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::trima_wrapper::DeviceArrayF32Trima;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+use crate::cuda::moving_averages::CudaTrima;
 use crate::indicators::sma::{sma, SmaData, SmaInput, SmaParams};
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -70,7 +49,10 @@ pub struct TrimaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct TrimaParams {
     pub period: Option<usize>,
 }
@@ -186,7 +168,6 @@ pub enum TrimaError {
     #[error("trima: Period too small: {period}")]
     PeriodTooSmall { period: usize },
 
-    
     #[error("trima: No data provided.")]
     NoData,
 
@@ -194,7 +175,11 @@ pub enum TrimaError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("trima: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("trima: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -209,23 +194,7 @@ pub fn trima(input: &TrimaInput) -> Result<TrimaOutput, TrimaError> {
 fn trima_prepare<'a>(
     input: &'a TrimaInput,
     kernel: Kernel,
-) -> Result<
-    (
-        
-        &'a [f64],
-        // period
-        usize,
-        // m1
-        usize,
-        // m2
-        usize,
-        // first
-        usize,
-        // chosen
-        Kernel,
-    ),
-    TrimaError,
-> {
+) -> Result<(&'a [f64], usize, usize, usize, usize, Kernel), TrimaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -297,13 +266,9 @@ fn trima_compute_into(
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX is not available
                 trima_scalar_optimized(data, period, m1, m2, first, out)
             }
-            Kernel::Auto => {
-                // Auto should have been resolved to a specific kernel by this point
-                trima_scalar_optimized(data, period, m1, m2, first, out)
-            }
+            Kernel::Auto => trima_scalar_optimized(data, period, m1, m2, first, out),
         }
     }
 }
@@ -324,20 +289,17 @@ unsafe fn trima_scalar_optimized(
     }
     let warm = first + period - 1;
     if warm >= n {
-        // nothing to write (caller already validated lengths)
         return;
     }
 
-    // Precompute reciprocals to turn divisions into multiplies
     let inv_m1 = 1.0 / (m1 as f64);
     let inv_m2 = 1.0 / (m2 as f64);
 
-    // 1) Initial m1-sum (partially unrolled)
     let base = data.as_ptr().add(first);
     let mut sum1 = 0.0;
     {
         let mut j = 0usize;
-        let end_unroll = m1 & !3usize; // floor to multiple of 4
+        let end_unroll = m1 & !3usize;
         while j < end_unroll {
             sum1 += *base.add(j) + *base.add(j + 1) + *base.add(j + 2) + *base.add(j + 3);
             j += 4;
@@ -348,28 +310,23 @@ unsafe fn trima_scalar_optimized(
         }
     }
 
-    // 2) Build m2 of SMA1s into a small ring
     let mut ring: Vec<f64> = Vec::with_capacity(m2);
     let mut sum2 = 0.0;
 
-    // time index t corresponds to the index of the SMA1 we just produced
     let mut t = first + m1 - 1;
 
-    // Pointers to advance sum1 in O(1) without bounds checks
-    let mut p_new = data.as_ptr().add(first + m1); // element to be added next
-    let mut p_old = data.as_ptr().add(first); // element to be removed next
+    let mut p_new = data.as_ptr().add(first + m1);
+    let mut p_old = data.as_ptr().add(first);
 
-    // First SMA1
     {
         let s1 = sum1 * inv_m1;
         ring.push(s1);
         sum2 += s1;
     }
 
-    // Fill the remaining (m2 - 1) SMA1s and accumulate sum2
     while ring.len() < m2 {
-        t += 1; // move to the index for the next SMA1
-                // Maintain the rolling m1-sum
+        t += 1;
+
         sum1 += *p_new - *p_old;
         p_new = p_new.add(1);
         p_old = p_old.add(1);
@@ -379,19 +336,15 @@ unsafe fn trima_scalar_optimized(
         sum2 += s1;
     }
 
-    // At this point, t == warm and sum2 holds the sum of the last m2 SMA1s.
     *out.get_unchecked_mut(warm) = sum2 * inv_m2;
 
-    // 3) Main rolling loop
-    let mut head = 0usize; // ring write index / oldest element
-    t += 1; // next index to produce TRIMA for
+    let mut head = 0usize;
+    t += 1;
     while t < n {
-        // Update m1 rolling sum
         sum1 += *p_new - *p_old;
         p_new = p_new.add(1);
         p_old = p_old.add(1);
 
-        // New SMA1 and ring maintenance for sum2
         let new_s1 = sum1 * inv_m1;
         let old_s1 = *ring.get_unchecked(head);
         sum2 += new_s1 - old_s1;
@@ -402,7 +355,6 @@ unsafe fn trima_scalar_optimized(
             head = 0;
         }
 
-        // Write TRIMA aligned at index t
         *out.get_unchecked_mut(t) = sum2 * inv_m2;
 
         t += 1;
@@ -417,12 +369,9 @@ unsafe fn trima_simd128(data: &[f64], m1: usize, m2: usize, first: usize, out: &
     const STEP: usize = 2;
     let n = data.len();
 
-    // Use the optimized algorithm from scalar but with SIMD acceleration
-    // First pass: compute SMA of length m1
     let mut sma1 = vec![f64::NAN; n];
 
     if first + m1 <= n {
-        // Initialize first value with SIMD
         let chunks = m1 / STEP;
         let tail = m1 % STEP;
 
@@ -440,19 +389,15 @@ unsafe fn trima_simd128(data: &[f64], m1: usize, m2: usize, first: usize, out: &
 
         sma1[first + m1 - 1] = sum / m1 as f64;
 
-        // Continue with scalar running sum for efficiency
         for i in (first + m1)..n {
             sum += data[i] - data[i - m1];
             sma1[i] = sum / m1 as f64;
         }
     }
 
-    // Second pass: compute SMA of length m2 on the first SMA
     if first + m1 + m2 - 1 <= n {
-        // Find first valid value in sma1
         let sma1_first = first + m1 - 1;
 
-        // Initialize second SMA with SIMD
         let chunks2 = m2 / STEP;
         let tail2 = m2 % STEP;
 
@@ -470,7 +415,6 @@ unsafe fn trima_simd128(data: &[f64], m1: usize, m2: usize, first: usize, out: &
 
         out[sma1_first + m2 - 1] = sum2 / m2 as f64;
 
-        // Continue with scalar running sum
         for i in (sma1_first + m2)..n {
             sum2 += sma1[i] - sma1[i - m2];
             out[i] = sum2 / m2 as f64;
@@ -502,10 +446,8 @@ pub fn trima_into_slice(
         });
     }
 
-    // Compute TRIMA values first
     trima_compute_into(data, period, m1, m2, first, chosen, output);
 
-    // Then set warmup period to NaN (like ALMA does)
     let warmup = first + period - 1;
     for i in 0..warmup.min(output.len()) {
         output[i] = f64::NAN;
@@ -514,12 +456,7 @@ pub fn trima_into_slice(
     Ok(())
 }
 
-/// Write TRIMA into a caller-provided buffer without allocations.
-///
-/// - Preserves the NaN warmup prefix exactly like the Vec-returning API
-///   (uses the same quiet-NaN pattern as `alloc_with_nan_prefix`).
-/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline(always)]
 pub fn trima_into(input: &TrimaInput, out: &mut [f64]) -> Result<(), TrimaError> {
     let (data, period, m1, m2, first, chosen) = trima_prepare(input, Kernel::Auto)?;
@@ -531,7 +468,6 @@ pub fn trima_into(input: &TrimaInput, out: &mut [f64]) -> Result<(), TrimaError>
         });
     }
 
-    // Prefill warmup prefix using the same quiet-NaN bit pattern
     let warm = first + period - 1;
     let end = warm.min(out.len());
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -539,53 +475,38 @@ pub fn trima_into(input: &TrimaInput, out: &mut [f64]) -> Result<(), TrimaError>
         *v = qnan;
     }
 
-    // Compute directly into the provided buffer
     trima_compute_into(data, period, m1, m2, first, chosen, out);
     Ok(())
 }
 
 #[inline]
-/// Classic kernel - optimized loop-jammed implementation without function calls
-pub fn trima_scalar_classic(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // ─── OPTIMIZED TWO-PASS SMA APPROACH (LOOP-JAMMED) ───
-    //
-    // Let m1 = (period+1)/2,  m2 = period − m1 + 1.
-    // First pass: compute the m1-period SMA of `data` inline.
-    // Second pass: compute the m2-period SMA of that first-pass result inline.
-    // This avoids function calls and allocations.
 
+pub fn trima_scalar_classic(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let n = data.len();
     let m1 = (period + 1) / 2;
     let m2 = period - m1 + 1;
 
-    // Allocate intermediate buffer for first pass
     let mut sma1 = vec![f64::NAN; n];
 
-    // FIRST PASS: Inline SMA of length m1
     if first + m1 <= n {
-        // Initial sum for first valid SMA value
         let mut sum1 = 0.0;
         for j in 0..m1 {
             sum1 += data[first + j];
         }
         sma1[first + m1 - 1] = sum1 / m1 as f64;
 
-        // Rolling sum for remaining values
         for i in (first + m1)..n {
             sum1 += data[i] - data[i - m1];
             sma1[i] = sum1 / m1 as f64;
         }
     }
 
-    // SECOND PASS: Inline SMA of length m2 on sma1 results
     let warmup_end = first + period - 1;
     if warmup_end < n {
-        // Find first valid index in sma1
         let first_valid_sma1 = first + m1 - 1;
         let first_valid_sma2 = first_valid_sma1 + m2 - 1;
 
         if first_valid_sma2 < n {
-            // Initial sum for first valid TRIMA value
             let mut sum2 = 0.0;
             for j in 0..m2 {
                 sum2 += sma1[first_valid_sma1 + j];
@@ -595,7 +516,6 @@ pub fn trima_scalar_classic(data: &[f64], period: usize, first: usize, out: &mut
                 out[warmup_end] = sum2 / m2 as f64;
             }
 
-            // Rolling sum for remaining values
             for i in (warmup_end + 1)..n {
                 let old_idx = i - m2;
                 if old_idx >= first_valid_sma1 {
@@ -607,36 +527,24 @@ pub fn trima_scalar_classic(data: &[f64], period: usize, first: usize, out: &mut
     }
 }
 
-/// Regular kernel - uses function calls for flexibility
 pub fn trima_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // ─── TWO-PASS SMA APPROACH ───
-    //
-    // Let m1 = (period+1)/2,  m2 = period − m1 + 1.
-    // First pass: compute the m1-period SMA of `data`.
-    // Second pass: compute the m2-period SMA of that first-pass result.
-    // That is exactly the standard definition of a "Triangular MA."
-
     let n = data.len();
     let m1 = (period + 1) / 2;
     let m2 = period - m1 + 1;
 
-    // FIRST PASS:  length-m1 SMA on `data`.
     let sma1_in = SmaInput {
         data: SmaData::Slice(data),
         params: SmaParams { period: Some(m1) },
     };
-    // We know this cannot error, because `period <= n` and m1 > 0.
+
     let pass1 = sma(&sma1_in).unwrap();
 
-    // SECOND PASS: length-m2 SMA on the first-pass values.
     let sma2_in = SmaInput {
         data: SmaData::Slice(&pass1.values),
         params: SmaParams { period: Some(m2) },
     };
     let pass2 = sma(&sma2_in).unwrap();
 
-    // Copy only the valid values from pass2, respecting the warmup period
-    // The batch implementation expects us to preserve the NaN values set by init_matrix_prefixes
     let warmup_end = first + period - 1;
     for i in warmup_end..n {
         out[i] = pass2.values[i];
@@ -671,10 +579,8 @@ pub unsafe fn trima_avx2(data: &[f64], period: usize, first: usize, out: &mut [f
     let inv_m1 = 1.0 / (m1 as f64);
     let inv_m2 = 1.0 / (m2 as f64);
 
-    // Vectorized initial m1-sum (unaligned loads)
     let mut sum1 = sum_u_avx2(data.as_ptr().add(first), m1);
 
-    // Ramp: build m2 SMA1s into a small ring
     let mut ring: Vec<f64> = Vec::with_capacity(m2);
     let mut sum2 = 0.0;
 
@@ -682,7 +588,6 @@ pub unsafe fn trima_avx2(data: &[f64], period: usize, first: usize, out: &mut [f
     let mut p_new = data.as_ptr().add(first + m1);
     let mut p_old = data.as_ptr().add(first);
 
-    // First SMA1
     {
         let s1 = sum1 * inv_m1;
         ring.push(s1);
@@ -702,7 +607,6 @@ pub unsafe fn trima_avx2(data: &[f64], period: usize, first: usize, out: &mut [f
 
     *out.get_unchecked_mut(warm) = sum2 * inv_m2;
 
-    // Rolling (sequential) core
     let mut head = 0usize;
     t += 1;
     while t < n {
@@ -743,7 +647,6 @@ pub unsafe fn trima_avx512_short(data: &[f64], period: usize, first: usize, out:
     let inv_m1 = 1.0 / (m1 as f64);
     let inv_m2 = 1.0 / (m2 as f64);
 
-    // Vectorized initial m1-sum
     let mut sum1 = sum_u_avx2(data.as_ptr().add(first), m1);
 
     let mut ring: Vec<f64> = Vec::with_capacity(m2);
@@ -797,7 +700,6 @@ pub unsafe fn trima_avx512_long(data: &[f64], period: usize, first: usize, out: 
     trima_avx512_short(data, period, first, out)
 }
 
-// ────────────────────── AVX helpers ──────────────────────
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn hsum256d(v: __m256d) -> f64 {
@@ -828,7 +730,6 @@ unsafe fn sum_u_avx2(ptr: *const f64, len: usize) -> f64 {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn hsum512d(v: __m512d) -> f64 {
-    // Reduce 8 lanes → 4 → 2 → 1
     let v4 = _mm256_add_pd(_mm512_castpd512_pd256(v), _mm512_extractf64x4_pd(v, 1));
     let v2 = _mm_add_pd(_mm256_castpd256_pd128(v4), _mm256_extractf128_pd(v4, 1));
     let hi = _mm_unpackhi_pd(v2, v2);
@@ -923,22 +824,18 @@ pub unsafe fn trima_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct TrimaStream {
-    // Overall TRIMA period and split into two passes
     period: usize,
     m1: usize,
     m2: usize,
 
-    // Precomputed reciprocals to avoid per-tick division
     inv_m1: f64,
     inv_m2: f64,
 
-    // First SMA ring
     buf1: Box<[f64]>,
     sum1: f64,
     head1: usize,
     filled1: bool,
 
-    // Second SMA ring (over SMA1)
     buf2: Box<[f64]>,
     sum2: f64,
     head2: usize,
@@ -952,7 +849,7 @@ impl TrimaStream {
         if period <= 3 {
             return Err(TrimaError::PeriodTooSmall { period });
         }
-        // TRIMA = SMA(SMA(x, m1), m2), where m1+m2-1 = period.
+
         let m1 = (period + 1) / 2;
         let m2 = period - m1 + 1;
 
@@ -963,7 +860,6 @@ impl TrimaStream {
             inv_m1: 1.0 / (m1 as f64),
             inv_m2: 1.0 / (m2 as f64),
 
-            // Fill with NaN so early rotations don't subtract (preserve semantics)
             buf1: vec![f64::NAN; m1].into_boxed_slice(),
             sum1: 0.0,
             head1: 0,
@@ -976,19 +872,14 @@ impl TrimaStream {
         })
     }
 
-    /// O(1) streaming update.
-    /// - Returns `None` until both internal windows are fully warmed.
-    /// - Preserves current NaN-handling semantics: NaN inputs do not pollute sums;
-    ///   division denominator stays fixed (m1/m2), matching batch output on finite inputs.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        
         let old1 = self.buf1[self.head1];
         self.buf1[self.head1] = x;
         self.head1 += 1;
         if self.head1 == self.m1 {
             self.head1 = 0;
-            self.filled1 = true; 
+            self.filled1 = true;
         }
 
         if !old1.is_nan() {
@@ -999,24 +890,23 @@ impl TrimaStream {
         }
 
         if !self.filled1 {
-            return None; 
+            return None;
         }
 
         let s1 = self.sum1 * self.inv_m1;
 
-        
         let old2 = self.buf2[self.head2];
         self.buf2[self.head2] = s1;
         self.head2 += 1;
         if self.head2 == self.m2 {
             self.head2 = 0;
-            self.filled2 = true; 
+            self.filled2 = true;
         }
 
         if !old2.is_nan() {
             self.sum2 -= old2;
         }
-        
+
         self.sum2 += s1;
 
         if self.filled2 {
@@ -1097,7 +987,6 @@ pub fn trima_batch_with_kernel(
         other => return Err(TrimaError::InvalidKernelForBatch(other)),
     };
 
-    
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1137,7 +1026,11 @@ fn expand_grid(r: &TrimaBatchRange) -> Vec<TrimaParams> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let mut v = Vec::new();
         let mut cur = lo;
         while cur <= hi {
@@ -1219,22 +1112,17 @@ fn trima_batch_inner(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(TrimaError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(TrimaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1252,7 +1140,6 @@ fn trima_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1273,7 +1160,6 @@ fn trima_batch_inner(
         }
     }
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(raw);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1322,13 +1208,11 @@ pub fn trima_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(TrimaError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(TrimaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(TrimaError::OutputLengthMismatch {
             expected,
@@ -1336,7 +1220,6 @@ pub fn trima_batch_inner_into(
         });
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1346,7 +1229,6 @@ pub fn trima_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let out_row =
@@ -1388,7 +1270,6 @@ pub fn trima_batch_inner_into(
     Ok(combos)
 }
 
-
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
@@ -1397,30 +1278,7 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 #[pyfunction(name = "trima")]
 #[pyo3(signature = (data, period, kernel=None))]
-/// Compute the Triangular Moving Average (TRIMA) of the input data.
-///
-/// TRIMA is a double-smoothed simple moving average that places more weight
-/// on the middle portion of the smoothing period.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Window size for the moving average (must be > 3).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of TRIMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period <= 3, period > data length, etc).
+
 pub fn trima_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1461,8 +1319,6 @@ impl TrimaStreamPy {
         Ok(TrimaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated TRIMA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -1471,22 +1327,7 @@ impl TrimaStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "trima_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
-/// Compute TRIMA for multiple period values in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'periods' array.
+
 pub fn trima_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1505,16 +1346,13 @@ pub fn trima_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("size overflow: rows*cols exceeds usize"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let kern = validate_kernel(kernel, true)?;
     let kern = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
@@ -1607,9 +1445,12 @@ pub fn trima_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32TrimaPy { inner: Some(inner) })
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Trima", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "DeviceArrayF32Trima",
+    unsendable
+)]
 pub struct DeviceArrayF32TrimaPy {
     pub(crate) inner: Option<DeviceArrayF32Trima>,
 }
@@ -1618,7 +1459,10 @@ pub struct DeviceArrayF32TrimaPy {
 #[pymethods]
 impl DeviceArrayF32TrimaPy {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         use pyo3::types::PyDict;
         let inner = self
             .inner
@@ -1634,14 +1478,14 @@ impl DeviceArrayF32TrimaPy {
                 std::mem::size_of::<f32>(),
             ),
         )?;
-        // CAI v3: for zero-size arrays, pointer should be 0
+
         let ptr_val: usize = if inner.rows == 0 || inner.cols == 0 {
             0
         } else {
             inner.device_ptr() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        // Stream omitted: producing stream synchronized before handle is returned
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1651,7 +1495,7 @@ impl DeviceArrayF32TrimaPy {
             .inner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
-        Ok((2, inner.device_id as i32)) // 2 == kDLCUDA
+        Ok((2, inner.device_id as i32))
     }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
@@ -1663,8 +1507,7 @@ impl DeviceArrayF32TrimaPy {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Determine allocation device and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
 
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1686,14 +1529,18 @@ impl DeviceArrayF32TrimaPy {
 
         let _ = stream;
 
-        // Move underlying TRIMA device array out; after this, the handle
-        // no longer owns VRAM and cannot be exported again.
         let inner = self
             .inner
             .take()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
 
-        let DeviceArrayF32Trima { buf, rows, cols, ctx: _ctx, device_id } = inner;
+        let DeviceArrayF32Trima {
+            buf,
+            rows,
+            cols,
+            ctx: _ctx,
+            device_id,
+        } = inner;
 
         if device_id as i32 != alloc_dev {
             return Err(PyValueError::new_err("device id mismatch for __dlpack__"));
@@ -1705,24 +1552,16 @@ impl DeviceArrayF32TrimaPy {
     }
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde_wasm_bindgen;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
-/// Compute the Triangular Moving Average (TRIMA) of the input data.
-///
-/// # Arguments
-/// * `data` - Input data array
-/// * `period` - Window size for the moving average (must be > 3)
-///
-/// # Returns
-/// Array of TRIMA values, same length as input
+
 pub fn trima_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = TrimaParams {
         period: Some(period),
@@ -1737,13 +1576,13 @@ pub fn trima_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TrimaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TrimaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1752,7 +1591,7 @@ pub struct TrimaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = trima_batch)]
 pub fn trima_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: TrimaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1761,7 +1600,6 @@ pub fn trima_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         period: config.period_range,
     };
 
-    // resolve per-row kernel for batch like ALMA
     let output = trima_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1775,16 +1613,9 @@ pub fn trima_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
-/// Compute TRIMA for multiple period values in a single pass.
-///
-/// # Arguments
-/// * `data` - Input data array
-/// * `period_start`, `period_end`, `period_step` - Period range parameters
-///
-/// # Returns
-/// Flattened array of values (row-major order)
+
 pub fn trima_batch_js(
     data: &[f64],
     period_start: usize,
@@ -1795,21 +1626,14 @@ pub fn trima_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     trima_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
-/// Get metadata about batch computation.
-///
-/// # Arguments
-/// * Period range parameters (same as trima_batch_js)
-///
-/// # Returns
-/// Array containing period values
+
 pub fn trima_batch_metadata_js(
     period_start: usize,
     period_end: usize,
@@ -1828,7 +1652,7 @@ pub fn trima_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trima_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1837,7 +1661,7 @@ pub fn trima_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trima_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1845,7 +1669,7 @@ pub fn trima_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trima_into(
     in_ptr: *const f64,
@@ -1865,7 +1689,6 @@ pub fn trima_into(
             period: Some(period),
         };
         if in_ptr == out_ptr {
-            // compute into a temp result buffer, then copy
             let mut temp = vec![0.0; len];
             let input = TrimaInput::from_slice(data, params);
             trima_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1882,7 +1705,7 @@ pub fn trima_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn trima_batch_into(
     in_ptr: *const f64,
@@ -1916,7 +1739,7 @@ pub fn trima_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -1930,7 +1753,7 @@ pub struct TrimaContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[allow(deprecated)]
 impl TrimaContext {
@@ -1992,7 +1815,6 @@ impl TrimaContext {
                 trima_compute_into(data, self.period, self.m1, self.m2, first, self.kernel, out);
             }
 
-            // Ensure proper warmup period
             let warmup = first + self.period - 1;
             for i in 0..warmup {
                 out[i] = f64::NAN;
@@ -2301,7 +2123,6 @@ mod tests {
         }
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_trima_no_poison(
         test_name: &str,
@@ -2312,7 +2133,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase coverage
         let test_periods = vec![4, 10, 14, 30, 50, 100];
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
@@ -2324,16 +2144,13 @@ mod tests {
                 let input = TrimaInput::from_candles(&candles, source, params);
                 let output = trima_with_kernel(&input, kernel)?;
 
-                // Check every value for poison patterns
                 for (i, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in the warmup period
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} (period={}, source={})",
@@ -2341,7 +2158,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} (period={}, source={})",
@@ -2349,7 +2165,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} (period={}, source={})",
@@ -2363,7 +2178,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_trima_no_poison(
         _test_name: &str,
@@ -2382,7 +2196,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (4usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -2399,14 +2212,12 @@ mod tests {
             };
             let input = TrimaInput::from_slice(&data, params);
 
-            
             let result = trima_with_kernel(&input, kernel)?;
             let scalar_result = trima_with_kernel(&input, Kernel::Scalar)?;
 
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_end = first + period - 1;
 
-            
             for i in 0..warmup_end.min(data.len()) {
                 prop_assert!(
                     result.values[i].is_nan(),
@@ -2416,7 +2227,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_end..data.len() {
                 prop_assert!(
                     result.values[i].is_finite() || data[i].is_nan(),
@@ -2426,7 +2236,6 @@ mod tests {
                 );
             }
 
-            
             if data[first..]
                 .windows(2)
                 .all(|w| (w[0] - w[1]).abs() < 1e-10)
@@ -2444,7 +2253,6 @@ mod tests {
                 }
             }
 
-            
             for i in 0..data.len() {
                 let val = result.values[i];
                 let ref_val = scalar_result.values[i];
@@ -2475,7 +2283,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in result.values.iter().enumerate() {
                 prop_assert!(
                     val.is_nan() || val.is_finite(),
@@ -2485,8 +2292,6 @@ mod tests {
                 );
             }
 
-            
-            
             for i in warmup_end..data.len() {
                 if i >= period - 1 {
                     let start = if i >= period - 1 { i + 1 - period } else { 0 };
@@ -2502,7 +2307,7 @@ mod tests {
 
                     if min_val.is_finite() && max_val.is_finite() {
                         let val = result.values[i];
-                        
+
                         prop_assert!(
                             val >= min_val - 1e-6 && val <= max_val + 1e-6,
                             "TRIMA value {} at index {} outside window bounds [{}, {}]",
@@ -2515,14 +2320,10 @@ mod tests {
                 }
             }
 
-            
             if period == 4 {
-                
-                
                 let m1 = 2;
                 let m2 = 3;
 
-                
                 let sma1_input = SmaInput {
                     data: SmaData::Slice(&data),
                     params: SmaParams { period: Some(m1) },
@@ -2535,7 +2336,6 @@ mod tests {
                 };
                 let expected = sma(&sma2_input)?;
 
-                
                 for i in warmup_end..data.len().min(warmup_end + 5) {
                     prop_assert!(
                         (result.values[i] - expected.values[i]).abs() < 1e-9,
@@ -2547,13 +2347,10 @@ mod tests {
                 }
             }
 
-            
-            
             {
                 let m1 = (period + 1) / 2;
                 let m2 = period - m1 + 1;
 
-                
                 let sma1_input = SmaInput {
                     data: SmaData::Slice(&data),
                     params: SmaParams { period: Some(m1) },
@@ -2566,7 +2363,6 @@ mod tests {
                 };
                 let expected = sma(&sma2_input)?;
 
-                
                 let check_points = vec![
                     warmup_end,
                     warmup_end + period / 2,
@@ -2592,9 +2388,7 @@ mod tests {
                 }
             }
 
-            
             if data.len() >= warmup_end + 20 {
-                
                 let sma_input = SmaInput {
                     data: SmaData::Slice(&data),
                     params: SmaParams {
@@ -2603,7 +2397,6 @@ mod tests {
                 };
                 let single_sma = sma(&sma_input)?;
 
-                
                 let trima_roughness: f64 = result.values[warmup_end..warmup_end + 20]
                     .windows(2)
                     .map(|w| (w[1] - w[0]).abs())
@@ -2614,12 +2407,9 @@ mod tests {
                     .map(|w| (w[1] - w[0]).abs())
                     .sum();
 
-                
-                
                 if sma_roughness > 1e-10 {
-                    
                     prop_assert!(
-							trima_roughness <= sma_roughness * 1.1, 
+							trima_roughness <= sma_roughness * 1.1,
 							"TRIMA should be smoother than single SMA: TRIMA roughness={}, SMA roughness={}",
 							trima_roughness,
 							sma_roughness
@@ -2627,15 +2417,13 @@ mod tests {
                 }
             }
 
-            
             if data.len() == period {
-                
                 prop_assert!(
                     result.values[period - 1].is_finite(),
                     "With data.len()==period, last value should be finite, got {}",
                     result.values[period - 1]
                 );
-                
+
                 for i in 0..period - 1 {
                     prop_assert!(
                         result.values[i].is_nan(),
@@ -2646,8 +2434,6 @@ mod tests {
                 }
             }
 
-            
-            
             let is_monotonic_increasing = data[first..].windows(2).all(|w| w[1] >= w[0] - 1e-10);
             let is_monotonic_decreasing = data[first..].windows(2).all(|w| w[1] <= w[0] + 1e-10);
 
@@ -2676,7 +2462,6 @@ mod tests {
                 }
             }
 
-            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in result.values.iter().enumerate() {
@@ -2736,7 +2521,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        
         let expected = [
             59957.916666666664,
             59846.770833333336,
@@ -2775,7 +2559,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2783,13 +2566,7 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
-        let period_ranges = vec![
-            (4, 20, 4),    
-            (20, 50, 10),  
-            (50, 100, 25), 
-            (5, 15, 1),    
-        ];
+        let period_ranges = vec![(4, 20, 4), (20, 50, 10), (50, 100, 25), (5, 15, 1)];
 
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
@@ -2800,9 +2577,7 @@ mod tests {
                     .period_range(start, end, step)
                     .apply_candles(&c, source)?;
 
-                
                 for (idx, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
@@ -2811,7 +2586,6 @@ mod tests {
                     let row = idx / output.cols;
                     let col = idx % output.cols;
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) source={}",
@@ -2819,7 +2593,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) source={}",
@@ -2827,7 +2600,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period_range({},{},{}) source={}",
@@ -2841,7 +2613,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -2855,7 +2626,6 @@ mod tests {
 
     #[test]
     fn test_trima_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..252 {
@@ -2865,23 +2635,20 @@ mod tests {
 
         let input = TrimaInput::from_slice(&data, TrimaParams::default());
 
-        
         let baseline = trima(&input)?;
 
-        
         let mut out = vec![0.0; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             trima_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             trima_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.values.len(), out.len());
-        
+
         for (a, b) in baseline.values.iter().copied().zip(out.iter().copied()) {
             let both_nan = a.is_nan() && b.is_nan();
             assert!(both_nan || a == b, "mismatch: got {b:?}, expected {a:?}");

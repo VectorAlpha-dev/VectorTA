@@ -1,11 +1,3 @@
-//! CUDA scaffolding for True Strength Index (TSI)
-//!
-//! Parity with ALMA/CWMA wrappers:
-//! - NON_BLOCKING stream, PTX loaded with DetermineTargetFromContext + OptLevel(O2) fallbacks
-//! - Policy enums for batch and many-series kernel selection
-//! - VRAM checks with ~64MB headroom; chunking not needed for 1D grids here
-//! - Warmup/NaN semantics identical to scalar `src/indicators/tsi.rs`
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::{
@@ -30,7 +22,11 @@ pub enum CudaTsiError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -38,7 +34,14 @@ pub enum CudaTsiError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -69,7 +72,7 @@ pub struct CudaTsi {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    
+
     scratch: Option<TsiScratch>,
 }
 
@@ -86,8 +89,7 @@ impl CudaTsi {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -170,8 +172,7 @@ impl CudaTsi {
                 "zero-sized grid or block".into(),
             ));
         }
-        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz
-        {
+        if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
             return Err(CudaTsiError::LaunchConfigTooLarge {
                 gx,
                 gy,
@@ -190,7 +191,6 @@ impl CudaTsi {
         Ok(())
     }
 
-    
     pub fn tsi_batch_dev(
         &mut self,
         prices_f32: &[f32],
@@ -206,7 +206,7 @@ impl CudaTsi {
             .ok_or_else(|| CudaTsiError::InvalidInput("all values are NaN/inf".into()))?;
 
         let combos = expand_grid(sweep)?;
-        
+
         let mut longs_i32 = Vec::<i32>::with_capacity(combos.len());
         let mut shorts_i32 = Vec::<i32>::with_capacity(combos.len());
         for p in &combos {
@@ -227,7 +227,6 @@ impl CudaTsi {
             shorts_i32.push(s as i32);
         }
 
-        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let in_bytes = len
@@ -281,10 +280,8 @@ impl CudaTsi {
         let d_prices = DeviceBuffer::from_slice(prices_f32)?;
         let d_longs = DeviceBuffer::from_slice(&longs_i32)?;
         let d_shorts = DeviceBuffer::from_slice(&shorts_i32)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_elems)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
-        
         let prefer_fast = combos.len() >= 32 && len >= 4_096 && free_ok_fast;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
@@ -294,17 +291,10 @@ impl CudaTsi {
         if prefer_fast {
             self.ensure_scratch(len, combos.len())?;
             if self.scratch.is_some() {
-                
                 let mut s = self.scratch.take().unwrap();
-                
-                self.launch_prepare_momentum(
-                    &d_prices,
-                    len,
-                    first_valid,
-                    &mut s.mom,
-                    &mut s.amom,
-                )?;
-                
+
+                self.launch_prepare_momentum(&d_prices, len, first_valid, &mut s.mom, &mut s.amom)?;
+
                 self.launch_param_parallel_tm(
                     &s.mom,
                     &s.amom,
@@ -316,16 +306,15 @@ impl CudaTsi {
                     &mut s.out_tm,
                     block_x,
                 )?;
-                
-            self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
-                
+
+                self.launch_transpose_tm_to_rm(&s.out_tm, len, combos.len(), &mut d_out)?;
+
                 self.scratch = Some(s);
             }
             self.last_batch = Some(BatchKernelSelected::Plain { block_x });
             self.maybe_log_batch_debug();
             self.synchronize()?;
         } else {
-            
             self.launch_batch_kernel(
                 &d_prices,
                 &d_longs,
@@ -379,10 +368,11 @@ impl CudaTsi {
         self.last_batch = Some(BatchKernelSelected::Plain { block_x });
         self.maybe_log_batch_debug();
 
-        let func = self
-            .module
-            .get_function("tsi_batch_f32")
-            .map_err(|_| CudaTsiError::MissingKernelSymbol { name: "tsi_batch_f32" })?;
+        let func = self.module.get_function("tsi_batch_f32").map_err(|_| {
+            CudaTsiError::MissingKernelSymbol {
+                name: "tsi_batch_f32",
+            }
+        })?;
 
         unsafe {
             let mut p_ptr = d_prices.as_device_ptr().as_raw();
@@ -424,7 +414,6 @@ impl CudaTsi {
         }
     }
 
-    
     pub fn tsi_many_series_one_param_time_major_dev(
         &mut self,
         prices_tm_f32: &[f32],
@@ -446,7 +435,6 @@ impl CudaTsi {
             return Err(CudaTsiError::InvalidInput("periods must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -468,7 +456,6 @@ impl CudaTsi {
             first_valids[s] = fv;
         }
 
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaTsiError::InvalidInput("size overflow".into()))?;
@@ -504,8 +491,7 @@ impl CudaTsi {
 
         let d_prices_tm = DeviceBuffer::from_slice(prices_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -582,8 +568,6 @@ impl CudaTsi {
         Ok(())
     }
 }
-
-
 
 struct TsiScratch {
     mom: DeviceBuffer<f32>,
@@ -795,21 +779,20 @@ fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, CudaTsiError> {
     Ok(out)
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const LEN: usize = 1_000_000; 
-    const ROWS: usize = 128; 
+    const LEN: usize = 1_000_000;
+    const ROWS: usize = 128;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = LEN * std::mem::size_of::<f32>();
         let params_bytes = ROWS * 2 * std::mem::size_of::<i32>();
-        let scratch_bytes = 2 * LEN * std::mem::size_of::<f32>(); 
-        let tm_bytes = ROWS * LEN * std::mem::size_of::<f32>(); 
-        let out_bytes = ROWS * LEN * std::mem::size_of::<f32>(); 
+        let scratch_bytes = 2 * LEN * std::mem::size_of::<f32>();
+        let tm_bytes = ROWS * LEN * std::mem::size_of::<f32>();
+        let out_bytes = ROWS * LEN * std::mem::size_of::<f32>();
         in_bytes + params_bytes + scratch_bytes + tm_bytes + out_bytes + 64 * 1024 * 1024
     }
 
@@ -873,7 +856,6 @@ pub mod benches {
         let price = gen_series(LEN);
         let first_valid = price.iter().position(|v| v.is_finite()).unwrap_or(0);
 
-        
         let sweep = TsiBatchRange {
             long_period: (25, 25 + ROWS - 1, 1),
             short_period: (13, 13, 0),

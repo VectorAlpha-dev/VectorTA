@@ -13,7 +13,7 @@ use my_project::indicators::{
 };
 use my_project::utilities::data_loader::Candles;
 
-/// FFI wrapper for Rust SMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_sma(
     size: c_int,
@@ -43,7 +43,7 @@ pub unsafe extern "C" fn rust_sma(
     }
 }
 
-/// FFI wrapper for Rust EMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_ema(
     size: c_int,
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn rust_ema(
     }
 }
 
-/// FFI wrapper for Rust RSI indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_rsi(
     size: c_int,
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn rust_rsi(
     }
 }
 
-/// FFI wrapper for Rust ATR indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_atr(
     size: c_int,
@@ -126,7 +126,7 @@ pub unsafe extern "C" fn rust_atr(
         length: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn rust_atr(
     for i in 0..size as usize {
         hl2[i] = (high_slice[i] + low_slice[i]) / 2.0;
         hlc3[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
-        ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0; 
+        ohlc4[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
         hlcc4[i] = (high_slice[i] + low_slice[i] + close_slice[i] + close_slice[i]) / 4.0;
     }
 
@@ -143,8 +143,8 @@ pub unsafe extern "C" fn rust_atr(
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
         close: close_slice.to_vec(),
-        open: vec![0.0; size as usize], 
-        volume: vec![0.0; size as usize], 
+        open: vec![0.0; size as usize],
+        volume: vec![0.0; size as usize],
         timestamp: vec![0; size as usize],
         hl2,
         hlc3,
@@ -163,7 +163,7 @@ pub unsafe extern "C" fn rust_atr(
     }
 }
 
-/// FFI wrapper for Rust Bollinger Bands indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_bbands(
     size: c_int,
@@ -205,7 +205,7 @@ pub unsafe extern "C" fn rust_bbands(
     }
 }
 
-/// FFI wrapper for Rust MACD indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_macd(
     size: c_int,
@@ -247,7 +247,7 @@ pub unsafe extern "C" fn rust_macd(
     }
 }
 
-/// FFI wrapper for Rust ADX indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_adx(
     size: c_int,
@@ -271,7 +271,7 @@ pub unsafe extern "C" fn rust_adx(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -308,7 +308,7 @@ pub unsafe extern "C" fn rust_adx(
     }
 }
 
-/// FFI wrapper for Rust CCI indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_cci(
     size: c_int,
@@ -332,7 +332,7 @@ pub unsafe extern "C" fn rust_cci(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn rust_cci(
     }
 }
 
-/// FFI wrapper for Rust DEMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_dema(
     size: c_int,
@@ -399,7 +399,7 @@ pub unsafe extern "C" fn rust_dema(
     }
 }
 
-/// FFI wrapper for Rust TEMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_tema(
     size: c_int,
@@ -429,7 +429,7 @@ pub unsafe extern "C" fn rust_tema(
     }
 }
 
-/// FFI wrapper for Rust WMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_wma(
     size: c_int,
@@ -459,7 +459,7 @@ pub unsafe extern "C" fn rust_wma(
     }
 }
 
-/// FFI wrapper for Rust KAMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_kama(
     size: c_int,
@@ -489,7 +489,7 @@ pub unsafe extern "C" fn rust_kama(
     }
 }
 
-/// FFI wrapper for Rust TRIMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_trima(
     size: c_int,
@@ -519,7 +519,7 @@ pub unsafe extern "C" fn rust_trima(
     }
 }
 
-/// FFI wrapper for Rust HMA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_hma(
     size: c_int,
@@ -549,7 +549,7 @@ pub unsafe extern "C" fn rust_hma(
     }
 }
 
-/// FFI wrapper for Rust Stochastic indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_stoch(
     size: c_int,
@@ -581,7 +581,7 @@ pub unsafe extern "C" fn rust_stoch(
         slowd_ma_type: Some("sma".to_string()),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -619,7 +619,7 @@ pub unsafe extern "C" fn rust_stoch(
     }
 }
 
-/// FFI wrapper for Rust AD (Accumulation/Distribution) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_ad(
     size: c_int,
@@ -640,7 +640,7 @@ pub unsafe extern "C" fn rust_ad(
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -677,7 +677,7 @@ pub unsafe extern "C" fn rust_ad(
     }
 }
 
-/// FFI wrapper for Rust ADOSC (Chaikin A/D Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_adosc(
     size: c_int,
@@ -705,7 +705,7 @@ pub unsafe extern "C" fn rust_adosc(
         long_period: Some(slow_period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -742,7 +742,7 @@ pub unsafe extern "C" fn rust_adosc(
     }
 }
 
-/// FFI wrapper for Rust ADXR (Average Directional Movement Index Rating) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_adxr(
     size: c_int,
@@ -766,7 +766,7 @@ pub unsafe extern "C" fn rust_adxr(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -803,7 +803,7 @@ pub unsafe extern "C" fn rust_adxr(
     }
 }
 
-/// FFI wrapper for Rust AO (Awesome Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_ao(
     size: c_int,
@@ -824,7 +824,7 @@ pub unsafe extern "C" fn rust_ao(
         long_period: Some(34),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -861,7 +861,7 @@ pub unsafe extern "C" fn rust_ao(
     }
 }
 
-/// FFI wrapper for Rust APO (Absolute Price Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_apo(
     size: c_int,
@@ -893,7 +893,7 @@ pub unsafe extern "C" fn rust_apo(
     }
 }
 
-/// FFI wrapper for Rust Aroon indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_aroon(
     size: c_int,
@@ -917,7 +917,7 @@ pub unsafe extern "C" fn rust_aroon(
         length: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -955,7 +955,7 @@ pub unsafe extern "C" fn rust_aroon(
     }
 }
 
-/// FFI wrapper for Rust AROONOSC (Aroon Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_aroonosc(
     size: c_int,
@@ -976,7 +976,7 @@ pub unsafe extern "C" fn rust_aroonosc(
         length: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1013,7 +1013,7 @@ pub unsafe extern "C" fn rust_aroonosc(
     }
 }
 
-/// FFI wrapper for Rust BOP (Balance of Power) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_bop(
     size: c_int,
@@ -1034,7 +1034,7 @@ pub unsafe extern "C" fn rust_bop(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1071,7 +1071,7 @@ pub unsafe extern "C" fn rust_bop(
     }
 }
 
-/// FFI wrapper for Rust CMO (Chande Momentum Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_cmo(
     size: c_int,
@@ -1101,7 +1101,7 @@ pub unsafe extern "C" fn rust_cmo(
     }
 }
 
-/// FFI wrapper for Rust DI (Directional Indicator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_di(
     size: c_int,
@@ -1127,7 +1127,7 @@ pub unsafe extern "C" fn rust_di(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1165,7 +1165,7 @@ pub unsafe extern "C" fn rust_di(
     }
 }
 
-/// FFI wrapper for Rust DPO (Detrended Price Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_dpo(
     size: c_int,
@@ -1195,7 +1195,7 @@ pub unsafe extern "C" fn rust_dpo(
     }
 }
 
-/// FFI wrapper for Rust DX (Directional Movement Index) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_dx(
     size: c_int,
@@ -1219,7 +1219,7 @@ pub unsafe extern "C" fn rust_dx(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1256,7 +1256,7 @@ pub unsafe extern "C" fn rust_dx(
     }
 }
 
-/// FFI wrapper for Rust FISHER (Fisher Transform) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_fisher(
     size: c_int,
@@ -1280,7 +1280,7 @@ pub unsafe extern "C" fn rust_fisher(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1318,7 +1318,7 @@ pub unsafe extern "C" fn rust_fisher(
     }
 }
 
-/// FFI wrapper for Rust MFI (Money Flow Index) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_mfi(
     size: c_int,
@@ -1344,7 +1344,7 @@ pub unsafe extern "C" fn rust_mfi(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1381,7 +1381,7 @@ pub unsafe extern "C" fn rust_mfi(
     }
 }
 
-/// FFI wrapper for Rust MOM (Momentum) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_mom(
     size: c_int,
@@ -1411,7 +1411,7 @@ pub unsafe extern "C" fn rust_mom(
     }
 }
 
-/// FFI wrapper for Rust NATR (Normalized Average True Range) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_natr(
     size: c_int,
@@ -1435,7 +1435,7 @@ pub unsafe extern "C" fn rust_natr(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1472,7 +1472,7 @@ pub unsafe extern "C" fn rust_natr(
     }
 }
 
-/// FFI wrapper for Rust OBV (On Balance Volume) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_obv(
     size: c_int,
@@ -1488,7 +1488,7 @@ pub unsafe extern "C" fn rust_obv(
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1525,7 +1525,7 @@ pub unsafe extern "C" fn rust_obv(
     }
 }
 
-/// FFI wrapper for Rust PPO (Percentage Price Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_ppo(
     size: c_int,
@@ -1557,9 +1557,9 @@ pub unsafe extern "C" fn rust_ppo(
 
     match ppo::ppo(&ppo_input) {
         Ok(result) => {
-            
+
             ppo_slice.copy_from_slice(&result.values);
-            
+
             for i in 0..size as usize {
                 signal_slice[i] = f64::NAN;
                 hist_slice[i] = f64::NAN;
@@ -1570,7 +1570,7 @@ pub unsafe extern "C" fn rust_ppo(
     }
 }
 
-/// FFI wrapper for Rust ROC (Rate of Change) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_roc(
     size: c_int,
@@ -1600,7 +1600,7 @@ pub unsafe extern "C" fn rust_roc(
     }
 }
 
-/// FFI wrapper for Rust ROCR (Rate of Change Ratio) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_rocr(
     size: c_int,
@@ -1630,7 +1630,7 @@ pub unsafe extern "C" fn rust_rocr(
     }
 }
 
-/// FFI wrapper for Rust ROCP (Rate of Change Percentage) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_rocp(
     size: c_int,
@@ -1660,7 +1660,7 @@ pub unsafe extern "C" fn rust_rocp(
     }
 }
 
-/// FFI wrapper for Rust STDDEV (Standard Deviation) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_stddev(
     size: c_int,
@@ -1691,7 +1691,7 @@ pub unsafe extern "C" fn rust_stddev(
     }
 }
 
-/// FFI wrapper for Rust ULTOSC (Ultimate Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_ultosc(
     size: c_int,
@@ -1719,7 +1719,7 @@ pub unsafe extern "C" fn rust_ultosc(
         timeperiod3: Some(period3 as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1756,7 +1756,7 @@ pub unsafe extern "C" fn rust_ultosc(
     }
 }
 
-/// FFI wrapper for Rust VAR (Variance) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_var(
     size: c_int,
@@ -1787,7 +1787,7 @@ pub unsafe extern "C" fn rust_var(
     }
 }
 
-/// FFI wrapper for Rust WILLR (Williams %R) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_willr(
     size: c_int,
@@ -1811,7 +1811,7 @@ pub unsafe extern "C" fn rust_willr(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1848,7 +1848,7 @@ pub unsafe extern "C" fn rust_willr(
     }
 }
 
-/// FFI wrapper for Rust DM (Directional Movement) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_dm(
     size: c_int,
@@ -1872,7 +1872,7 @@ pub unsafe extern "C" fn rust_dm(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -1910,7 +1910,7 @@ pub unsafe extern "C" fn rust_dm(
     }
 }
 
-/// FFI wrapper for Rust FOSC (Forecast Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_fosc(
     size: c_int,
@@ -1940,7 +1940,7 @@ pub unsafe extern "C" fn rust_fosc(
     }
 }
 
-/// FFI wrapper for Rust KVO (Klinger Volume Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_kvo(
     size: c_int,
@@ -1970,7 +1970,7 @@ pub unsafe extern "C" fn rust_kvo(
         long_period: Some(long_period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2001,7 +2001,7 @@ pub unsafe extern "C" fn rust_kvo(
     match kvo::kvo(&kvo_input) {
         Ok(result) => {
             kvo_slice.copy_from_slice(&result.values);
-            
+
             for i in 0..size as usize {
                 signal_slice[i] = f64::NAN;
             }
@@ -2011,7 +2011,7 @@ pub unsafe extern "C" fn rust_kvo(
     }
 }
 
-/// FFI wrapper for Rust LINREG (Linear Regression) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_linreg(
     size: c_int,
@@ -2041,7 +2041,7 @@ pub unsafe extern "C" fn rust_linreg(
     }
 }
 
-/// FFI wrapper for Rust MASS (Mass Index) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_mass(
     size: c_int,
@@ -2062,7 +2062,7 @@ pub unsafe extern "C" fn rust_mass(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2099,7 +2099,7 @@ pub unsafe extern "C" fn rust_mass(
     }
 }
 
-/// FFI wrapper for Rust MEDPRICE (Median Price) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_medprice(
     size: c_int,
@@ -2115,7 +2115,7 @@ pub unsafe extern "C" fn rust_medprice(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2152,7 +2152,7 @@ pub unsafe extern "C" fn rust_medprice(
     }
 }
 
-/// FFI wrapper for Rust MIDPOINT indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_midpoint(
     size: c_int,
@@ -2182,7 +2182,7 @@ pub unsafe extern "C" fn rust_midpoint(
     }
 }
 
-/// FFI wrapper for Rust MIDPRICE indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_midprice(
     size: c_int,
@@ -2203,7 +2203,7 @@ pub unsafe extern "C" fn rust_midprice(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2240,7 +2240,7 @@ pub unsafe extern "C" fn rust_midprice(
     }
 }
 
-/// FFI wrapper for Rust NVI (Negative Volume Index) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_nvi(
     size: c_int,
@@ -2256,7 +2256,7 @@ pub unsafe extern "C" fn rust_nvi(
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2293,7 +2293,7 @@ pub unsafe extern "C" fn rust_nvi(
     }
 }
 
-/// FFI wrapper for Rust PVI (Positive Volume Index) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_pvi(
     size: c_int,
@@ -2309,7 +2309,7 @@ pub unsafe extern "C" fn rust_pvi(
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2346,7 +2346,7 @@ pub unsafe extern "C" fn rust_pvi(
     }
 }
 
-/// FFI wrapper for Rust QSTICK indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_qstick(
     size: c_int,
@@ -2367,7 +2367,7 @@ pub unsafe extern "C" fn rust_qstick(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2404,7 +2404,7 @@ pub unsafe extern "C" fn rust_qstick(
     }
 }
 
-/// FFI wrapper for Rust SAR (Parabolic SAR) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_sar(
     size: c_int,
@@ -2427,7 +2427,7 @@ pub unsafe extern "C" fn rust_sar(
         maximum: Some(accel_max),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2464,7 +2464,7 @@ pub unsafe extern "C" fn rust_sar(
     }
 }
 
-/// FFI wrapper for Rust SRSI (Stochastic RSI) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_srsi(
     size: c_int,
@@ -2504,7 +2504,7 @@ pub unsafe extern "C" fn rust_srsi(
     }
 }
 
-/// FFI wrapper for Rust STOCHF (Stochastic Fast) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_stochf(
     size: c_int,
@@ -2530,10 +2530,10 @@ pub unsafe extern "C" fn rust_stochf(
     let params = stochf::StochfParams {
         fastk_period: Some(fastk_period as usize),
         fastd_period: Some(fastd_period as usize),
-        fastd_matype: Some(0), 
+        fastd_matype: Some(0),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2571,7 +2571,7 @@ pub unsafe extern "C" fn rust_stochf(
     }
 }
 
-/// FFI wrapper for Rust TRIX indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_trix(
     size: c_int,
@@ -2601,7 +2601,7 @@ pub unsafe extern "C" fn rust_trix(
     }
 }
 
-/// FFI wrapper for Rust TSF (Time Series Forecast) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_tsf(
     size: c_int,
@@ -2631,7 +2631,7 @@ pub unsafe extern "C" fn rust_tsf(
     }
 }
 
-/// FFI wrapper for Rust VIDYA indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_vidya(
     size: c_int,
@@ -2665,7 +2665,7 @@ pub unsafe extern "C" fn rust_vidya(
     }
 }
 
-/// FFI wrapper for Rust VOSC (Volume Oscillator) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_vosc(
     size: c_int,
@@ -2697,7 +2697,7 @@ pub unsafe extern "C" fn rust_vosc(
     }
 }
 
-/// FFI wrapper for Rust VWMA (Volume Weighted Moving Average) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_vwma(
     size: c_int,
@@ -2718,7 +2718,7 @@ pub unsafe extern "C" fn rust_vwma(
         period: Some(period as usize),
     };
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2755,7 +2755,7 @@ pub unsafe extern "C" fn rust_vwma(
     }
 }
 
-/// FFI wrapper for Rust WAD (Williams Accumulation/Distribution) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_wad(
     size: c_int,
@@ -2773,7 +2773,7 @@ pub unsafe extern "C" fn rust_wad(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2810,7 +2810,7 @@ pub unsafe extern "C" fn rust_wad(
     }
 }
 
-/// FFI wrapper for Rust WCLPRICE (Weighted Close Price) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_wclprice(
     size: c_int,
@@ -2828,7 +2828,7 @@ pub unsafe extern "C" fn rust_wclprice(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let mut hl2 = vec![0.0; size as usize];
     let mut hlc3 = vec![0.0; size as usize];
     let mut ohlc4 = vec![0.0; size as usize];
@@ -2865,7 +2865,7 @@ pub unsafe extern "C" fn rust_wclprice(
     }
 }
 
-/// FFI wrapper for Rust WILDERS (Wilders Smoothing) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_wilders(
     size: c_int,
@@ -2895,7 +2895,7 @@ pub unsafe extern "C" fn rust_wilders(
     }
 }
 
-/// FFI wrapper for Rust ZLEMA (Zero Lag EMA) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_zlema(
     size: c_int,
@@ -2925,7 +2925,7 @@ pub unsafe extern "C" fn rust_zlema(
     }
 }
 
-/// FFI wrapper for Rust Linear Regression Slope indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_linearreg_slope(
     size: c_int,
@@ -2955,7 +2955,7 @@ pub unsafe extern "C" fn rust_linearreg_slope(
     }
 }
 
-/// FFI wrapper for Rust Linear Regression Intercept indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_linearreg_intercept(
     size: c_int,
@@ -2985,7 +2985,7 @@ pub unsafe extern "C" fn rust_linearreg_intercept(
     }
 }
 
-/// FFI wrapper for Rust EMV (Ease of Movement) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_emv(
     size: c_int,
@@ -3003,12 +3003,12 @@ pub unsafe extern "C" fn rust_emv(
     let volume_slice = slice::from_raw_parts(volume, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
-        close: vec![0.0; size as usize], 
-        open: vec![0.0; size as usize],  
+        close: vec![0.0; size as usize],
+        open: vec![0.0; size as usize],
         volume: volume_slice.to_vec(),
         timestamp: vec![0; size as usize],
         hl2: vec![0.0; size as usize],
@@ -3028,7 +3028,7 @@ pub unsafe extern "C" fn rust_emv(
     }
 }
 
-/// FFI wrapper for Rust CVI (Chaikin Volatility Index) indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_cvi(
     size: c_int,
@@ -3045,7 +3045,7 @@ pub unsafe extern "C" fn rust_cvi(
     let low_slice = slice::from_raw_parts(low, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     let candles = Candles {
         high: high_slice.to_vec(),
         low: low_slice.to_vec(),
@@ -3074,7 +3074,7 @@ pub unsafe extern "C" fn rust_cvi(
     }
 }
 
-/// FFI wrapper for Rust True Range indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_tr(
     size: c_int,
@@ -3092,7 +3092,7 @@ pub unsafe extern "C" fn rust_tr(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     output_slice[0] = high_slice[0] - low_slice[0];
     for i in 1..size as usize {
         let hl = high_slice[i] - low_slice[i];
@@ -3104,7 +3104,7 @@ pub unsafe extern "C" fn rust_tr(
     0
 }
 
-/// FFI wrapper for Rust Average Price indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_avgprice(
     size: c_int,
@@ -3124,7 +3124,7 @@ pub unsafe extern "C" fn rust_avgprice(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     for i in 0..size as usize {
         output_slice[i] = (open_slice[i] + high_slice[i] + low_slice[i] + close_slice[i]) / 4.0;
     }
@@ -3132,7 +3132,7 @@ pub unsafe extern "C" fn rust_avgprice(
     0
 }
 
-/// FFI wrapper for Rust Typical Price indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_typprice(
     size: c_int,
@@ -3150,7 +3150,7 @@ pub unsafe extern "C" fn rust_typprice(
     let close_slice = slice::from_raw_parts(close, size as usize);
     let output_slice = slice::from_raw_parts_mut(output, size as usize);
 
-    
+
     for i in 0..size as usize {
         output_slice[i] = (high_slice[i] + low_slice[i] + close_slice[i]) / 3.0;
     }
@@ -3158,7 +3158,7 @@ pub unsafe extern "C" fn rust_typprice(
     0
 }
 
-/// FFI wrapper for Rust LINEARREG_ANGLE indicator
+
 #[no_mangle]
 pub unsafe extern "C" fn rust_linearreg_angle(
     size: c_int,

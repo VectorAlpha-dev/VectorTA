@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::vwma::{
     vwma_batch_with_kernel, VwmaBatchRange, VwmaBuilder,
 };
@@ -46,10 +44,8 @@ fn vwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let sweep = VwmaBatchRange { period: (6, 30, 4) };
 
-    
     let cpu = vwma_batch_with_kernel(&prices, &volumes, &sweep, Kernel::ScalarBatch)?;
 
-    
     let cuda = CudaVwma::new(0).expect("CudaVwma::new");
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
@@ -79,7 +75,6 @@ fn vwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    
     let cpu_single = VwmaBuilder::new()
         .period(14)
         .apply_slice(&prices, &volumes)?
@@ -124,7 +119,6 @@ fn vwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 18usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for series_idx in 0..num_series {
         let mut prices_series = vec![f64::NAN; series_len];
@@ -144,7 +138,6 @@ fn vwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    
     let cuda = CudaVwma::new(0).expect("CudaVwma::new");
     let prices_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes_tm.iter().map(|&v| v as f32).collect();

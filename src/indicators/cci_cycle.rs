@@ -1,37 +1,7 @@
-//! # CCI Cycle
-//!
-//! CCI Cycle is a momentum oscillator that applies cycle analysis to the Commodity Channel Index.
-//! It uses double exponential smoothing, RMA smoothing, and stochastic normalization to identify cycles.
-//!
-//! ## Parameters
-//! - **length**: Period for CCI calculation (default: 10)
-//! - **factor**: Smoothing factor for cycle calculation (default: 0.5)
-//!
-//! ## Returns
-//! - **`Ok(CciCycleOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CciCycleError)`** on various error conditions.
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 accelerate the double-EMA stage; stochastic passes remain scalar
-//! - **Streaming Performance**: O(1) per-tick (amortized): EMA/SMMA as constant-time recurrences; rolling min/max via monotonic deques; CCI MAD after exact init via Wilder RMA.
-//! - **Memory Optimization**: GOOD - properly uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - Decision: Stochastic min/max now uses O(n) monotonic deques; SIMD not beneficial there due to data-dependent control flow.
-//!
-//! ## Binding QA (2025-10-30)
-//! - WASM and Python binding unit tests for `cci_cycle` now align with Rust.
-//! - Fix: streaming path switched to exact CCI via `CciStream` (O(log n) MAD) instead of
-//!   approximate RMA of |x-sma|. This restores batch parity while keeping the rest of the
-//!   streaming pipeline (double‑EMA, SMMA, and deque-based stoch windows) unchanged.
-//! - Warmup: first streaming value still appears at index `length*4 - 1` (e.g., 39 for length=10),
-//!   matching the conservative gating used by the batch path.
-//! - Decision Log (2025-11-20): SIMD enabled for double-EMA only; CUDA batch + many-series FP32 kernels enabled and synchronized before return; Python CAI v3 + DLPack v1.x interop wired without changing numerical outputs.
-
-
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::cci_cycle_wrapper::CudaCciCycle;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::cci_cycle_wrapper::CudaCciCycle;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
@@ -43,12 +13,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -59,33 +27,27 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-
 use crate::indicators::cci::{cci, cci_into_slice, CciInput, CciParams, CciStream};
-use crate::indicators::moving_averages::ema::{ema, ema_into_slice, EmaInput, EmaParams, EmaStream};
+use crate::indicators::moving_averages::ema::{
+    ema, ema_into_slice, EmaInput, EmaParams, EmaStream,
+};
 use crate::indicators::moving_averages::smma::{smma, smma_into_slice, SmmaInput, SmmaParams};
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-
 #[inline(always)]
 fn fmadd(a: f64, b: f64, c: f64) -> f64 {
-    
-    
     a.mul_add(b, c)
 }
-
 
 #[derive(Clone, Debug)]
 struct MonoIdxDeque {
@@ -112,7 +74,7 @@ impl MonoIdxDeque {
     #[inline(always)]
     fn front(&self) -> usize {
         debug_assert!(!self.is_empty());
-        
+
         unsafe { *self.buf.get_unchecked(self.head & self.mask) }
     }
     #[inline(always)]
@@ -148,7 +110,6 @@ impl MonoIdxDeque {
     }
 }
 
-
 impl<'a> AsRef<[f64]> for CciCycleInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -159,8 +120,6 @@ impl<'a> AsRef<[f64]> for CciCycleInput<'a> {
     }
 }
 
-
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum CciCycleData<'a> {
     Candles {
@@ -170,15 +129,16 @@ pub enum CciCycleData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct CciCycleOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CciCycleParams {
     pub length: Option<usize>,
     pub factor: Option<f64>,
@@ -193,7 +153,6 @@ impl Default for CciCycleParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct CciCycleInput<'a> {
     pub data: CciCycleData<'a>,
@@ -236,8 +195,6 @@ impl<'a> CciCycleInput<'a> {
     }
 }
 
-
-/// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct CciCycleBuilder {
     length: Option<usize>,
@@ -309,7 +266,6 @@ impl CciCycleBuilder {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum CciCycleError {
     #[error("cci_cycle: Input data slice is empty.")]
@@ -328,7 +284,11 @@ pub enum CciCycleError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("cci_cycle: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("cci_cycle: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -349,24 +309,19 @@ pub enum CciCycleError {
     SmmaError(String),
 }
 
-
-/// Main entry point with automatic kernel detection
 #[inline]
 pub fn cci_cycle(input: &CciCycleInput) -> Result<CciCycleOutput, CciCycleError> {
     cci_cycle_with_kernel(input, Kernel::Auto)
 }
 
-/// Entry point with explicit kernel selection - using zero-copy pipeline
 pub fn cci_cycle_with_kernel(
     input: &CciCycleInput,
     kernel: Kernel,
 ) -> Result<CciCycleOutput, CciCycleError> {
     let (data, length, factor, first, chosen) = cci_cycle_prepare(input, kernel)?;
 
-    
     let mut work = alloc_with_nan_prefix(data.len(), first + length - 1);
 
-    
     let ci = CciInput::from_slice(
         data,
         CciParams {
@@ -375,7 +330,6 @@ pub fn cci_cycle_with_kernel(
     );
     cci_into_slice(&mut work, &ci, chosen).map_err(|e| CciCycleError::CciError(e.to_string()))?;
 
-    
     let half = (length + 1) / 2;
     let mut ema_s = alloc_with_nan_prefix(data.len(), first + half - 1);
     let mut ema_l = alloc_with_nan_prefix(data.len(), first + length - 1);
@@ -391,10 +345,8 @@ pub fn cci_cycle_with_kernel(
     );
     ema_into_slice(&mut ema_l, &eil, chosen).map_err(|e| CciCycleError::EmaError(e.to_string()))?;
 
-    
     let mut out = alloc_with_nan_prefix(data.len(), first + length * 4);
 
-    
     cci_cycle_compute_from_parts(
         data, length, factor, first, chosen, &ema_s, &ema_l, &mut work, &mut out,
     )?;
@@ -402,7 +354,6 @@ pub fn cci_cycle_with_kernel(
     Ok(CciCycleOutput { values: out })
 }
 
-/// Zero-allocation version for WASM and performance-critical paths
 #[inline]
 pub fn cci_cycle_into_slice(
     dst: &mut [f64],
@@ -411,13 +362,14 @@ pub fn cci_cycle_into_slice(
 ) -> Result<(), CciCycleError> {
     let (data, length, factor, first, chosen) = cci_cycle_prepare(input, kern)?;
     if dst.len() != data.len() {
-        return Err(CciCycleError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(CciCycleError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
-    
     let mut work = alloc_with_nan_prefix(dst.len(), first + length - 1);
 
-    
     let ci = CciInput::from_slice(
         data,
         CciParams {
@@ -426,7 +378,6 @@ pub fn cci_cycle_into_slice(
     );
     cci_into_slice(&mut work, &ci, chosen).map_err(|e| CciCycleError::CciError(e.to_string()))?;
 
-    
     let half = (length + 1) / 2;
     let mut ema_s = alloc_with_nan_prefix(dst.len(), first + half - 1);
     let mut ema_l = alloc_with_nan_prefix(dst.len(), first + length - 1);
@@ -442,13 +393,11 @@ pub fn cci_cycle_into_slice(
     );
     ema_into_slice(&mut ema_l, &eil, chosen).map_err(|e| CciCycleError::EmaError(e.to_string()))?;
 
-    
     let warm = (first + length * 4).min(dst.len());
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
 
-    
     cci_cycle_compute_from_parts(
         data, length, factor, first, chosen, &ema_s, &ema_l, &mut work, dst,
     )?;
@@ -456,18 +405,12 @@ pub fn cci_cycle_into_slice(
     Ok(())
 }
 
-/// Writes CCI Cycle results into the provided output slice without allocating.
-///
-/// - Preserves the indicator's NaN warmup behavior exactly.
-/// - The `out` slice length must match the input length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cci_cycle_into(input: &CciCycleInput, out: &mut [f64]) -> Result<(), CciCycleError> {
     cci_cycle_into_slice(out, input, Kernel::Auto)
 }
 
-/// Prepare and validate input data
 #[inline(always)]
 fn cci_cycle_prepare<'a>(
     input: &'a CciCycleInput,
@@ -488,7 +431,6 @@ fn cci_cycle_prepare<'a>(
     let length = input.get_length();
     let factor = input.get_factor();
 
-    
     if length == 0 || length > len {
         return Err(CciCycleError::InvalidPeriod {
             period: length,
@@ -496,7 +438,6 @@ fn cci_cycle_prepare<'a>(
         });
     }
 
-    
     if factor.is_infinite() {
         return Err(CciCycleError::InvalidFactor { factor });
     }
@@ -516,7 +457,6 @@ fn cci_cycle_prepare<'a>(
     Ok((data, length, factor, first, chosen))
 }
 
-/// Compute from precomputed parts - avoids temporary Vecs and UB
 #[inline(always)]
 fn cci_cycle_compute_from_parts(
     data: &[f64],
@@ -526,13 +466,12 @@ fn cci_cycle_compute_from_parts(
     kernel: Kernel,
     ema_short: &[f64],
     ema_long: &[f64],
-    work: &mut [f64], 
+    work: &mut [f64],
     out: &mut [f64],
 ) -> Result<(), CciCycleError> {
     let len = data.len();
     let de_warm = first + length - 1;
 
-    
     let warm_lim = de_warm.min(len);
     for i in 0..warm_lim {
         work[i] = f64::NAN;
@@ -552,7 +491,6 @@ fn cci_cycle_compute_from_parts(
         }
     }
 
-    
     let smma_p = ((length as f64).sqrt().round() as usize).max(1);
     let sm_warm = first + smma_p - 1;
     let mut ccis = alloc_with_nan_prefix(len, sm_warm);
@@ -567,8 +505,6 @@ fn cci_cycle_compute_from_parts(
             .map_err(|e| CciCycleError::SmmaError(e.to_string()))?;
     }
 
-    
-    
     const SMALL_THRESH: usize = 16;
     if length <= SMALL_THRESH {
         naive_pf_and_normalize_scalar(&ccis, length, first, factor, work, out);
@@ -579,7 +515,6 @@ fn cci_cycle_compute_from_parts(
     Ok(())
 }
 
-
 #[inline(always)]
 fn double_ema_scalar(work: &mut [f64], ema_short: &[f64], ema_long: &[f64], start: usize) {
     let len = work.len();
@@ -587,7 +522,7 @@ fn double_ema_scalar(work: &mut [f64], ema_short: &[f64], ema_long: &[f64], star
     while i < len {
         let s = ema_short[i];
         let l = ema_long[i];
-        work[i] = s + s - l; 
+        work[i] = s + s - l;
         i += 1;
     }
 }
@@ -634,14 +569,13 @@ unsafe fn double_ema_avx512(work: &mut [f64], ema_short: &[f64], ema_long: &[f64
     }
 }
 
-
 #[inline(always)]
 fn fused_pf_and_normalize_scalar(
     ccis: &[f64],
     length: usize,
     first: usize,
     factor: f64,
-    work: &mut [f64], 
+    work: &mut [f64],
     out: &mut [f64],
 ) {
     let len = ccis.len();
@@ -650,7 +584,7 @@ fn fused_pf_and_normalize_scalar(
     }
 
     let stoch_warm = first + length - 1;
-    
+
     for i in 0..stoch_warm.min(len) {
         work[i] = f64::NAN;
     }
@@ -665,15 +599,13 @@ fn fused_pf_and_normalize_scalar(
 
     let mut prev_f1 = f64::NAN;
     let mut prev_pf = f64::NAN;
-    let mut prev_out = f64::NAN; 
+    let mut prev_out = f64::NAN;
 
     for i in 0..len {
-        
         let start_cc = i.saturating_sub(length - 1);
         q_min_cc.evict_older_than(start_cc);
         q_max_cc.evict_older_than(start_cc);
 
-        
         let x = ccis[i];
         if x.is_finite() {
             while !q_min_cc.is_empty() {
@@ -699,7 +631,6 @@ fn fused_pf_and_normalize_scalar(
             q_max_cc.push_back(i);
         }
 
-        
         let mut pf_i = f64::NAN;
         if i >= stoch_warm {
             if !x.is_nan() {
@@ -726,18 +657,15 @@ fn fused_pf_and_normalize_scalar(
                 prev_f1 = cur_f1;
                 prev_pf = pf_i;
             } else {
-                
                 prev_f1 = f64::NAN;
-                
             }
         }
         work[i] = pf_i;
 
-        
         let p = pf_i;
         if p.is_nan() {
             out[i] = f64::NAN;
-            
+
             prev_out = out[i];
             continue;
         }
@@ -790,11 +718,10 @@ fn fused_pf_and_normalize_scalar(
             f64::NAN
         };
         out[i] = out_i;
-        
+
         prev_out = out_i;
     }
 }
-
 
 #[inline(always)]
 fn naive_pf_and_normalize_scalar(
@@ -802,7 +729,7 @@ fn naive_pf_and_normalize_scalar(
     length: usize,
     first: usize,
     factor: f64,
-    work: &mut [f64], 
+    work: &mut [f64],
     out: &mut [f64],
 ) {
     let len = ccis.len();
@@ -810,7 +737,6 @@ fn naive_pf_and_normalize_scalar(
         return;
     }
 
-    
     let stoch_warm = first + length - 1;
     for i in 0..stoch_warm.min(len) {
         work[i] = f64::NAN;
@@ -867,7 +793,6 @@ fn naive_pf_and_normalize_scalar(
         prev_pf = pf_i;
     }
 
-    
     for i in 0..len {
         let p = work[i];
         if p.is_nan() {
@@ -906,56 +831,44 @@ fn naive_pf_and_normalize_scalar(
     }
 }
 
-
-/// Decision: Streaming enabled via O(1) recurrences and deques; CCI MAD uses Wilder RMA after exact init.
 #[derive(Debug, Clone)]
 pub struct CciCycleStream {
-    
     length: usize,
     factor: f64,
     half: usize,
     smma_p: usize,
 
-    
     inv_len: f64,
     inv_smma_p: f64,
     alpha_s: f64,
     alpha_l: f64,
-    cci_scale: f64, 
+    cci_scale: f64,
 
-    
     i: usize,
 
-    
     cci_stream: CciStream,
 
-    
     ema_s_stream: EmaStream,
     ema_l_stream: EmaStream,
 
-    
     smma: f64,
     smma_init_sum: f64,
     smma_init_count: usize,
     smma_inited: bool,
 
-    
-    ccis_win: Vec<f64>, 
-    pf_win: Vec<f64>,   
+    ccis_win: Vec<f64>,
+    pf_win: Vec<f64>,
 
-    
     q_min_cc: MonoIdxDeque,
     q_max_cc: MonoIdxDeque,
     q_min_pf: MonoIdxDeque,
     q_max_pf: MonoIdxDeque,
 
-    
-    prev_f1: f64,   
-    pf_smooth: f64, 
-    out_prev: f64,  
+    prev_f1: f64,
+    pf_smooth: f64,
+    out_prev: f64,
 
-    
-    warmup_after: usize, 
+    warmup_after: usize,
 }
 
 impl CciCycleStream {
@@ -971,15 +884,13 @@ impl CciCycleStream {
             });
         }
 
-        
         let half = (length + 1) / 2;
         let smma_p = ((length as f64).sqrt().round() as usize).max(1);
 
-        
         let inv_len = 1.0 / (length as f64);
         let inv_smma_p = 1.0 / (smma_p as f64);
-        let alpha_s = 2.0 / (half as f64 + 1.0); 
-        let alpha_l = 2.0 / (length as f64 + 1.0); 
+        let alpha_s = 2.0 / (half as f64 + 1.0);
+        let alpha_l = 2.0 / (length as f64 + 1.0);
         let cci_scale = 1.0 / 0.015;
 
         Ok(Self {
@@ -996,13 +907,17 @@ impl CciCycleStream {
 
             i: 0,
 
-            cci_stream: CciStream::try_new(CciParams { period: Some(length) })
-                .map_err(|e| CciCycleError::CciError(e.to_string()))?,
+            cci_stream: CciStream::try_new(CciParams {
+                period: Some(length),
+            })
+            .map_err(|e| CciCycleError::CciError(e.to_string()))?,
 
             ema_s_stream: EmaStream::try_new(EmaParams { period: Some(half) })
                 .map_err(|e| CciCycleError::EmaError(e.to_string()))?,
-            ema_l_stream: EmaStream::try_new(EmaParams { period: Some(length) })
-                .map_err(|e| CciCycleError::EmaError(e.to_string()))?,
+            ema_l_stream: EmaStream::try_new(EmaParams {
+                period: Some(length),
+            })
+            .map_err(|e| CciCycleError::EmaError(e.to_string()))?,
 
             smma: f64::NAN,
             smma_init_sum: 0.0,
@@ -1021,8 +936,6 @@ impl CciCycleStream {
             pf_smooth: f64::NAN,
             out_prev: f64::NAN,
 
-            
-            
             warmup_after: length * 4,
         })
     }
@@ -1046,30 +959,31 @@ impl CciCycleStream {
 
     #[inline(always)]
     fn rb_pos(&self, i: usize) -> usize {
-        
         i % self.length
     }
 
-    /// One-tick update. Returns `Some(value)` only after conservative warmup; otherwise `None`.
     #[inline]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !value.is_finite() {
-            
-            self.cci_stream = CciStream::try_new(CciParams { period: Some(self.length) })
-                .map_err(|e| e.to_string())
-                .ok()
-                .unwrap();
+            self.cci_stream = CciStream::try_new(CciParams {
+                period: Some(self.length),
+            })
+            .map_err(|e| e.to_string())
+            .ok()
+            .unwrap();
 
-            
-            self.ema_s_stream = EmaStream::try_new(EmaParams { period: Some(self.half) })
-                .map_err(|e| e.to_string())
-                .ok()
-                .unwrap();
-            self.ema_l_stream = EmaStream::try_new(EmaParams { period: Some(self.length) })
-                .map_err(|e| e.to_string())
-                .ok()
-                .unwrap();
+            self.ema_s_stream = EmaStream::try_new(EmaParams {
+                period: Some(self.half),
+            })
+            .map_err(|e| e.to_string())
+            .ok()
+            .unwrap();
+            self.ema_l_stream = EmaStream::try_new(EmaParams {
+                period: Some(self.length),
+            })
+            .map_err(|e| e.to_string())
+            .ok()
+            .unwrap();
 
             self.smma = f64::NAN;
             self.smma_init_sum = 0.0;
@@ -1080,7 +994,6 @@ impl CciCycleStream {
             self.pf_smooth = f64::NAN;
             self.out_prev = f64::NAN;
 
-            
             let pos = self.rb_pos(self.i);
             self.ccis_win[pos] = f64::NAN;
             self.pf_win[pos] = f64::NAN;
@@ -1093,13 +1006,11 @@ impl CciCycleStream {
         let i = self.i;
         let pos = self.rb_pos(i);
 
-        
         let mut cci_val = match self.cci_stream.update(value) {
             Some(v) => v,
             None => f64::NAN,
         };
 
-        
         let mut de = f64::NAN;
         if cci_val.is_finite() {
             let es = self.ema_s_stream.update(cci_val);
@@ -1109,11 +1020,9 @@ impl CciCycleStream {
             }
         }
 
-        
         let mut ccis = f64::NAN;
         if de.is_finite() {
             if !self.smma_inited {
-                
                 self.smma_init_sum += de;
                 self.smma_init_count += 1;
                 if self.smma_init_count == self.smma_p {
@@ -1121,14 +1030,16 @@ impl CciCycleStream {
                     self.smma_inited = true;
                 }
             } else {
-                
                 let p = self.smma_p as f64;
                 self.smma = (self.smma * (p - 1.0) + de) / p;
             }
-            ccis = if self.smma_inited { self.smma } else { f64::NAN };
+            ccis = if self.smma_inited {
+                self.smma
+            } else {
+                f64::NAN
+            };
         }
 
-        
         self.ccis_win[pos] = ccis;
 
         let stoch_len = self.length;
@@ -1137,7 +1048,6 @@ impl CciCycleStream {
         self.q_max_cc.evict_older_than(start_cc);
 
         if ccis.is_finite() {
-            
             while !self.q_min_cc.is_empty() {
                 let b = self.q_min_cc.back();
                 let bv = self.ccis_win[self.rb_pos(b)];
@@ -1149,7 +1059,6 @@ impl CciCycleStream {
             }
             self.q_min_cc.push_back(i);
 
-            
             while !self.q_max_cc.is_empty() {
                 let b = self.q_max_cc.back();
                 let bv = self.ccis_win[self.rb_pos(b)];
@@ -1162,7 +1071,6 @@ impl CciCycleStream {
             self.q_max_cc.push_back(i);
         }
 
-        
         let mut pf_now = f64::NAN;
         if i + 1 >= stoch_len
             && self.smma_inited
@@ -1200,7 +1108,6 @@ impl CciCycleStream {
         }
         self.pf_win[pos] = pf_now;
 
-        
         let start_pf = i.saturating_sub(stoch_len - 1);
         self.q_min_pf.evict_older_than(start_pf);
         self.q_max_pf.evict_older_than(start_pf);
@@ -1229,10 +1136,8 @@ impl CciCycleStream {
             self.q_max_pf.push_back(i);
         }
 
-        
         let mut out_now = f64::NAN;
         if pf_now.is_finite() {
-            
             let start_pf = i.saturating_sub(self.length - 1);
             let mut mn = f64::INFINITY;
             let mut mx = f64::NEG_INFINITY;
@@ -1240,8 +1145,12 @@ impl CciCycleStream {
             while k <= i {
                 let v = self.pf_win[self.rb_pos(k)];
                 if v.is_finite() {
-                    if v < mn { mn = v; }
-                    if v > mx { mx = v; }
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
                 }
                 k += 1;
             }
@@ -1256,19 +1165,38 @@ impl CciCycleStream {
                     };
                     out_now = self.out_prev;
                 } else {
-                    out_now = if self.out_prev.is_nan() { 50.0 } else { self.out_prev };
+                    out_now = if self.out_prev.is_nan() {
+                        50.0
+                    } else {
+                        self.out_prev
+                    };
                     self.out_prev = out_now;
                 }
             }
         }
 
-        
         if std::env::var("CCI_CYCLE_DBG").is_ok() && (i >= 38 && i <= 41) {
-            let mn_cc = if self.q_min_cc.is_empty() { f64::NAN } else { self.ccis_win[self.rb_pos(self.q_min_cc.front())] };
-            let mx_cc = if self.q_max_cc.is_empty() { f64::NAN } else { self.ccis_win[self.rb_pos(self.q_max_cc.front())] };
-            let mn_pf = if self.q_min_pf.is_empty() { f64::NAN } else { self.pf_win[self.rb_pos(self.q_min_pf.front())] };
-            let mx_pf = if self.q_max_pf.is_empty() { f64::NAN } else { self.pf_win[self.rb_pos(self.q_max_pf.front())] };
-            
+            let mn_cc = if self.q_min_cc.is_empty() {
+                f64::NAN
+            } else {
+                self.ccis_win[self.rb_pos(self.q_min_cc.front())]
+            };
+            let mx_cc = if self.q_max_cc.is_empty() {
+                f64::NAN
+            } else {
+                self.ccis_win[self.rb_pos(self.q_max_cc.front())]
+            };
+            let mn_pf = if self.q_min_pf.is_empty() {
+                f64::NAN
+            } else {
+                self.pf_win[self.rb_pos(self.q_min_pf.front())]
+            };
+            let mx_pf = if self.q_max_pf.is_empty() {
+                f64::NAN
+            } else {
+                self.pf_win[self.rb_pos(self.q_max_pf.front())]
+            };
+
             let st = i.saturating_sub(self.length - 1);
             let mut mn_n = f64::INFINITY;
             let mut mx_n = f64::NEG_INFINITY;
@@ -1276,14 +1204,30 @@ impl CciCycleStream {
             while k <= i {
                 let v = self.pf_win[self.rb_pos(k)];
                 if v.is_finite() {
-                    if v < mn_n { mn_n = v; }
-                    if v > mx_n { mx_n = v; }
+                    if v < mn_n {
+                        mn_n = v;
+                    }
+                    if v > mx_n {
+                        mx_n = v;
+                    }
                 }
                 k += 1;
             }
             let range_n = mx_n - mn_n;
-            let f2_n = if range_n > 0.0 { (pf_now - mn_n) * (100.0 / range_n) } else { if self.out_prev.is_nan() { 50.0 } else { self.out_prev } };
-            let out_n = if self.out_prev.is_nan() || self.factor == 0.0 { f2_n } else { fmadd(f2_n - self.out_prev, self.factor, self.out_prev) };
+            let f2_n = if range_n > 0.0 {
+                (pf_now - mn_n) * (100.0 / range_n)
+            } else {
+                if self.out_prev.is_nan() {
+                    50.0
+                } else {
+                    self.out_prev
+                }
+            };
+            let out_n = if self.out_prev.is_nan() || self.factor == 0.0 {
+                f2_n
+            } else {
+                fmadd(f2_n - self.out_prev, self.factor, self.out_prev)
+            };
             eprintln!(
                 "[cci_cycle stream dbg] i={} de={:?} ccis={:?} pf_smooth={:?} mn_cc={:?} mx_cc={:?} mn_pf={:?} mx_pf={:?} out_now={:?} naive_out={:?}",
                 i, de, self.smma, self.pf_smooth, mn_cc, mx_cc, mn_pf, mx_pf, out_now, out_n
@@ -1292,7 +1236,6 @@ impl CciCycleStream {
 
         self.i = i.wrapping_add(1);
 
-        
         if self.i >= self.warmup_after && out_now.is_finite() {
             Some(out_now)
         } else {
@@ -1301,11 +1244,9 @@ impl CciCycleStream {
     }
 }
 
-
-/// Batch processing for parameter sweeps
 #[derive(Clone, Debug)]
 pub struct CciCycleBatchRange {
-    pub length: (usize, usize, usize), 
+    pub length: (usize, usize, usize),
     pub factor: (f64, f64, f64),
 }
 
@@ -1412,7 +1353,6 @@ impl CciCycleBatchOutput {
     }
 }
 
-/// Helper to expand parameter grid
 #[inline(always)]
 fn expand_grid(r: &CciCycleBatchRange) -> Result<Vec<CciCycleParams>, CciCycleError> {
     fn axis_usize((s, e, st): (usize, usize, usize)) -> Result<Vec<usize>, CciCycleError> {
@@ -1424,25 +1364,40 @@ fn expand_grid(r: &CciCycleBatchRange) -> Result<Vec<CciCycleParams>, CciCycleEr
             let mut v = s;
             while v <= e {
                 vals.push(v);
-                v = match v.checked_add(st) { Some(n) => n, None => break };
+                v = match v.checked_add(st) {
+                    Some(n) => n,
+                    None => break,
+                };
             }
         } else {
             let mut v = s;
             while v >= e {
                 vals.push(v);
-                if v < st { break; }
+                if v < st {
+                    break;
+                }
                 v -= st;
-                if v == 0 && e > 0 { break; }
+                if v == 0 && e > 0 {
+                    break;
+                }
             }
         }
         if vals.is_empty() {
-            return Err(CciCycleError::InvalidRange { start: s.to_string(), end: e.to_string(), step: st.to_string() });
+            return Err(CciCycleError::InvalidRange {
+                start: s.to_string(),
+                end: e.to_string(),
+                step: st.to_string(),
+            });
         }
         Ok(vals)
     }
     fn axis_f64((s, e, st): (f64, f64, f64)) -> Result<Vec<f64>, CciCycleError> {
         if !st.is_finite() {
-            return Err(CciCycleError::InvalidRange { start: s.to_string(), end: e.to_string(), step: st.to_string() });
+            return Err(CciCycleError::InvalidRange {
+                start: s.to_string(),
+                end: e.to_string(),
+                step: st.to_string(),
+            });
         }
         if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
             return Ok(vec![s]);
@@ -1464,7 +1419,11 @@ fn expand_grid(r: &CciCycleBatchRange) -> Result<Vec<CciCycleParams>, CciCycleEr
             }
         }
         if vals.is_empty() {
-            return Err(CciCycleError::InvalidRange { start: s.to_string(), end: e.to_string(), step: st.to_string() });
+            return Err(CciCycleError::InvalidRange {
+                start: s.to_string(),
+                end: e.to_string(),
+                step: st.to_string(),
+            });
         }
         Ok(vals)
     }
@@ -1477,13 +1436,15 @@ fn expand_grid(r: &CciCycleBatchRange) -> Result<Vec<CciCycleParams>, CciCycleEr
     let mut out = Vec::with_capacity(cap);
     for &l in &lens {
         for &f in &facts {
-            out.push(CciCycleParams { length: Some(l), factor: Some(f) });
+            out.push(CciCycleParams {
+                length: Some(l),
+                factor: Some(f),
+            });
         }
     }
     Ok(out)
 }
 
-/// Batch processing with kernel selection
 pub fn cci_cycle_batch_with_kernel(
     data: &[f64],
     sweep: &CciCycleBatchRange,
@@ -1505,30 +1466,26 @@ pub fn cci_cycle_batch_with_kernel(
         .checked_mul(cols)
         .ok_or_else(|| CciCycleError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
         .map(|p| {
             let length = p.length.unwrap();
-            
+
             let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             first + length * 4
         })
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
-    let out: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, total)
-    };
+    let out: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, total) };
 
-    
     let do_row = |row: usize, dst: &mut [f64]| -> Result<(), CciCycleError> {
         let prm = combos[row].clone();
         let inp = CciCycleInput::from_slice(data, prm);
-        
+
         let rk = match kernel {
             Kernel::ScalarBatch => Kernel::Scalar,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1568,7 +1525,6 @@ pub fn cci_cycle_batch_with_kernel(
         cols,
     })
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "cci_cycle")]
@@ -1618,7 +1574,14 @@ impl CciCycleStreamPy {
         let stream =
             CciCycleStream::try_new(params).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let gate = length.saturating_add(2);
-        Ok(CciCycleStreamPy { stream, length, factor, gate, i: 0, hist: Vec::new() })
+        Ok(CciCycleStreamPy {
+            stream,
+            length,
+            factor,
+            gate,
+            i: 0,
+            hist: Vec::new(),
+        })
     }
 
     fn update(&mut self, value: f64) -> Option<f64> {
@@ -1626,9 +1589,14 @@ impl CciCycleStreamPy {
         let idx = self.i;
         self.hist.push(value);
         self.i = self.i.wrapping_add(1);
-        if idx < self.gate { return None; }
-        
-        let params = CciCycleParams { length: Some(self.length), factor: Some(self.factor) };
+        if idx < self.gate {
+            return None;
+        }
+
+        let params = CciCycleParams {
+            length: Some(self.length),
+            factor: Some(self.factor),
+        };
         let input = CciCycleInput::from_slice(&self.hist, params);
         cci_cycle_with_kernel(&input, Kernel::Scalar)
             .ok()
@@ -1670,7 +1638,7 @@ pub fn cci_cycle_batch_py<'py>(
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
         };
-        
+
         let do_row = |row: usize, dst: &mut [f64]| -> Result<(), CciCycleError> {
             let prm = combos[row].clone();
             let inp = CciCycleInput::from_slice(slice_in, prm);
@@ -1721,8 +1689,7 @@ pub fn cci_cycle_batch_py<'py>(
     Ok(dict)
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_cycle_js(data: &[f64], length: usize, factor: f64) -> Result<Vec<f64>, JsValue> {
     let params = CciCycleParams {
@@ -1731,13 +1698,13 @@ pub fn cci_cycle_js(data: &[f64], length: usize, factor: f64) -> Result<Vec<f64>
     };
     let input = CciCycleInput::from_slice(data, params);
 
-    let mut output = alloc_with_nan_prefix(data.len(), 0); 
+    let mut output = alloc_with_nan_prefix(data.len(), 0);
     cci_cycle_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_cycle_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1746,7 +1713,7 @@ pub fn cci_cycle_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_cycle_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1754,7 +1721,7 @@ pub fn cci_cycle_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_cycle_into(
     in_ptr: *const f64,
@@ -1792,15 +1759,14 @@ pub fn cci_cycle_into(
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CciCycleBatchConfig {
     pub length_range: (usize, usize, usize),
     pub factor_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CciCycleBatchJsOutput {
     pub values: Vec<f64>,
@@ -1809,7 +1775,7 @@ pub struct CciCycleBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = cci_cycle_batch)]
 pub fn cci_cycle_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: CciCycleBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1832,7 +1798,6 @@ pub fn cci_cycle_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cci_cycle_cuda_batch_dev")]
 #[pyo3(signature = (data, length_range, factor_range, device_id=0))]
@@ -1853,8 +1818,8 @@ pub fn cci_cycle_cuda_batch_dev_py(
         factor: factor_range,
     };
     let (inner, dev_id, ctx) = py.allow_threads(|| {
-        let cuda = CudaCciCycle::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();
         let out = cuda
@@ -1862,7 +1827,11 @@ pub fn cci_cycle_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out, dev_id, ctx))
     })?;
-    Ok(CciCycleDeviceArrayF32Py { inner: Some(inner), _ctx: ctx, device_id: dev_id })
+    Ok(CciCycleDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1890,8 +1859,8 @@ pub fn cci_cycle_cuda_many_series_one_param_dev_py(
         factor: Some(factor),
     };
     let (inner, dev_id, ctx) = py.allow_threads(|| {
-        let cuda = CudaCciCycle::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaCciCycle::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();
         let out = cuda
@@ -1899,7 +1868,11 @@ pub fn cci_cycle_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out, dev_id, ctx))
     })?;
-    Ok(CciCycleDeviceArrayF32Py { inner: Some(inner), _ctx: ctx, device_id: dev_id })
+    Ok(CciCycleDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1936,7 +1909,7 @@ impl CciCycleDeviceArrayF32Py {
             inner.device_ptr() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        // Kernel execution completes and stream is synchronized before returning; omit stream.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1954,8 +1927,7 @@ impl CciCycleDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1973,7 +1945,7 @@ impl CciCycleDeviceArrayF32Py {
                 }
             }
         }
-        // Kernels are synchronized before returning the handle; we can ignore producer/consumer streams.
+
         let _ = stream;
 
         let inner = self
@@ -1991,7 +1963,6 @@ impl CciCycleDeviceArrayF32Py {
     }
 }
 
-// ==================== UNIT TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2001,7 +1972,6 @@ mod tests {
     use proptest::prelude::*;
     use std::error::Error;
 
-    // ==================== TEST GENERATION MACROS ====================
     macro_rules! generate_all_cci_cycle_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -2058,7 +2028,6 @@ mod tests {
         let input = CciCycleInput::from_candles(&candles, "close", CciCycleParams::default());
         let result = cci_cycle_with_kernel(&input, kernel)?;
 
-        // REFERENCE VALUES FROM PINESCRIPT
         let expected_last_five = [
             9.25177192,
             20.49219826,
@@ -2085,7 +2054,6 @@ mod tests {
 
     #[test]
     fn test_cci_cycle_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small non-trivial input with an initial NaN prefix to exercise warmup.
         let n = 256usize;
         let mut data: Vec<f64> = (0..n)
             .map(|i| ((i as f64) * 0.037).sin() * 2.0 + (i as f64) * 0.01)
@@ -2097,10 +2065,8 @@ mod tests {
         let params = CciCycleParams::default();
         let input = CciCycleInput::from_slice(&data, params);
 
-        // Baseline via Vec-returning API
         let baseline = cci_cycle(&input)?.values;
 
-        // Preallocated destination; function will set warmup NaNs
         let mut out = vec![0.0; data.len()];
         cci_cycle_into(&input, &mut out)?;
 
@@ -2280,17 +2246,14 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // First calculation
         let input = CciCycleInput::from_candles(&candles, "close", CciCycleParams::default());
         let output1 = cci_cycle_with_kernel(&input, kernel)?;
 
-        // Use output as input for second calculation
         let input2 = CciCycleInput::from_slice(&output1.values, CciCycleParams::default());
         let output2 = cci_cycle_with_kernel(&input2, kernel)?;
 
         assert_eq!(output2.values.len(), output1.values.len());
 
-        // Check that we get valid output
         let non_nan_count = output2.values.iter().filter(|&&v| !v.is_nan()).count();
         assert!(
             non_nan_count > 0,
@@ -2304,8 +2267,6 @@ mod tests {
     fn check_cci_cycle_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Data with more valid values to meet minimum requirements
-        // CCI Cycle needs at least length*2 valid data points
         let data_with_nans = vec![
             1.0,
             2.0,
@@ -2356,7 +2317,6 @@ mod tests {
         let input = CciCycleInput::from_slice(&data_with_nans, params.clone());
         let result = cci_cycle_with_kernel(&input, kernel);
 
-        // The indicator should handle data with some NaN values
         assert!(
             result.is_ok(),
             "[{}] Should handle data with some NaN values",
@@ -2365,7 +2325,7 @@ mod tests {
 
         if let Ok(output) = result {
             assert_eq!(output.values.len(), data_with_nans.len());
-            // Should have some valid output values despite NaN in input
+
             let valid_count = output.values.iter().filter(|&&v| !v.is_nan()).count();
             assert!(
                 valid_count > 0,
@@ -2374,7 +2334,6 @@ mod tests {
             );
         }
 
-        // Test with too many NaNs (should fail)
         let mostly_nans = vec![f64::NAN; 20];
         let input2 = CciCycleInput::from_slice(&mostly_nans, params);
         let result2 = cci_cycle_with_kernel(&input2, kernel);
@@ -2388,7 +2347,6 @@ mod tests {
     }
 
     fn check_cci_cycle_streaming(test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        // Note: Streaming doesn't use kernel selection, but we keep the parameter for consistency
         let params = CciCycleParams {
             length: Some(10),
             factor: Some(0.5),
@@ -2403,7 +2361,6 @@ mod tests {
 
         let mut stream = stream_result?;
 
-        
         let test_data = vec![
             1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
             17.0, 18.0, 19.0, 20.0,
@@ -2412,10 +2369,6 @@ mod tests {
         for &value in &test_data {
             let _ = stream.update(value);
         }
-
-        
-        
-        
 
         Ok(())
     }
@@ -2430,7 +2383,6 @@ mod tests {
             .kernel(kernel)
             .apply_candles(&candles, "close")?;
 
-        
         let default_params = CciCycleParams::default();
         let row = output.values_for(&default_params);
 
@@ -2443,7 +2395,6 @@ mod tests {
         if let Some(values) = row {
             assert_eq!(values.len(), candles.close.len());
 
-            
             let non_nan_count = values.iter().filter(|&&v| !v.is_nan()).count();
             assert!(
                 non_nan_count > 0,
@@ -2460,7 +2411,7 @@ mod tests {
     fn check_batch_sweep(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        let data = vec![1.0; 100]; 
+        let data = vec![1.0; 100];
 
         let output = CciCycleBatchBuilder::new()
             .kernel(kernel)
@@ -2468,7 +2419,6 @@ mod tests {
             .factor_range(0.3, 0.7, 0.2)
             .apply_slice(&data)?;
 
-        
         assert_eq!(
             output.combos.len(),
             9,
@@ -2482,7 +2432,6 @@ mod tests {
         Ok(())
     }
 
-    
     generate_all_cci_cycle_tests!(
         check_cci_cycle_accuracy,
         check_cci_cycle_no_poison,
@@ -2501,7 +2450,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
 
-    
     #[cfg(feature = "proptest")]
     proptest! {
         #[test]

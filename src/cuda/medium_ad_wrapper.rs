@@ -1,24 +1,10 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Median Absolute Deviation (MEDIUM_AD).
-//!
-//! Parity with ALMA/CUDA wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/medium_ad_kernel.ptx")) with JIT
-//!   options DetermineTargetFromContext + OptLevel O2, with simpler fallbacks if needed.
-//! - NON_BLOCKING stream
-//! - VRAM guard and grid.y chunking (<= 65_535)
-//! - Public device entry points for batch (one-series × many-params) and
-//!   many-series (time-major) × one-param.
-//!
-//! Semantics:
-//! - Identical to scalar path in src/indicators/medium_ad.rs (warmup NaNs,
-//!   window NaNs → NaN, period==1 → 0.0 on finite input).
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::medium_ad::MediumAdBatchRange;
 use cust::context::{CacheConfig, Context};
 use cust::device::{Device, DeviceAttribute};
-use cust::function::{BlockSize, GridSize, Function};
+use cust::function::{BlockSize, Function, GridSize};
 use cust::launch;
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -28,7 +14,7 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-const MEDIUM_AD_MAX_PERIOD: usize = 512; 
+const MEDIUM_AD_MAX_PERIOD: usize = 512;
 
 #[derive(Debug, Error)]
 pub enum CudaMediumAdError {
@@ -36,14 +22,27 @@ pub enum CudaMediumAdError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch configuration too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer on {buf}, current device {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -175,23 +174,12 @@ impl CudaMediumAd {
         let max_threads = device
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
             .max(1) as u32;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)?
-            .max(1) as u32;
-        let max_grid_y = device
-            .get_attribute(DeviceAttribute::MaxGridDimY)?
-            .max(1) as u32;
-        let max_grid_z = device
-            .get_attribute(DeviceAttribute::MaxGridDimZ)?
-            .max(1) as u32;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)?.max(1) as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)?.max(1) as u32;
+        let max_grid_z = device.get_attribute(DeviceAttribute::MaxGridDimZ)?.max(1) as u32;
 
-        let threads_per_block = bx
-            .saturating_mul(by)
-            .saturating_mul(bz);
-        if threads_per_block > max_threads
-            || gx > max_grid_x
-            || gy > max_grid_y
-            || gz > max_grid_z
+        let threads_per_block = bx.saturating_mul(by).saturating_mul(bz);
+        if threads_per_block > max_threads || gx > max_grid_x || gy > max_grid_y || gz > max_grid_z
         {
             return Err(CudaMediumAdError::LaunchConfigTooLarge {
                 gx,
@@ -259,12 +247,10 @@ impl CudaMediumAd {
                 name: "medium_ad_batch_f32",
             })?;
 
-        
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x: u32 = Self::pick_block_x_from_occupancy(&func);
         let grid_x = ((len as u32) + block_x - 1) / block_x;
 
-        
         const max_y: usize = 65_535;
         let chunk_rows = n_combos.min(max_y).max(1);
         let mut launched = 0usize;
@@ -293,13 +279,11 @@ impl CudaMediumAd {
                     .as_raw()
                     .wrapping_add(periods_byte_offset);
                 let mut ncomb_i = cur as i32;
-                let out_elem_offset = launched
-                    .checked_mul(len)
-                    .ok_or_else(|| {
-                        CudaMediumAdError::InvalidInput(
-                            "output offset overflow in medium_ad batch kernel".into(),
-                        )
-                    })?;
+                let out_elem_offset = launched.checked_mul(len).ok_or_else(|| {
+                    CudaMediumAdError::InvalidInput(
+                        "output offset overflow in medium_ad batch kernel".into(),
+                    )
+                })?;
                 let out_byte_offset = out_elem_offset
                     .checked_mul(std::mem::size_of::<f32>())
                     .ok_or_else(|| {
@@ -307,10 +291,7 @@ impl CudaMediumAd {
                             "output byte offset overflow in medium_ad batch kernel".into(),
                         )
                     })? as u64;
-                let mut out_ptr = d_out
-                    .as_device_ptr()
-                    .as_raw()
-                    .wrapping_add(out_byte_offset);
+                let mut out_ptr = d_out.as_device_ptr().as_raw().wrapping_add(out_byte_offset);
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut data_ptr as *mut _ as *mut c_void,
@@ -338,44 +319,32 @@ impl CudaMediumAd {
     ) -> Result<DeviceArrayF32, CudaMediumAdError> {
         let len = data_f32.len();
         let elem_size = std::mem::size_of::<f32>();
-        let n_elems = combos
-            .len()
-            .checked_mul(len)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput("rows*cols overflow in medium_ad batch".into())
-            })?;
-        let out_bytes = n_elems
-            .checked_mul(elem_size)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput("output bytes overflow in medium_ad batch".into())
-            })?;
-        let in_bytes = len
-            .checked_mul(elem_size)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput("input bytes overflow in medium_ad batch".into())
-            })?;
-        let total_bytes = in_bytes
-            .checked_add(out_bytes)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput("total bytes overflow in medium_ad batch".into())
-            })?;
+        let n_elems = combos.len().checked_mul(len).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("rows*cols overflow in medium_ad batch".into())
+        })?;
+        let out_bytes = n_elems.checked_mul(elem_size).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("output bytes overflow in medium_ad batch".into())
+        })?;
+        let in_bytes = len.checked_mul(elem_size).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("input bytes overflow in medium_ad batch".into())
+        })?;
+        let total_bytes = in_bytes.checked_add(out_bytes).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("total bytes overflow in medium_ad batch".into())
+        })?;
         Self::will_fit(total_bytes, 64 << 20)?;
 
-        
         let h_data = LockedBuffer::from_slice(data_f32)?;
-        let mut d_data =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        let mut d_data = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
         unsafe { d_data.async_copy_from(&h_data, &self.stream) }?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
-        
+
         let h_periods = LockedBuffer::from_slice(&periods)?;
         let mut d_periods =
             unsafe { DeviceBuffer::<i32>::uninitialized_async(periods.len(), &self.stream) }?;
         unsafe { d_periods.async_copy_from(&h_periods, &self.stream) }?;
 
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(n_elems, &self.stream) }?;
 
         self.launch_batch_kernel(
             &d_data,
@@ -402,8 +371,6 @@ impl CudaMediumAd {
         let (combos, first_valid) = Self::prepare_batch_inputs(data_f32, sweep)?;
         self.run_batch_kernel(data_f32, &combos, first_valid)
     }
-
-    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -510,29 +477,17 @@ impl CudaMediumAd {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, period)?;
 
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput(
-                    "cols*rows overflow in medium_ad many-series".into(),
-                )
-            })?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("cols*rows overflow in medium_ad many-series".into())
+        })?;
         let elem_size = std::mem::size_of::<f32>();
-        let in_bytes = elems
-            .checked_mul(elem_size)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput(
-                    "input bytes overflow in medium_ad many-series".into(),
-                )
-            })?;
+        let in_bytes = elems.checked_mul(elem_size).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("input bytes overflow in medium_ad many-series".into())
+        })?;
         let out_bytes = in_bytes;
-        let total_bytes = in_bytes
-            .checked_add(out_bytes)
-            .ok_or_else(|| {
-                CudaMediumAdError::InvalidInput(
-                    "total bytes overflow in medium_ad many-series".into(),
-                )
-            })?;
+        let total_bytes = in_bytes.checked_add(out_bytes).ok_or_else(|| {
+            CudaMediumAdError::InvalidInput("total bytes overflow in medium_ad many-series".into())
+        })?;
         Self::will_fit(total_bytes, 64 << 20)?;
 
         let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
@@ -540,10 +495,8 @@ impl CudaMediumAd {
 
         let mut d_prices =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
-        let mut d_first =
-            unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
-        let mut d_out =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
         unsafe { d_prices.async_copy_from(&h_prices, &self.stream) }?;
         unsafe { d_first.async_copy_from(&h_first, &self.stream) }?;
@@ -560,14 +513,11 @@ impl CudaMediumAd {
     }
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    
     const ONE_SERIES_LEN: usize = 200_000;
     const PARAM_SWEEP: usize = 64;
 

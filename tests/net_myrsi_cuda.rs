@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::net_myrsi::{
     net_myrsi_batch_with_kernel, net_myrsi_with_kernel, NetMyrsiBatchRange, NetMyrsiInput,
     NetMyrsiParams,
@@ -40,7 +38,7 @@ fn net_myrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut data = vec![f64::NAN; len];
     for i in 6..len {
         let x = i as f64;
-        
+
         data[i] = (x * 0.00071).sin() + 0.0003 * (i % 11) as f64;
         if i % 997 == 0 {
             data[i] = f64::NAN;
@@ -68,7 +66,7 @@ fn net_myrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut gpu = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu)?;
 
-    let tol = 1e-3; 
+    let tol = 1e-3;
     for (idx, (&a, &b)) in cpu.values.iter().zip(gpu.iter()).enumerate() {
         assert!(
             approx_eq(a, b as f64, tol),
@@ -102,7 +100,6 @@ fn net_myrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
 
     let data_tm32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     let p = NetMyrsiParams { period: Some(14) };
     for s in 0..cols {

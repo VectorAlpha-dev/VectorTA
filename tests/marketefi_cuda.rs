@@ -1,8 +1,4 @@
-
-
-use vector_ta::indicators::marketefi::{
-    marketefi, MarketefiData, MarketefiInput, MarketefiParams,
-};
+use vector_ta::indicators::marketefi::{marketefi, MarketefiData, MarketefiInput, MarketefiParams};
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -67,7 +63,7 @@ fn marketefi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 1e-5; 
+    let tol = 1e-5;
     for i in 0..len {
         assert!(
             approx_eq(cpu[i], host[i] as f64, tol),
@@ -88,8 +84,8 @@ fn marketefi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut h_tm = vec![f64::NAN; cols * rows];
     let mut l_tm = vec![f64::NAN; cols * rows];
     let mut v_tm = vec![f64::NAN; cols * rows];
@@ -102,7 +98,6 @@ fn marketefi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

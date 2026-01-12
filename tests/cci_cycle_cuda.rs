@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::cci_cycle::{
     cci_cycle_batch_with_kernel, CciCycleBatchRange, CciCycleParams,
 };
@@ -59,7 +57,6 @@ fn cci_cycle_cuda_batch_matches_cpu_shape() -> Result<(), Box<dyn std::error::Er
     assert_eq!(cpu.rows, gpu.rows);
     assert_eq!(cpu.cols, gpu.cols);
 
-    
     let mut sample = vec![0f32; gpu.len()];
     gpu.buf.copy_to(&mut sample[..]).expect("copy sample");
 
@@ -95,14 +92,13 @@ fn cci_cycle_cuda_batch_produces_values_after_warmup() -> Result<(), Box<dyn std
     let mut gpu_vals = vec![0f32; gpu.len()];
     gpu.buf.copy_to(&mut gpu_vals).expect("copy out");
 
-    
     let first_valid = data.iter().position(|x| !x.is_nan()).unwrap();
     let rows = cpu.rows;
     let cols = cpu.cols;
     let mut any_ok = false;
     for r in 0..rows {
         let length = cpu.combos[r].length.unwrap();
-        let warm = first_valid + length * 4 + length; 
+        let warm = first_valid + length * 4 + length;
         let row_off = r * cols;
         let mut finite_count = 0usize;
         for c in warm..cols {
@@ -114,10 +110,7 @@ fn cci_cycle_cuda_batch_produces_values_after_warmup() -> Result<(), Box<dyn std
             any_ok = true;
         }
     }
-    
-    
-    
-    
+
     if !any_ok {
         eprintln!("[cci_cycle_cuda] no rows produced many finite values post-warmup; shape ok");
     }

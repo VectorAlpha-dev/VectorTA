@@ -1,30 +1,3 @@
-//! # 2-Pole High-Pass Filter
-//!
-//! A 2-pole high-pass filter using a user-specified cutoff frequency (`k`). This filter
-//! removes or attenuates lower-frequency components from the input data.
-//!
-//! ## Parameters
-//! - **period**: Window size (must be ≥ 2).
-//! - **k**: Cutoff frequency (commonly in [0.0, 1.0]) controlling the filter's
-//!          attenuation of low-frequency components (defaults to 0.707).
-//!
-//! ## Returns
-//! - **`Ok(HighPass2Output)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(HighPass2Error)`** otherwise.
-//!
-//! ## Developer Status / Decision Log
-//! - Scalar path optimized: 4x software pipeline + FMA via `mul_add`, `sin_cos` coefficients.
-//!   On 100k candles: ~312µs -> ~78µs (~4x), measured with `-C target-cpu=native`.
-//! - AVX2/AVX512: same pipeline; modest gains vs optimized scalar (~0–3%). AVX512 currently
-//!   routes to the AVX2 body. Keep both enabled; scalar remains reference.
-//! - Batch: adds optional precomputed second-difference shared across rows; engaged when rows ≥ 2.
-//!   Helps large parameter grids; neutral overhead for single-row default benches.
-//! - CUDA: kernels enabled with typed wrapper errors and preflight VRAM checks; Python interop implements
-//!   CAI v3 (byte strides, synchronized producer) and DLPack v1.x with version negotiation. Context lifetime
-//!   is retained via primary-context RAII on the Python handle; numerics unchanged.
-//! - Streaming update: O(1) state rotation retained; semantics unchanged.
-//! - Memory: follows `alma.rs` patterns (`alloc_with_nan_prefix`, `make_uninit_matrix`).
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -43,7 +16,7 @@ use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaHighPass2};
-// Use an indicator-specific Python handle (CAI v3 + DLPack) to carry context and device id.
+
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -59,12 +32,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-// ==================== PYTHON: CUDA VRAM HANDLE (CAI v3 + DLPack) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -75,7 +47,7 @@ use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct HighPass2DeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -104,12 +76,14 @@ impl HighPass2DeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -122,8 +96,7 @@ impl HighPass2DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -143,7 +116,6 @@ impl HighPass2DeviceArrayF32Py {
         }
         let _ = stream;
 
-        
         let buf = self
             .buf
             .take()
@@ -182,7 +154,10 @@ pub struct HighPass2Output {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct HighPass2Params {
     pub period: Option<usize>,
     pub k: Option<f64>,
@@ -363,42 +338,34 @@ pub enum HighPass2Error {
     #[error("highpass_2_pole: Invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("highpass_2_pole: Invalid usize range: start={start}, end={end}, step={step}")]
-    InvalidRangeUsize { start: usize, end: usize, step: usize },
+    InvalidRangeUsize {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("highpass_2_pole: Invalid f64 range: start={start}, end={end}, step={step}")]
     InvalidRangeF64 { start: f64, end: f64, step: f64 },
     #[error("highpass_2_pole: size overflow while computing {what}")]
     SizeOverflow { what: &'static str },
 }
 
-/// Computes a two-pole high-pass filter using the best available kernel.
-///
-/// # Errors
-/// Returns [`HighPass2Error`] when parameters are invalid.
 #[inline]
 pub fn highpass_2_pole(input: &HighPass2Input) -> Result<HighPass2Output, HighPass2Error> {
     highpass_2_pole_with_kernel(input, Kernel::Auto)
 }
 
-/// Computes a two-pole high-pass filter directly into the provided output buffer.
-///
-/// # Errors
-/// Returns [`HighPass2Error`] when parameters are invalid.
 #[inline]
 pub fn highpass_2_pole_into(input: &HighPass2Input, out: &mut [f64]) -> Result<(), HighPass2Error> {
     highpass_2_pole_with_kernel_into(input, Kernel::Auto, out)
 }
 
-/// Computes a two-pole high-pass filter with a specific kernel.
-///
-/// # Errors
-/// See [`HighPass2Error`] for details.
 pub fn highpass_2_pole_with_kernel(
     input: &HighPass2Input,
     kernel: Kernel,
 ) -> Result<HighPass2Output, HighPass2Error> {
     let (data, period, k, first, chosen) = highpass2_prepare(input, kernel)?;
     let warm = warmup_end(first, period);
-    let mut out = alloc_with_nan_prefix(data.len(), first); 
+    let mut out = alloc_with_nan_prefix(data.len(), first);
 
     unsafe {
         match chosen {
@@ -416,16 +383,10 @@ pub fn highpass_2_pole_with_kernel(
             _ => unreachable!(),
         }
     }
-    
-    
 
     Ok(HighPass2Output { values: out })
 }
 
-/// Computes a two-pole high-pass filter with a specific kernel directly into the provided output buffer.
-///
-/// # Errors
-/// See [`HighPass2Error`] for details.
 fn highpass_2_pole_with_kernel_into(
     input: &HighPass2Input,
     kernel: Kernel,
@@ -439,10 +400,8 @@ fn highpass_2_pole_with_kernel_into(
         });
     }
     let warm = warmup_end(first, period);
-    
-    
+
     if first > 0 {
-        
         let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
         for v in &mut out[..first] {
             *v = qnan;
@@ -463,18 +422,10 @@ fn highpass_2_pole_with_kernel_into(
             _ => unreachable!(),
         }
     }
-    
+
     Ok(())
 }
 
-/// Scalar fallback implementation.
-///
-/// Optimized with precomputed coefficients, fused multiply-add chains
-/// and a 4x software pipeline to reduce recurrence latency. Matches
-/// the same seeding/warmup semantics as ALMA-style implementations:
-/// - Preserve NaN prefix [0..first)
-/// - Seed out[first..=first+1] from inputs when available
-/// - Start recurrence from first+2
 #[inline(always)]
 pub unsafe fn highpass_2_pole_scalar_(
     data: &[f64],
@@ -493,7 +444,6 @@ pub unsafe fn highpass_2_pole_scalar_(
         return;
     }
 
-    
     let theta = 2.0 * PI * k / (period as f64);
     let (s, c0) = theta.sin_cos();
     let alpha = 1.0 + ((s - 1.0) / c0);
@@ -501,12 +451,10 @@ pub unsafe fn highpass_2_pole_scalar_(
     let one_minus_alpha = 1.0 - alpha;
     let c = (1.0 - 0.5 * alpha) * (1.0 - 0.5 * alpha);
 
-    
     let cm2 = -2.0 * c;
     let two_1m = 2.0 * one_minus_alpha;
     let neg_oma_sq = -(one_minus_alpha * one_minus_alpha);
 
-    
     out[first] = data[first];
     if first + 1 >= n {
         return;
@@ -516,47 +464,40 @@ pub unsafe fn highpass_2_pole_scalar_(
         return;
     }
 
-    
     let mut x_im2 = data[first];
     let mut x_im1 = data[first + 1];
     let mut y_im2 = out[first];
     let mut y_im1 = out[first + 1];
 
-    
     let mut src = data.as_ptr().add(first + 2);
     let mut dst = out.as_mut_ptr().add(first + 2);
     let mut rem = n - (first + 2);
 
     while rem >= 4 {
-        
         let x0 = *src;
         let t0 = cm2.mul_add(x_im1, c * x0);
         let t0 = c.mul_add(x_im2, t0);
         let y0 = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, t0));
         *dst = y0;
 
-        
         let x1 = *src.add(1);
         let t1 = cm2.mul_add(x0, c * x1);
         let t1 = c.mul_add(x_im1, t1);
         let y1 = two_1m.mul_add(y0, neg_oma_sq.mul_add(y_im1, t1));
         *dst.add(1) = y1;
 
-        
         let x2 = *src.add(2);
         let t2 = cm2.mul_add(x1, c * x2);
         let t2 = c.mul_add(x0, t2);
         let y2 = two_1m.mul_add(y1, neg_oma_sq.mul_add(y0, t2));
         *dst.add(2) = y2;
 
-        
         let x3 = *src.add(3);
         let t3 = cm2.mul_add(x2, c * x3);
         let t3 = c.mul_add(x1, t3);
         let y3 = two_1m.mul_add(y2, neg_oma_sq.mul_add(y1, t3));
         *dst.add(3) = y3;
 
-        
         x_im2 = x2;
         x_im1 = x3;
         y_im2 = y2;
@@ -567,7 +508,6 @@ pub unsafe fn highpass_2_pole_scalar_(
         rem -= 4;
     }
 
-    
     while rem > 0 {
         let xi = *src;
         let y = two_1m.mul_add(
@@ -588,7 +528,6 @@ pub unsafe fn highpass_2_pole_scalar_(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-/// AVX2 implementation of the filter.
 #[inline]
 pub unsafe fn highpass_2_pole_avx2(
     data: &[f64],
@@ -606,7 +545,6 @@ pub unsafe fn highpass_2_pole_avx2(
     debug_assert!(out.len() >= n);
     debug_assert!(period >= 2 && period <= n);
 
-    
     let theta = 2.0 * PI * k / period as f64;
     let (s, c0) = theta.sin_cos();
     let alpha = 1.0 + ((s - 1.0) / c0);
@@ -615,8 +553,6 @@ pub unsafe fn highpass_2_pole_avx2(
     let two_1m = 2.0 * (1.0 - alpha);
     let neg_oma_sq = -(1.0 - alpha) * (1.0 - alpha);
 
-    
-    
     out[first] = data[first];
     if first + 1 >= n {
         return;
@@ -626,47 +562,40 @@ pub unsafe fn highpass_2_pole_avx2(
         return;
     }
 
-    
-    let mut rem = n - (first + 2); 
+    let mut rem = n - (first + 2);
     let mut src = data.as_ptr().add(first + 2);
     let mut dst = out.as_mut_ptr().add(first + 2);
 
-    
     let mut x_im2 = data[first];
     let mut x_im1 = data[first + 1];
     let mut y_im2 = out[first];
     let mut y_im1 = out[first + 1];
 
     while rem >= 4 {
-        
         let x0 = *src;
         let t0 = cm2.mul_add(x_im1, c * x0);
         let t0 = c.mul_add(x_im2, t0);
         let y0 = two_1m.mul_add(y_im1, neg_oma_sq.mul_add(y_im2, t0));
         *dst = y0;
 
-        
         let x1 = *src.add(1);
         let t1 = cm2.mul_add(x0, c * x1);
         let t1 = c.mul_add(x_im1, t1);
         let y1 = two_1m.mul_add(y0, neg_oma_sq.mul_add(y_im1, t1));
         *dst.add(1) = y1;
 
-        
         let x2 = *src.add(2);
         let t2 = cm2.mul_add(x1, c * x2);
         let t2 = c.mul_add(x0, t2);
         let y2 = two_1m.mul_add(y1, neg_oma_sq.mul_add(y0, t2));
         *dst.add(2) = y2;
 
-        
         let x3 = *src.add(3);
         let t3 = cm2.mul_add(x2, c * x3);
         let t3 = c.mul_add(x1, t3);
         let y3 = two_1m.mul_add(y2, neg_oma_sq.mul_add(y1, t3));
         *dst.add(3) = y3;
 
-        
         x_im2 = x2;
         x_im1 = x3;
         y_im2 = y2;
@@ -697,7 +626,6 @@ pub unsafe fn highpass_2_pole_avx2(
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-/// AVX-512 implementation. Internally uses the AVX2 routine.
 #[inline(always)]
 pub fn highpass_2_pole_avx512(data: &[f64], period: usize, k: f64, first: usize, out: &mut [f64]) {
     unsafe { highpass_2_pole_avx2(data, period, k, first, out) }
@@ -707,17 +635,17 @@ pub fn highpass_2_pole_avx512(data: &[f64], period: usize, k: f64, first: usize,
 pub struct HighPass2Stream {
     period: usize,
     k: f64,
-    
+
     c: f64,
-    cm2: f64,        
-    two_1m: f64,     
-    neg_oma_sq: f64, 
-    
+    cm2: f64,
+    two_1m: f64,
+    neg_oma_sq: f64,
+
     x_im2: f64,
     x_im1: f64,
     y_im2: f64,
     y_im1: f64,
-    seen: usize, 
+    seen: usize,
 }
 
 impl HighPass2Stream {
@@ -738,24 +666,19 @@ impl HighPass2Stream {
 
         use core::f64::consts::PI;
 
-        
         let theta = 2.0 * PI * k / (period as f64);
 
-        
         let (s, c0) = theta.sin_cos();
 
-        
         let cos_guard = if c0.abs() < 1.0e-12 {
             c0.signum() * 1.0e-12
         } else {
             c0
         };
 
-        
         let invc = 1.0 / cos_guard;
         let alpha = (s - 1.0).mul_add(invc, 1.0);
 
-        
         let one_minus_alpha = 1.0 - alpha;
         let t = 1.0 - 0.5 * alpha;
         let c = t * t;
@@ -775,7 +698,6 @@ impl HighPass2Stream {
         })
     }
 
-    /// Reset the internal state (warmup restarts).
     #[inline(always)]
     pub fn reset(&mut self) {
         self.x_im2 = f64::NAN;
@@ -785,20 +707,13 @@ impl HighPass2Stream {
         self.seen = 0;
     }
 
-    /// O(1) streaming update.
-    ///
-    /// Returns `None` until warmup completes (i.e., until `seen >= period`),
-    /// then returns `Some(y_i)` on each call. Seeding behavior matches batch:
-    /// the first two internal outputs are pass-throughs of the inputs.
     #[inline(always)]
     pub fn update(&mut self, x_i: f64) -> Option<f64> {
-        
         if !x_i.is_finite() {
             self.reset();
             return None;
         }
 
-        
         let y_i = match self.seen {
             0 => {
                 self.x_im2 = x_i;
@@ -811,8 +726,6 @@ impl HighPass2Stream {
                 x_i
             }
             _ => {
-                
-                
                 let dx2 = self
                     .c
                     .mul_add(self.x_im2, self.cm2.mul_add(self.x_im1, self.c * x_i));
@@ -820,7 +733,6 @@ impl HighPass2Stream {
                     .two_1m
                     .mul_add(self.y_im1, self.neg_oma_sq.mul_add(self.y_im2, dx2));
 
-                
                 self.x_im2 = self.x_im1;
                 self.x_im1 = x_i;
                 self.y_im2 = self.y_im1;
@@ -832,7 +744,6 @@ impl HighPass2Stream {
 
         self.seen += 1;
 
-        
         if self.seen >= self.period {
             Some(y_i)
         } else {
@@ -840,13 +751,11 @@ impl HighPass2Stream {
         }
     }
 
-    /// How many samples remain before `update()` starts returning `Some(..)`.
     #[inline(always)]
     pub fn warmup_left(&self) -> usize {
         self.period.saturating_sub(self.seen)
     }
 
-    /// Expose coefficients for debugging/validation if desired.
     #[inline(always)]
     pub fn coeffs(&self) -> (f64, f64, f64, f64) {
         (self.c, self.cm2, self.two_1m, self.neg_oma_sq)
@@ -970,7 +879,11 @@ fn expand_grid(r: &HighPass2BatchRange) -> Result<Vec<HighPass2Params>, HighPass
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let v: Vec<usize> = (lo..=hi).step_by(step).collect();
         if v.is_empty() {
             return Err(HighPass2Error::InvalidRangeUsize { start, end, step });
@@ -983,7 +896,11 @@ fn expand_grid(r: &HighPass2BatchRange) -> Result<Vec<HighPass2Params>, HighPass
         if step.abs() < EPS || (start - end).abs() < EPS {
             return Ok(vec![start]);
         }
-        let step_eff = if start <= end { step.abs() } else { -step.abs() };
+        let step_eff = if start <= end {
+            step.abs()
+        } else {
+            -step.abs()
+        };
         let mut v = Vec::new();
         let mut x = start;
         if step_eff > 0.0 {
@@ -1007,11 +924,16 @@ fn expand_grid(r: &HighPass2BatchRange) -> Result<Vec<HighPass2Params>, HighPass
     let combos_len = periods
         .len()
         .checked_mul(ks.len())
-        .ok_or(HighPass2Error::SizeOverflow { what: "parameter grid" })?;
+        .ok_or(HighPass2Error::SizeOverflow {
+            what: "parameter grid",
+        })?;
     let mut out = Vec::with_capacity(combos_len);
     for &p in &periods {
         for &k in &ks {
-            out.push(HighPass2Params { period: Some(p), k: Some(k) });
+            out.push(HighPass2Params {
+                period: Some(p),
+                k: Some(k),
+            });
         }
     }
     Ok(out)
@@ -1062,29 +984,23 @@ fn highpass_2_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(HighPass2Error::SizeOverflow { what: "batch output elements" })?;
 
-    
+    let _total = rows.checked_mul(cols).ok_or(HighPass2Error::SizeOverflow {
+        what: "batch output elements",
+    })?;
+
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| warmup_end(first, c.period.unwrap()))
         .collect();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
-    
     let dd: Option<Vec<f64>> = if rows >= 2 {
         let mut v = vec![0.0_f64; cols];
         if first + 2 < cols {
-            
             for i in (first + 2)..cols {
-                
                 v[i] = data[i] - 2.0 * data[i - 1] + data[i - 2];
             }
         }
@@ -1093,7 +1009,6 @@ fn highpass_2_pole_batch_inner(
         None
     };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let k = combos[row].k.unwrap();
@@ -1112,7 +1027,6 @@ fn highpass_2_pole_batch_inner(
                 }
             }
         }
-        
     };
 
     if parallel {
@@ -1135,7 +1049,6 @@ fn highpass_2_pole_batch_inner(
         }
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -1164,8 +1077,6 @@ pub unsafe fn highpass_2_pole_row_scalar(
     highpass_2_pole_scalar_(data, period, k, first, out);
 }
 
-/// Scalar per-row kernel using a precomputed second-difference `dd` shared across rows.
-/// dd[i] = x[i] - 2x[i-1] + x[i-2]; only used for indices >= first+2.
 #[inline(always)]
 pub unsafe fn highpass_2_pole_row_scalar_dd(
     data: &[f64],
@@ -1193,7 +1104,6 @@ pub unsafe fn highpass_2_pole_row_scalar_dd(
     let two_1m = 2.0 * one_minus_alpha;
     let neg_oma_sq = -(one_minus_alpha * one_minus_alpha);
 
-    
     out[first] = data[first];
     if first + 1 >= n {
         return;
@@ -1203,11 +1113,9 @@ pub unsafe fn highpass_2_pole_row_scalar_dd(
         return;
     }
 
-    
     let mut y_im2 = out[first];
     let mut y_im1 = out[first + 1];
 
-    
     let mut src = dd.as_ptr().add(first + 2);
     let mut dst = out.as_mut_ptr().add(first + 2);
     let mut rem = n - (first + 2);
@@ -1282,10 +1190,9 @@ mod tests {
 
     #[test]
     fn test_highpass_2_pole_into_matches_api() {
-        
         let len = 256usize;
         let mut data = vec![0.0f64; len];
-        
+
         data[0] = f64::NAN;
         data[1] = f64::NAN;
         data[2] = f64::NAN;
@@ -1500,19 +1407,16 @@ mod tests {
         use proptest::prelude::*;
         use std::f64::consts::PI;
 
-        
-        let strat = (2usize..=50) 
-            .prop_flat_map(|period| {
-                (
-                    
-                    prop::collection::vec(
-                        (-1000f64..1000f64).prop_filter("finite", |x| x.is_finite()),
-                        period.max(10)..400, 
-                    ),
-                    Just(period),
-                    0.01f64..0.99f64, 
-                )
-            });
+        let strat = (2usize..=50).prop_flat_map(|period| {
+            (
+                prop::collection::vec(
+                    (-1000f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+                    period.max(10)..400,
+                ),
+                Just(period),
+                0.01f64..0.99f64,
+            )
+        });
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period, k)| {
@@ -1522,19 +1426,14 @@ mod tests {
                 };
                 let input = HighPass2Input::from_slice(&data, params);
 
-                
                 let HighPass2Output { values: out } =
                     highpass_2_pole_with_kernel(&input, kernel).unwrap();
 
-                
                 let HighPass2Output { values: ref_out } =
                     highpass_2_pole_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len());
 
-                
-                
                 if data.len() > 0 && data[0].is_finite() {
                     prop_assert!(
                         (out[0] - data[0]).abs() < 1e-10,
@@ -1552,10 +1451,7 @@ mod tests {
                     );
                 }
 
-                
-                
                 if data.len() >= 3 {
-                    
                     let angle = 2.0 * PI * k / (period as f64);
                     let sin_val = angle.sin();
                     let cos_val = angle.cos();
@@ -1564,7 +1460,6 @@ mod tests {
                     let one_minus_alpha = 1.0 - alpha;
                     let one_minus_alpha_sq = one_minus_alpha * one_minus_alpha;
 
-                    
                     for i in 2..(10.min(data.len())) {
                         if data[i].is_finite() && data[i - 1].is_finite() && data[i - 2].is_finite()
                         {
@@ -1583,8 +1478,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let const_start = data.len().saturating_sub(period * 3);
                 let const_end = data.len();
                 if const_start < const_end && const_end - const_start >= period {
@@ -1594,7 +1487,6 @@ mod tests {
                         let is_constant = window.iter().all(|&x| (x - mean).abs() < 1e-6);
 
                         if is_constant && mean.abs() > 1e-6 {
-                            
                             let final_out = out[const_end - 1];
                             let relative_output = final_out.abs() / mean.abs();
                             prop_assert!(relative_output < 0.01,
@@ -1604,20 +1496,12 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if data.len() > period * 3 {
-                    
                     for i in period..(data.len() - period * 2) {
                         if i > 0 && data[i].is_finite() && data[i - 1].is_finite() {
                             let change = (data[i] - data[i - 1]).abs();
                             if change > 200.0 {
-                                
-                                
-                                
                                 if out[i].is_finite() {
-                                    
                                     prop_assert!(
                                         out[i].abs() > 0.01,
                                         "High-pass should respond to change of {} at index {}",
@@ -1625,21 +1509,18 @@ mod tests {
                                         i
                                     );
                                 }
-                                break; 
+                                break;
                             }
                         }
                     }
                 }
 
-                
-                
                 if data.len() > 10 {
                     let alt_start = 5;
                     let alt_end = (alt_start + 8).min(data.len());
                     let mut is_alternating = true;
                     for i in (alt_start + 1)..alt_end {
                         if data[i].is_finite() && data[i - 1].is_finite() {
-                            
                             if data[i] * data[i - 1] > 0.0 {
                                 is_alternating = false;
                                 break;
@@ -1651,8 +1532,6 @@ mod tests {
                     }
 
                     if is_alternating && alt_end > alt_start + 4 {
-                        
-                        
                         let input_amp = data[alt_start..alt_end]
                             .iter()
                             .filter(|x| x.is_finite())
@@ -1677,13 +1556,11 @@ mod tests {
                     }
                 }
 
-                
                 for i in 2..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
                     if !y.is_finite() || !r.is_finite() {
-                        
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
                             "Non-finite mismatch at index {}: {} vs {}",
@@ -1692,7 +1569,6 @@ mod tests {
                             r
                         );
                     } else {
-                        
                         let abs_diff = (y - r).abs();
                         let rel_diff = if r.abs() > 1e-10 {
                             abs_diff / r.abs()
@@ -1712,8 +1588,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let input_bound = data
                     .iter()
                     .filter(|x| x.is_finite())
@@ -1721,10 +1595,6 @@ mod tests {
                     .fold(0.0, f64::max);
 
                 if input_bound > 0.0 && input_bound.is_finite() {
-                    
-                    
-                    
-                    
                     let max_gain = 32.0;
                     let expected_bound = input_bound * max_gain;
 
@@ -1742,7 +1612,6 @@ mod tests {
                     }
                 }
 
-                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         let bits = val.to_bits();
@@ -1764,9 +1633,7 @@ mod tests {
                     }
                 }
 
-                
                 if k < 0.02 || k > 0.98 {
-                    
                     let finite_count = out.iter().filter(|x| x.is_finite()).count();
                     let expected_finite = data.iter().filter(|x| x.is_finite()).count();
                     prop_assert!(
@@ -1784,11 +1651,10 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(feature = "proptest"))]
     fn check_highpass2_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let data = vec![5.0; 100];
         let params = HighPass2Params {
             period: Some(10),
@@ -1805,18 +1671,17 @@ mod tests {
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let data = vec![
             f64::NAN,
             f64::NAN,
-            f64::NAN, 
+            f64::NAN,
             100.0,
             102.0,
             98.0,
             103.0,
             97.0,
             105.0,
-            99.0, 
+            99.0,
             101.0,
             104.0,
             96.0,
@@ -1831,7 +1696,6 @@ mod tests {
         let input = HighPass2Input::from_slice(&data, params);
         let output = highpass_2_pole_with_kernel(&input, kernel)?;
 
-        
         for i in 0..3 {
             assert!(
                 output.values[i].is_nan(),
@@ -1842,8 +1706,6 @@ mod tests {
             );
         }
 
-        
-        
         for i in 7..data.len() {
             assert!(
                 !output.values[i].is_nan(),
@@ -1853,11 +1715,9 @@ mod tests {
             );
         }
 
-        
-        let mut out_slice = vec![999.0; data.len()]; 
+        let mut out_slice = vec![999.0; data.len()];
         highpass_2_pole_into(&input, &mut out_slice)?;
 
-        
         for i in 0..3 {
             assert!(
                 out_slice[i].is_nan(),
@@ -1894,7 +1754,7 @@ mod tests {
             }
         }
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_highpass2_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1902,60 +1762,56 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_cases = vec![
             HighPass2Params {
                 period: Some(48),
                 k: Some(0.707),
-            }, 
+            },
             HighPass2Params {
                 period: Some(10),
                 k: Some(0.3),
-            }, 
+            },
             HighPass2Params {
                 period: Some(100),
                 k: Some(0.9),
-            }, 
+            },
             HighPass2Params {
                 period: Some(20),
                 k: Some(0.5),
-            }, 
+            },
             HighPass2Params {
                 period: Some(2),
                 k: Some(0.1),
-            }, 
+            },
             HighPass2Params {
                 period: Some(60),
                 k: Some(0.8),
-            }, 
+            },
             HighPass2Params {
                 period: Some(30),
                 k: Some(0.2),
-            }, 
+            },
             HighPass2Params {
                 period: None,
                 k: None,
-            }, 
+            },
             HighPass2Params {
                 period: Some(15),
                 k: Some(0.95),
-            }, 
+            },
         ];
 
         for params in test_cases {
             let input = HighPass2Input::from_candles(&candles, "close", params.clone());
             let output = highpass_2_pole_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1964,7 +1820,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1973,7 +1828,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1987,7 +1841,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_highpass2_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2057,7 +1910,7 @@ mod tests {
             }
         };
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2065,17 +1918,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            
             ((10, 30, 10), (0.5, 0.9, 0.2)),
-            
-            ((2, 2, 0), (0.1, 0.1, 0.0)), 
-            ((100, 120, 20), (0.2, 0.8, 0.3)), 
-            ((5, 15, 5), (0.1, 0.5, 0.2)), 
-            ((20, 60, 20), (0.3, 0.9, 0.3)), 
-            ((48, 48, 0), (0.707, 0.707, 0.0)), 
-            ((3, 12, 3), (0.05, 0.95, 0.45)), 
+            ((2, 2, 0), (0.1, 0.1, 0.0)),
+            ((100, 120, 20), (0.2, 0.8, 0.3)),
+            ((5, 15, 5), (0.1, 0.5, 0.2)),
+            ((20, 60, 20), (0.3, 0.9, 0.3)),
+            ((48, 48, 0), (0.707, 0.707, 0.0)),
+            ((3, 12, 3), (0.05, 0.95, 0.45)),
         ];
 
         for ((p_start, p_end, p_step), (k_start, k_end, k_step)) in batch_configs {
@@ -2085,9 +1935,7 @@ mod tests {
                 .k_range(k_start, k_end, k_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2097,7 +1945,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -2106,7 +1953,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -2115,7 +1961,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -2129,7 +1974,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2139,7 +1983,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-/// highpass_2_pole_batch_inner_into writes directly to the output buffer
 #[inline(always)]
 fn highpass_2_pole_batch_inner_into(
     data: &[f64],
@@ -2168,25 +2011,25 @@ fn highpass_2_pole_batch_inner_into(
     }
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(HighPass2Error::SizeOverflow { what: "batch output elements" })?;
+    let expected = rows.checked_mul(cols).ok_or(HighPass2Error::SizeOverflow {
+        what: "batch output elements",
+    })?;
     if out.len() != expected {
-        return Err(HighPass2Error::OutputLengthMismatch { out_len: out.len(), expected });
+        return Err(HighPass2Error::OutputLengthMismatch {
+            out_len: out.len(),
+            expected,
+        });
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| warmup_end(first, c.period.unwrap()))
         .collect();
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
@@ -2201,7 +2044,6 @@ fn highpass_2_pole_batch_inner_into(
             Kernel::Avx2 => highpass_2_pole_row_avx2(data, first, period, k, out_row),
             _ => highpass_2_pole_row_scalar(data, first, period, k, out_row),
         }
-        
     };
 
     if parallel {
@@ -2226,7 +2068,6 @@ fn highpass_2_pole_batch_inner_into(
 
     Ok(combos)
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass_2_pole")]
@@ -2276,8 +2117,7 @@ pub fn highpass_2_pole_batch_py<'py>(
         k: k_range,
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
     let total: usize = rows
@@ -2346,7 +2186,8 @@ pub fn highpass_2_pole_cuda_batch_dev_py(
     };
 
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .highpass2_batch_dev(slice_in, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2354,7 +2195,13 @@ pub fn highpass_2_pole_cuda_batch_dev_py(
     })?;
 
     let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
-    Ok(HighPass2DeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
+    Ok(HighPass2DeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2387,7 +2234,8 @@ pub fn highpass_2_pole_cuda_many_series_one_param_dev_py(
     };
 
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaHighPass2::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let out = cuda
             .highpass2_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2395,7 +2243,13 @@ pub fn highpass_2_pole_cuda_many_series_one_param_dev_py(
     })?;
 
     let crate::cuda::DeviceArrayF32 { buf, rows, cols } = inner;
-    Ok(HighPass2DeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
+    Ok(HighPass2DeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(feature = "python")]
@@ -2422,8 +2276,7 @@ impl HighPass2StreamPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_2_pole_js(data: &[f64], period: usize, k: f64) -> Result<Vec<f64>, JsValue> {
     let params = HighPass2Params {
@@ -2432,31 +2285,25 @@ pub fn highpass_2_pole_js(data: &[f64], period: usize, k: f64) -> Result<Vec<f64
     };
     let input = HighPass2Input::from_slice(data, params);
 
-    
     let mut output = vec![0.0; data.len()];
 
-    
     highpass_2_pole_into(&input, &mut output).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_2_pole_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_2_pole_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2464,7 +2311,7 @@ pub fn highpass_2_pole_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = highpass_2_pole_into)]
 pub fn highpass_2_pole_into_wasm(
     in_ptr: *const f64,
@@ -2473,7 +2320,6 @@ pub fn highpass_2_pole_into_wasm(
     period: usize,
     k: f64,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
@@ -2486,18 +2332,14 @@ pub fn highpass_2_pole_into_wasm(
         };
         let input = HighPass2Input::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             highpass_2_pole_into(&input, &mut temp)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             highpass_2_pole_into(&input, out).map_err(|e| JsValue::from_str(&e.to_string()))?;
         }
@@ -2506,16 +2348,14 @@ pub fn highpass_2_pole_into_wasm(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HighPass2BatchConfig {
     pub period_range: (usize, usize, usize),
     pub k_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HighPass2BatchJsOutput {
     pub values: Vec<f64>,
@@ -2524,7 +2364,7 @@ pub struct HighPass2BatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = highpass_2_pole_batch)]
 pub fn highpass_2_pole_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: HighPass2BatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2535,7 +2375,6 @@ pub fn highpass_2_pole_batch_unified_js(data: &[f64], config: JsValue) -> Result
         k: config.k_range,
     };
 
-    
     let batch_kernel = detect_best_batch_kernel();
     let compute_kernel = match batch_kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2557,9 +2396,7 @@ pub fn highpass_2_pole_batch_unified_js(data: &[f64], config: JsValue) -> Result
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_2_pole_batch_into(
     in_ptr: *const f64,
@@ -2583,9 +2420,8 @@ pub fn highpass_2_pole_batch_into(
             k: (k_start, k_end, k_step),
         };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let rows = combos.len();
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos.len();
         let cols = len;
 
         if rows * cols == 0 {
@@ -2594,10 +2430,8 @@ pub fn highpass_2_pole_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         let kernel = detect_best_batch_kernel();
 
-        
         let compute_kernel = match kernel {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -2605,7 +2439,6 @@ pub fn highpass_2_pole_batch_into(
             _ => Kernel::Scalar,
         };
 
-        
         highpass_2_pole_batch_inner_into(data, &sweep, compute_kernel, true, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

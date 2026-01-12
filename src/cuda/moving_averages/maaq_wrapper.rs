@@ -1,51 +1,31 @@
-//! CUDA wrapper for MAAQ (Moving Average Adaptive Q) kernels.
-//!
-//! Aligned with the ALMA wrapper design/policy:
-//! - Robust PTX loading with context-targeted JIT and opt-level fallbacks
-//! - Policy enums for explicit kernel selection (batch/many-series)
-//! - VRAM estimation with headroom; fail early when insufficient
-//! - Chunking over parameter combinations (<= 65_535 per launch)
-//! - NON_BLOCKING stream; async copies and pinned buffers where helpful
-//!
-//! Kernels expected:
-//! - "maaq_batch_f32"                          
-//! - "maaq_multi_series_one_param_f32"         
-//!
-//! Notes:
-//! - MAAQ is a recurrence/IIR style indicator. Each thread/block scans time
-//!   sequentially per parameter-combo or per series. Tiling only affects launch
-//!   geometry; math remains per-thread sequential.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::maaq::{expand_grid, MaaqBatchRange, MaaqParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
-use cust::error::CudaError;
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    
+
     Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    
+
     OneD { block_x: u32 },
 }
 
@@ -78,13 +58,22 @@ pub enum CudaMaaqError {
     #[error(
         "Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
     )]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
-    #[error(
-        "Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
-    )]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer on device {buf}, current device {current}")]
     DeviceMismatch { buf: i32, current: i32 },
     #[error("arithmetic overflow computing {0}")]
@@ -103,8 +92,6 @@ pub enum ManySeriesKernelSelected {
     OneD { block_x: u32 },
 }
 
-/// Device buffer handle returned by MAAQ wrappers.
-/// Contains context guard and device id for safe interop.
 pub struct DeviceArrayF32Maaq {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -115,28 +102,31 @@ pub struct DeviceArrayF32Maaq {
 
 impl DeviceArrayF32Maaq {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaMaaq {
     module: Module,
     stream: Stream,
-    _context: Arc<Context>, // keep context alive and clonable
+    _context: Arc<Context>,
     device_id: u32,
     policy: CudaMaaqPolicy,
     last_batch: Option<BatchKernelSelected>,
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // Cached device attributes
+
     max_grid_x: usize,
     max_threads_per_block: u32,
 }
 
 impl CudaMaaq {
-    /// Extended: returns a handle with context + device id for Python interop
     pub fn maaq_batch_dev_ex(
         &self,
         data_f32: &[f32],
@@ -145,7 +135,6 @@ impl CudaMaaq {
         let (combos, first_valid, len, max_period) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM estimate: inputs + params + outputs (checked arithmetic)
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or(CudaMaaqError::ArithmeticOverflow("prices_bytes"))?;
@@ -165,7 +154,7 @@ impl CudaMaaq {
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaMaaqError::ArithmeticOverflow("required_bytes"))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let mut periods_i32 = Vec::with_capacity(n_combos);
@@ -216,7 +205,7 @@ impl CudaMaaq {
         let context = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/maaq_kernel.ptx"));
-        // Prefer context-targeted JIT with a stable opt level; fall back progressively
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -225,15 +214,14 @@ impl CudaMaaq {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        let max_grid_x = device
-            .get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
-        let max_threads_per_block = device
-            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_grid_x = device.get_attribute(cust::device::DeviceAttribute::MaxGridDimX)? as usize;
+        let max_threads_per_block =
+            device.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
 
         Ok(Self {
             module,
@@ -311,8 +299,6 @@ impl CudaMaaq {
         }
     }
 
-    // ---------- Utilities ----------
-
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -334,7 +320,11 @@ impl CudaMaaq {
                 if need <= free {
                     Ok(())
                 } else {
-                    Err(CudaMaaqError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                    Err(CudaMaaqError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom: headroom_bytes,
+                    })
                 }
             }
             Err(_) => Ok(()),
@@ -350,7 +340,9 @@ impl CudaMaaq {
     }
 
     #[inline]
-    fn grid_x_limit(&self) -> usize { self.max_grid_x }
+    fn grid_x_limit(&self) -> usize {
+        self.max_grid_x
+    }
 
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -439,12 +431,12 @@ impl CudaMaaq {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("maaq_batch_f32")
-            .map_err(|_| CudaMaaqError::MissingKernelSymbol { name: "maaq_batch_f32" })?;
+        let func = self.module.get_function("maaq_batch_f32").map_err(|_| {
+            CudaMaaqError::MissingKernelSymbol {
+                name: "maaq_batch_f32",
+            }
+        })?;
 
-        // Selection + record
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 32u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
@@ -465,7 +457,6 @@ impl CudaMaaq {
         }
         self.maybe_log_batch_debug();
 
-        // Launch in chunks based on actual grid.x limit
         let max_chunk = self.grid_x_limit();
         for (start, len) in Self::chunk_pairs(n_combos, max_chunk) {
             let grid: GridSize = (len as u32, 1, 1).into();
@@ -481,7 +472,7 @@ impl CudaMaaq {
                 let mut series_len_i = series_len as i32;
                 let mut n_combos_i = len as i32;
                 let mut max_period_i = max_period as i32;
-                // slice output per chunk (row-major: combos × series_len)
+
                 let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
@@ -503,8 +494,6 @@ impl CudaMaaq {
         Ok(())
     }
 
-    /// Device-level batch entry: launches `maaq_batch_f32` using preallocated device buffers.
-    /// Mirrors ALMA-style device APIs for benches and advanced callers.
     pub fn maaq_batch_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -548,7 +537,6 @@ impl CudaMaaq {
         let (combos, first_valid, len, max_period) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM estimate: inputs + params + outputs (checked arithmetic)
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or(CudaMaaqError::ArithmeticOverflow("prices_bytes"))?;
@@ -568,7 +556,7 @@ impl CudaMaaq {
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or(CudaMaaqError::ArithmeticOverflow("required_bytes"))?;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let mut periods_i32 = Vec::with_capacity(n_combos);
@@ -713,7 +701,9 @@ impl CudaMaaq {
         let func = self
             .module
             .get_function("maaq_multi_series_one_param_f32")
-            .map_err(|_| CudaMaaqError::MissingKernelSymbol { name: "maaq_multi_series_one_param_f32" })?;
+            .map_err(|_| CudaMaaqError::MissingKernelSymbol {
+                name: "maaq_multi_series_one_param_f32",
+            })?;
 
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 32u32,
@@ -735,7 +725,6 @@ impl CudaMaaq {
         }
         self.maybe_log_many_debug();
 
-        // Launch in chunks over series using the actual grid.x limit
         let max_chunk = self.grid_x_limit();
         for (start, len) in Self::chunk_pairs(num_series, max_chunk) {
             let grid: GridSize = (len as u32, 1, 1).into();
@@ -743,15 +732,14 @@ impl CudaMaaq {
             let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
 
             unsafe {
-                // IMPORTANT: base pointers are offset by start; stride remains full num_series
                 let mut prices_ptr = d_prices_tm.as_device_ptr().add(start).as_raw();
                 let mut period_i = period as i32;
                 let mut fast = fast_sc;
                 let mut slow = slow_sc;
-                let mut num_series_i = num_series as i32; // stride (full column count)
+                let mut num_series_i = num_series as i32;
                 let mut series_len_i = series_len as i32;
                 let mut first_ptr = d_first_valids.as_device_ptr().add(start).as_raw();
-                // time-major output; offset by start series
+
                 let mut out_ptr = d_out_tm.as_device_ptr().add(start).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
@@ -810,7 +798,6 @@ impl CudaMaaq {
         let (first_valids, period, fast_sc, slow_sc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate (checked): prices + first_valids + out
         let prices_bytes = cols
             .checked_mul(rows)
             .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
@@ -829,8 +816,8 @@ impl CudaMaaq {
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm = self.upload_f32_large(data_tm_f32)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(CudaMaaqError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaMaaqError::Cuda)?;
         let mut d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
 
@@ -853,7 +840,6 @@ impl CudaMaaq {
         })
     }
 
-    /// Extended: returns a handle with context + device id for Python interop
     pub fn maaq_multi_series_one_param_time_major_dev_ex(
         &self,
         data_tm_f32: &[f32],
@@ -882,8 +868,8 @@ impl CudaMaaq {
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices_tm = self.upload_f32_large(data_tm_f32)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids)
-            .map_err(CudaMaaqError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaMaaqError::Cuda)?;
         let mut d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
 
@@ -927,7 +913,8 @@ impl CudaMaaq {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
         let d_prices_tm = self.upload_f32_large(data_tm_f32)?;
-        let d_first_valids = DeviceBuffer::from_slice(&first_valids).map_err(CudaMaaqError::Cuda)?;
+        let d_first_valids =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaMaaqError::Cuda)?;
         let mut d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }?;
 
@@ -941,7 +928,7 @@ impl CudaMaaq {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        // Use pinned host buffer for faster D2H
+
         self.stream.synchronize()?;
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows)? };
         unsafe {
@@ -956,10 +943,9 @@ impl CudaMaaq {
 impl CudaMaaq {
     #[inline]
     fn upload_f32_large(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaMaaqError> {
-        const PINNED_THRESH_BYTES: usize = 1 << 20; // 1 MiB
+        const PINNED_THRESH_BYTES: usize = 1 << 20;
         let n = src.len();
         if n * std::mem::size_of::<f32>() >= PINNED_THRESH_BYTES {
-            // Stage in pinned memory for true async H2D and higher throughput
             let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(n) }?;
             pinned.as_mut_slice().copy_from_slice(src);
 
@@ -973,8 +959,6 @@ impl CudaMaaq {
         }
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;

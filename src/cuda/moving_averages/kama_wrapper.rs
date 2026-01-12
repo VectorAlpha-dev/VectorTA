@@ -1,12 +1,3 @@
-//! CUDA wrapper for the Kaufman Adaptive Moving Average (KAMA) kernels.
-//!
-//! Aligns with the ALMA wrapper conventions: PTX JIT options (determine target
-//! from context, O2 with fallback), NON_BLOCKING stream, lightweight kernel
-//! policy/introspection, VRAM estimation with headroom and grid chunking for
-//! large combo counts. Behavior mirrors scalar KAMA exactly (NaN warmup and
-//! recurrence/state) while keeping intermediate arithmetic in FP64 inside
-//! kernels for numerical parity.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::moving_averages::kama::{KamaBatchRange, KamaParams};
@@ -19,8 +10,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -32,9 +23,20 @@ pub enum CudaKamaError {
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Out of memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Device mismatch: buffer device={buf} current={current}")]
@@ -43,7 +45,6 @@ pub enum CudaKamaError {
     NotImplemented,
 }
 
-/// VRAM-backed array handle for KAMA with context guard and device id
 pub struct DeviceArrayF32Kama {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -53,9 +54,13 @@ pub struct DeviceArrayF32Kama {
 }
 impl DeviceArrayF32Kama {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaKama {
@@ -77,7 +82,7 @@ impl CudaKama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kama_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -85,7 +90,8 @@ impl CudaKama {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -107,7 +113,6 @@ impl CudaKama {
         })
     }
 
-    /// Expose synchronize for benches/tests that manage device buffers.
     pub fn synchronize(&self) -> Result<(), CudaKamaError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -137,7 +142,7 @@ impl CudaKama {
 
     #[inline]
     fn grid_chunks(total: usize) -> impl Iterator<Item = (usize, usize)> {
-        const MAX: usize = 65_535; 
+        const MAX: usize = 65_535;
         (0..total).step_by(MAX).map(move |start| {
             let len = (total - start).min(MAX);
             (start, len)
@@ -191,7 +196,6 @@ impl CudaKama {
         } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
@@ -263,20 +267,18 @@ impl CudaKama {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKamaError> {
-        let func = self
-            .module
-            .get_function("kama_batch_f32")
-            .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_batch_f32" })?;
+        let func = self.module.get_function("kama_batch_f32").map_err(|_| {
+            CudaKamaError::MissingKernelSymbol {
+                name: "kama_batch_f32",
+            }
+        })?;
 
-        
         unsafe {
             let this = self as *const _ as *mut CudaKama;
             (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 32 });
         }
         self.maybe_log_batch_debug();
 
-        
-        
         const BLOCK_X: u32 = 32;
         for (start, len) in Self::grid_chunks(n_combos) {
             let grid: GridSize = (len as u32, 1, 1).into();
@@ -319,9 +321,10 @@ impl CudaKama {
         let func = self
             .module
             .get_function("kama_batch_prefix_f32")
-            .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_batch_prefix_f32" })?;
+            .map_err(|_| CudaKamaError::MissingKernelSymbol {
+                name: "kama_batch_prefix_f32",
+            })?;
 
-        
         unsafe {
             let this = self as *const _ as *mut CudaKama;
             (*this).last_batch = Some(BatchKernelSelected::OneD { block_x: 32 });
@@ -361,7 +364,6 @@ impl CudaKama {
 
     #[inline]
     fn build_roc1_prefix_bytes(series_len: usize) -> usize {
-        
         (series_len + 1) * std::mem::size_of::<f32>()
     }
 
@@ -387,11 +389,9 @@ impl CudaKama {
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaKamaError::InvalidInput("out byte size overflow".into()))?;
 
-        
         let have_prefix_kernel = self.has_function("kama_batch_prefix_f32");
         let use_prefix = have_prefix_kernel;
 
-        
         let prefix_bytes = if use_prefix {
             Self::build_roc1_prefix_bytes(series_len)
         } else {
@@ -402,10 +402,14 @@ impl CudaKama {
             .and_then(|x| x.checked_add(out_bytes))
             .and_then(|x| x.checked_add(prefix_bytes))
             .ok_or_else(|| CudaKamaError::InvalidInput("aggregate byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let (free, _total) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaKamaError::OutOfMemory { required, free, headroom });
+            return Err(CudaKamaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
@@ -414,7 +418,6 @@ impl CudaKama {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         if use_prefix {
-            
             let mut prefix: Vec<f32> = Vec::with_capacity(series_len + 1);
             prefix.push(0.0f32);
             let mut acc = 0.0f32;
@@ -430,7 +433,7 @@ impl CudaKama {
                 prefix.push(acc);
                 prev = cur;
             }
-            
+
             prefix.push(acc);
             let d_prefix = DeviceBuffer::from_slice(&prefix)?;
             self.launch_batch_kernel_with_prefix(
@@ -578,8 +581,6 @@ impl CudaKama {
         d_first_valids: &DeviceBuffer<i32>,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaKamaError> {
-        
-        
         let block_x = std::env::var("KAMA_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
@@ -590,9 +591,10 @@ impl CudaKama {
         let func = self
             .module
             .get_function("kama_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaKamaError::MissingKernelSymbol { name: "kama_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaKamaError::MissingKernelSymbol {
+                name: "kama_many_series_one_param_time_major_f32",
+            })?;
 
-        
         unsafe {
             let this = self as *const _ as *mut CudaKama;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -643,10 +645,14 @@ impl CudaKama {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaKamaError::InvalidInput("aggregate byte size overflow".into()))?;
-        let headroom = 16 * 1024 * 1024; 
+        let headroom = 16 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let (free, _total) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaKamaError::OutOfMemory { required, free, headroom });
+            return Err(CudaKamaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
@@ -693,7 +699,8 @@ impl CudaKama {
                 cols * rows
             )));
         }
-        let arr = self.kama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
+        let arr =
+            self.kama_many_series_one_param_time_major_dev(data_tm_f32, cols, rows, params)?;
         arr.buf.copy_to(out).map_err(Into::into)
     }
 
@@ -721,8 +728,6 @@ impl CudaKama {
         )
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -877,11 +882,8 @@ pub mod benches {
     }
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
-    /// One thread-block per combo; recurrence computed by thread 0
     OneD { block_x: u32 },
 }
 
@@ -893,10 +895,8 @@ pub enum ManySeriesKernelSelected {
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    /// For completeness; the KAMA batch kernel is always 1D
-    OneD {
-        block_x: u32,
-    },
+
+    OneD { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]

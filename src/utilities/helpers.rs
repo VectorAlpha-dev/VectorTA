@@ -44,9 +44,7 @@ pub fn detect_wasm_kernel() -> Kernel {
     *BEST_WASM.get_or_init(|| {
         #[cfg(target_feature = "simd128")]
         {
-            
-            return Kernel::Scalar; 
-                                   
+            return Kernel::Scalar;
         }
 
         Kernel::Scalar
@@ -56,7 +54,6 @@ pub fn detect_wasm_kernel() -> Kernel {
 #[cfg(not(target_arch = "wasm32"))]
 #[inline(always)]
 pub fn detect_wasm_kernel() -> Kernel {
-    
     Kernel::Scalar
 }
 
@@ -108,10 +105,8 @@ pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
 
     let warm = warm.min(len);
 
-    // Allocate with capacity
     let mut buf: Vec<MaybeUninit<f64>> = Vec::with_capacity(len);
 
-    // In release mode, just set length after filling warmup
     #[cfg(not(debug_assertions))]
     {
         unsafe {
@@ -122,10 +117,8 @@ pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
         }
     }
 
-    // In debug mode, initialize all values to avoid any UB window
     #[cfg(debug_assertions)]
     {
-        // Extend to full length with poison values
         for _ in 0..warm {
             buf.push(MaybeUninit::new(f64::from_bits(0x7ff8_0000_0000_0000)));
         }
@@ -134,7 +127,6 @@ pub fn alloc_with_nan_prefix(len: usize, warm: usize) -> Vec<f64> {
         }
     }
 
-    // Convert to Vec<f64>
     let ptr = buf.as_mut_ptr() as *mut f64;
     let cap = buf.capacity();
     mem::forget(buf);
@@ -154,17 +146,13 @@ pub fn init_matrix_prefixes(buf: &mut [MaybeUninit<f64>], cols: usize, warm_pref
         "`warm_prefixes` length must equal number of rows"
     );
 
-    // DEBUG ONLY: First poison ALL cells to catch uninitialized reads
     #[cfg(debug_assertions)]
     {
-        // Use different poison value 0x22222222_22222222
-        // This appears as 3.5873e-221 when interpreted as f64
         for cell in buf.iter_mut() {
             cell.write(f64::from_bits(0x22222222_22222222));
         }
     }
 
-    // Write NaN values to warm prefixes
     buf.chunks_exact_mut(cols)
         .zip(warm_prefixes)
         .for_each(|(row, &warm)| {
@@ -175,19 +163,16 @@ pub fn init_matrix_prefixes(buf: &mut [MaybeUninit<f64>], cols: usize, warm_pref
         });
 }
 
-/// Allocate `rows × cols` uninitialised `f64` without UB or silent overflow.
 #[inline]
 pub fn make_uninit_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<f64>> {
     let total = rows
         .checked_mul(cols)
         .expect("rows * cols overflowed usize");
 
-    // try_reserve_exact lets us bail out gracefully instead of aborting/BSOD
     let mut v: Vec<MaybeUninit<f64>> = Vec::new();
     v.try_reserve_exact(total)
         .expect("OOM in make_uninit_matrix");
 
-    // In release mode, just set length - MaybeUninit is safe for uninitialized memory
     #[cfg(not(debug_assertions))]
     {
         unsafe {
@@ -195,10 +180,8 @@ pub fn make_uninit_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<f64>> {
         }
     }
 
-    // DEBUG ONLY: poison all cells with a third distinct pattern
     #[cfg(debug_assertions)]
     {
-        // Push poison values to avoid UB window
         for _ in 0..total {
             v.push(MaybeUninit::new(f64::from_bits(0x33333333_33333333)));
         }

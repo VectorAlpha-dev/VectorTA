@@ -1,30 +1,3 @@
-//! # Low Pass Channel (LPC)
-//!
-//! Attenuates higher frequency oscillations in price and volatility with minimal lag.
-//! Uses single pole low pass filter with channel bands based on filtered true range.
-//!
-//! ## Parameters
-//! - **cutoff_type**: "adaptive" or "fixed" cutoff period (default: "adaptive")
-//! - **fixed_period**: Fixed cutoff period for fixed mode (default: 20)
-//! - **max_cycle_limit**: Maximum cycle limit for adaptive mode (default: 60)
-//! - **cycle_mult**: Adaptive cutoff period multiplier (default: 1.0)
-//! - **tr_mult**: True range multiplier for channel width (default: 1.0)
-//!
-//! ## Returns
-//! - **`Ok(LpcOutput)`** on success (`filter`, `high_band`, `low_band` vectors)
-//! - **`Err(LpcError)`** on failure
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 reuse the optimized scalar core with light prefetching. Per-series SIMD is de-emphasized due to the sequential IIR dependency.
-//! - **Streaming**: Implemented O(1) ring-buffered IFM + 1‑pole filter; Wilder‑style TR parity with batch.
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-//! - **CUDA**: Single-precision PTX wrapper with typed errors, VRAM checks, and zero-copy Python handles (CAI v3 + DLPack v1.x) backed by a retained primary context per device.
-//! - Decision: Scalar path optimized (sin_cos, mul_add, alpha caching, unroll-by-2). Batch keeps scalar per-row; row-specific batch SIMD not attempted yet. Consider TR precompute across rows in future.
-//!
-//! Decision note: Streaming enabled with constant‑time updates (ring buffer Hilbert/IFM) and alpha caching; matches batch TR and cutoff logic while avoiding heap churn.
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -36,12 +9,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -52,14 +23,11 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::convert::AsRef;
 use std::error::Error;
@@ -67,8 +35,6 @@ use std::f64::consts::PI;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-
-/// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum LpcData<'a> {
     Candles {
@@ -83,7 +49,6 @@ pub enum LpcData<'a> {
     },
 }
 
-/// Output structure containing calculated filter and channel bands
 #[derive(Debug, Clone)]
 pub struct LpcOutput {
     pub filter: Vec<f64>,
@@ -91,9 +56,11 @@ pub struct LpcOutput {
     pub low_band: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct LpcParams {
     pub cutoff_type: Option<String>,
     pub fixed_period: Option<usize>,
@@ -114,7 +81,6 @@ impl Default for LpcParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct LpcInput<'a> {
     pub data: LpcData<'a>,
@@ -195,8 +161,6 @@ impl<'a> LpcInput<'a> {
     }
 }
 
-
-/// Builder for ergonomic API usage
 #[derive(Clone, Debug)]
 pub struct LpcBuilder {
     cutoff_type: Option<String>,
@@ -323,14 +287,13 @@ impl LpcBuilder {
     }
 }
 
-
 #[derive(Clone, Debug)]
 pub struct LpcBatchRange {
     pub fixed_period: (usize, usize, usize),
     pub cycle_mult: (f64, f64, f64),
     pub tr_mult: (f64, f64, f64),
-    pub cutoff_type: String, 
-    pub max_cycle_limit: usize, 
+    pub cutoff_type: String,
+    pub max_cycle_limit: usize,
 }
 
 impl Default for LpcBatchRange {
@@ -409,12 +372,11 @@ impl LpcBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct LpcBatchOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<LpcParams>,
-    pub rows: usize, 
+    pub rows: usize,
     pub cols: usize,
 }
-
 
 #[derive(Debug, Error)]
 pub enum LpcError {
@@ -440,14 +402,16 @@ pub enum LpcError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("lpc: invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("lpc: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
 
-
-/// Dominant Cycle Detection Function Using In Phase & Quadrature IFM
 pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     let len = src.len();
     let mut dom_cycles = vec![f64::NAN; len];
@@ -466,7 +430,6 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     for i in 7..len {
         let val1 = src[i] - src[i - 7];
 
-        
         if i >= 4 {
             let val1_4 = if i >= 4 {
                 src[i - 4] - src[i.saturating_sub(11)]
@@ -482,7 +445,6 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 + if i >= 3 { 0.635 * in_phase[i - 3] } else { 0.0 };
         }
 
-        
         if i >= 2 {
             let val1_2 = src[i - 2] - src[i.saturating_sub(9)];
             quadrature[i] = val1_2 - 0.338 * val1
@@ -493,7 +455,6 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 };
         }
 
-        
         if i >= 1 {
             real_part[i] = 0.2
                 * (in_phase[i] * in_phase[i - 1] + quadrature[i] * quadrature[i - 1])
@@ -503,12 +464,10 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
                 + 0.8 * imag_part[i - 1];
         }
 
-        
         if real_part[i] != 0.0 {
             delta_phase[i] = (imag_part[i] / real_part[i]).atan();
         }
 
-        
         let mut val2 = 0.0;
         let mut found_period = false;
         for j in 0..=max_cycle_limit.min(i) {
@@ -526,7 +485,6 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
             inst_per[i] = if i > 0 { inst_per[i - 1] } else { 20.0 };
         }
 
-        
         if i > 0 && !dom_cycles[i - 1].is_nan() {
             dom_cycles[i] = 0.25 * inst_per[i] + 0.75 * dom_cycles[i - 1];
         } else {
@@ -537,7 +495,6 @@ pub(crate) fn dom_cycle(src: &[f64], max_cycle_limit: usize) -> Vec<f64> {
     dom_cycles
 }
 
-/// Single Pole Low Pass Filter
 fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
     let len = src.len();
     let mut output = vec![f64::NAN; len];
@@ -549,12 +506,10 @@ fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
     let omega = 2.0 * PI / (period as f64);
     let alpha = (1.0 - omega.sin()) / omega.cos();
 
-    
     if !src[0].is_nan() {
         output[0] = src[0];
     }
 
-    
     for i in 1..len {
         if !src[i].is_nan() && !src[i - 1].is_nan() && !output[i - 1].is_nan() {
             output[i] = 0.5 * (1.0 - alpha) * (src[i] + src[i - 1]) + alpha * output[i - 1];
@@ -566,7 +521,6 @@ fn lp_filter(src: &[f64], period: usize) -> Vec<f64> {
     output
 }
 
-/// Calculate True Range
 fn calculate_true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     let len = high.len();
     let mut tr = vec![0.0; len];
@@ -575,10 +529,8 @@ fn calculate_true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
         return tr;
     }
 
-    
     tr[0] = high[0] - low[0];
 
-    
     for i in 1..len {
         let hl = high[i] - low[i];
         let c_low1 = (close[i] - low[i - 1]).abs();
@@ -589,9 +541,8 @@ fn calculate_true_range(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     tr
 }
 
-/// Zero-copy compute function that writes directly to output slices
 #[inline(always)]
-/// Scalar kernel implementation for LPC computation
+
 pub fn lpc_scalar(
     high: &[f64],
     low: &[f64],
@@ -608,14 +559,13 @@ pub fn lpc_scalar(
     out_low: &mut [f64],
 ) {
     let len = src.len();
-    
+
     if first > 0 {
         out_filter[..first].fill(f64::NAN);
         out_high[..first].fill(f64::NAN);
         out_low[..first].fill(f64::NAN);
     }
 
-    
     let dc = if cutoff_type.eq_ignore_ascii_case("adaptive") {
         Some(dom_cycle(src, max_cycle_limit))
     } else {
@@ -626,7 +576,6 @@ pub fn lpc_scalar(
         return;
     }
 
-    
     out_filter[first] = src[first];
     let mut tr_prev = high[first] - low[first];
     let mut ftr_prev = tr_prev;
@@ -635,7 +584,6 @@ pub fn lpc_scalar(
     out_high[first] = out_filter[first] + tr_prev * tm;
     out_low[first] = out_filter[first] - tr_prev * tm;
 
-    
     #[inline(always)]
     fn alpha_from_period(p: usize) -> f64 {
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
@@ -656,7 +604,6 @@ pub fn lpc_scalar(
         }
     }
 
-    
     let mut last_p: usize = if dc.is_none() { fixed_period } else { 0 };
     let mut alpha: f64 = if dc.is_none() {
         alpha_from_period(fixed_period)
@@ -664,10 +611,8 @@ pub fn lpc_scalar(
         0.0
     };
 
-    
     let mut i = first + 1;
     while i + 1 < len {
-        
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
@@ -690,7 +635,6 @@ pub fn lpc_scalar(
         out_high[i] = f_i + ftr_i * tm;
         out_low[i] = f_i - ftr_i * tm;
 
-        
         let i1 = i + 1;
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
@@ -715,7 +659,6 @@ pub fn lpc_scalar(
         i += 2;
     }
 
-    
     if i < len {
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
@@ -739,7 +682,6 @@ pub fn lpc_scalar(
     }
 }
 
-/// AVX2 kernel implementation for LPC computation (prefetch + scalar core)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub fn lpc_avx2(
     high: &[f64],
@@ -756,9 +698,7 @@ pub fn lpc_avx2(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
-    
     unsafe {
-        
         if src.len() > first + 32 {
             _mm_prefetch(src.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
             _mm_prefetch(high.as_ptr().add(first + 16) as *const i8, _MM_HINT_T0);
@@ -783,7 +723,6 @@ pub fn lpc_avx2(
     )
 }
 
-/// AVX512 kernel implementation for LPC computation (prefetch + scalar core)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 pub fn lpc_avx512(
     high: &[f64],
@@ -800,9 +739,7 @@ pub fn lpc_avx512(
     out_high: &mut [f64],
     out_low: &mut [f64],
 ) {
-    
     unsafe {
-        
         if src.len() > first + 64 {
             _mm_prefetch(src.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
             _mm_prefetch(high.as_ptr().add(first + 32) as *const i8, _MM_HINT_T0);
@@ -827,7 +764,6 @@ pub fn lpc_avx512(
     )
 }
 
-/// Dispatch function that selects the appropriate kernel
 #[inline(always)]
 fn lpc_compute_into(
     high: &[f64],
@@ -917,7 +853,6 @@ fn lpc_compute_into(
     }
 }
 
-/// Zero-copy compute function that writes directly to output slices (assumes NaN prefixes already written)
 #[inline(always)]
 fn lpc_compute_into_prefilled(
     high: &[f64],
@@ -939,7 +874,6 @@ fn lpc_compute_into_prefilled(
         return;
     }
 
-    
     out_filter[first] = src[first];
     let mut tr_prev = high[first] - low[first];
     let mut ftr_prev = tr_prev;
@@ -980,10 +914,8 @@ fn lpc_compute_into_prefilled(
         0.0
     };
 
-    
     let mut i = first + 1;
     while i + 1 < len {
-        
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
@@ -1003,7 +935,6 @@ fn lpc_compute_into_prefilled(
         out_high[i] = f_i + ftr_i * tm;
         out_low[i] = f_i - ftr_i * tm;
 
-        
         let i1 = i + 1;
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
@@ -1047,10 +978,8 @@ fn lpc_compute_into_prefilled(
     }
 }
 
-/// Variant of compute-into that uses a precomputed true range slice
 #[inline(always)]
 fn lpc_compute_into_prefilled_pretr(
-    
     _high: &[f64],
     _low: &[f64],
     _close: &[f64],
@@ -1071,7 +1000,6 @@ fn lpc_compute_into_prefilled_pretr(
         return;
     }
 
-    
     out_filter[first] = src[first];
     let mut tr_prev = tr[first];
     let mut ftr_prev = tr_prev;
@@ -1112,10 +1040,8 @@ fn lpc_compute_into_prefilled_pretr(
         0.0
     };
 
-    
     let mut i = first + 1;
     while i + 1 < len {
-        
         let p_i = per_bar_period(dc.as_deref(), i, fixed_period, cycle_mult);
         if p_i != last_p {
             last_p = p_i;
@@ -1132,7 +1058,6 @@ fn lpc_compute_into_prefilled_pretr(
         out_high[i] = f_i + ftr_i * tm;
         out_low[i] = f_i - ftr_i * tm;
 
-        
         let i1 = i + 1;
         let p_i1 = per_bar_period(dc.as_deref(), i1, fixed_period, cycle_mult);
         if p_i1 != last_p {
@@ -1170,13 +1095,11 @@ fn lpc_compute_into_prefilled_pretr(
     }
 }
 
-/// Main entry point with automatic kernel detection
 #[inline]
 pub fn lpc(input: &LpcInput) -> Result<LpcOutput, LpcError> {
     lpc_with_kernel(input, Kernel::Auto)
 }
 
-/// Entry point with explicit kernel selection
 pub fn lpc_with_kernel(input: &LpcInput, kernel: Kernel) -> Result<LpcOutput, LpcError> {
     let (h, l, c, s, cutoff, fp, mcl, cm, tm, first, _chosen) = lpc_prepare(input, kernel)?;
     let len = s.len();
@@ -1209,12 +1132,7 @@ pub fn lpc_with_kernel(input: &LpcInput, kernel: Kernel) -> Result<LpcOutput, Lp
     })
 }
 
-/// Compute LPC into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - All output slice lengths must equal the input length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn lpc_into(
     input: &LpcInput,
     filter_out: &mut [f64],
@@ -1224,7 +1142,6 @@ pub fn lpc_into(
     lpc_into_slices(filter_out, high_out, low_out, input, Kernel::Auto)
 }
 
-/// Prepare function to extract and validate inputs
 fn lpc_prepare<'a>(
     input: &'a LpcInput<'a>,
     kernel: Kernel,
@@ -1270,7 +1187,6 @@ fn lpc_prepare<'a>(
         return Err(LpcError::MissingData);
     }
 
-    // Check for all NaN values
     if src.iter().all(|v| v.is_nan())
         || high.iter().all(|v| v.is_nan())
         || low.iter().all(|v| v.is_nan())
@@ -1296,7 +1212,6 @@ fn lpc_prepare<'a>(
         });
     }
 
-    // Find first valid index
     let mut first = 0;
     for i in 0..src.len() {
         if !src[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
@@ -1305,13 +1220,16 @@ fn lpc_prepare<'a>(
         }
     }
 
-    // Require at least 2 valid bars after `first` because the filter uses i and i-1
     let valid = src.len().saturating_sub(first);
     if valid < 2 {
         return Err(LpcError::NotEnoughValidData { needed: 2, valid });
     }
 
-    let chosen = if kernel == Kernel::Auto { Kernel::Scalar } else { kernel };
+    let chosen = if kernel == Kernel::Auto {
+        Kernel::Scalar
+    } else {
+        kernel
+    };
 
     Ok((
         high,
@@ -1328,13 +1246,7 @@ fn lpc_prepare<'a>(
     ))
 }
 
-// ==================== STREAMING IMPLEMENTATION ====================
-/// Streaming implementation with O(1) updates:
-/// - Ring buffer for the 7/9/11-lag taps used by the Hilbert IFM
-/// - No heap churn, no shifting
-/// - Adaptive and fixed cutoff supported
 pub struct LpcStream {
-    // Params
     cutoff_type: String,
     fixed_period: usize,
     max_cycle_limit: usize,
@@ -1342,49 +1254,41 @@ pub struct LpcStream {
     tr_mult: f64,
     adaptive_enabled: bool,
 
-    // Last-bar state
     prev_src: f64,
     prev_high: f64,
     prev_low: f64,
     prev_close: f64,
 
-    // 1-pole filter & TR filter state
     prev_filter: f64,
     prev_tr: f64,
     prev_ftr: f64,
 
-    // Alpha cache
     last_p: usize,
     alpha: f64,
     one_minus_alpha: f64,
 
-    // Dominant-cycle streaming state
     dc: DomCycleState,
 }
 
 #[derive(Clone)]
 struct DomCycleState {
-    // 12-slot ring for src so we can access [0,2,4,7,9,11] lags
     buf: [f64; 12],
     idx: usize,
     count: usize,
 
-    // InPhase/Quadrature short histories for recursion/EMA
     ip_l1: f64,
     ip_l2: f64,
-    ip_l3: f64, // need i-1 and i-3
+    ip_l3: f64,
     q_l1: f64,
-    q_l2: f64, // need i-1 and i-2
+    q_l2: f64,
 
     real_prev: f64,
     imag_prev: f64,
 
-    // Phase accumulation to get instantaneous period
     phase_accum: f64,
     bars_since_cross: usize,
     last_inst_per: f64,
 
-    // Smoothed dominant cycle
     dom_cycle_prev: f64,
 }
 
@@ -1424,16 +1328,12 @@ impl DomCycleState {
         self.buf[pos]
     }
 
-    /// O(1) streaming IFM update.
-    /// Returns Some(smooth_dom_cycle) once enough samples exist, else None.
     #[inline(always)]
     fn update_ifm(&mut self) -> Option<f64> {
-        // Need at least the largest lag (11) to be valid
         if self.count < 12 {
             return None;
         }
 
-        // Short-hands for lags used by Ehlers' 7-bar Hilbert implementation
         let v0 = self.at(0);
         let v2 = self.at(2);
         let v4 = self.at(4);
@@ -1441,29 +1341,22 @@ impl DomCycleState {
         let v9 = self.at(9);
         let v11 = self.at(11);
 
-        
         let ip_prev = self.ip_l1;
         let q_prev = self.q_l1;
 
-        
-        
         let ip_cur = 1.25 * ((v4 - v11) - 0.635 * (v2 - v9)) + 0.635 * self.ip_l3;
 
-        
         let q_cur = (v2 - v9) - 0.338 * (v0 - v7) + 0.338 * self.q_l2;
 
-        
         let real_cur = 0.2 * (ip_cur * ip_prev + q_cur * q_prev) + 0.8 * self.real_prev;
         let imag_cur = 0.2 * (ip_cur * q_prev - ip_prev * q_cur) + 0.8 * self.imag_prev;
 
-        
         let delta = if real_cur != 0.0 {
             (imag_cur / real_cur).atan()
         } else {
             0.0
         };
 
-        
         const TAU: f64 = std::f64::consts::PI * 2.0;
         self.phase_accum += delta;
         self.bars_since_cross = self.bars_since_cross.saturating_add(1);
@@ -1476,10 +1369,8 @@ impl DomCycleState {
             self.last_inst_per = inst;
         }
 
-        
         let dom = 0.25 * inst + 0.75 * self.dom_cycle_prev;
 
-        
         self.ip_l3 = self.ip_l2;
         self.ip_l2 = self.ip_l1;
         self.ip_l1 = ip_cur;
@@ -1535,7 +1426,6 @@ impl LpcStream {
             dc: DomCycleState::default(),
         };
 
-        
         s.set_alpha(fixed_period);
         Ok(s)
     }
@@ -1545,12 +1435,10 @@ impl LpcStream {
         if p == self.last_p {
             return;
         }
-        
+
         let omega = 2.0 * std::f64::consts::PI / (p as f64);
         let (s, c) = omega.sin_cos();
         let a = if c.abs() < 1e-12 {
-            
-            
             if self.last_p == 0 {
                 2.0 / (p as f64 + 1.0)
             } else {
@@ -1564,22 +1452,16 @@ impl LpcStream {
         self.last_p = p;
     }
 
-    /// O(1) update. Returns the triple once inputs are finite; otherwise None.
-    /// Uses fixed cutoff immediately; adaptive cutoff activates automatically once IFM is warmed.
     pub fn update(&mut self, high: f64, low: f64, close: f64, src: f64) -> Option<(f64, f64, f64)> {
-        
         if !(high.is_finite() && low.is_finite() && close.is_finite() && src.is_finite()) {
             return None;
         }
 
-        
         self.dc.push_src(src);
 
-        
         let mut period = self.fixed_period;
         if self.adaptive_enabled {
             if let Some(dom) = self.dc.update_ifm() {
-                
                 let p = (dom * self.cycle_mult).round().max(3.0) as usize;
                 period = if self.max_cycle_limit > 0 {
                     p.min(self.max_cycle_limit)
@@ -1590,7 +1472,6 @@ impl LpcStream {
         }
         self.set_alpha(period);
 
-        
         let filt = if self.prev_filter.is_nan() || self.prev_src.is_nan() {
             src
         } else {
@@ -1600,7 +1481,6 @@ impl LpcStream {
             )
         };
 
-        
         let tr = if self.prev_high.is_nan() || self.prev_low.is_nan() || self.prev_close.is_nan() {
             (high - low).abs()
         } else {
@@ -1610,7 +1490,6 @@ impl LpcStream {
             hl.max(c_low1).max(c_high1)
         };
 
-        
         let ftr = if self.prev_ftr.is_nan() || self.prev_tr.is_nan() {
             tr
         } else {
@@ -1623,7 +1502,6 @@ impl LpcStream {
         let band_high = filt + ftr * self.tr_mult;
         let band_low = filt - ftr * self.tr_mult;
 
-        
         self.prev_src = src;
         self.prev_high = high;
         self.prev_low = low;
@@ -1636,7 +1514,6 @@ impl LpcStream {
         Some((filt, band_high, band_low))
     }
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "lpc")]
@@ -1765,8 +1642,7 @@ pub fn lpc_batch_py<'py>(
         cutoff_type: cutoff_type.to_string(),
         max_cycle_limit,
     };
-    let combos =
-        expand_grid_lpc(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_lpc(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len() * 3;
     let cols = s.len();
 
@@ -1775,11 +1651,9 @@ pub fn lpc_batch_py<'py>(
         .find(|&i| !s[i].is_nan() && !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
         .unwrap_or(0);
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     for row in 0..rows {
         for col in 0..first {
             slice_out[row * cols + col] = f64::NAN;
@@ -1817,7 +1691,7 @@ pub fn lpc_batch_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    
+
     let order_list = PyList::new(py, vec!["filter", "high", "low"])?;
     dict.set_item("order", order_list)?;
     dict.set_item("rows", rows)?;
@@ -1837,7 +1711,6 @@ pub fn register_lpc_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-// ==================== PYTHON: CUDA BINDINGS (zero-copy) ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available as cuda_is_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1888,8 +1761,7 @@ pub fn lpc_cuda_batch_dev_py<'py>(
         let (triplet, combos) = cuda
             .lpc_batch_dev(h, l, c, s, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .synchronize()
+        cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((triplet, combos, ctx, dev_id))
     })?;
@@ -1998,8 +1870,7 @@ pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
         let triplet = cuda
             .lpc_many_series_one_param_time_major_dev(h, l, c, s, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .synchronize()
+        cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((triplet, ctx, dev_id))
     })?;
@@ -2035,8 +1906,7 @@ pub fn lpc_cuda_many_series_one_param_dev_py<'py>(
     Ok(d)
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 struct LpcResult {
     filter: Vec<f64>,
@@ -2044,7 +1914,7 @@ struct LpcResult {
     low_band: Vec<f64>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lpc_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2053,7 +1923,7 @@ pub fn lpc_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lpc_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2061,7 +1931,7 @@ pub fn lpc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lpc_into(
     high_ptr: *const f64,
@@ -2104,7 +1974,6 @@ pub fn lpc_into(
         };
         let input = LpcInput::from_slices(h, l, c, s, params);
 
-        // Detect aliasing with inputs. If any alias -> use temps, else write in place.
         let alias = filter_out_ptr as *const f64 == high_ptr
             || filter_out_ptr as *const f64 == low_ptr
             || filter_out_ptr as *const f64 == close_ptr
@@ -2138,7 +2007,7 @@ pub fn lpc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lpc_wasm(
     high: &[f64],
@@ -2174,15 +2043,15 @@ pub fn lpc_wasm(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LpcJsOutput {
-    pub values: Vec<f64>, // [filter..., high..., low...]
-    pub rows: usize,      // 3
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = lpc)]
 pub fn lpc_js(
     high: &[f64],
@@ -2212,7 +2081,7 @@ pub fn lpc_js(
     Ok(values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LpcBatchConfig {
     pub fixed_period_range: (usize, usize, usize),
@@ -2222,19 +2091,19 @@ pub struct LpcBatchConfig {
     pub max_cycle_limit: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LpcBatchJsOutput {
-    pub values: Vec<Vec<f64>>, // 2D array: rows × cols
+    pub values: Vec<Vec<f64>>,
     pub fixed_periods: Vec<usize>,
     pub cycle_mults: Vec<f64>,
     pub tr_mults: Vec<f64>,
     pub rows: usize,
     pub cols: usize,
-    pub order: Vec<String>, // ["filter", "high", "low"]
+    pub order: Vec<String>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = lpc_batch)]
 pub fn lpc_batch_unified_js(
     high: &[f64],
@@ -2255,7 +2124,6 @@ pub fn lpc_batch_unified_js(
     let out = lpc_batch_with_kernel(high, low, close, src, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Convert flat values to 2D array for JavaScript
     let mut values_2d = Vec::with_capacity(out.rows);
     for i in 0..out.rows {
         let start = i * out.cols;
@@ -2263,8 +2131,6 @@ pub fn lpc_batch_unified_js(
         values_2d.push(out.values[start..end].to_vec());
     }
 
-    // Extract parameter arrays from combos
-    // Since each combo generates 3 rows (filter, high, low), we need to repeat each param 3 times
     let num_combos = out.combos.len();
     let mut fixed_periods = Vec::with_capacity(num_combos);
     let mut cycle_mults = Vec::with_capacity(num_combos);
@@ -2289,14 +2155,14 @@ pub fn lpc_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lpc_batch_into(
     high_ptr: *const f64,
     low_ptr: *const f64,
     close_ptr: *const f64,
     src_ptr: *const f64,
-    out_ptr: *mut f64, // length = rows*cols, rows = combos*3
+    out_ptr: *mut f64,
     len: usize,
     fixed_start: usize,
     fixed_end: usize,
@@ -2329,42 +2195,35 @@ pub fn lpc_batch_into(
             cutoff_type: cutoff_type.to_string(),
             max_cycle_limit,
         };
-        let combos =
-            expand_grid_lpc(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let rows = combos
-            .len()
-            .checked_mul(3)
-            .ok_or_else(|| {
-                JsValue::from_str(
-                    &LpcError::InvalidRange {
-                        start: fixed_start,
-                        end: fixed_end,
-                        step: fixed_step,
-                    }
-                    .to_string(),
-                )
-            })?;
+        let combos = expand_grid_lpc(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos.len().checked_mul(3).ok_or_else(|| {
+            JsValue::from_str(
+                &LpcError::InvalidRange {
+                    start: fixed_start,
+                    end: fixed_end,
+                    step: fixed_step,
+                }
+                .to_string(),
+            )
+        })?;
         let cols = len;
 
-        let total = rows
-            .checked_mul(cols)
-            .ok_or_else(|| {
-                JsValue::from_str(
-                    &LpcError::InvalidRange {
-                        start: fixed_start,
-                        end: fixed_end,
-                        step: fixed_step,
-                    }
-                    .to_string(),
-                )
-            })?;
+        let total = rows.checked_mul(cols).ok_or_else(|| {
+            JsValue::from_str(
+                &LpcError::InvalidRange {
+                    start: fixed_start,
+                    end: fixed_end,
+                    step: fixed_step,
+                }
+                .to_string(),
+            )
+        })?;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
         let first = (0..len)
             .find(|&i| !s[i].is_nan() && !h[i].is_nan() && !l[i].is_nan() && !c[i].is_nan())
             .unwrap_or(0);
 
-        // Pre-fill NaN values for first entries of each row
         for row in 0..rows {
             for col in 0..first {
                 out[row * cols + col] = f64::NAN;
@@ -2386,8 +2245,6 @@ pub fn lpc_batch_into(
     }
 }
 
-// ==================== BATCH PROCESSING ====================
-/// Zero-allocation version for performance-critical paths
 #[inline]
 pub fn lpc_into_slices(
     filter_dst: &mut [f64],
@@ -2404,7 +2261,7 @@ pub fn lpc_into_slices(
             got: filter_dst.len(),
         });
     }
-    // Prefill warmup prefix with the crate's quiet-NaN pattern to match Vec APIs
+
     if first > 0 {
         let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
         let w = first.min(n);
@@ -2436,7 +2293,6 @@ pub fn lpc_into_slices(
     );
     Ok(())
 }
-
 
 #[inline]
 fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, LpcError> {
@@ -2476,11 +2332,7 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, L
         }
     }
     if vals.is_empty() {
-        return Err(LpcError::InvalidRange {
-            start,
-            end,
-            step,
-        });
+        return Err(LpcError::InvalidRange { start, end, step });
     }
     Ok(vals)
 }
@@ -2577,14 +2429,11 @@ pub fn lpc_batch_with_kernel(
 
     let combos = expand_grid_lpc(sweep)?;
     let cols = src.len();
-    let rows = combos
-        .len()
-        .checked_mul(3)
-        .ok_or(LpcError::InvalidRange {
-            start: sweep.fixed_period.0,
-            end: sweep.fixed_period.1,
-            step: sweep.fixed_period.2,
-        })?;
+    let rows = combos.len().checked_mul(3).ok_or(LpcError::InvalidRange {
+        start: sweep.fixed_period.0,
+        end: sweep.fixed_period.1,
+        step: sweep.fixed_period.2,
+    })?;
     rows.checked_mul(cols).ok_or(LpcError::InvalidRange {
         start: sweep.fixed_period.0,
         end: sweep.fixed_period.1,
@@ -2597,7 +2446,6 @@ pub fn lpc_batch_with_kernel(
         other => return Err(LpcError::InvalidKernelForBatch(other)),
     };
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm = vec![first; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
@@ -2606,7 +2454,6 @@ pub fn lpc_batch_with_kernel(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     lpc_batch_inner_into(high, low, close, src, sweep, kernel, first, out)?;
 
     let values = unsafe {
@@ -2638,7 +2485,7 @@ fn lpc_batch_inner_into(
     let _ = k;
     let combos = expand_grid_lpc(sweep)?;
     let cols = src.len();
-    
+
     let tr_series = calculate_true_range(high, low, close);
 
     let out_mu = unsafe {
@@ -2690,7 +2537,6 @@ fn lpc_batch_inner_into(
     Ok(())
 }
 
-/// Generic batch processing function
 pub fn lpc_batch(
     high: &[f64],
     low: &[f64],
@@ -2701,7 +2547,6 @@ pub fn lpc_batch(
     lpc_batch_with_kernel(high, low, close, src, sweep, Kernel::Auto)
 }
 
-/// Batch processing function for slices
 pub fn lpc_batch_slice(
     high: &[f64],
     low: &[f64],
@@ -2712,7 +2557,6 @@ pub fn lpc_batch_slice(
     lpc_batch_with_kernel(high, low, close, src, sweep, detect_best_batch_kernel())
 }
 
-/// Parallel batch processing function for slices
 #[cfg(not(target_arch = "wasm32"))]
 pub fn lpc_batch_par_slice(
     high: &[f64],
@@ -2721,10 +2565,8 @@ pub fn lpc_batch_par_slice(
     src: &[f64],
     sweep: &LpcBatchRange,
 ) -> Result<LpcBatchOutput, LpcError> {
-    
     lpc_batch_with_kernel(high, low, close, src, sweep, detect_best_batch_kernel())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2736,7 +2578,6 @@ mod tests {
 
     #[test]
     fn test_lpc_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let warm = 8usize;
         let mut ts = Vec::with_capacity(n);
@@ -2764,26 +2605,27 @@ mod tests {
         }
 
         let candles = crate::utilities::data_loader::Candles::new(
-            ts, open, high.clone(), low.clone(), close.clone(), vol,
+            ts,
+            open,
+            high.clone(),
+            low.clone(),
+            close.clone(),
+            vol,
         );
         let input = LpcInput::from_candles(&candles, "close", LpcParams::default());
 
-        
         let baseline = lpc(&input)?;
 
-        
         let mut f = vec![0.0; n];
         let mut hb = vec![0.0; n];
         let mut lb = vec![0.0; n];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             lpc_into(&input, &mut f, &mut hb, &mut lb)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             lpc_into_slices(&mut f, &mut hb, &mut lb, &input, Kernel::Auto)?;
         }
 
@@ -2796,9 +2638,27 @@ mod tests {
         }
 
         for i in 0..n {
-            assert!(eq_or_both_nan(f[i], baseline.filter[i]), "filter mismatch at {}: {} vs {}", i, f[i], baseline.filter[i]);
-            assert!(eq_or_both_nan(hb[i], baseline.high_band[i]), "high band mismatch at {}: {} vs {}", i, hb[i], baseline.high_band[i]);
-            assert!(eq_or_both_nan(lb[i], baseline.low_band[i]), "low band mismatch at {}: {} vs {}", i, lb[i], baseline.low_band[i]);
+            assert!(
+                eq_or_both_nan(f[i], baseline.filter[i]),
+                "filter mismatch at {}: {} vs {}",
+                i,
+                f[i],
+                baseline.filter[i]
+            );
+            assert!(
+                eq_or_both_nan(hb[i], baseline.high_band[i]),
+                "high band mismatch at {}: {} vs {}",
+                i,
+                hb[i],
+                baseline.high_band[i]
+            );
+            assert!(
+                eq_or_both_nan(lb[i], baseline.low_band[i]),
+                "low band mismatch at {}: {} vs {}",
+                i,
+                lb[i],
+                baseline.low_band[i]
+            );
         }
         Ok(())
     }
@@ -2812,7 +2672,6 @@ mod tests {
         let input = LpcInput::from_candles(&candles, "close", params);
         let result = lpc_with_kernel(&input, kernel)?;
 
-        
         let expected_filter = vec![
             59346.30519969,
             59327.59393858,
@@ -3026,7 +2885,7 @@ mod tests {
         let input = LpcInput::from_slices(&nan_data, &nan_data, &nan_data, &nan_data, params);
 
         let res = lpc_with_kernel(&input, kernel);
-        
+
         assert!(
             matches!(res, Err(LpcError::AllValuesNaN)),
             "[{}] LPC should fail with AllValuesNaN error",
@@ -3050,7 +2909,6 @@ mod tests {
         let first_input = LpcInput::from_candles(&candles, "close", first_params);
         let first_result = lpc_with_kernel(&first_input, kernel)?;
 
-        
         let second_params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
             fixed_period: Some(20),
@@ -3161,7 +3019,6 @@ mod tests {
 
         assert_eq!(batch_output.filter.len(), stream_filter.len());
 
-        
         for i in 20..100.min(stream_filter.len()) {
             if !stream_filter[i].is_nan() {
                 assert!(
@@ -3211,7 +3068,6 @@ mod tests {
             let input = LpcInput::from_candles(&candles, "close", params.clone());
             let output = lpc_with_kernel(&input, kernel)?;
 
-            
             for i in 0..output.filter.len() {
                 let f = output.filter[i];
                 let hi = output.high_band[i];
@@ -3278,13 +3134,10 @@ mod tests {
                 let result = lpc_with_kernel(&input, kernel).unwrap();
                 let ref_result = lpc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(result.filter.len(), data.len());
                 prop_assert_eq!(result.high_band.len(), data.len());
                 prop_assert_eq!(result.low_band.len(), data.len());
 
-                
-                
                 let check_start = (period * 2).min(data.len());
                 for i in check_start..data.len() {
                     let f = result.filter[i];
@@ -3292,16 +3145,11 @@ mod tests {
                     let l = result.low_band[i];
 
                     if !f.is_nan() && !h.is_nan() && !l.is_nan() {
-                        
-                        
-                        
-                        
                         prop_assert!(f.is_finite(), "filter at {i} not finite");
                         prop_assert!(h.is_finite(), "high_band at {i} not finite");
                         prop_assert!(l.is_finite(), "low_band at {i} not finite");
                     }
 
-                    
                     if !f.is_nan() && !ref_result.filter[i].is_nan() {
                         let diff = (f - ref_result.filter[i]).abs();
                         prop_assert!(
@@ -3343,7 +3191,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_lpc_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3397,7 +3244,6 @@ mod tests {
 
     #[test]
     fn test_lpc_streaming_basic() {
-        
         let params = LpcParams {
             cutoff_type: Some("fixed".to_string()),
             fixed_period: Some(10),
@@ -3408,7 +3254,6 @@ mod tests {
 
         let mut stream = LpcStream::try_new(params).unwrap();
 
-        
         let test_data = vec![
             (100.0, 95.0, 98.0, 98.0),
             (102.0, 97.0, 101.0, 101.0),
@@ -3445,7 +3290,7 @@ mod tests {
             max_cycle_limit: 60,
         };
         let out = lpc_batch_with_kernel(&c.high, &c.low, &c.close, &c.close, &sweep, kernel)?;
-        let combos = 3; 
+        let combos = 3;
         assert_eq!(out.rows, combos * 3);
         assert_eq!(out.cols, c.close.len());
         assert_eq!(out.values.len(), out.rows * out.cols);

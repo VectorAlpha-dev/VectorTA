@@ -1,5 +1,3 @@
-
-
 #[cfg(feature = "cuda")]
 use vector_ta::indicators::moving_averages::dma::{
     dma_batch_with_kernel, DmaBatchRange, DmaBuilder, DmaParams,

@@ -1,49 +1,7 @@
-//! # Rolling Standard Deviation (STDDEV)
-//!
-//! The STDDEV indicator measures the rolling standard deviation of a window over input data,
-//! scaled by `nbdev`. Parameters `period` and `nbdev` control the window size and deviation scale.
-//! Features include AVX2/AVX512 API parity, streaming computation, and parameter grid batching.
-//!
-//! ## Variance Calculation
-//! This implementation uses **population variance** (dividing by n) rather than sample variance
-//! (dividing by n-1). This is standard for technical indicators where the window is considered
-//! the entire population of interest.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points).
-//! - **nbdev**: Non-negative multiplier for standard deviations (default: 1.0). Must be ≥ 0.
-//!
-//! ## Errors
-//! - **AllValuesNaN**: stddev: All input values are `NaN`.
-//! - **InvalidPeriod**: stddev: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: stddev: Not enough valid data points for requested `period`.
-//!
-//! ## Errors
-//! - **EmptyInputData**: stddev: Input data slice is empty.
-//! - **AllValuesNaN**: stddev: All input values are `NaN`.
-//! - **InvalidPeriod**: stddev: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: stddev: Not enough valid data points for requested `period`.
-//! - **InvalidNbdev**: stddev: `nbdev` is negative or non-finite.
-//! - **OutputLengthMismatch**: stddev: Output slice length does not match input length.
-//! - **InvalidRange**: stddev batch: Invalid sweep configuration (period/nbdev ranges).
-//! - **InvalidKernelForBatch**: stddev batch: Non-batch kernel passed to batch API.
-//!
-//! ## Returns
-//! - **Ok(StdDevOutput)** on success (output vector of length == input).
-//! - **Err(StdDevError)** otherwise.
-//!
-//! ## Developer Notes
-//! - Single-series SIMD: kept disabled (delegates to scalar). The rolling update is memory-bound and per-step dependent, and did not show consistent >5% wins at realistic sizes (10k/100k).
-//! - Batch SIMD: row-specific AVX2/AVX512 from prefix sums is enabled and faster than scalar by ~5–10% at 100k on a modern x86_64 CPU.
-//! - CUDA: PTX wrapper provides batch and many-series kernels with VRAM-checked launches; Python uses a DeviceArray handle with CAI v3 byte-strides and DLPack v1.x negotiation.
-//! - Streaming parity: scalar path computes variance with the same operation order as the stream (`mean = sum/den; var = sum2/den - mean*mean`) to ensure bitwise consistency in tests.
-//! - Allocation: follows alma.rs patterns (warmup prefix via `alloc_with_nan_prefix`; batch via `make_uninit_matrix`/`init_matrix_prefixes`).
-//! - Streaming kernel: O(1) modulo-free ring buffer; NaN-robust using a `nan_count` window tracker. Emits NaN only while a NaN is inside the window and recovers as soon as it slides out.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::CudaStddev;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -53,9 +11,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -101,7 +59,10 @@ pub struct StdDevOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct StdDevParams {
     pub period: Option<usize>,
     pub nbdev: Option<f64>,
@@ -234,10 +195,14 @@ pub enum StdDevError {
     #[error("stddev: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("stddev: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("stddev: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
-    
+
     #[error("stddev: Output length mismatch: dst = {dst_len}, expected = {expected_len}")]
     MismatchedOutputLen { dst_len: usize, expected_len: usize },
     #[error("stddev: Invalid kernel type: {msg}")]
@@ -303,7 +268,7 @@ pub fn stddev_with_kernel(
             Kernel::Avx512 | Kernel::Avx512Batch => {
                 stddev_avx512(data, period, first, nbdev, &mut out)
             }
-            
+
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 stddev_scalar(data, period, first, nbdev, &mut out)
@@ -315,7 +280,6 @@ pub fn stddev_with_kernel(
     Ok(StdDevOutput { values: out })
 }
 
-/// Write StdDev directly to output slice - no allocations (WASM optimization)
 #[inline]
 pub fn stddev_into_slice(
     dst: &mut [f64],
@@ -357,7 +321,6 @@ pub fn stddev_into_slice(
         });
     }
 
-    
     let warmup = first + period - 1;
     for v in &mut dst[..warmup] {
         *v = f64::NAN;
@@ -385,26 +348,14 @@ pub fn stddev_into_slice(
     Ok(())
 }
 
-/// Write STDDEV into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API does.
-/// - The output slice length must equal the input length.
-/// - Selects `Kernel::Auto` at runtime (same as `stddev()`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn stddev_into(input: &StdDevInput, out: &mut [f64]) -> Result<(), StdDevError> {
-    
-    
     stddev_into_slice(out, input, Kernel::Auto)
 }
 
 #[inline]
 pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out: &mut [f64]) {
-    
-    
-    
-    
-    
     let den = period as f64;
     let inv_den = 1.0 / den;
 
@@ -413,8 +364,6 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
     let mut sum = 0.0;
     let mut sum_sqr = 0.0;
 
-    
-    
     unsafe {
         let mut ptr = data.as_ptr().add(first);
         let end = ptr.add(period);
@@ -426,13 +375,15 @@ pub fn stddev_scalar(data: &[f64], period: usize, first: usize, nbdev: f64, out:
         }
     }
 
-    
     let idx0 = first + period - 1;
     let mean0 = sum * inv_den;
     let var0 = (sum_sqr * inv_den) - (mean0 * mean0);
-    out[idx0] = if var0 <= 0.0 { 0.0 } else { var0.sqrt() * nbdev };
+    out[idx0] = if var0 <= 0.0 {
+        0.0
+    } else {
+        var0.sqrt() * nbdev
+    };
 
-    
     unsafe {
         let mut out_ptr = out.as_mut_ptr().add(idx0 + 1);
         let mut in_new = data.as_ptr().add(first + period);
@@ -506,7 +457,7 @@ pub struct StdDevStream {
     filled: bool,
     sum: f64,
     sum_sqr: f64,
-    nan_count: usize, 
+    nan_count: usize,
 }
 
 impl StdDevStream {
@@ -535,16 +486,8 @@ impl StdDevStream {
         })
     }
 
-    /// O(1) update with NaN-robustness and modulo-free ring advance.
-    ///
-    /// - Maintains rolling sum and sum of squares ignoring NaNs (tracked via `nan_count`).
-    /// - Emits `None` until warmup completes (first `period` values seen).
-    /// - Emits `NaN` if any NaN is inside the current window; recovers once it slides out.
-    /// - Computes variance with the same operation order as the scalar path for parity:
-    ///   mean = sum/den; var = sum2/den - mean*mean.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !self.filled {
             if value.is_nan() {
                 self.nan_count += 1;
@@ -556,7 +499,6 @@ impl StdDevStream {
 
             let next = self.head + 1;
             if next == self.period {
-                
                 self.head = 0;
                 self.filled = true;
 
@@ -576,26 +518,21 @@ impl StdDevStream {
             }
         }
 
-        
         let old = self.buffer[self.head];
         let new_is_nan = value.is_nan();
         let old_is_nan = old.is_nan();
 
-        
         match (old_is_nan, new_is_nan) {
             (false, false) => {
-                
                 self.sum += value - old;
                 self.sum_sqr += (value * value) - (old * old);
             }
             (false, true) => {
-                
                 self.sum -= old;
                 self.sum_sqr -= old * old;
                 self.nan_count += 1;
             }
             (true, false) => {
-                
                 if self.nan_count > 0 {
                     self.nan_count -= 1;
                 }
@@ -603,27 +540,21 @@ impl StdDevStream {
                 self.sum_sqr += value * value;
             }
             (true, true) => {
-                
-                
-                
                 if self.nan_count > 0 {
                     self.nan_count -= 1;
                 }
-                
+
                 self.nan_count += 1;
             }
         }
 
-        
         self.buffer[self.head] = value;
 
-        
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
         }
 
-        
         if self.nan_count > 0 {
             return Some(f64::NAN);
         }
@@ -749,9 +680,7 @@ impl StdDevBatchOutput {
 
 #[inline(always)]
 fn expand_grid_checked(r: &StdDevBatchRange) -> Result<Vec<StdDevParams>, StdDevError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, StdDevError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, StdDevError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -789,9 +718,7 @@ fn expand_grid_checked(r: &StdDevBatchRange) -> Result<Vec<StdDevParams>, StdDev
         }
         Ok(v)
     }
-    fn axis_f64(
-        (start, end, step): (f64, f64, f64),
-    ) -> Result<Vec<f64>, StdDevError> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, StdDevError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return Ok(vec![start]);
         }
@@ -918,22 +845,20 @@ fn stddev_batch_inner(
     let rows = combos.len();
     let cols = len;
 
-    
-    let _ = rows.checked_mul(cols).ok_or_else(|| StdDevError::InvalidInput {
-        msg: "stddev: rows*cols overflow in batch".to_string(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| StdDevError::InvalidInput {
+            msg: "stddev: rows*cols overflow in batch".to_string(),
+        })?;
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut values = unsafe {
         Vec::from_raw_parts(
             buf_mu.as_mut_ptr() as *mut f64,
@@ -943,7 +868,6 @@ fn stddev_batch_inner(
     };
     std::mem::forget(buf_mu);
 
-    
     #[derive(Clone)]
     struct StdPrefixes {
         ps: Vec<f64>,
@@ -984,24 +908,21 @@ fn stddev_batch_inner(
             return;
         }
 
-        
         let inv_den = 1.0 / (period as f64);
         let inv_den2 = inv_den * inv_den;
 
-        
         let no_nans = pre.pnan[n] == 0;
         if no_nans {
             for i in warmup_end..n {
                 let sum = pre.ps[i + 1] - pre.ps[i + 1 - period];
                 let sum2 = pre.ps2[i + 1] - pre.ps2[i + 1 - period];
-                
+
                 let var = sum2.mul_add(inv_den, -(sum * sum) * inv_den2);
                 out_row[i] = if var <= 0.0 { 0.0 } else { var.sqrt() * nbdev };
             }
             return;
         }
 
-        
         for i in warmup_end..n {
             if pre.pnan[i + 1] - pre.pnan[i + 1 - period] > 0 {
                 out_row[i] = f64::NAN;
@@ -1030,7 +951,6 @@ fn stddev_batch_inner(
         }
         let no_nans = pre.pnan[n] == 0;
         if !no_nans {
-            
             stddev_from_prefix_scalar(warmup_end, period, nbdev, pre, out_row);
             return;
         }
@@ -1044,7 +964,6 @@ fn stddev_batch_inner(
 
         let mut i = warmup_end;
         while i + 4 <= n {
-            
             let s_hi = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1));
             let s_lo = _mm256_loadu_pd(pre.ps.as_ptr().add(i + 1 - period));
             let sum = _mm256_sub_pd(s_hi, s_lo);
@@ -1053,7 +972,6 @@ fn stddev_batch_inner(
             let q_lo = _mm256_loadu_pd(pre.ps2.as_ptr().add(i + 1 - period));
             let sum2 = _mm256_sub_pd(q_hi, q_lo);
 
-            
             let sum_sq = _mm256_mul_pd(sum, sum);
             let term = _mm256_mul_pd(sum_sq, v_inv_den2);
             let var = _mm256_sub_pd(_mm256_mul_pd(sum2, v_inv_den), term);
@@ -1063,7 +981,7 @@ fn stddev_batch_inner(
             _mm256_storeu_pd(out_row.as_mut_ptr().add(i), outv);
             i += 4;
         }
-        
+
         if i < n {
             stddev_from_prefix_scalar(i, period, nbdev, pre, out_row);
         }
@@ -1273,7 +1191,6 @@ pub fn stddev_batch_inner_into(
         });
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
@@ -1448,10 +1365,6 @@ pub fn stddev_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "stddev_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, nbdev_range=(1.0, 1.0, 0.0), device_id=0))]
@@ -1511,11 +1424,7 @@ pub fn stddev_cuda_many_series_one_param_dev_py<'py>(
     Ok(handle)
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stddev_js(data: &[f64], period: usize, nbdev: f64) -> Result<Vec<f64>, JsValue> {
     let params = StdDevParams {
@@ -1524,14 +1433,14 @@ pub fn stddev_js(data: &[f64], period: usize, nbdev: f64) -> Result<Vec<f64>, Js
     };
     let input = StdDevInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; 
+    let mut output = vec![0.0; data.len()];
     stddev_into_slice(&mut output, &input, detect_best_kernel())
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stddev_into(
     in_ptr: *const f64,
@@ -1553,7 +1462,6 @@ pub fn stddev_into(
         let input = StdDevInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             stddev_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1568,7 +1476,7 @@ pub fn stddev_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stddev_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1577,7 +1485,7 @@ pub fn stddev_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stddev_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1587,26 +1495,26 @@ pub fn stddev_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StdDevBatchConfig {
     pub period_range: (usize, usize, usize),
     pub nbdev_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StdDevBatchJsOutput {
     pub values: Vec<f64>,
     pub combos: Vec<StdDevParams>,
-    
+
     pub periods: Vec<usize>,
     pub nbdevs: Vec<f64>,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = stddev_batch)]
 pub fn stddev_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: StdDevBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1633,8 +1541,7 @@ pub fn stddev_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue,
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stddev_batch_into(
     in_ptr: *const f64,
@@ -1659,8 +1566,7 @@ pub fn stddev_batch_into(
             nbdev: (nbdev_start, nbdev_end, nbdev_step),
         };
 
-        let combos = expand_grid_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -1675,8 +1581,7 @@ pub fn stddev_batch_into(
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stddev_batch_into_cfg(
     in_ptr: *const f64,
@@ -1696,8 +1601,7 @@ pub fn stddev_batch_into_cfg(
         nbdev: config.nbdev_range,
     };
 
-    let combos = expand_grid_checked(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     if combos.is_empty() {
         return Err(JsValue::from_str("No parameter combinations generated"));
     }
@@ -1716,7 +1620,7 @@ pub fn stddev_batch_into_cfg(
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let result = StdDevBatchJsOutput {
-            values: vec![], 
+            values: vec![],
             periods: params.iter().map(|p| p.period.unwrap()).collect(),
             nbdevs: params.iter().map(|p| p.nbdev.unwrap()).collect(),
             combos: params,
@@ -1747,15 +1651,12 @@ mod tests {
         test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
-        
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let sweep = StdDevBatchRange::default();
 
-        
         let res = stddev_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(matches!(res, Err(StdDevError::InvalidKernelForBatch(_))));
 
-        
         let res2 = stddev_batch_with_kernel(&data, &sweep, Kernel::Avx2);
         assert!(matches!(res2, Err(StdDevError::InvalidKernelForBatch(_))));
         Ok(())
@@ -1770,15 +1671,16 @@ mod tests {
         let params = StdDevParams::default();
         let input = StdDevInput::from_slice(&data, params);
 
-        
-        let mut wrong_size_output = vec![0.0; 10]; 
+        let mut wrong_size_output = vec![0.0; 10];
         let res = stddev_into_slice(&mut wrong_size_output, &input, kernel);
         assert!(matches!(res, Err(StdDevError::OutputLengthMismatch { .. })));
 
-        
-        let mut small_output = vec![0.0; 3]; 
+        let mut small_output = vec![0.0; 3];
         let res2 = stddev_into_slice(&mut small_output, &input, kernel);
-        assert!(matches!(res2, Err(StdDevError::OutputLengthMismatch { .. })));
+        assert!(matches!(
+            res2,
+            Err(StdDevError::OutputLengthMismatch { .. })
+        ));
         Ok(())
     }
 
@@ -1787,17 +1689,15 @@ mod tests {
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
         let params = StdDevParams {
             period: Some(3),
-            nbdev: Some(-1.0), 
+            nbdev: Some(-1.0),
         };
         let input = StdDevInput::from_slice(&data, params.clone());
         let res = stddev_with_kernel(&input, kernel);
         assert!(matches!(res, Err(StdDevError::InvalidNbdev { .. })));
 
-        
         let stream_res = StdDevStream::try_new(params);
         assert!(matches!(stream_res, Err(StdDevError::InvalidNbdev { .. })));
 
-        
         let inf_params = StdDevParams {
             period: Some(3),
             nbdev: Some(f64::INFINITY),
@@ -1806,7 +1706,6 @@ mod tests {
         let inf_res = stddev_with_kernel(&inf_input, kernel);
         assert!(matches!(inf_res, Err(StdDevError::InvalidNbdev { .. })));
 
-        
         let nan_params = StdDevParams {
             period: Some(3),
             nbdev: Some(f64::NAN),
@@ -1966,30 +1865,25 @@ mod tests {
 
     #[test]
     fn test_stddev_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = StdDevInput::from_candles(&candles, "close", StdDevParams::default());
 
-        
         let baseline = stddev(&input)?.values;
 
-        
         let mut out = vec![0.0; baseline.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             stddev_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             stddev_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(baseline.len(), out.len());
 
-        
         let eq_or_both_nan = |a: f64, b: f64| -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         };
@@ -2202,8 +2096,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=30, 0.5f64..=3.0f64).prop_flat_map(|(period, nbdev)| {
             (
                 prop::collection::vec(
@@ -2226,10 +2118,8 @@ mod tests {
             let StdDevOutput { values: ref_out } =
                 stddev_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            
             let warmup_period = period - 1;
 
-            
             for i in 0..warmup_period {
                 prop_assert!(
                     out[i].is_nan(),
@@ -2239,12 +2129,10 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_period..data.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
-                
                 prop_assert!(
                     y.is_nan() || y >= 0.0,
                     "StdDev at index {} is negative: {}",
@@ -2252,7 +2140,6 @@ mod tests {
                     y
                 );
 
-                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = if y_bits > r_bits {
@@ -2269,7 +2156,6 @@ mod tests {
                     ulp_diff
                 );
 
-                
                 let window = &data[i + 1 - period..=i];
                 let is_constant = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12);
                 if is_constant {
@@ -2281,15 +2167,11 @@ mod tests {
                     );
                 }
 
-                
-                
-                
                 if (nbdev - 1.0).abs() < 1e-9 {
                     let window_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
                     let window_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let range = window_max - window_min;
 
-                    
                     let max_stddev =
                         (range / 2.0) * ((period as f64) / ((period - 1) as f64)).sqrt();
 
@@ -2302,8 +2184,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 if (nbdev - 1.0).abs() > 1e-9 {
                     let params_unit = StdDevParams {
                         period: Some(period),
@@ -2314,7 +2194,6 @@ mod tests {
                         stddev_with_kernel(&input_unit, kernel).unwrap();
                     let y_unit = out_unit[i];
 
-                    
                     let expected = y_unit * nbdev;
                     let diff = (y - expected).abs();
                     prop_assert!(
@@ -2329,7 +2208,6 @@ mod tests {
                 }
             }
 
-            
             if period == 2 && data.len() >= 2 {
                 let identical_data = vec![42.0; 10];
                 let params2 = StdDevParams {
@@ -2349,8 +2227,6 @@ mod tests {
                 }
             }
 
-            
-            
             if data.len() >= period * 2 {
                 let monotonic_data: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 10.0).collect();
                 let mono_params = StdDevParams {
@@ -2361,14 +2237,13 @@ mod tests {
                 let StdDevOutput { values: mono_out } =
                     stddev_with_kernel(&mono_input, kernel).unwrap();
 
-                
                 let step_size = 10.0;
                 let expected_stddev = step_size * ((period * period - 1) as f64 / 12.0).sqrt();
 
                 for i in (period - 1)..mono_out.len().min(period * 3) {
                     let deviation = (mono_out[i] - expected_stddev).abs();
                     prop_assert!(
-                        deviation < 1.0, 
+                        deviation < 1.0,
                         "Monotonic pattern stddev mismatch at index {}: got {}, expected ~{}",
                         i,
                         mono_out[i],
@@ -2377,8 +2252,6 @@ mod tests {
                 }
             }
 
-            
-            
             if data.len() >= period * 2 && period >= 4 {
                 let alternating_data: Vec<f64> = (0..100)
                     .map(|i| if i % 2 == 0 { 1000.0 } else { 100.0 })
@@ -2391,19 +2264,17 @@ mod tests {
                 let StdDevOutput { values: alt_out } =
                     stddev_with_kernel(&alt_input, kernel).unwrap();
 
-                
-                let alt_range = 900.0; 
-                let expected_alt_stddev = alt_range / 2.0; 
+                let alt_range = 900.0;
+                let expected_alt_stddev = alt_range / 2.0;
 
                 for i in (period - 1)..alt_out.len().min(period * 3) {
-                    
                     prop_assert!(
                         alt_out[i] > alt_range * 0.4,
                         "Alternating pattern should produce high stddev at index {}: got {}",
                         i,
                         alt_out[i]
                     );
-                    
+
                     let max_possible =
                         (alt_range / 2.0) * ((period as f64) / ((period - 1) as f64)).sqrt();
                     prop_assert!(
@@ -2505,14 +2376,13 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            
-            (2, 10, 2, 1.0, 1.0, 0.0),    
-            (5, 25, 5, 0.5, 2.5, 0.5),    
-            (30, 60, 15, 1.0, 1.0, 0.0),  
-            (2, 5, 1, 1.0, 3.0, 1.0),     
-            (10, 10, 0, 0.5, 3.0, 0.5),   
-            (20, 50, 10, 2.0, 2.0, 0.0),  
-            (100, 100, 0, 1.0, 3.0, 1.0), 
+            (2, 10, 2, 1.0, 1.0, 0.0),
+            (5, 25, 5, 0.5, 2.5, 0.5),
+            (30, 60, 15, 1.0, 1.0, 0.0),
+            (2, 5, 1, 1.0, 3.0, 1.0),
+            (10, 10, 0, 0.5, 3.0, 0.5),
+            (20, 50, 10, 2.0, 2.0, 0.0),
+            (100, 100, 0, 1.0, 3.0, 1.0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, n_start, n_end, n_step)) in

@@ -1,8 +1,4 @@
-
-
-use vector_ta::indicators::cci::{
-    CciBatchBuilder, CciBatchRange, CciInput, CciParams,
-};
+use vector_ta::indicators::cci::{CciBatchBuilder, CciBatchRange, CciInput, CciParams};
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -91,7 +87,7 @@ fn cci_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-1; 
+    let tol = 7e-1;
     let mut max_diff = 0.0f64;
     let mut max_idx = 0usize;
     let mut max_cpu = 0.0f64;
@@ -147,8 +143,8 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
@@ -158,7 +154,6 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 14usize;
 
-    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let tm_quant: Vec<f64> = tm_f32.iter().map(|&v| v as f64).collect();
     let mut cpu_tm = vec![f64::NAN; cols * rows];
@@ -179,7 +174,6 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let cuda = CudaCci::new(0).expect("CudaCci::new");
     let dev = cuda
         .cci_many_series_one_param_time_major_dev(&tm_f32, cols, rows, period)
@@ -189,7 +183,7 @@ fn cci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 7e-1; 
+    let tol = 7e-1;
     let mut max_diff = 0.0f64;
     let mut max_idx = 0usize;
     let mut max_cpu = 0.0f64;

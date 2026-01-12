@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::coppock::{
     coppock_batch_with_kernel, coppock_with_kernel, CoppockBatchRange, CoppockInput, CoppockParams,
 };
@@ -76,8 +74,8 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         eprintln!("[coppock_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 6usize; 
-    let rows = 2048usize; 
+    let cols = 6usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -90,7 +88,6 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
     let long = 14usize;
     let ma_p = 10usize;
 
-    
     let mut cpu = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -110,7 +107,6 @@ fn coppock_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         }
     }
 
-    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaCoppock::new(0).expect("CudaCoppock::new");
     let dev = cuda

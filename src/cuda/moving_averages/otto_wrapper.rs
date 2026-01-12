@@ -1,14 +1,3 @@
-//! CUDA wrapper for OTTO (Optimized Trend Tracker Oscillator).
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX embed and JIT options (DetermineTargetFromContext + O2 fallback)
-//! - NON_BLOCKING stream, optional VRAM checks + chunked launches
-//! - Batch (one series × many params) and Many-series × one param (time-major)
-//!
-//! Math category: Recurrence/IIR (per-row sequential). Batch path precomputes
-//! abs(CMO(9)) on host once per series and reuses it for all rows, mirroring
-//! the scalar batch path in `indicators::otto`.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -25,15 +14,19 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 #[derive(thiserror::Error, Debug)]
 pub enum CudaOttoError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("otto: out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("otto: missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("otto: invalid input: {0}")]
@@ -41,7 +34,14 @@ pub enum CudaOttoError {
     #[error("otto: invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("otto: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("otto: device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("otto: not implemented")]
@@ -123,9 +123,13 @@ impl CudaOtto {
         Ok(me)
     }
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
     pub fn set_policy(&mut self, policy: CudaOttoPolicy) {
         self.policy = policy;
@@ -179,7 +183,11 @@ impl CudaOtto {
     }
 
     #[inline]
-    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaOttoError> {
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaOttoError> {
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
         let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
@@ -187,10 +195,18 @@ impl CudaOtto {
         let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
         let max_gz = dev.get_attribute(DeviceAttribute::MaxGridDimZ)? as u32;
-        if block.0 == 0 || block.1 == 0 || block.2 == 0
-            || grid.0 == 0 || grid.1 == 0 || grid.2 == 0
-            || block.0 > max_bx || block.1 > max_by || block.2 > max_bz
-            || grid.0 > max_gx || grid.1 > max_gy || grid.2 > max_gz
+        if block.0 == 0
+            || block.1 == 0
+            || block.2 == 0
+            || grid.0 == 0
+            || grid.1 == 0
+            || grid.2 == 0
+            || block.0 > max_bx
+            || block.1 > max_by
+            || block.2 > max_bz
+            || grid.0 > max_gx
+            || grid.1 > max_gy
+            || grid.2 > max_gz
         {
             return Err(CudaOttoError::LaunchConfigTooLarge {
                 gx: grid.0,
@@ -203,8 +219,6 @@ impl CudaOtto {
         }
         Ok(())
     }
-
-    
 
     pub fn otto_batch_dev(
         &self,
@@ -245,11 +259,12 @@ impl CudaOtto {
         let headroom = 64 * 1024 * 1024usize;
         Self::will_fit(required, headroom)?;
 
-        
         let d_prices = self.htod_copy_f32(prices_f32)?;
         let d_cabs = self.htod_copy_f32(inputs.cabs.as_slice())?;
-        let d_ott_periods = DeviceBuffer::from_slice(&inputs.ott_periods).map_err(CudaOttoError::Cuda)?;
-        let d_ott_percents = DeviceBuffer::from_slice(&inputs.ott_percents).map_err(CudaOttoError::Cuda)?;
+        let d_ott_periods =
+            DeviceBuffer::from_slice(&inputs.ott_periods).map_err(CudaOttoError::Cuda)?;
+        let d_ott_percents =
+            DeviceBuffer::from_slice(&inputs.ott_percents).map_err(CudaOttoError::Cuda)?;
         let d_fast = DeviceBuffer::from_slice(&inputs.fast).map_err(CudaOttoError::Cuda)?;
         let d_slow = DeviceBuffer::from_slice(&inputs.slow).map_err(CudaOttoError::Cuda)?;
         let d_coco = DeviceBuffer::from_slice(&inputs.coco).map_err(CudaOttoError::Cuda)?;
@@ -259,9 +274,11 @@ impl CudaOtto {
             .checked_mul(inputs.combos.len())
             .ok_or_else(|| CudaOttoError::InvalidInput("rows*cols overflow".into()))?;
         let mut d_hott: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(CudaOttoError::Cuda)?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaOttoError::Cuda)?;
         let mut d_lott: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }.map_err(CudaOttoError::Cuda)?;
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }
+                .map_err(CudaOttoError::Cuda)?;
 
         self.launch_batch_kernel(
             &d_prices,
@@ -310,10 +327,11 @@ impl CudaOtto {
         d_hott: &mut DeviceBuffer<f32>,
         d_lott: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaOttoError> {
-        let func = self
-            .module
-            .get_function("otto_batch_f32")
-            .map_err(|_| CudaOttoError::MissingKernelSymbol { name: "otto_batch_f32" })?;
+        let func = self.module.get_function("otto_batch_f32").map_err(|_| {
+            CudaOttoError::MissingKernelSymbol {
+                name: "otto_batch_f32",
+            }
+        })?;
 
         unsafe {
             let this = self as *const _ as *mut CudaOtto;
@@ -355,14 +373,14 @@ impl CudaOtto {
                     &mut hott_ptr as *mut _ as *mut c_void,
                     &mut lott_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, grid, block, 0, args).map_err(CudaOttoError::Cuda)?;
+                self.stream
+                    .launch(&func, grid, block, 0, args)
+                    .map_err(CudaOttoError::Cuda)?;
             }
             start += chunk;
         }
         Ok(())
     }
-
-    
 
     pub fn otto_many_series_one_param_time_major_dev(
         &self,
@@ -402,9 +420,11 @@ impl CudaOtto {
 
         let d_prices_tm = self.htod_copy_f32(prices_tm_f32)?;
         let mut d_hott_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaOttoError::Cuda)?;
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(CudaOttoError::Cuda)?;
         let mut d_lott_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaOttoError::Cuda)?;
+            unsafe { DeviceBuffer::uninitialized_async(cols * rows, &self.stream) }
+                .map_err(CudaOttoError::Cuda)?;
 
         self.launch_many_series_kernel(
             &d_prices_tm,
@@ -451,7 +471,9 @@ impl CudaOtto {
         let func = self
             .module
             .get_function("otto_many_series_one_param_f32")
-            .map_err(|_| CudaOttoError::MissingKernelSymbol { name: "otto_many_series_one_param_f32" })?;
+            .map_err(|_| CudaOttoError::MissingKernelSymbol {
+                name: "otto_many_series_one_param_f32",
+            })?;
         unsafe {
             let this = self as *const _ as *mut CudaOtto;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
@@ -485,12 +507,12 @@ impl CudaOtto {
                 &mut hott_ptr as *mut _ as *mut c_void,
                 &mut lott_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, 0, args).map_err(CudaOttoError::Cuda)?;
+            self.stream
+                .launch(&func, grid, block, 0, args)
+                .map_err(CudaOttoError::Cuda)?;
         }
         Ok(())
     }
-
-    
 
     fn htod_copy_f32(&self, host: &[f32]) -> Result<DeviceBuffer<f32>, CudaOttoError> {
         let mut d: DeviceBuffer<f32> =
@@ -546,12 +568,13 @@ impl CudaOtto {
         let combos = {
             let v = expand_grid_otto(sweep);
             if v.is_empty() {
-                return Err(CudaOttoError::InvalidInput("no parameter combinations".into()));
+                return Err(CudaOttoError::InvalidInput(
+                    "no parameter combinations".into(),
+                ));
             }
             v
         };
 
-        
         let first_valid = prices_f32
             .iter()
             .position(|v| v.is_finite())
@@ -663,8 +686,6 @@ fn expand_grid_otto(r: &OttoBatchRange) -> Vec<OttoParams> {
 }
 
 fn build_cmo_abs9(prices: &[f32]) -> Vec<f32> {
-    
-    
     const P: usize = 9;
     let n = prices.len();
     let mut out = vec![0.0f32; n];

@@ -1,9 +1,3 @@
-//! CUDA support for the Williams' %R (WILLR) indicator.
-//!
-//! Mirrors the CPU batching API by accepting a single price series with many
-//! period combinations. Kernels operate in FP32 and replicate the scalar
-//! semantics (warm-up NaNs, NaN propagation, zero denominator handling).
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -28,13 +22,24 @@ pub enum CudaWillrError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -48,7 +53,6 @@ pub struct CudaWillr {
     device_id: u32,
 }
 
-/// Device-resident sparse-table buffers for WILLR, reusable across runs.
 pub struct WillrGpuTablesDev {
     d_log2: DeviceBuffer<i32>,
     d_level_offsets: DeviceBuffer<i32>,
@@ -76,7 +80,6 @@ impl CudaWillr {
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/willr_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            // Prefer higher driver JIT optimization; fallback below if unsupported.
             ModuleJitOption::OptLevel(OptLevel::O3),
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
@@ -93,7 +96,6 @@ impl CudaWillr {
         })
     }
 
-    /// Expose context/device for Python interop and tests.
     #[inline]
     pub fn context(&self) -> Arc<Context> {
         self.ctx.clone()
@@ -142,7 +144,6 @@ impl CudaWillr {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        // VRAM estimate: close + tables + periods + output
         let n = prepared.series_len;
         let elems = n
             .checked_mul(n_combos)
@@ -155,19 +156,34 @@ impl CudaWillr {
         let bytes_periods = n_combos
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_log2 = prepared.tables.log2.len()
+        let bytes_log2 = prepared
+            .tables
+            .log2
+            .len()
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_offsets = prepared.tables.level_offsets.len()
+        let bytes_offsets = prepared
+            .tables
+            .level_offsets
+            .len()
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_st_max = prepared.tables.st_max.len()
+        let bytes_st_max = prepared
+            .tables
+            .st_max
+            .len()
             .checked_mul(f32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_st_min = prepared.tables.st_min.len()
+        let bytes_st_min = prepared
+            .tables
+            .st_min
+            .len()
             .checked_mul(f32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_nan_psum = prepared.tables.nan_psum.len()
+        let bytes_nan_psum = prepared
+            .tables
+            .nan_psum
+            .len()
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
         let bytes_out = elems
@@ -191,8 +207,7 @@ impl CudaWillr {
         let d_st_max = DeviceBuffer::from_slice(&prepared.tables.st_max)?;
         let d_st_min = DeviceBuffer::from_slice(&prepared.tables.st_min)?;
         let d_nan_psum = DeviceBuffer::from_slice(&prepared.tables.nan_psum)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.launch_batch_kernel(
             &d_close,
@@ -344,8 +359,6 @@ impl CudaWillr {
         )
     }
 
-    /// Build sparse tables on host (from H/L) and upload them once.
-    /// Returns a reusable device handle that also carries series_len, first_valid and level_count.
     pub fn prepare_tables_device(
         &self,
         high: &[f32],
@@ -359,30 +372,37 @@ impl CudaWillr {
             ));
         }
 
-        // earliest index where all H/L/C are non-NaN (preserves warmup semantics)
         let first_valid = (0..len)
             .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
             .ok_or_else(|| CudaWillrError::InvalidInput("all values are NaN".into()))?;
 
-        // Build sparse tables (host) once for this series.
         let tables = build_willr_gpu_tables(high, low);
 
-        // Upload once; keep device buffers around for reuse.
         let f32_bytes = core::mem::size_of::<f32>();
         let i32_bytes = core::mem::size_of::<i32>();
-        let bytes_log2 = tables.log2.len()
+        let bytes_log2 = tables
+            .log2
+            .len()
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_offsets = tables.level_offsets.len()
+        let bytes_offsets = tables
+            .level_offsets
+            .len()
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_st_max = tables.st_max.len()
+        let bytes_st_max = tables
+            .st_max
+            .len()
             .checked_mul(f32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_st_min = tables.st_min.len()
+        let bytes_st_min = tables
+            .st_min
+            .len()
             .checked_mul(f32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
-        let bytes_nan_psum = tables.nan_psum.len()
+        let bytes_nan_psum = tables
+            .nan_psum
+            .len()
             .checked_mul(i32_bytes)
             .ok_or_else(|| CudaWillrError::InvalidInput("size overflow".into()))?;
         let required = bytes_log2
@@ -417,8 +437,6 @@ impl CudaWillr {
         })
     }
 
-    /// Compute WILLR for many periods using previously uploaded device tables.
-    /// This avoids re-uploading st_max/st_min/nan_psum/log2/offsets on every run.
     pub fn willr_batch_dev_with_tables(
         &self,
         close_f32: &[f32],
@@ -433,7 +451,6 @@ impl CudaWillr {
             )));
         }
 
-        // Expand period sweep → device vector
         let combos = expand_periods(sweep)?;
         let periods: Vec<i32> = combos
             .iter()
@@ -441,7 +458,6 @@ impl CudaWillr {
             .collect();
         let n_combos = periods.len();
 
-        // VRAM estimate: close + periods + output (tables already resident)
         let n = dev_tables.series_len;
         let elems = n
             .checked_mul(n_combos)
@@ -465,10 +481,8 @@ impl CudaWillr {
 
         let d_close = DeviceBuffer::from_slice(close_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
-        // Launch using the reusable tables.
         self.launch_batch_kernel_raw(
             &d_close,
             &d_periods,
@@ -521,10 +535,11 @@ impl CudaWillr {
             return Ok(());
         }
 
-        let func = self
-            .module
-            .get_function("willr_batch_f32")
-            .map_err(|_| CudaWillrError::MissingKernelSymbol { name: "willr_batch_f32" })?;
+        let func = self.module.get_function("willr_batch_f32").map_err(|_| {
+            CudaWillrError::MissingKernelSymbol {
+                name: "willr_batch_f32",
+            }
+        })?;
 
         let block_x: u32 = Self::block_for_time_parallel(series_len);
         let grid: GridSize = (n_combos as u32, 1, 1).into();
@@ -565,8 +580,6 @@ impl CudaWillr {
         Ok(())
     }
 
-    // ----- Many-series × one-param (time-major) -----
-
     pub fn willr_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -579,7 +592,6 @@ impl CudaWillr {
         let (first_valids, cols, rows, period) =
             Self::prepare_many_series_inputs(high_tm, low_tm, close_tm, cols, rows, period)?;
 
-        // VRAM estimate: 3 inputs + first_valids + output
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaWillrError::InvalidInput("cols*rows overflow".into()))?;
@@ -605,8 +617,7 @@ impl CudaWillr {
         let d_low = DeviceBuffer::from_slice(low_tm)?;
         let d_close = DeviceBuffer::from_slice(close_tm)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems)? };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
 
         self.willr_many_series_one_param_device(
             &d_high,
@@ -681,7 +692,6 @@ impl CudaWillr {
             return Err(CudaWillrError::InvalidInput("period must be > 0".into()));
         }
 
-        // Per-series first valid index where all three inputs are non-NaN.
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -753,8 +763,6 @@ impl CudaWillr {
     }
 }
 
-// ---------- Bench profiles (batch only) ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -764,7 +772,6 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        // close + precomputed tables (derived from synthetic H/L); count worst-case generous
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
@@ -881,10 +888,7 @@ pub mod benches {
 }
 
 fn expand_periods(range: &WillrBatchRange) -> Result<Vec<WillrParams>, CudaWillrError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, CudaWillrError> {
-        // Treat zero step as static; allow reversed bounds; error on empty.
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaWillrError> {
         if step == 0 {
             return Ok(vec![start]);
         }

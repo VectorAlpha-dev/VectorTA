@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehlers_kama::{
     ehlers_kama_batch_with_kernel, EhlersKamaBatchRange, EhlersKamaBuilder, EhlersKamaParams,
 };
@@ -52,7 +50,7 @@ fn ehlers_kama_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>
 
     let cuda = CudaEhlersKama::new(0).expect("CudaEhlersKama::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    
+
     let data_q: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
     let cpu = ehlers_kama_batch_with_kernel(&data_q, &sweep, Kernel::ScalarBatch)?;
     let gpu = cuda
@@ -110,7 +108,7 @@ fn ehlers_kama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn st
 
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
-    
+
     let data_tm_q: Vec<f64> = data_tm_f32.iter().map(|&v| v as f64).collect();
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
@@ -170,7 +168,7 @@ fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu(
         return Ok(());
     }
 
-    let num_series = 33usize; 
+    let num_series = 33usize;
     let series_len = 1024usize;
     let mut data_tm = vec![f64::NAN; num_series * series_len];
     for j in 0..num_series {
@@ -188,7 +186,7 @@ fn ehlers_kama_cuda_many_series_one_param_tiled2d_matches_cpu(
 
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
-    
+
     let data_tm_q: Vec<f64> = data_tm_f32.iter().map(|&v| v as f64).collect();
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];

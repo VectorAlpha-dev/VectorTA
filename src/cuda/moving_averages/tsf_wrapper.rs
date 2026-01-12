@@ -1,12 +1,3 @@
-//! CUDA scaffolding for the Time Series Forecast (TSF) indicator.
-//!
-//! Mirrors LINREG’s CUDA path with ALMA-style wrapper behavior:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/tsf_kernel.ptx"))
-//! - Stream NON_BLOCKING
-//! - Simple 1D policies for batch and many-series
-//! - VRAM checks + ~64MB headroom
-//! - Warmup/NaN semantics identical to scalar TSF (period >= 2)
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -67,7 +58,11 @@ pub enum CudaTsfError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -75,7 +70,14 @@ pub enum CudaTsfError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -191,7 +193,6 @@ impl CudaTsf {
         }
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -269,7 +270,6 @@ impl CudaTsf {
         Ok(())
     }
 
-    
     #[allow(clippy::type_complexity)]
     fn prepare_batch_inputs(
         data_f32: &[f32],
@@ -340,7 +340,7 @@ impl CudaTsf {
             }
 
             let pf = period as f64;
-            
+
             let x_sum = pf * (pf + 1.0) * 0.5;
             let x2_sum = pf * (pf + 1.0) * (2.0 * pf + 1.0) / 6.0;
             let denom = pf * x2_sum - x_sum * x_sum;
@@ -373,10 +373,11 @@ impl CudaTsf {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTsfError> {
-        let func = self
-            .module
-            .get_function("tsf_batch_f32")
-            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_batch_f32" })?;
+        let func = self.module.get_function("tsf_batch_f32").map_err(|_| {
+            CudaTsfError::MissingKernelSymbol {
+                name: "tsf_batch_f32",
+            }
+        })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(256),
@@ -436,7 +437,9 @@ impl CudaTsf {
         let func = self
             .module
             .get_function("tsf_exclusive_prefix_y_yi_f64")
-            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_exclusive_prefix_y_yi_f64" })?;
+            .map_err(|_| CudaTsfError::MissingKernelSymbol {
+                name: "tsf_exclusive_prefix_y_yi_f64",
+            })?;
 
         let grid: GridSize = (1u32, 1u32, 1u32).into();
         let block: BlockSize = (1u32, 1u32, 1u32).into();
@@ -477,7 +480,9 @@ impl CudaTsf {
         let func = self
             .module
             .get_function("tsf_batch_from_prefix_f64")
-            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_batch_from_prefix_f64" })?;
+            .map_err(|_| CudaTsfError::MissingKernelSymbol {
+                name: "tsf_batch_from_prefix_f64",
+            })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => match env::var("LINREG_PREFIX_BLOCK_X").ok().as_deref() {
@@ -492,7 +497,9 @@ impl CudaTsf {
             },
             BatchKernelPolicy::Prefix { block_x } => block_x.max(32).min(256),
             BatchKernelPolicy::Plain { .. } => {
-                return Err(CudaTsfError::InvalidPolicy("Plain policy requires launch_batch_kernel"));
+                return Err(CudaTsfError::InvalidPolicy(
+                    "Plain policy requires launch_batch_kernel",
+                ));
             }
         };
 
@@ -548,10 +555,11 @@ impl CudaTsf {
         denom_invs: &[f32],
         inv_periods: &[f32],
     ) -> Result<DeviceArrayF32, CudaTsfError> {
-        
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaTsfError::InvalidInput("series_len * sizeof(f32) overflow".into()))?;
+            .ok_or_else(|| {
+                CudaTsfError::InvalidInput("series_len * sizeof(f32) overflow".into())
+            })?;
         let per_combo_bytes = std::mem::size_of::<i32>() + 3 * std::mem::size_of::<f32>();
         let params_bytes = combos
             .len()
@@ -586,9 +594,15 @@ impl CudaTsf {
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaTsfError::OutOfMemory { required, free, headroom });
+                return Err(CudaTsfError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
-                return Err(CudaTsfError::InvalidInput("insufficient device memory".into()));
+                return Err(CudaTsfError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
@@ -615,8 +629,15 @@ impl CudaTsf {
             }
             BatchKernelPolicy::Auto | BatchKernelPolicy::Prefix { .. } => {
                 let mut d_prefix_y = unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
-                let mut d_prefix_yi = unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
-                self.launch_prefix_kernel(&d_prices, series_len, first_valid, &mut d_prefix_y, &mut d_prefix_yi)?;
+                let mut d_prefix_yi =
+                    unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1)? };
+                self.launch_prefix_kernel(
+                    &d_prices,
+                    series_len,
+                    first_valid,
+                    &mut d_prefix_y,
+                    &mut d_prefix_yi,
+                )?;
                 self.launch_batch_from_prefix_kernel(
                     &d_prefix_y,
                     &d_prefix_yi,
@@ -693,7 +714,6 @@ impl CudaTsf {
         Ok((dev.rows, dev.cols, combos))
     }
 
-    
     #[allow(clippy::type_complexity)]
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -763,7 +783,9 @@ impl CudaTsf {
         let func = self
             .module
             .get_function("tsf_many_series_one_param_f32")
-            .map_err(|_| CudaTsfError::MissingKernelSymbol { name: "tsf_many_series_one_param_f32" })?;
+            .map_err(|_| CudaTsfError::MissingKernelSymbol {
+                name: "tsf_many_series_one_param_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 256,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64).min(256),
@@ -836,9 +858,15 @@ impl CudaTsf {
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaTsfError::OutOfMemory { required, free, headroom });
+                return Err(CudaTsfError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
-                return Err(CudaTsfError::InvalidInput("insufficient device memory".into()));
+                return Err(CudaTsfError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
@@ -913,7 +941,6 @@ impl CudaTsf {
         Ok(())
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -1087,12 +1114,13 @@ pub mod benches {
     }
 }
 
-
 #[inline]
 fn expand_grid_local(r: &TsfBatchRange) -> Vec<TsfParams> {
     let (start, end, step) = r.period;
     if step == 0 || start == end {
-        return vec![TsfParams { period: Some(start) }];
+        return vec![TsfParams {
+            period: Some(start),
+        }];
     }
     let mut v = Vec::new();
     if start <= end {

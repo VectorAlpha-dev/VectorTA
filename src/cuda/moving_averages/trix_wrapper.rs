@@ -1,17 +1,3 @@
-//! CUDA scaffolding for the TRIX (Triple Exponential Average Oscillator) kernels.
-//!
-//! ALMA-parity wrapper surface:
-//! - PTX loaded with DetermineTargetFromContext and OptLevel O2 (with fallbacks)
-//! - NON_BLOCKING stream, VRAM estimates via mem_get_info, ~64MB headroom
-//! - Policy enums and one-shot BENCH_DEBUG logging of selected kernels
-//! - Batch (one series × many params) and time-major many-series × one param
-//! - Chunk extremely large grids when needed (grid.x based)
-//!
-//! Math category: recurrence/IIR. The batch kernel expects ln(price) to be
-//! precomputed on host and passed as input to avoid redundant device logf
-//! across parameter rows. The many-series kernel computes ln(price) on device
-//! per series.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -33,7 +19,11 @@ pub enum CudaTrixError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -41,7 +31,14 @@ pub enum CudaTrixError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -64,15 +61,13 @@ impl Default for CudaTrixPolicy {
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
-    /// One block per combo; single-thread sequential scan
     Plain { block_x: u32 },
-    /// One warp per combo; warp-cooperative scan over affine transforms
+
     WarpScan { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelSelected {
-    /// One block per series; single-thread sequential scan (time-major)
     OneD { block_x: u32 },
 }
 
@@ -142,9 +137,7 @@ impl CudaTrix {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaTrixError> {
-        self.stream
-            .synchronize()
-            .map_err(Into::into)
+        self.stream.synchronize().map_err(Into::into)
     }
 
     #[inline]
@@ -295,7 +288,7 @@ impl CudaTrix {
 
     fn run_batch_kernel(&self, inputs: &BatchInputs) -> Result<DeviceArrayF32, CudaTrixError> {
         let trace = std::env::var("TRIX_TRACE").ok().as_deref() == Some("1");
-        
+
         let logs_bytes = inputs
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -331,7 +324,6 @@ impl CudaTrix {
             }
         }
 
-        
         if trace {
             eprintln!(
                 "[TRACE] trix.run_batch_kernel: series_len={} combos={} first_valid={} (device={})",
@@ -359,10 +351,6 @@ impl CudaTrix {
             &mut d_out,
         )?;
 
-        
-        
-        
-        
         if trace {
             eprintln!("[TRACE] trix.run_batch_kernel: stream.synchronize (begin)");
         }
@@ -388,10 +376,8 @@ impl CudaTrix {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTrixError> {
         let trace = std::env::var("TRIX_TRACE").ok().as_deref() == Some("1");
-        
-        
-        let warp_scan_enabled =
-            std::env::var("TRIX_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
+
+        let warp_scan_enabled = std::env::var("TRIX_BATCH_WARP_SCAN").ok().as_deref() == Some("1");
         let block_x: u32 = if warp_scan_enabled {
             match self.policy.batch {
                 BatchKernelPolicy::Auto => std::env::var("TRIX_BLOCK_X")
@@ -409,9 +395,8 @@ impl CudaTrix {
             1
         };
 
-        
         if warp_scan_enabled && block_x >= 32 {
-            let block_x = (block_x / 32).max(1) * 32; 
+            let block_x = (block_x / 32).max(1) * 32;
             let warps_per_block = (block_x / 32).max(1) as usize;
             let grid_x = ((n_combos + warps_per_block - 1) / warps_per_block) as u32;
 
@@ -428,7 +413,9 @@ impl CudaTrix {
             let func = self
                 .module
                 .get_function("trix_batch_warp_scan_f32")
-                .map_err(|_| CudaTrixError::MissingKernelSymbol { name: "trix_batch_warp_scan_f32" })?;
+                .map_err(|_| CudaTrixError::MissingKernelSymbol {
+                    name: "trix_batch_warp_scan_f32",
+                })?;
             if trace {
                 eprintln!("[TRACE] trix.launch_batch_kernel: module.get_function(trix_batch_warp_scan_f32) (done)");
             }
@@ -470,11 +457,12 @@ impl CudaTrix {
         if trace {
             eprintln!("[TRACE] trix.launch_batch_kernel: plain path (block_x=1) (begin)");
         }
-        let func = self
-            .module
-            .get_function("trix_batch_f32")
-            .map_err(|_| CudaTrixError::MissingKernelSymbol { name: "trix_batch_f32" })?;
-        
+        let func = self.module.get_function("trix_batch_f32").map_err(|_| {
+            CudaTrixError::MissingKernelSymbol {
+                name: "trix_batch_f32",
+            }
+        })?;
+
         let mut launched = 0usize;
         while launched < n_combos {
             let chunk = (n_combos - launched).min(self.max_grid_x as usize);
@@ -487,7 +475,7 @@ impl CudaTrix {
             self.maybe_log_batch_debug();
 
             unsafe {
-                let mut logs_ptr = d_logs.as_device_ptr().as_raw() + 0u64; 
+                let mut logs_ptr = d_logs.as_device_ptr().as_raw() + 0u64;
                 let period_offset_bytes = launched
                     .checked_mul(core::mem::size_of::<i32>())
                     .ok_or_else(|| CudaTrixError::InvalidInput("periods offset overflow".into()))?;
@@ -501,9 +489,10 @@ impl CudaTrix {
                     .ok_or_else(|| CudaTrixError::InvalidInput("output offset overflow".into()))?;
                 let offset_bytes = offset_elems
                     .checked_mul(core::mem::size_of::<f32>())
-                    .ok_or_else(|| CudaTrixError::InvalidInput("output offset bytes overflow".into()))?;
-                let mut out_ptr =
-                    d_out.as_device_ptr().as_raw() + offset_bytes as u64;
+                    .ok_or_else(|| {
+                        CudaTrixError::InvalidInput("output offset bytes overflow".into())
+                    })?;
+                let mut out_ptr = d_out.as_device_ptr().as_raw() + offset_bytes as u64;
                 let args: &mut [*mut c_void] = &mut [
                     &mut logs_ptr as *mut _ as *mut c_void,
                     &mut periods_ptr as *mut _ as *mut c_void,
@@ -604,8 +593,7 @@ impl CudaTrix {
                 ));
             }
         }
-        let d_prices_tm =
-            unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }?;
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(prices_tm_f32, &self.stream) }?;
         let d_first_valids =
             unsafe { DeviceBuffer::from_slice_async(&inputs.first_valids, &self.stream) }?;
         let mut d_out_tm: DeviceBuffer<f32> =
@@ -620,8 +608,6 @@ impl CudaTrix {
             &mut d_out_tm,
         )?;
 
-        
-        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -645,7 +631,6 @@ impl CudaTrix {
             ));
         }
 
-        
         let first_valid = prices
             .iter()
             .position(|v| !v.is_nan())
@@ -670,12 +655,15 @@ impl CudaTrix {
             max_period = max_period.max(period);
         }
 
-        
         let needed = max_period
             .checked_sub(1)
             .and_then(|v| v.checked_mul(3))
             .and_then(|v| v.checked_add(2))
-            .ok_or_else(|| CudaTrixError::InvalidInput("period overflow when computing TRIX warmup length".into()))?;
+            .ok_or_else(|| {
+                CudaTrixError::InvalidInput(
+                    "period overflow when computing TRIX warmup length".into(),
+                )
+            })?;
         if series_len - first_valid < needed {
             return Err(CudaTrixError::InvalidInput(format!(
                 "not enough valid data (needed >= {}, valid = {})",
@@ -684,14 +672,11 @@ impl CudaTrix {
             )));
         }
 
-        
         let mut logs = vec![0f32; series_len];
         for i in 0..first_valid {
             logs[i] = 0.0;
         }
         for i in first_valid..series_len {
-            
-            
             logs[i] = (prices[i] as f64).ln() as f32;
         }
 
@@ -750,7 +735,11 @@ impl CudaTrix {
                 .checked_sub(1)
                 .and_then(|v| v.checked_mul(3))
                 .and_then(|v| v.checked_add(2))
-                .ok_or_else(|| CudaTrixError::InvalidInput("period overflow when computing TRIX warmup length".into()))?;
+                .ok_or_else(|| {
+                    CudaTrixError::InvalidInput(
+                        "period overflow when computing TRIX warmup length".into(),
+                    )
+                })?;
             if rows - first < needed {
                 return Err(CudaTrixError::InvalidInput(format!(
                     "series {} lacks data: needed >= {}, valid = {}",
@@ -768,8 +757,7 @@ impl CudaTrix {
     fn htod_copy_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaTrixError> {
         match LockedBuffer::from_slice(src) {
             Ok(h_pinned) => unsafe {
-                let mut dst =
-                    DeviceBuffer::uninitialized_async(src.len(), &self.stream)?;
+                let mut dst = DeviceBuffer::uninitialized_async(src.len(), &self.stream)?;
                 dst.async_copy_from(&h_pinned, &self.stream)?;
                 Ok(dst)
             },
@@ -780,8 +768,7 @@ impl CudaTrix {
     fn htod_copy_i32(&self, src: &[i32]) -> Result<DeviceBuffer<i32>, CudaTrixError> {
         match LockedBuffer::from_slice(src) {
             Ok(h_pinned) => unsafe {
-                let mut dst =
-                    DeviceBuffer::uninitialized_async(src.len(), &self.stream)?;
+                let mut dst = DeviceBuffer::uninitialized_async(src.len(), &self.stream)?;
                 dst.async_copy_from(&h_pinned, &self.stream)?;
                 Ok(dst)
             },
@@ -828,8 +815,6 @@ impl CudaTrix {
         }
     }
 }
-
-
 
 pub mod benches {
     use super::*;

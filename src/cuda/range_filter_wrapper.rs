@@ -1,13 +1,3 @@
-//! CUDA wrapper for the Range Filter indicator.
-//!
-//! Parity goals (mirrors ALMA/CWMA wrappers):
-//! - PTX load via DetermineTargetFromContext + OptLevel O2 with fallback
-//! - NON_BLOCKING stream
-//! - Policy enums (simple 1D launch for batch; 1D blocks per series for many-series)
-//! - VRAM checks + grid.y chunking (<= 65_535) for batch
-//! - Warmup/NaN semantics identical to scalar: warm = first_valid + max(range_period, smooth? smooth_period : 0)
-//! - Compensated FP32 accumulators in kernels (no FP64); FP32 I/O
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::range_filter::{RangeFilterBatchRange, RangeFilterParams};
@@ -22,15 +12,21 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum CudaRangeFilterError {
     Cuda(CudaError),
     InvalidInput(String),
-    MissingKernelSymbol { name: &'static str },
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     LaunchConfigTooLarge {
         gx: u32,
         gy: u32,
@@ -40,7 +36,10 @@ pub enum CudaRangeFilterError {
         bz: u32,
     },
     InvalidPolicy(&'static str),
-    DeviceMismatch { buf: u32, current: u32 },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 
@@ -52,12 +51,23 @@ impl fmt::Display for CudaRangeFilterError {
             CudaRangeFilterError::MissingKernelSymbol { name } => {
                 write!(f, "Missing kernel symbol: {}", name)
             }
-            CudaRangeFilterError::OutOfMemory { required, free, headroom } => write!(
+            CudaRangeFilterError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "Out of memory on device: required={}B, free={}B, headroom={}B",
                 required, free, headroom
             ),
-            CudaRangeFilterError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaRangeFilterError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
             ),
@@ -73,7 +83,6 @@ impl fmt::Display for CudaRangeFilterError {
 }
 impl std::error::Error for CudaRangeFilterError {}
 
-/// Three VRAM-backed arrays for (filter, high, low)
 pub struct DeviceRangeFilterTrio {
     pub filter: DeviceBuffer<f32>,
     pub high: DeviceBuffer<f32>,
@@ -176,7 +185,9 @@ impl CudaRangeFilter {
         self.policy = p;
     }
     pub fn synchronize(&self) -> Result<(), CudaRangeFilterError> {
-        self.stream.synchronize().map_err(CudaRangeFilterError::Cuda)?;
+        self.stream
+            .synchronize()
+            .map_err(CudaRangeFilterError::Cuda)?;
         Ok(())
     }
 
@@ -217,8 +228,6 @@ impl CudaRangeFilter {
             Ok(())
         }
     }
-
-    // ---------------- Batch: one series × many params ----------------
 
     #[inline]
     fn pick_1d_launch_for_batch(
@@ -297,7 +306,6 @@ impl CudaRangeFilter {
             ));
         }
 
-        // Validate periods and warmup coverage like scalar
         let max_needed = combos
             .iter()
             .map(|c| {
@@ -340,16 +348,17 @@ impl CudaRangeFilter {
             }
         }
 
-        // VRAM estimate
         let rows = combos.len();
         let elem_size = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(elem_size)
             .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
         let params_row_bytes = elem_size
-            .checked_add(3usize.checked_mul(std::mem::size_of::<i32>()).ok_or_else(|| {
-                CudaRangeFilterError::InvalidInput("size overflow".into())
-            })?)
+            .checked_add(
+                3usize
+                    .checked_mul(std::mem::size_of::<i32>())
+                    .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?,
+            )
             .ok_or_else(|| CudaRangeFilterError::InvalidInput("size overflow".into()))?;
         let params_bytes = rows
             .checked_mul(params_row_bytes)
@@ -394,10 +403,14 @@ impl CudaRangeFilter {
                 })
             })
             .collect::<Result<_, _>>()?;
-        let d_rs = DeviceBuffer::from_slice(&range_sizes_f32).map_err(CudaRangeFilterError::Cuda)?;
-        let d_rp = DeviceBuffer::from_slice(&range_periods_i32).map_err(CudaRangeFilterError::Cuda)?;
-        let d_sf = DeviceBuffer::from_slice(&smooth_flags_i32).map_err(CudaRangeFilterError::Cuda)?;
-        let d_sp = DeviceBuffer::from_slice(&smooth_periods_i32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_rs =
+            DeviceBuffer::from_slice(&range_sizes_f32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_rp =
+            DeviceBuffer::from_slice(&range_periods_i32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_sf =
+            DeviceBuffer::from_slice(&smooth_flags_i32).map_err(CudaRangeFilterError::Cuda)?;
+        let d_sp =
+            DeviceBuffer::from_slice(&smooth_periods_i32).map_err(CudaRangeFilterError::Cuda)?;
 
         let elems = rows
             .checked_mul(len)
@@ -409,7 +422,6 @@ impl CudaRangeFilter {
         let mut d_l: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaRangeFilterError::Cuda)?;
 
-        // --------------- Single 1D launch (grid-stride kernel) ---------------
         let func = self
             .module
             .get_function("range_filter_batch_f32")
@@ -431,9 +443,9 @@ impl CudaRangeFilter {
             let mut nrows_i: i32 = rows
                 .try_into()
                 .map_err(|_| CudaRangeFilterError::InvalidInput("rows exceeds i32".into()))?;
-            let mut first_i: i32 = first_valid
-                .try_into()
-                .map_err(|_| CudaRangeFilterError::InvalidInput("first_valid exceeds i32".into()))?;
+            let mut first_i: i32 = first_valid.try_into().map_err(|_| {
+                CudaRangeFilterError::InvalidInput("first_valid exceeds i32".into())
+            })?;
             let mut f_ptr = d_f.as_device_ptr().as_raw();
             let mut h_ptr = d_h.as_device_ptr().as_raw();
             let mut l_ptr = d_l.as_device_ptr().as_raw();
@@ -473,7 +485,6 @@ impl CudaRangeFilter {
         ))
     }
 
-    // ------------- Many series × one param (time‑major) -------------
     pub fn range_filter_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -512,7 +523,6 @@ impl CudaRangeFilter {
             return Err(CudaRangeFilterError::InvalidInput("invalid period".into()));
         }
 
-        // first_valid per series (column) scanning time-major layout
         if rows > i32::MAX as usize || cols > i32::MAX as usize {
             return Err(CudaRangeFilterError::InvalidInput(
                 "rows or cols exceeds i32".into(),
@@ -547,7 +557,8 @@ impl CudaRangeFilter {
         Self::will_fit(required, Self::headroom_bytes())?;
 
         let d_data = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaRangeFilterError::Cuda)?;
-        let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaRangeFilterError::Cuda)?;
+        let d_first =
+            DeviceBuffer::from_slice(&first_valids).map_err(CudaRangeFilterError::Cuda)?;
         let mut d_f: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaRangeFilterError::Cuda)?;
         let mut d_h: DeviceBuffer<f32> =
@@ -577,10 +588,10 @@ impl CudaRangeFilter {
             let mut sp_i = sp;
             let mut cols_i: i32 = cols
                 .try_into()
-                .map_err(|_| CudaRangeFilterError::InvalidInput("cols exceeds i32".into()))?; // num_series
+                .map_err(|_| CudaRangeFilterError::InvalidInput("cols exceeds i32".into()))?;
             let mut rows_i: i32 = rows
                 .try_into()
-                .map_err(|_| CudaRangeFilterError::InvalidInput("rows exceeds i32".into()))?; // series_len
+                .map_err(|_| CudaRangeFilterError::InvalidInput("rows exceeds i32".into()))?;
             let mut first_ptr = d_first.as_device_ptr().as_raw();
             let mut f_ptr = d_f.as_device_ptr().as_raw();
             let mut h_ptr = d_h.as_device_ptr().as_raw();
@@ -618,7 +629,6 @@ impl CudaRangeFilter {
     }
 }
 
-// ---------------- Helpers ----------------
 #[inline]
 fn expand_grid(r: &RangeFilterBatchRange) -> Result<Vec<RangeFilterParams>, CudaRangeFilterError> {
     fn axis_usize(
@@ -672,9 +682,7 @@ fn expand_grid(r: &RangeFilterBatchRange) -> Result<Vec<RangeFilterParams>, Cuda
         Ok(v)
     }
 
-    fn axis_f64(
-        (start, end, step): (f64, f64, f64),
-    ) -> Result<Vec<f64>, CudaRangeFilterError> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaRangeFilterError> {
         let eps = 1e-12;
         if !start.is_finite() || !end.is_finite() || !step.is_finite() {
             return Err(CudaRangeFilterError::InvalidInput(
@@ -739,7 +747,6 @@ fn expand_grid(r: &RangeFilterBatchRange) -> Result<Vec<RangeFilterParams>, Cuda
     Ok(out)
 }
 
-// ---------------- Bench profiles ----------------
 pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
@@ -797,14 +804,17 @@ pub mod benches {
                     .launch(&func, self.grid, self.block, 0, args)
                     .expect("range_filter batch launch");
             }
-            self.cuda.stream.synchronize().expect("range_filter batch sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("range_filter batch sync");
         }
     }
 
     fn prep_rf_batch() -> Box<dyn CudaBenchState> {
         let len = 120_000usize;
         let mut data = vec![f32::NAN; len];
-        
+
         for i in 5..len {
             let x = i as f32;
             data[i] = (x * 0.0021).sin() + 0.00021 * x;
@@ -918,13 +928,16 @@ pub mod benches {
                     .launch(&func, self.grid, self.block, 0, args)
                     .expect("range_filter many launch");
             }
-            self.cuda.stream.synchronize().expect("range_filter many sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("range_filter many sync");
         }
     }
 
     fn prep_rf_many_series() -> Box<dyn CudaBenchState> {
-        let cols = 256usize; // series
-        let rows = 200_000usize; // time
+        let cols = 256usize;
+        let rows = 200_000usize;
         let mut tm = vec![f32::NAN; rows * cols];
         for s in 0..cols {
             for t in s..rows {
@@ -942,7 +955,11 @@ pub mod benches {
         let cuda = CudaRangeFilter::new(0).unwrap();
         let rs = params.range_size.unwrap_or(2.618) as f32;
         let rp = params.range_period.unwrap_or(14) as i32;
-        let sf = if params.smooth_range.unwrap_or(true) { 1 } else { 0 };
+        let sf = if params.smooth_range.unwrap_or(true) {
+            1
+        } else {
+            0
+        };
         let sp = params.smooth_period.unwrap_or(27) as i32;
 
         let mut first_valids = vec![cols as i32; cols];

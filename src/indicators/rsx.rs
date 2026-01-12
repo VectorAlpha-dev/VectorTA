@@ -1,23 +1,3 @@
-//! # Relative Strength Xtra (RSX)
-//!
-//! A smoothed oscillator similar to RSI that attempts to reduce lag and noise. The calculation uses an IIR filter approach for smoothing while retaining responsiveness.
-//!
-//! ## Parameters
-//! - **period**: Lookback window for RSX calculations (default: 14)
-//!
-//! ## Inputs
-//! - Data series as slice or candles with source
-//!
-//! ## Returns
-//! - **values**: RSX oscillator values as `Vec<f64>` (length matches input, range 0-100)
-//!
-//! ## Developer Notes
-//! - SIMD status: AVX2 provides a scalar, FMA‑enabled path (via `mul_add`) for a consistent 5–10% speedup on large series; AVX512 reuses the same path. RSX is a short, stateful IIR chain, so there is no cross‑time lane parallelism without complex look‑ahead transforms.
-//! - CUDA status: Enabled for batch and many-series FP32 kernels; producing streams synchronize before returning VRAM handles, which expose CUDA Array Interface v3 and DLPack v1.x for Python interop.
-//! - Batch status: Row‑specific batch kernels were not attempted; there is no clear shared precompute across periods to amortize work beyond minor per‑row wins.
-//! - Scalar path: Warmup/init hoisted out of the loop; safe, branch‑lean hot loop following ALMA patterns. Outputs and prefixes use zero‑copy helpers.
-//! - Streaming update: O(1) per tick via explicit RSX IIR state; mirrors batch logic exactly. Ring buffer removed; warmup semantics preserved (None until `period-1`, then NaN once, then values).
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -43,11 +23,11 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde_wasm_bindgen;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for RsxInput<'a> {
@@ -75,7 +55,10 @@ pub struct RsxOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RsxParams {
     pub period: Option<usize>,
 }
@@ -193,7 +176,11 @@ pub enum RsxError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("rsx: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("rsx: Invalid kernel: expected batch kernel, got {kernel:?}")]
     InvalidKernel { kernel: Kernel },
@@ -291,7 +278,6 @@ pub fn rsx_into_slice(dst: &mut [f64], input: &RsxInput, kern: Kernel) -> Result
         }
     }
 
-    // prefix only
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -299,13 +285,7 @@ pub fn rsx_into_slice(dst: &mut [f64], input: &RsxInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Write RSX values into a caller-provided buffer without allocations.
-///
-/// - Preserves the module's NaN warmup behavior by pre-filling the warmup
-///   prefix in `out`.
-/// - `out.len()` must equal the input length; otherwise a size mismatch error
-///   is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn rsx_into(input: &RsxInput, out: &mut [f64]) -> Result<(), RsxError> {
     rsx_into_slice(out, input, Kernel::Auto)
@@ -323,7 +303,6 @@ pub fn rsx_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
 #[inline]
 pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     let mut f0 = 0.0;
     let mut f8 = 0.0;
     let mut f18 = 0.0;
@@ -348,7 +327,6 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    
     f90 = 1.0;
     f0 = 0.0;
     f88 = if period >= 6 {
@@ -361,17 +339,13 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     f20 = 1.0 - f18;
     out[start] = f64::NAN;
 
-    
     for i in (start + 1)..data.len() {
-        
         f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
 
-        
         let prev = f8;
         f8 = 100.0 * data[i];
         let v8 = f8 - prev;
 
-        
         f28 = f20 * f28 + f18 * v8;
         f30 = f18 * f28 + f20 * f30;
         let v_c = f28 * 1.5 - f30 * 0.5;
@@ -397,7 +371,6 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         f80 = f18 * f78 + f20 * f80;
         let v20_ = f78 * 1.5 - f80 * 0.5;
 
-        
         if f88 >= f90 && f8 != prev {
             f0 = 1.0;
         }
@@ -405,7 +378,6 @@ pub fn rsx_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             f90 = 0.0;
         }
 
-        
         if f88 < f90 && v20_ > 1e-10 {
             let mut v4 = (v14 / v20_ + 1.0) * 50.0;
             if v4 > 100.0 {
@@ -430,7 +402,6 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         return;
     }
 
-    
     let mut f0 = 0.0;
     let mut f8 = 100.0 * *data.get_unchecked(start);
     let f18 = 3.0 / (period as f64 + 2.0);
@@ -456,7 +427,6 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
 
     *out.get_unchecked_mut(start) = f64::NAN;
 
-    
     for i in (start + 1)..len {
         f90 = if f88 <= f90 { f88 + 1.0 } else { f90 + 1.0 };
 
@@ -464,7 +434,6 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
         f8 = 100.0 * *data.get_unchecked(i);
         let v8 = f8 - prev;
 
-        
         f28 = f18.mul_add(v8, f20 * f28);
         f30 = f18.mul_add(f28, f20 * f30);
         let v_c = 1.5f64.mul_add(f28, -0.5 * f30);
@@ -511,24 +480,18 @@ pub unsafe fn rsx_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rsx_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
-    
-    
     rsx_avx2(data, period, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn rsx_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     rsx_avx2(data, period, first, out)
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn rsx_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
-    
     rsx_scalar(data, period, first, out)
 }
 
@@ -536,21 +499,17 @@ unsafe fn rsx_simd128(data: &[f64], period: usize, first: usize, out: &mut [f64]
 pub struct RsxStream {
     period: usize,
 
-    
     seen: usize,
     init_done: bool,
 
-    
-    alpha: f64, 
-    beta: f64,  
-    f88: f64,   
-    f90: f64,   
+    alpha: f64,
+    beta: f64,
+    f88: f64,
+    f90: f64,
 
-    
     f0: f64,
     f8: f64,
 
-    
     f28: f64,
     f30: f64,
     f38: f64,
@@ -609,15 +568,12 @@ impl RsxStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         self.seen += 1;
 
-        
         if !self.init_done && self.seen < self.period {
             return None;
         }
 
-        
         if !self.init_done {
             self.init_done = true;
             self.f0 = 0.0;
@@ -625,7 +581,6 @@ impl RsxStream {
             return Some(f64::NAN);
         }
 
-        
         self.f90 = if self.f88 <= self.f90 {
             self.f88 + 1.0
         } else {
@@ -636,7 +591,6 @@ impl RsxStream {
         self.f8 = 100.0 * value;
         let v8 = self.f8 - prev;
 
-        
         self.f28 = self.beta * self.f28 + self.alpha * v8;
         self.f30 = self.alpha * self.f28 + self.beta * self.f30;
         let v_c = self.f28 * 1.5 - self.f30 * 0.5;
@@ -662,7 +616,6 @@ impl RsxStream {
         self.f80 = self.alpha * self.f78 + self.beta * self.f80;
         let v20_ = self.f78 * 1.5 - self.f80 * 0.5;
 
-        
         if self.f88 >= self.f90 && self.f8 != prev {
             self.f0 = 1.0;
         }
@@ -670,7 +623,6 @@ impl RsxStream {
             self.f90 = 0.0;
         }
 
-        
         let y = if self.f88 < self.f90 && v20_ > 1e-10 {
             let v4 = (v14 / v20_ + 1.0) * 50.0;
             v4.max(0.0).min(100.0)
@@ -801,7 +753,7 @@ fn expand_grid(r: &RsxBatchRange) -> Result<Vec<RsxParams>, RsxError> {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -883,32 +835,28 @@ fn rsx_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let _ = rows.checked_mul(cols).ok_or_else(|| RsxError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| RsxError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
-    
     let actual_kernel = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values_slice: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, rows * cols) };
@@ -950,7 +898,6 @@ fn rsx_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(buf_guard.as_mut_ptr() as *mut f64, rows * cols, rows * cols)
     };
@@ -1000,36 +947,34 @@ mod tests {
 
     #[test]
     fn test_rsx_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
         let input = RsxInput::with_default_candles(&candles);
 
-        
         let RsxOutput { values: expected } = rsx(&input)?;
 
-        
         let mut out = vec![0.0; candles.close.len()];
 
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             rsx_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             rsx_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(expected.len(), out.len());
 
-        
         for i in 0..out.len() {
             let a = expected[i];
             let b = out[i];
             if a.is_nan() || b.is_nan() {
-                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at {i}: {a:?} vs {b:?}");
+                assert!(
+                    a.is_nan() && b.is_nan(),
+                    "NaN mismatch at {i}: {a:?} vs {b:?}"
+                );
             } else {
                 assert!(a == b, "Mismatch at {i}: {a} vs {b}");
             }
@@ -1300,20 +1245,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            RsxParams::default(),            
-            RsxParams { period: Some(2) },   
-            RsxParams { period: Some(7) },   
-            RsxParams { period: Some(21) },  
-            RsxParams { period: Some(50) },  
-            RsxParams { period: Some(100) }, 
-            RsxParams { period: Some(200) }, 
-            RsxParams { period: Some(5) },   
-            RsxParams { period: Some(10) },  
-            RsxParams { period: Some(20) },  
-            RsxParams { period: Some(30) },  
-            RsxParams { period: Some(40) },  
+            RsxParams::default(),
+            RsxParams { period: Some(2) },
+            RsxParams { period: Some(7) },
+            RsxParams { period: Some(21) },
+            RsxParams { period: Some(50) },
+            RsxParams { period: Some(100) },
+            RsxParams { period: Some(200) },
+            RsxParams { period: Some(5) },
+            RsxParams { period: Some(10) },
+            RsxParams { period: Some(20) },
+            RsxParams { period: Some(30) },
+            RsxParams { period: Some(40) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1322,12 +1266,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1377,7 +1320,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1389,7 +1332,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1411,7 +1353,6 @@ mod tests {
                 let RsxOutput { values: ref_out } =
                     rsx_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in period..data.len() {
                     let y = out[i];
                     if !y.is_nan() {
@@ -1422,7 +1363,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..period.min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1431,7 +1371,6 @@ mod tests {
                     );
                 }
 
-                
                 if data.len() > period {
                     prop_assert!(
                         !out[period].is_nan(),
@@ -1440,11 +1379,9 @@ mod tests {
                     );
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                     && data.len() > period
                 {
-                    
                     for i in period..data.len() {
                         prop_assert!(
                             (out[i] - 50.0).abs() <= 1e-9,
@@ -1454,10 +1391,8 @@ mod tests {
                     }
                 }
 
-                
                 let is_strictly_increasing = data.windows(2).all(|w| w[1] > w[0]);
                 if is_strictly_increasing && data.len() >= period + 10 {
-                    
                     for i in (period + 10)..data.len() {
                         prop_assert!(
                             out[i] > 50.0 || (out[i] - 50.0).abs() < 1e-9,
@@ -1467,10 +1402,8 @@ mod tests {
                     }
                 }
 
-                
                 let is_strictly_decreasing = data.windows(2).all(|w| w[1] < w[0]);
                 if is_strictly_decreasing && data.len() >= period + 10 {
-                    
                     for i in (period + 10)..data.len() {
                         prop_assert!(
                             out[i] < 50.0 || (out[i] - 50.0).abs() < 1e-9,
@@ -1480,7 +1413,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1493,7 +1425,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -1504,8 +1435,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let RsxOutput { values: out2 } = rsx_with_kernel(&input, kernel).unwrap();
                 for i in 0..data.len() {
                     prop_assert!(
@@ -1601,16 +1530,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            (2, 10, 2),    
-            (5, 25, 5),    
-            (30, 60, 15),  
-            (2, 5, 1),     
-            (10, 100, 10), 
-            (14, 28, 7),   
-            (3, 9, 3),     
-            (50, 150, 25), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 100, 10),
+            (14, 28, 7),
+            (3, 9, 3),
+            (50, 150, 25),
         ];
 
         for (cfg_idx, &(period_start, period_end, period_step)) in test_configs.iter().enumerate() {
@@ -1629,7 +1557,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1685,7 +1612,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     gen_batch_tests!(check_batch_default_row);
@@ -1711,12 +1638,10 @@ pub fn rsx_py<'py>(
     };
     let input = RsxInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| rsx_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1763,23 +1688,18 @@ pub fn rsx_batch_py<'py>(
         period: period_range,
     };
 
-    
-    let combos =
-        expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| {
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -1796,11 +1716,9 @@ pub fn rsx_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    
     dict.set_item(
         "periods",
         combos
@@ -1812,7 +1730,6 @@ pub fn rsx_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(any(feature = "python", feature = "wasm"))]
 #[inline(always)]
@@ -1851,7 +1768,6 @@ fn rsx_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    
     unsafe {
         let out_mu =
             std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len());
@@ -1862,7 +1778,6 @@ fn rsx_batch_inner_into(
         init_matrix_prefixes(out_mu, cols, &warm);
     }
 
-    
     let actual = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -1912,7 +1827,7 @@ fn rsx_batch_inner_into(
     Ok(combos)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsx_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = RsxParams {
@@ -1928,7 +1843,7 @@ pub fn rsx_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsx_into(
     in_ptr: *const f64,
@@ -1968,7 +1883,7 @@ pub fn rsx_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsx_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1977,7 +1892,7 @@ pub fn rsx_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsx_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1987,13 +1902,13 @@ pub fn rsx_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsxBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsxBatchJsOutput {
     pub values: Vec<f64>,
@@ -2002,7 +1917,7 @@ pub struct RsxBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = rsx_batch)]
 pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: RsxBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2011,16 +1926,13 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         period: config.period_range,
     };
 
-    
-    let combos =
-        expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos.len();
     let cols = data.len();
     let _ = rows
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let first = data
         .iter()
@@ -2032,7 +1944,6 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -2058,7 +1969,7 @@ pub fn rsx_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsx_batch_into(
     in_ptr: *const f64,
@@ -2079,8 +1990,7 @@ pub fn rsx_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos =
-            expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -2095,7 +2005,6 @@ pub fn rsx_batch_into(
         Ok(rows)
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -2129,7 +2038,7 @@ impl RsxDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream synchronizes before returning the handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2147,7 +2056,6 @@ impl RsxDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Array API stream semantics: producer is already synchronized, so we only validate.
         if let Some(stream_obj) = stream.as_ref() {
             if let Ok(s) = stream_obj.extract::<usize>(py) {
                 if s == 0 {
@@ -2158,8 +2066,7 @@ impl RsxDeviceArrayF32Py {
             }
         }
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2170,7 +2077,6 @@ impl RsxDeviceArrayF32Py {
             }
         }
 
-        // copy=True is not supported for this handle.
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -2180,13 +2086,16 @@ impl RsxDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         use cust::memory::DeviceBuffer;
         let dummy = DeviceBuffer::<f32>::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -2226,17 +2135,15 @@ pub fn rsx_cuda_batch_dev_py(
     let sweep = RsxBatchRange {
         period: period_range,
     };
-    let (inner, ctx, dev_id) = py
-        .allow_threads(|| {
-            let cuda = CudaRsx::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
-            let dev_id = cuda.device_id();
-            let arr = cuda
-                .rsx_batch_dev(prices, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
-        })?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaRsx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .rsx_batch_dev(prices, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+    })?;
     Ok(RsxDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
@@ -2261,16 +2168,14 @@ pub fn rsx_cuda_many_series_one_param_dev_py(
     if prices_tm.len() != expected {
         return Err(PyValueError::new_err("time-major input length mismatch"));
     }
-    let (inner, ctx, dev_id) = py
-        .allow_threads(|| {
-            let cuda = CudaRsx::new(device_id)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
-            let dev_id = cuda.device_id();
-            let arr = cuda
-                .rsx_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
-        })?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaRsx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let arr = cuda
+            .rsx_many_series_one_param_time_major_dev(prices_tm, cols, rows, period)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
+    })?;
     Ok(RsxDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }

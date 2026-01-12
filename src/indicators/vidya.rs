@@ -1,39 +1,7 @@
-//! # Variable Index Dynamic Average (VIDYA)
-//!
-//! VIDYA is an adaptive moving average that adjusts its smoothing factor based on the ratio
-//! of short-term to long-term standard deviations, becoming more responsive during volatile periods.
-//!
-//! ## Parameters
-//! - **short_period**: Short lookback for standard deviation. Defaults to 2.
-//! - **long_period**: Long lookback for standard deviation. Defaults to 5.
-//! - **alpha**: Base smoothing factor (0.0-1.0). Defaults to 0.2.
-//!
-//! ## Returns
-//! - **`Ok(VidyaOutput)`** containing a `Vec<f64>` of adaptive moving average values matching input length.
-//! - **`Err(VidyaError)`** on invalid parameters, invalid ranges, or insufficient data.
-//!
-//! ## Developer Notes
-//! - Decision: Streaming kernel tightened per GUIDE. Uses mul_add for sums/EMA, one-sqrt ratio, and mod-free long-ring wrap; outputs match scalar/batch.
-//! - **SIMD Status**: AVX2 enabled with an unsafe + FMA (mul_add) implementation that yields
-//!   ~16–20% speedups on realistic sizes. This can introduce very small numerical differences
-//!   versus the scalar path due to operation reordering and fused operations. Tests use slightly
-//!   relaxed tolerances to accommodate this. AVX512 remains a stub delegating to scalar.
-//! - **Streaming Performance**: O(1) – rolling sums for mean/variance; constants hoisted; warmup
-//!   split to avoid branch in the hot loop.
-//! - **Scalar Tuning (2025-10)**: Adopted fused operations (mul_add) in hot spots while keeping
-//!   the scalar path safe; observed ~2–3% improvement at 100k locally with `-C target-cpu=native`.
-//! - **Memory Optimization**: ✓ Uses `alloc_with_nan_prefix` for output allocation.
-//! - **Batch Support**: ✓ Parallel batch over parameter grid. Row-specific SIMD not attempted as
-//!   there is no clear shared precompute beyond single prefix sums; per-row sequential dependency
-//!   dominates.
-//! - **CUDA / Python Status (2025-11)**: CUDA wrapper present for batch and many-series variants;
-//!   VRAM handles are exposed to Python with CUDA Array Interface v3 and DLPack v1.x (__dlpack__
-//!   + versioned capsules) while preserving scalar numerical outputs.
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaVidya;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaVidya;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
@@ -44,9 +12,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -87,23 +55,19 @@ mod tests_into_parity {
 
     #[test]
     fn test_vidya_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = VidyaInput::with_default_candles(&candles);
 
-        
         let baseline = vidya(&input)?.values;
 
-        
         let mut out = vec![0.0; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             vidya_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             vidya_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -142,7 +106,10 @@ pub struct VidyaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VidyaParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -291,7 +258,11 @@ pub enum VidyaError {
     #[error("vidya: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vidya: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("vidya: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -372,7 +343,6 @@ pub fn vidya_with_kernel(input: &VidyaInput, kernel: Kernel) -> Result<VidyaOutp
     Ok(VidyaOutput { values: out })
 }
 
-/// Write directly to output slice - no allocations (for WASM bindings)
 #[inline]
 pub fn vidya_into_slice(
     dst: &mut [f64],
@@ -441,7 +411,7 @@ pub fn vidya_into_slice(
         {
             if matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch) {
                 vidya_simd128(data, short_period, long_period, alpha, first, dst);
-                
+
                 for v in &mut dst[..warmup_period] {
                     *v = f64::NAN;
                 }
@@ -465,7 +435,6 @@ pub fn vidya_into_slice(
         }
     }
 
-    
     for v in &mut dst[..warmup_period] {
         *v = f64::NAN;
     }
@@ -473,12 +442,7 @@ pub fn vidya_into_slice(
     Ok(())
 }
 
-/// Compute VIDYA into a caller-provided buffer (no allocations).
-///
-/// - Preserves the module's NaN warmup behavior by writing a quiet-NaN prefix
-///   identical to the Vec-returning API.
-/// - `out.len()` must equal the input length; otherwise an error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn vidya_into(input: &VidyaInput, out: &mut [f64]) -> Result<(), VidyaError> {
     vidya_into_slice(out, input, Kernel::Auto)
@@ -495,30 +459,26 @@ pub unsafe fn vidya_scalar(
 ) {
     let len = data.len();
 
-    // Rolling accumulators
     let mut long_sum = 0.0_f64;
     let mut long_sum2 = 0.0_f64;
     let mut short_sum = 0.0_f64;
     let mut short_sum2 = 0.0_f64;
 
-    // Precompute invariant divisors
     let sp_f = short_period as f64;
     let lp_f = long_period as f64;
     let short_inv = 1.0 / sp_f;
     let long_inv = 1.0 / lp_f;
 
-    // Warmup phase: split to avoid branch on each iteration
     let warm_end = first + long_period;
     let short_head = warm_end - short_period;
 
-    // Part 1: only long accumulators
     for i in first..short_head {
         let x = data[i];
         long_sum += x;
-        // Use mul_add to reduce separate mul+add steps
+
         long_sum2 = x.mul_add(x, long_sum2);
     }
-    // Part 2: both long and short accumulators
+
     for i in short_head..warm_end {
         let x = data[i];
         long_sum += x;
@@ -527,7 +487,6 @@ pub unsafe fn vidya_scalar(
         short_sum2 = x.mul_add(x, short_sum2);
     }
 
-    // First two defined outputs
     let idx_m2 = warm_end - 2;
     let idx_m1 = warm_end - 1;
 
@@ -549,32 +508,28 @@ pub unsafe fn vidya_scalar(
         k *= alpha;
 
         let x = data[idx_m1];
-        // Fused update to reduce separate mul+add steps
+
         val = (x - val).mul_add(k, val);
         out[idx_m1] = val;
     }
 
-    // Main rolling loop
     for t in warm_end..len {
         let x_new = data[t];
         let x_new2 = x_new * x_new;
 
-        // push new
         long_sum += x_new;
         long_sum2 += x_new2;
         short_sum += x_new;
         short_sum2 += x_new2;
 
-        // pop old
         let x_long_out = data[t - long_period];
         let x_short_out = data[t - short_period];
         long_sum -= x_long_out;
-        // Use mul_add for subtracting squares
+
         long_sum2 = (-x_long_out).mul_add(x_long_out, long_sum2);
         short_sum -= x_short_out;
         short_sum2 = (-x_short_out).mul_add(x_short_out, short_sum2);
 
-        // compute adaptive factor
         let short_mean = short_sum * short_inv;
         let long_mean = long_sum * long_inv;
         let short_var = short_sum2 * short_inv - (short_mean * short_mean);
@@ -588,7 +543,6 @@ pub unsafe fn vidya_scalar(
         }
         k *= alpha;
 
-        // EMA-style update (fused)
         val = (x_new - val).mul_add(k, val);
         out[t] = val;
     }
@@ -612,7 +566,6 @@ unsafe fn vidya_simd128(
     let mut short_sum = 0.0;
     let mut short_sum2 = 0.0;
 
-    // Warmup phase - same as scalar
     for i in first..(first + long_period) {
         long_sum += data[i];
         long_sum2 += data[i] * data[i];
@@ -643,7 +596,6 @@ unsafe fn vidya_simd128(
         out[first + long_period - 1] = val;
     }
 
-    // Main loop with SIMD optimizations for sum calculations
     let alpha_v = f64x2_splat(alpha);
     let sp_v = f64x2_splat(short_period as f64);
     let lp_v = f64x2_splat(long_period as f64);
@@ -651,7 +603,6 @@ unsafe fn vidya_simd128(
     let long_div_v = f64x2_splat(1.0 / long_period as f64);
 
     for i in (first + long_period)..len {
-        // Update sums - can vectorize some of this
         let new_val = data[i];
         long_sum += new_val;
         long_sum2 += new_val * new_val;
@@ -668,7 +619,6 @@ unsafe fn vidya_simd128(
         short_sum -= remove_short;
         short_sum2 -= remove_short * remove_short;
 
-        // Calculate standard deviations using SIMD
         let short_mean = short_sum / short_period as f64;
         let long_mean = long_sum / long_period as f64;
 
@@ -698,9 +648,6 @@ pub unsafe fn vidya_avx2(
     first: usize,
     out: &mut [f64],
 ) {
-    // AVX2 kernel: unsafe pointer path + f64::mul_add to reduce overhead.
-    // Note: This may differ from scalar by tiny amounts due to fused operations and
-    // reordering. See module notes; tests relax tolerances slightly accordingly.
     vidya_avx2_experimental(data, short_period, long_period, alpha, first, out);
 }
 
@@ -714,30 +661,23 @@ unsafe fn vidya_avx2_experimental(
     first: usize,
     out: &mut [f64],
 ) {
-    // Optimized scalar-shaped kernel using unsafe pointer math and fused multiply-adds.
-    // Rationale: VIDYA has a strict recurrence (EMA-style). Per-step vectorization is
-    // ineffective; we instead reduce overhead via pointer access + mul_add.
     let len = data.len();
     let ptr = data.as_ptr();
     let out_ptr = out.as_mut_ptr();
 
-    // Rolling accumulators
     let mut long_sum = 0.0_f64;
     let mut long_sum2 = 0.0_f64;
     let mut short_sum = 0.0_f64;
     let mut short_sum2 = 0.0_f64;
 
-    // Precompute invariant divisors
     let sp_f = short_period as f64;
     let lp_f = long_period as f64;
     let short_inv = 1.0 / sp_f;
     let long_inv = 1.0 / lp_f;
 
-    // Warmup bounds
     let warm_end = first + long_period;
     let short_head = warm_end - short_period;
 
-    // Part 1: only long accumulators
     let mut i = first;
     while i < short_head {
         let x = *ptr.add(i);
@@ -745,7 +685,7 @@ unsafe fn vidya_avx2_experimental(
         long_sum2 = x.mul_add(x, long_sum2);
         i += 1;
     }
-    // Part 2: both long and short accumulators
+
     while i < warm_end {
         let x = *ptr.add(i);
         long_sum += x;
@@ -755,7 +695,6 @@ unsafe fn vidya_avx2_experimental(
         i += 1;
     }
 
-    // First two defined outputs
     let idx_m2 = warm_end - 2;
     let idx_m1 = warm_end - 1;
 
@@ -777,24 +716,21 @@ unsafe fn vidya_avx2_experimental(
         k *= alpha;
 
         let x = *ptr.add(idx_m1);
-        // val = (x - val) * k + val; -> fused
+
         val = (x - val).mul_add(k, val);
         *out_ptr.add(idx_m1) = val;
     }
 
-    // Main rolling loop
     let mut t = warm_end;
     while t < len {
         let x_new = *ptr.add(t);
         let x_new2 = x_new * x_new;
 
-        // push new
         long_sum += x_new;
         long_sum2 = x_new.mul_add(x_new, long_sum2);
         short_sum += x_new;
         short_sum2 = x_new.mul_add(x_new, short_sum2);
 
-        // pop old
         let x_long_out = *ptr.add(t - long_period);
         let x_short_out = *ptr.add(t - short_period);
         long_sum -= x_long_out;
@@ -802,7 +738,6 @@ unsafe fn vidya_avx2_experimental(
         short_sum -= x_short_out;
         short_sum2 = (-x_short_out).mul_add(x_short_out, short_sum2);
 
-        // adaptive factor
         let short_mean = short_sum * short_inv;
         let long_mean = long_sum * long_inv;
         let short_var = short_sum2 * short_inv - (short_mean * short_mean);
@@ -816,7 +751,6 @@ unsafe fn vidya_avx2_experimental(
         }
         k *= alpha;
 
-        // EMA-style update with FMA
         val = (x_new - val).mul_add(k, val);
         *out_ptr.add(t) = val;
 
@@ -867,7 +801,6 @@ pub unsafe fn vidya_avx512_long(
     vidya_scalar(data, short_period, long_period, alpha, first, out);
 }
 
-// Streaming (stepwise) API
 #[derive(Debug, Clone)]
 pub struct VidyaStream {
     short_period: usize,
@@ -919,15 +852,12 @@ impl VidyaStream {
 
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        // Pull tails before we overwrite ring slots.
         let long_tail = self.long_buf[self.head];
         let short_idx = self.idx % self.short_period;
         let short_tail = self.short_buf[short_idx];
 
-        // Phase boundary for when short window starts accumulating.
         let phase2_start = self.long_period - self.short_period;
 
-        // --- PUSH new sample into rolling stats (use FMA for sum of squares) ---
         self.long_sum += x;
         self.long_sum2 = x.mul_add(x, self.long_sum2);
 
@@ -936,7 +866,6 @@ impl VidyaStream {
             self.short_sum2 = x.mul_add(x, self.short_sum2);
         }
 
-        // --- POP old sample(s) once the long window is full ---
         if self.idx >= self.long_period {
             self.long_sum -= long_tail;
             self.long_sum2 = (-long_tail).mul_add(long_tail, self.long_sum2);
@@ -945,21 +874,17 @@ impl VidyaStream {
             self.short_sum2 = (-short_tail).mul_add(short_tail, self.short_sum2);
         }
 
-        // Commit to rings
         self.long_buf[self.head] = x;
         self.short_buf[short_idx] = x;
 
-        // Branchless (mod-free) wrap for the long ring head.
         let mut h = self.head + 1;
         if h == self.long_period {
             h = 0;
         }
         self.head = h;
 
-        // Advance sample count.
         self.idx += 1;
 
-        // Warm-up handling mirrors batch: first defined output at (long - 2)
         if self.idx < self.long_period - 1 {
             self.val = x;
             return None;
@@ -969,31 +894,25 @@ impl VidyaStream {
             return Some(self.val);
         }
 
-        // --- Compute adaptive factor k = α * sqrt(short_var / long_var) ---
         let short_inv = 1.0 / (self.short_period as f64);
         let long_inv = 1.0 / (self.long_period as f64);
 
         let short_mean = self.short_sum * short_inv;
         let long_mean = self.long_sum * long_inv;
 
-        // Variances via one-pass rolling sums.
         let short_var = self.short_sum2 * short_inv - (short_mean * short_mean);
         let long_var = self.long_sum2 * long_inv - (long_mean * long_mean);
 
-        // Guard degenerate windows and avoid NaNs/Infs.
         let mut k = 0.0;
         if long_var > 0.0 && short_var > 0.0 {
-            // Exact: one sqrt of the variance ratio.
             k = (short_var / long_var).sqrt() * self.alpha;
         }
 
-        // EMA-style fused update: y += k * (x - y)
         self.val = (x - self.val).mul_add(k, self.val);
         Some(self.val)
     }
 }
 
-// Batch parameter sweep
 #[derive(Clone, Debug)]
 pub struct VidyaBatchRange {
     pub short_period: (usize, usize, usize),
@@ -1276,23 +1195,22 @@ fn vidya_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    let _ = rows.checked_mul(cols).ok_or_else(|| VidyaError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| VidyaError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
-    // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.long_period.unwrap() - 2)
         .collect();
 
-    // Allocate uninitialized matrix and initialize NaN prefixes
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Convert to initialized memory safely
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1338,7 +1256,6 @@ fn vidya_batch_inner(
         }
     }
 
-    // Take ownership of the buffer
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1718,7 +1635,6 @@ mod tests {
                 long_period: Some(200),
                 alpha: Some(0.1),
             },
-            // Test various alpha values
             VidyaParams {
                 short_period: Some(2),
                 long_period: Some(10),
@@ -1729,7 +1645,6 @@ mod tests {
                 long_period: Some(15),
                 alpha: Some(1.0),
             },
-            // Edge cases
             VidyaParams {
                 short_period: Some(1),
                 long_period: Some(100),
@@ -1799,41 +1714,35 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic test data with varying volatility patterns
-        let strat = (2usize..=20) // short_period range (must be >= 2 for valid stddev)
-            .prop_flat_map(|short_period| {
-                // long_period must be >= short_period
-                let long_min = (short_period + 1).max(2);
-                let long_max = 100.min(long_min + 50);
+        let strat = (2usize..=20).prop_flat_map(|short_period| {
+            let long_min = (short_period + 1).max(2);
+            let long_max = 100.min(long_min + 50);
 
-                (long_min..=long_max).prop_flat_map(move |long_period| {
-                    // Generate data with length >= long_period
-                    let data_len = long_period.max(10)..400;
+            (long_min..=long_max).prop_flat_map(move |long_period| {
+                let data_len = long_period.max(10)..400;
 
-                    (
-                        // Generate realistic price data with varying volatility
-                        prop::collection::vec(
-                            (-0.05f64..0.05f64).prop_filter("finite", |x| x.is_finite()),
-                            data_len,
-                        )
-                        .prop_map(|returns| {
-                            let mut prices = Vec::with_capacity(returns.len());
-                            let mut price = 100.0;
-                            // Create periods of high and low volatility
-                            for (i, ret) in returns.iter().enumerate() {
-                                // Alternate between high and low volatility periods
-                                let volatility_factor = if (i / 20) % 2 == 0 { 0.5 } else { 2.0 };
-                                price *= 1.0 + (ret * volatility_factor);
-                                prices.push(price);
-                            }
-                            prices
-                        }),
-                        Just(short_period),
-                        Just(long_period),
-                        0.01f64..1.0f64, // alpha range
+                (
+                    prop::collection::vec(
+                        (-0.05f64..0.05f64).prop_filter("finite", |x| x.is_finite()),
+                        data_len,
                     )
-                })
-            });
+                    .prop_map(|returns| {
+                        let mut prices = Vec::with_capacity(returns.len());
+                        let mut price = 100.0;
+
+                        for (i, ret) in returns.iter().enumerate() {
+                            let volatility_factor = if (i / 20) % 2 == 0 { 0.5 } else { 2.0 };
+                            price *= 1.0 + (ret * volatility_factor);
+                            prices.push(price);
+                        }
+                        prices
+                    }),
+                    Just(short_period),
+                    Just(long_period),
+                    0.01f64..1.0f64,
+                )
+            })
+        });
 
         proptest::test_runner::TestRunner::default()
 			.run(&strat, |(data, short_period, long_period, alpha)| {
@@ -1844,11 +1753,11 @@ mod tests {
 				};
 				let input = VidyaInput::from_slice(&data, params.clone());
 
-				// Test kernel consistency
+
 				let VidyaOutput { values: out } = vidya_with_kernel(&input, kernel).unwrap();
 				let VidyaOutput { values: ref_out } = vidya_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: Kernel consistency - all kernels should produce identical results
+
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1861,15 +1770,15 @@ mod tests {
 
 	                    let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 	                    prop_assert!(
-	                        // SIMD kernels may differ slightly due to FMA and/or different reduction order.
-	                        // Keep this tight to still catch genuine mismatches, but avoid flaky proptests.
+
+
 	                        (y - r).abs() <= 5e-8 || ulp_diff <= 4,
 	                        "[{}] kernel mismatch at idx {}: {} vs {} (ULP={})",
 	                        test_name, i, y, r, ulp_diff
 	                    );
 	                }
 
-				// Property 2: Warmup period - VIDYA starts outputting at first + long_period - 2
+
 				let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
 				let first_valid_idx = if first + long_period >= 2 {
 					first + long_period - 2
@@ -1877,37 +1786,37 @@ mod tests {
 					0
 				};
 
-				// Values before first_valid_idx should be NaN
+
 				for i in 0..first_valid_idx.min(data.len()) {
 					prop_assert!(out[i].is_nan(),
 						"[{}] Expected NaN during warmup at idx {}, got {}", test_name, i, out[i]);
 				}
 
-				// Property 3: First valid output should be at first_valid_idx
+
 				if first_valid_idx < data.len() {
 					prop_assert!(!out[first_valid_idx].is_nan(),
 						"[{}] Expected valid value at first_valid_idx {}, got NaN", test_name, first_valid_idx);
 				}
 
-				// For the rest of the test, use the actual warmup_end as defined by the implementation
+
 				let warmup_end = first + long_period - 2;
 
-				// Property 4: Output values should be reasonable (within data range + some margin)
+
 				if data.len() > warmup_end + 1 {
 					let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
 					let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-					// Use a minimum margin for cases where all values are similar
+
 					let range = data_max - data_min;
-					// Increase margin for high alpha values which can cause temporary overshooting
-					// VIDYA with high alpha can overshoot during sudden volatility changes
-					let alpha_factor = 1.0 + alpha * 2.0;  // Range 1.0 to 3.0 for alpha 0 to 1
+
+
+					let alpha_factor = 1.0 + alpha * 2.0;
 					let margin = if range < 1.0 {
-						// For tiny ranges, use a percentage of the average magnitude
+
 						let avg_magnitude = (data_max.abs() + data_min.abs()) / 2.0;
-						avg_magnitude * 0.3 * alpha_factor  // More lenient for tiny ranges
+						avg_magnitude * 0.3 * alpha_factor
 					} else {
-						// For normal ranges, allow more overshooting with high alpha. This VIDYA
-						// variant scales the EMA factor by (short_std / long_std), which can exceed 1.0.
+
+
 						range * 0.5 * alpha_factor
 					};
 
@@ -1923,16 +1832,16 @@ mod tests {
 					}
 				}
 
-				// Property 5: Very low alpha should produce stable output
+
 				if alpha < 0.05 && data.len() > warmup_end + 10 {
-					// With very low alpha, VIDYA should change slowly
+
 					let vidya_section = &out[(warmup_end + 1)..];
 					if vidya_section.len() > 2 {
-						// Check that consecutive values are very close
+
 						for window in vidya_section.windows(2) {
 							let change_ratio = (window[1] - window[0]).abs() / window[0].abs().max(1e-10);
 							prop_assert!(
-								change_ratio < 0.1,  // Less than 10% change between consecutive values
+								change_ratio < 0.1,
 								"[{}] With alpha={}, VIDYA should be stable but found large change ratio {}",
 								test_name, alpha, change_ratio
 							);
@@ -1940,9 +1849,9 @@ mod tests {
 					}
 				}
 
-				// Property 6: Constant input should produce constant output (after warmup)
+
 				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > warmup_end + 1 {
-					// All data values are essentially the same
+
 					let constant_value = data[0];
 					for i in (warmup_end + 1)..data.len() {
 						prop_assert!(
@@ -1953,12 +1862,12 @@ mod tests {
 					}
 				}
 
-				// Property 7: VIDYA follows general price trends
-				// Check that VIDYA generally follows the direction of price movements
-				// Note: VIDYA correctly freezes when volatility is zero, so we only count periods where it's actually moving
-				
+
+
+
+
 				if alpha >= 0.05 && data.len() > warmup_end + 20 {
-					
+
 					let mut same_direction_count = 0;
 					let mut total_movements = 0;
 					let mut frozen_periods = 0;
@@ -1967,11 +1876,11 @@ mod tests {
 						let price_change = data[i] - data[i - 1];
 						let vidya_change = out[i] - out[i - 1];
 
-						
+
 						if price_change.abs() > 1e-6 && vidya_change.abs() <= 1e-10 {
 							frozen_periods += 1;
 						}
-						
+
 						else if price_change.abs() > 1e-6 && vidya_change.abs() > 1e-10 {
 							total_movements += 1;
 							if price_change.signum() == vidya_change.signum() {
@@ -1980,9 +1889,9 @@ mod tests {
 						}
 					}
 
-					
-					
-					
+
+
+
 					if total_movements > 10 && frozen_periods < (data.len() - warmup_end) / 2 {
 						let direction_ratio = same_direction_count as f64 / total_movements as f64;
 						prop_assert!(
@@ -1993,7 +1902,7 @@ mod tests {
 					}
 				}
 
-				
+
 				for (i, &val) in out.iter().enumerate() {
 					if val.is_finite() {
 						let bits = val.to_bits();
@@ -2104,16 +2013,15 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            
-            (2, 5, 1, 5, 10, 1, 0.2, 0.2, 0.0), 
-            (2, 10, 2, 10, 30, 5, 0.1, 0.5, 0.1), 
-            (5, 20, 5, 30, 60, 10, 0.2, 0.2, 0.0), 
-            (10, 30, 10, 50, 100, 25, 0.3, 0.3, 0.0), 
-            (2, 2, 0, 5, 50, 5, 0.1, 0.9, 0.2), 
-            (5, 15, 5, 20, 20, 0, 0.2, 0.8, 0.3), 
-            (1, 3, 1, 4, 8, 2, 0.5, 0.5, 0.0),  
-            (20, 50, 15, 100, 200, 50, 0.1, 0.3, 0.1), 
-            (2, 2, 0, 3, 3, 0, 0.1, 1.0, 0.1),  
+            (2, 5, 1, 5, 10, 1, 0.2, 0.2, 0.0),
+            (2, 10, 2, 10, 30, 5, 0.1, 0.5, 0.1),
+            (5, 20, 5, 30, 60, 10, 0.2, 0.2, 0.0),
+            (10, 30, 10, 50, 100, 25, 0.3, 0.3, 0.0),
+            (2, 2, 0, 5, 50, 5, 0.1, 0.9, 0.2),
+            (5, 15, 5, 20, 20, 0, 0.2, 0.8, 0.3),
+            (1, 3, 1, 4, 8, 2, 0.5, 0.5, 0.0),
+            (20, 50, 15, 100, 200, 50, 0.1, 0.3, 0.1),
+            (2, 2, 0, 3, 3, 0, 0.1, 1.0, 0.1),
         ];
 
         for (cfg_idx, &(s_start, s_end, s_step, l_start, l_end, l_step, a_start, a_end, a_step)) in
@@ -2197,9 +2105,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
-/// Batch calculation that writes directly to output buffer (for Python bindings)
 #[inline(always)]
 pub fn vidya_batch_inner_into(
     data: &[f64],
@@ -2242,13 +2147,11 @@ pub fn vidya_batch_inner_into(
         });
     }
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.long_period.unwrap() - 2)
         .collect();
 
-    
     for (row, &warmup) in warmup_periods.iter().enumerate() {
         let row_start = row * cols;
         out[row_start..row_start + warmup].fill(f64::NAN);
@@ -2429,9 +2332,12 @@ pub fn vidya_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "VidyaDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "VidyaDeviceArrayF32",
+    unsendable
+)]
 pub struct VidyaDeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: std::sync::Arc<Context>,
@@ -2454,7 +2360,7 @@ impl VidyaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producer synchronizes before returning handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2472,8 +2378,7 @@ impl VidyaDeviceArrayF32Py {
         _dl_device: Option<pyo3::PyObject>,
         _copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = _dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2493,9 +2398,8 @@ impl VidyaDeviceArrayF32Py {
         }
         let _ = _stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -2593,7 +2497,7 @@ pub fn vidya_cuda_many_series_one_param_dev_py(
     })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vidya_js(
     data: &[f64],
@@ -2615,7 +2519,7 @@ pub fn vidya_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vidya_into(
     in_ptr: *const f64,
@@ -2639,7 +2543,6 @@ pub fn vidya_into(
         let input = VidyaInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing: use temporary buffer
             let mut temp = vec![0.0; len];
             vidya_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2654,7 +2557,7 @@ pub fn vidya_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vidya_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2663,7 +2566,7 @@ pub fn vidya_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vidya_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2673,7 +2576,7 @@ pub fn vidya_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VidyaBatchConfig {
     pub short_period_range: (usize, usize, usize),
@@ -2681,7 +2584,7 @@ pub struct VidyaBatchConfig {
     pub alpha_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VidyaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2690,7 +2593,7 @@ pub struct VidyaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = vidya_batch)]
 pub fn vidya_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: VidyaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2702,7 +2605,7 @@ pub fn vidya_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue>
         alpha: config.alpha_range,
     };
 
-    let mut output = vec![0.0; data.len() * 232]; // Default 232 combinations like alma
+    let mut output = vec![0.0; data.len() * 232];
     let kernel = match detect_best_kernel() {
         Kernel::Avx512 => Kernel::Avx2,
         other => other,
@@ -2725,7 +2628,7 @@ pub fn vidya_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue>
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vidya_batch_into(
     in_ptr: *const f64,
@@ -2753,7 +2656,6 @@ pub fn vidya_batch_into(
             alpha: (alpha_start, alpha_end, alpha_step),
         };
 
-        // Calculate expected output size
         let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let total_size = combos
             .len()

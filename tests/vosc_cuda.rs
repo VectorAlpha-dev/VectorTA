@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::vosc::{
     vosc_batch_with_kernel, vosc_with_kernel, VoscBatchRange, VoscData, VoscInput, VoscParams,
 };
@@ -81,8 +79,8 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    let cols = 16usize; 
-    let rows = 8192usize; 
+    let cols = 16usize;
+    let rows = 8192usize;
     let mut vol_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s + 3)..rows {
@@ -96,7 +94,6 @@ fn vosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         long_period: Some(34),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut v = vec![f64::NAN; rows];

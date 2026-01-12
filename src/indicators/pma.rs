@@ -1,24 +1,3 @@
-//! # Predictive Moving Average (PMA)
-//!
-//! Ehlers' Predictive Moving Average using weighted MAs for responsive prediction.
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//!
-//! ## Returns
-//! - `predict`: Vec<f64> - Predictive values matching input length
-//! - `trigger`: Vec<f64> - Signal line values matching input length
-//!
-//! ## Developer Status
-//! - SIMD: AVX2/AVX512 stubs delegate to scalar. Single-series PMA is a tight
-//!   recurrence (A,S,A1,S1,A2,T) with loop-carried deps; SIMD brings ≤0–5% in practice.
-//!   We keep runtime selection short-circuited to scalar for correctness/simplicity.
-//! - Scalar: Optimized O(1) rolling updates for both WMAs and trigger; warmup preserved.
-//! - Batch: Single-row “unified” compute writes directly into caller buffers; no
-//!   row-specific SIMD due to lack of cross-row reuse.
-//! - CUDA: FP32 kernels via `CudaPma` wrapper validated against scalar within tolerance;
-//!   VRAM handles reuse shared ALMA CAI v3 + DLPack v1.x helpers for interop.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -30,11 +9,11 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for PmaInput<'a> {
@@ -156,7 +135,11 @@ pub enum PmaError {
     #[error("pma: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("pma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("pma: invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("pma: size overflow computing rows*cols: rows = {rows}, cols = {cols}")]
@@ -230,19 +213,18 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
     let mut w_head = 0usize;
     let mut p_head = 0usize;
 
-    let mut A = 0.0_f64; // sum of last 7 prices
-    let mut S = 0.0_f64; // weighted sum of last 7 prices
-    let mut A1 = 0.0_f64; // sum of last 7 wma1
-    let mut S1 = 0.0_f64; // weighted sum of last 7 wma1
-    let mut A2 = 0.0_f64; // sum of last 4 predicts
-    let mut T = 0.0_f64; // weighted sum (4,3,2,1) of predicts
+    let mut A = 0.0_f64;
+    let mut S = 0.0_f64;
+    let mut A1 = 0.0_f64;
+    let mut S1 = 0.0_f64;
+    let mut A2 = 0.0_f64;
+    let mut T = 0.0_f64;
 
     let j0 = first_valid_idx + 6;
 
     unsafe {
         let dp = data.as_ptr();
 
-        // Seed A,S and x_ring at j0
         let x0 = *dp.add(j0 - 6);
         let x1 = *dp.add(j0 - 5);
         let x2 = *dp.add(j0 - 4);
@@ -268,7 +250,6 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
 
         let mut w1 = S * INV_28;
 
-        // Update WMA2 accumulators
         let old_A1 = A1;
         let old_w = w_ring[w_head];
         S1 = (7.0_f64).mul_add(w1, S1) - old_A1;
@@ -283,7 +264,6 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
         let mut pr = (2.0_f64).mul_add(w1, -w2);
         *predict.get_unchecked_mut(j0) = pr;
 
-        // Seed trigger accumulators with first predict
         let old_A2 = A2;
         let old_p = p_ring[p_head];
         T = (4.0_f64).mul_add(pr, T) - old_A2;
@@ -295,7 +275,6 @@ pub fn pma_scalar(data: &[f64], first_valid_idx: usize) -> Result<PmaOutput, Pma
         }
         *trigger.get_unchecked_mut(j0) = f64::NAN;
 
-        // Main loop
         let mut j = j0 + 1;
         while j < n {
             let x_new = *dp.add(j);
@@ -376,19 +355,18 @@ fn pma_compute_into(
     let mut w_head = 0usize;
     let mut p_head = 0usize;
 
-    let mut A = 0.0_f64; // price sum
-    let mut S = 0.0_f64; // price weighted sum
-    let mut A1 = 0.0_f64; // wma1 sum
-    let mut S1 = 0.0_f64; // wma1 weighted sum
-    let mut A2 = 0.0_f64; // predict sum
-    let mut T = 0.0_f64; // predict weighted (4,3,2,1)
+    let mut A = 0.0_f64;
+    let mut S = 0.0_f64;
+    let mut A1 = 0.0_f64;
+    let mut S1 = 0.0_f64;
+    let mut A2 = 0.0_f64;
+    let mut T = 0.0_f64;
 
     let j0 = first_valid_idx + 6;
 
     unsafe {
         let dp = data.as_ptr();
 
-        // Seed A,S and x_ring at j0
         let x0 = *dp.add(j0 - 6);
         let x1 = *dp.add(j0 - 5);
         let x2 = *dp.add(j0 - 4);
@@ -440,7 +418,6 @@ fn pma_compute_into(
 
         *trigger_out.get_unchecked_mut(j0) = f64::NAN;
 
-        // Main loop
         let mut j = j0 + 1;
         while j < n {
             let x_new = *dp.add(j);
@@ -562,12 +539,10 @@ fn pma_batch_unified_inner(data: &[f64], kern: Kernel) -> Result<PmaBatchOutputU
         .checked_mul(cols)
         .ok_or(PmaError::SizeOverflow { rows, cols })?;
 
-    // Allocate rows×cols uninitialized and write NaN prefixes exactly
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm = [first + 7 - 1; 2];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Write into the matrix without extra allocations/copies
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let outf: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -586,7 +561,6 @@ fn pma_batch_unified_inner(data: &[f64], kern: Kernel) -> Result<PmaBatchOutputU
         row1,
     );
 
-    // Turn the backing buffer into Vec<f64> without copy
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -603,7 +577,7 @@ pub struct PmaStream {
     wma1: [f64; 7],
     idx: usize,
     filled7: bool,
-    // Keep last 4 predictions for trigger calculation
+
     pred4: [f64; 4],
     pred_idx: usize,
     pred_filled: bool,
@@ -645,7 +619,6 @@ impl PmaStream {
 
         let predict = 2.0 * wma1_j - wma2;
 
-        // Ring of the last 4 predicts
         self.pred4[self.pred_idx] = predict;
         self.pred_idx = (self.pred_idx + 1) % 4;
         if !self.pred_filled && self.pred_idx == 0 {
@@ -653,7 +626,6 @@ impl PmaStream {
         }
 
         let trigger = if self.pred_filled {
-            // Order: [t3,t2,t1,t0] == [current, -1, -2, -3]
             let t3 = self.pred4[(self.pred_idx + 3) % 4];
             let t2 = self.pred4[(self.pred_idx + 2) % 4];
             let t1 = self.pred4[(self.pred_idx + 1) % 4];
@@ -669,7 +641,6 @@ impl PmaStream {
 
 #[derive(Clone, Debug)]
 pub struct PmaBatchRange {
-    // Only dummy for now, PMA has no true sweepable params, but we keep for API parity
     pub dummy: (usize, usize, usize),
 }
 
@@ -725,11 +696,14 @@ impl PmaBatchOutput {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct PmaBatchOutputUnified {
-    pub values: Vec<f64>, // row-major: row0=predict, row1=trigger
-    pub rows: usize,      // 2
-    pub cols: usize,      // data.len()
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
 #[inline(always)]
@@ -779,7 +753,6 @@ fn pma_batch_inner(
     })
 }
 
-// Row functions - stubs for AVX2/AVX512
 #[inline(always)]
 pub unsafe fn pma_row_scalar(
     data: &[f64],
@@ -790,7 +763,6 @@ pub unsafe fn pma_row_scalar(
     out_predict: &mut [f64],
     out_trigger: &mut [f64],
 ) {
-    // Compute directly into output slices - no allocation!
     pma_compute_into(data, first, Kernel::Scalar, out_predict, out_trigger);
 }
 
@@ -850,7 +822,6 @@ pub unsafe fn pma_row_avx512_long(
     pma_row_scalar(data, first, stride, dummy, inv_n, out_predict, out_trigger);
 }
 
-// Move pma_into_slice outside of #[cfg(feature = "wasm")] so it's always available
 #[inline]
 pub fn pma_into_slice(
     predict_dst: &mut [f64],
@@ -874,10 +845,8 @@ pub fn pma_into_slice(
         k => k,
     };
 
-    
     pma_compute_into(data, first, chosen, predict_dst, trigger_dst);
 
-    
     let warm_end = first + 7 - 1;
     for v in &mut predict_dst[..warm_end] {
         *v = f64::NAN;
@@ -889,12 +858,7 @@ pub fn pma_into_slice(
     Ok(())
 }
 
-/// Compute PMA into caller-provided output buffers without allocating.
-///
-/// - Preserves the module's NaN warmups exactly (prefix NaNs for both series).
-/// - `predict_out.len()` and `trigger_out.len()` must equal `input` length.
-/// - Uses `Kernel::Auto` for dispatch and writes results directly into the slices.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn pma_into(
     input: &PmaInput,
@@ -904,11 +868,7 @@ pub fn pma_into(
     pma_into_slice(predict_out, trigger_out, input, Kernel::Auto)
 }
 
-//--------------------------
-// WASM Bindings
-//--------------------------
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_js(data: &[f64]) -> Result<Vec<f64>, JsValue> {
     let input = PmaInput::from_slice(data, PmaParams {});
@@ -923,11 +883,11 @@ pub fn pma_js(data: &[f64]) -> Result<Vec<f64>, JsValue> {
         pma_into_slice(pred, trig, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
-    // Return flat array [predict..., trigger...]
+
     Ok(values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_into(
     in_ptr: *const f64,
@@ -944,7 +904,6 @@ pub fn pma_into(
         let params = PmaParams {};
         let input = PmaInput::from_slice(data, params);
 
-        // Check for aliasing - need to handle all possible combinations
         let need_temp =
             in_ptr == predict_ptr || in_ptr == trigger_ptr || predict_ptr == trigger_ptr;
 
@@ -972,7 +931,7 @@ pub fn pma_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -981,7 +940,7 @@ pub fn pma_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -991,22 +950,21 @@ pub fn pma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PmaBatchConfig {
-    // PMA has no parameters, but we keep this for API consistency
     pub dummy: Option<usize>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PmaJsOutput {
-    pub values: Vec<f64>, // [predict..., trigger...]
-    pub rows: usize,      // 2
+    pub values: Vec<f64>,
+    pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PmaBatchJsOutput {
     pub predict: Vec<f64>,
@@ -1015,10 +973,9 @@ pub struct PmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_batch(data: &[f64]) -> Result<JsValue, JsValue> {
-    // PMA has no parameters, so batch just returns single run
     let input = PmaInput::from_slice(data, PmaParams {});
     let mut predict = vec![0.0; data.len()];
     let mut trigger = vec![0.0; data.len()];
@@ -1029,7 +986,7 @@ pub fn pma_batch(data: &[f64]) -> Result<JsValue, JsValue> {
     let output = PmaBatchJsOutput {
         predict,
         trigger,
-        rows: 1, // No parameter sweep
+        rows: 1,
         cols: data.len(),
     };
 
@@ -1037,8 +994,7 @@ pub fn pma_batch(data: &[f64]) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Optional pointer-based unified INTO for flat output
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_unified_into(
     in_ptr: *const f64,
@@ -1061,10 +1017,10 @@ pub fn pma_unified_into(
         pma_into_slice(pred, trig, &input, detect_best_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
     }
-    Ok(rows) // rows
+    Ok(rows)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pma_batch_into(
     in_ptr: *const f64,
@@ -1072,18 +1028,17 @@ pub fn pma_batch_into(
     trigger_ptr: *mut f64,
     len: usize,
 ) -> Result<usize, JsValue> {
-    // Since PMA has no parameters, this is the same as pma_into but returns row count
     pma_into(in_ptr, predict_ptr, trigger_ptr, len)?;
-    Ok(1) // Always returns 1 row since no parameter sweep
+    Ok(1)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub struct PmaStreamWasm {
     stream: PmaStream,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 impl PmaStreamWasm {
     #[wasm_bindgen(constructor)]
@@ -1101,9 +1056,6 @@ impl PmaStreamWasm {
     }
 }
 
-//--------------------------
-// Python Bindings
-//--------------------------
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1117,11 +1069,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaPma};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{DeviceArrayF32Py, make_device_array_py};
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "pma")]
@@ -1136,7 +1087,6 @@ pub fn pma_py<'py>(
 
     let input = PmaInput::from_slice(slice_in, PmaParams {});
 
-    
     let out = py
         .allow_threads(|| pma_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1181,16 +1131,13 @@ pub fn pma_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err(PmaError::SizeOverflow { rows, cols }.to_string()))?;
 
-    
     let values_arr = unsafe { PyArray1::<f64>::new(py, [size], false) };
     let values_slice = unsafe { values_arr.as_slice_mut()? };
 
     py.allow_threads(|| -> PyResult<()> {
-        
-        let first = pma_first_valid_idx(slice_in)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let first =
+            pma_first_valid_idx(slice_in).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        
         let warm = first + 7 - 1;
         let warm_prefixes = [warm; 2];
         let values_mu: &mut [core::mem::MaybeUninit<f64>] = unsafe {
@@ -1275,9 +1222,6 @@ pub fn pma_cuda_many_series_one_param_dev_py(
     let trigger = make_device_array_py(device_id, pair.trigger)?;
     Ok((predict, trigger))
 }
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1436,7 +1380,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_sources = vec![
             "close", "open", "high", "low", "hl2", "hlc3", "ohlc4", "volume",
         ];
@@ -1445,7 +1388,6 @@ mod tests {
             let input = PmaInput::from_candles(&candles, source, PmaParams {});
             let output = pma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.predict.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1478,7 +1420,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.trigger.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1532,29 +1473,24 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = prop::collection::vec(
             (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-            7..400, 
+            7..400,
         );
 
         proptest::test_runner::TestRunner::default().run(&strat, |data| {
             let input = PmaInput::from_slice(&data, PmaParams {});
 
-            
             let result = pma_with_kernel(&input, kernel)?;
             let ref_result = pma_with_kernel(&input, Kernel::Scalar)?;
 
-            
             prop_assert_eq!(result.predict.len(), data.len());
             prop_assert_eq!(result.trigger.len(), data.len());
             prop_assert_eq!(ref_result.predict.len(), data.len());
             prop_assert_eq!(ref_result.trigger.len(), data.len());
 
-            
             let warmup_period = 7;
 
-            
             for i in 0..warmup_period {
                 prop_assert!(
                     result.predict[i].is_nan(),
@@ -1568,11 +1504,9 @@ mod tests {
                 );
             }
 
-            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                 && data.len() >= warmup_period
             {
-                
                 for i in warmup_period..data.len() {
                     if result.predict[i].is_finite() {
                         prop_assert!(
@@ -1586,9 +1520,7 @@ mod tests {
                 }
             }
 
-            
             for i in warmup_period..data.len() {
-                
                 if result.predict[i].is_finite() && ref_result.predict[i].is_finite() {
                     let diff_predict = (result.predict[i] - ref_result.predict[i]).abs();
                     prop_assert!(
@@ -1608,7 +1540,6 @@ mod tests {
                     );
                 }
 
-                
                 if result.trigger[i].is_finite() && ref_result.trigger[i].is_finite() {
                     let diff_trigger = (result.trigger[i] - ref_result.trigger[i]).abs();
                     prop_assert!(
@@ -1628,15 +1559,12 @@ mod tests {
                     );
                 }
 
-                
                 if i >= warmup_period && result.predict[i].is_finite() {
                     let window_start = i.saturating_sub(6);
                     let window_data = &data[window_start..=i];
                     let min_val = window_data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                     let max_val = window_data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
-                    
-                    
                     let tolerance = (max_val - min_val).abs() * 0.1 + 1e-9;
                     prop_assert!(
                         result.predict[i] >= min_val - tolerance
@@ -1650,9 +1578,7 @@ mod tests {
                     );
                 }
 
-                
                 if i == warmup_period && i >= 6 {
-                    
                     let wma1_expected = (7.0 * data[i]
                         + 6.0 * data[i - 1]
                         + 5.0 * data[i - 2]
@@ -1662,11 +1588,7 @@ mod tests {
                         + data[i - 6])
                         / 28.0;
 
-                    
-                    
-                    
                     if result.predict[i].is_finite() {
-                        
                         let window_start = i.saturating_sub(6);
                         let window = &data[window_start..=i];
                         let window_avg = window.iter().sum::<f64>() / window.len() as f64;
@@ -1682,12 +1604,10 @@ mod tests {
                     }
                 }
 
-                
                 if i >= warmup_period + 3
                     && result.trigger[i].is_finite()
                     && result.predict[i].is_finite()
                 {
-                    
                     if result.predict[i - 1].is_finite()
                         && result.predict[i - 2].is_finite()
                         && result.predict[i - 3].is_finite()
@@ -1710,9 +1630,7 @@ mod tests {
                 }
             }
 
-            
             if data.len() == 7 {
-                
                 prop_assert!(
                     result.predict[6].is_finite(),
                     "With exactly 7 points, predict[6] should be finite but got NaN"
@@ -1749,13 +1667,11 @@ mod tests {
             .kernel(kernel)
             .apply_candles(&c, "close")?;
 
-        
         assert_eq!(output.rows, 1, "Expected exactly 1 row");
         assert_eq!(output.cols, c.close.len());
         assert_eq!(output.predict.len(), c.close.len());
         assert_eq!(output.trigger.len(), c.close.len());
 
-        
         let input = PmaInput::from_candles(&c, "close", PmaParams::default());
         let expected = pma_with_kernel(&input, kernel)?;
 
@@ -1821,7 +1737,6 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_sources = vec!["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"];
 
         for (source_idx, source) in test_sources.iter().enumerate() {
@@ -1829,7 +1744,6 @@ mod tests {
                 .kernel(kernel)
                 .apply_candles(&c, source)?;
 
-            
             for (idx, &val) in output.predict.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1862,7 +1776,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.trigger.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1912,29 +1825,24 @@ mod tests {
 
     #[test]
     fn test_pma_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = PmaInput::with_default_candles(&candles);
 
-        
         let base = pma_with_kernel(&input, Kernel::Auto)?;
 
-        
         let n = candles.close.len();
         let mut out_predict = vec![0.0; n];
         let mut out_trigger = vec![0.0; n];
 
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             pma_into(&input, &mut out_predict, &mut out_trigger)?;
         }
 
-        
         assert_eq!(base.predict.len(), out_predict.len());
         assert_eq!(base.trigger.len(), out_trigger.len());
 
-        
         fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }

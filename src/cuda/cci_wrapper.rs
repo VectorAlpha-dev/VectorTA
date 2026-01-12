@@ -1,11 +1,3 @@
-//! CUDA wrapper for CCI (Commodity Channel Index)
-//!
-//! Parity goals:
-//! - API mirrors ALMA-style wrappers: PTX load via OUT_DIR, NON_BLOCKING stream
-//! - VRAM estimation and basic headroom guard
-//! - Batch (one series × many params) and many-series × one-param (time-major)
-//! - Warmup/NaN semantics identical to scalar CCI
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -17,8 +9,8 @@ use cust::function::{BlockSize, Function, GridSize};
 use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
-use cust::sys as cu;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -31,15 +23,30 @@ pub enum CudaCciError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -52,7 +59,7 @@ pub struct CudaCci {
     context: Arc<Context>,
     device_id: u32,
     debug_batch_logged: bool,
-    smem_optin_limit: usize, 
+    smem_optin_limit: usize,
 }
 
 impl CudaCci {
@@ -119,7 +126,7 @@ impl CudaCci {
         unsafe {
             let mut dev: cu::CUdevice = std::mem::zeroed();
             if cu::cuCtxGetDevice(&mut dev) != cu::CUresult::CUDA_SUCCESS {
-                return 48 * 1024; 
+                return 48 * 1024;
             }
 
             let mut optin: i32 = 0;
@@ -136,8 +143,12 @@ impl CudaCci {
                 dev,
             );
 
-            let cap = if optin > 0 { optin as usize } else { def as usize };
-            cap.saturating_sub(1024) 
+            let cap = if optin > 0 {
+                optin as usize
+            } else {
+                def as usize
+            };
+            cap.saturating_sub(1024)
         }
     }
 
@@ -159,15 +170,20 @@ impl CudaCci {
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom: usize) -> Result<(), CudaCciError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Ok((free, _total)) = mem_get_info() {
             if required_bytes.saturating_add(headroom) <= free {
                 Ok(())
             } else {
-                Err(CudaCciError::OutOfMemory { required: required_bytes, free, headroom })
+                Err(CudaCciError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom,
+                })
             }
         } else {
-            
             Ok(())
         }
     }
@@ -275,19 +291,17 @@ impl CudaCci {
         out_offset_elems: usize,
         dyn_smem_bytes: usize,
     ) -> Result<(), CudaCciError> {
-        let mut func: Function = self
-            .module
-            .get_function("cci_batch_f32")
-            .map_err(|_| CudaCciError::MissingKernelSymbol { name: "cci_batch_f32" })?;
+        let mut func: Function = self.module.get_function("cci_batch_f32").map_err(|_| {
+            CudaCciError::MissingKernelSymbol {
+                name: "cci_batch_f32",
+            }
+        })?;
 
-        
         let _ = func.set_cache_config(CacheConfig::PreferShared);
         let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
 
-        
         let dyn_smem = dyn_smem_bytes.min(self.smem_optin_limit);
 
-        
         unsafe {
             let raw = func.to_raw();
             let _ = cu::cuFuncSetAttribute(
@@ -302,16 +316,15 @@ impl CudaCci {
             );
         }
 
-        
         let block_x: u32 = match env::var("CCI_BLOCK_X").ok().as_deref() {
             Some("auto") | None => {
-                let (_mg, suggest) = func
-                    .suggested_launch_configuration(dyn_smem, BlockSize::xyz(0, 0, 0))?;
+                let (_mg, suggest) =
+                    func.suggested_launch_configuration(dyn_smem, BlockSize::xyz(0, 0, 0))?;
                 suggest
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
         };
-        
+
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x.max(64), 1, 1).into();
 
@@ -332,7 +345,8 @@ impl CudaCci {
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(&func, grid, block, dyn_smem as u32, args)?;
+            self.stream
+                .launch(&func, grid, block, dyn_smem as u32, args)?;
         }
         Ok(())
     }
@@ -344,15 +358,29 @@ impl CudaCci {
     ) -> Result<DeviceArrayF32, CudaCciError> {
         let (combos, first_valid, len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let rows = combos.len();
-        
+
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let prices_b = len.checked_mul(sz_f32).ok_or_else(|| CudaCciError::InvalidInput("series_len bytes overflow".into()))?;
-        let params_b = rows.checked_mul(sz_i32).ok_or_else(|| CudaCciError::InvalidInput("params bytes overflow".into()))?;
-        let out_elems = rows.checked_mul(len).ok_or_else(|| CudaCciError::InvalidInput("rows*len overflow".into()))?;
-        let out_b = out_elems.checked_mul(sz_f32).ok_or_else(|| CudaCciError::InvalidInput("out bytes overflow".into()))?;
-        let bytes = prices_b.checked_add(params_b).and_then(|x| x.checked_add(out_b)).ok_or_else(|| CudaCciError::InvalidInput("total bytes overflow".into()))?;
-        let headroom = env::var("CUDA_MEM_HEADROOM").ok().and_then(|s| s.parse::<usize>().ok()).unwrap_or(64 * 1024 * 1024);
+        let prices_b = len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaCciError::InvalidInput("series_len bytes overflow".into()))?;
+        let params_b = rows
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaCciError::InvalidInput("params bytes overflow".into()))?;
+        let out_elems = rows
+            .checked_mul(len)
+            .ok_or_else(|| CudaCciError::InvalidInput("rows*len overflow".into()))?;
+        let out_b = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaCciError::InvalidInput("out bytes overflow".into()))?;
+        let bytes = prices_b
+            .checked_add(params_b)
+            .and_then(|x| x.checked_add(out_b))
+            .ok_or_else(|| CudaCciError::InvalidInput("total bytes overflow".into()))?;
+        let headroom = env::var("CUDA_MEM_HEADROOM")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
         Self::will_fit(bytes, headroom)?;
 
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
@@ -368,17 +396,21 @@ impl CudaCci {
             let mut d_out =
                 unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
             unsafe {
-                d_prices.async_copy_from(&h_prices, &self.stream).map_err(CudaCciError::Cuda)?;
-                d_periods.async_copy_from(&h_periods, &self.stream).map_err(CudaCciError::Cuda)?;
+                d_prices
+                    .async_copy_from(&h_prices, &self.stream)
+                    .map_err(CudaCciError::Cuda)?;
+                d_periods
+                    .async_copy_from(&h_periods, &self.stream)
+                    .map_err(CudaCciError::Cuda)?;
             }
-            
+
             let max_blocks: usize = 65_535;
             let mut launched = 0usize;
             while launched < rows {
                 let n_this = std::cmp::min(max_blocks, rows - launched);
                 let periods_off = launched;
                 let out_off = launched * len;
-                
+
                 let max_p_this = periods_u[launched..launched + n_this]
                     .iter()
                     .copied()
@@ -413,13 +445,13 @@ impl CudaCci {
         } else {
             let d_prices = DeviceBuffer::from_slice(data_f32).map_err(CudaCciError::Cuda)?;
             let d_periods = DeviceBuffer::from_slice(&periods).map_err(CudaCciError::Cuda)?;
-            let mut d_out =
-                unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }.map_err(CudaCciError::Cuda)?;
+            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }
+                .map_err(CudaCciError::Cuda)?;
             let max_blocks: usize = 65_535;
             let mut launched = 0usize;
             while launched < rows {
                 let n_this = std::cmp::min(max_blocks, rows - launched);
-                
+
                 let max_p_this = periods_u[launched..launched + n_this]
                     .iter()
                     .copied()
@@ -506,30 +538,41 @@ impl CudaCci {
         let mut func: Function = self
             .module
             .get_function("cci_many_series_one_param_f32")
-            .map_err(|_| CudaCciError::MissingKernelSymbol { name: "cci_many_series_one_param_f32" })?;
+            .map_err(|_| CudaCciError::MissingKernelSymbol {
+                name: "cci_many_series_one_param_f32",
+            })?;
 
         let block_x: u32 = match env::var("CCI_MS_BLOCK_X").ok().as_deref() {
             Some("auto") => {
-                let (_mg, s) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_mg, s) = func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 s
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
             None => {
-                let (_mg, s) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_mg, s) = func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 s
             }
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         let dev = Device::get_device(self.device_id).map_err(CudaCciError::Cuda)?;
-        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaCciError::Cuda)? as u32;
-        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock).map_err(CudaCciError::Cuda)? as u32;
+        let max_grid_x = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaCciError::Cuda)? as u32;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .map_err(CudaCciError::Cuda)? as u32;
         if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_threads {
-            return Err(CudaCciError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaCciError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -560,7 +603,7 @@ impl CudaCci {
         period: usize,
     ) -> Result<DeviceArrayF32, CudaCciError> {
         let (first_valids, period) = Self::prepare_many_series(data_tm_f32, cols, rows, period)?;
-        
+
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let elems = cols
@@ -575,29 +618,53 @@ impl CudaCci {
         if Self::use_async() {
             let h_prices = LockedBuffer::from_slice(data_tm_f32).map_err(CudaCciError::Cuda)?;
             let h_first = LockedBuffer::from_slice(&first_valids).map_err(CudaCciError::Cuda)?;
-            let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaCciError::Cuda)?;
-            let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }.map_err(CudaCciError::Cuda)?;
-            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaCciError::Cuda)?;
-            let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaCciError::Cuda)?;
-            let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }.map_err(CudaCciError::Cuda)?;
-            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }.map_err(CudaCciError::Cuda)?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(CudaCciError::Cuda)?;
+            let mut d_first =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+                    .map_err(CudaCciError::Cuda)?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(CudaCciError::Cuda)?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(CudaCciError::Cuda)?;
+            let mut d_first =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }
+                    .map_err(CudaCciError::Cuda)?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }
+                    .map_err(CudaCciError::Cuda)?;
             unsafe {
-                d_prices.async_copy_from(&h_prices, &self.stream).map_err(CudaCciError::Cuda)?;
-                d_first.async_copy_from(&h_first, &self.stream).map_err(CudaCciError::Cuda)?;
+                d_prices
+                    .async_copy_from(&h_prices, &self.stream)
+                    .map_err(CudaCciError::Cuda)?;
+                d_first
+                    .async_copy_from(&h_first, &self.stream)
+                    .map_err(CudaCciError::Cuda)?;
             }
             self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
             self.stream.synchronize().map_err(CudaCciError::Cuda)?;
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         } else {
             let d_prices = DeviceBuffer::from_slice(data_tm_f32).map_err(CudaCciError::Cuda)?;
             let d_first = DeviceBuffer::from_slice(&first_valids).map_err(CudaCciError::Cuda)?;
-            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }.map_err(CudaCciError::Cuda)?;
+            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(cols * rows) }
+                .map_err(CudaCciError::Cuda)?;
             self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
-            Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+            Ok(DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols,
+            })
         }
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -605,7 +672,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 200; 
+    const PARAM_SWEEP: usize = 200;
 
     fn bytes_required() -> usize {
         let in_bytes = SERIES_LEN * std::mem::size_of::<f32>();
@@ -666,7 +733,8 @@ pub mod benches {
         let rows = combos.len();
         let d_prices = DeviceBuffer::from_slice(&data).expect("d_prices");
         let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(rows * len) }.expect("d_out");
         Box::new(CciBatchDeviceState {
             cuda,
             d_prices,

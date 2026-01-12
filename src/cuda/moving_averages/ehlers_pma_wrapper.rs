@@ -1,11 +1,3 @@
-//! CUDA scaffolding for the Ehlers Predictive Moving Average (PMA).
-//!
-//! The kernels operate purely in FP32 memory with FP64 intermediates to mirror
-//! the scalar implementation. This wrapper mirrors the ALMA GPU surface: a
-//! "one series × many params" batch launcher (where `combos` is a synthetic
-//! sweep count) and a "many series × one param" launch that consumes
-//! time-major data without extra host copies.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -26,8 +18,6 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -69,8 +59,6 @@ impl Default for CudaEhlersPmaPolicy {
     }
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -94,10 +82,23 @@ pub enum CudaEhlersPmaError {
     InvalidPolicy(&'static str),
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Launch config too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -106,11 +107,10 @@ pub enum CudaEhlersPmaError {
     CudaDriver(String),
 }
 
-/// VRAM-backed pair of outputs (predict + trigger).
 pub struct DeviceEhlersPmaPair {
     pub predict: DeviceArrayF32,
     pub trigger: DeviceArrayF32,
-    
+
     pub(crate) _ctx: Arc<Context>,
     pub(crate) _device_id: u32,
 }
@@ -147,8 +147,7 @@ impl CudaEhlersPma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ehlers_pma_kernel.ptx"));
-        
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -179,7 +178,6 @@ impl CudaEhlersPma {
         })
     }
 
-    /// Create using an explicit policy (tests/benches).
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaEhlersPmaPolicy,
@@ -196,14 +194,18 @@ impl CudaEhlersPma {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { Arc::clone(&self._context) }
+    pub fn context_arc(&self) -> Arc<Context> {
+        Arc::clone(&self._context)
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
-    pub fn stream_handle(&self) -> usize { self.stream.as_inner() as usize }
+    pub fn stream_handle(&self) -> usize {
+        self.stream.as_inner() as usize
+    }
 
-    /// Expose the producing CUDA stream handle for CUDA Array Interface 'stream'.
-    /// Return a real handle; omit the key at the caller if you synchronously wait.
     pub fn stream_handle_for_cai(&self) -> usize {
         self.stream.as_inner() as usize
     }
@@ -214,7 +216,6 @@ impl CudaEhlersPma {
         self.last_many
     }
 
-    /// Explicit synchronize to aid deterministic timing.
     pub fn synchronize(&self) -> Result<(), CudaEhlersPmaError> {
         self.stream.synchronize()?;
         Ok(())
@@ -365,13 +366,12 @@ impl CudaEhlersPma {
         let required = prices_bytes
             .checked_add(two_out)
             .ok_or_else(|| CudaEhlersPmaError::InvalidInput("byte size overflow".into()))?;
-        
-        let headroom = 64 * 1024 * 1024; 
+
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
-        let mut d_prices: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len)? };
-        
+        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len)? };
+
         self.h2d_copy_pinned(&mut d_prices, prices)?;
         let mut d_predict: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len)? };
@@ -386,8 +386,6 @@ impl CudaEhlersPma {
             &mut d_predict,
             &mut d_trigger,
         )?;
-
-        
 
         Ok(DeviceEhlersPmaPair {
             predict: DeviceArrayF32 {
@@ -414,7 +412,6 @@ impl CudaEhlersPma {
         d_predict: &mut DeviceBuffer<f32>,
         d_trigger: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaEhlersPmaError> {
-        
         let mut func_name = "ehlers_pma_batch_f32";
         let mut block_x = 1u32;
         match self.policy.batch {
@@ -500,13 +497,11 @@ impl CudaEhlersPma {
                 &mut predict_ptr as *mut _ as *mut c_void,
                 &mut trigger_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, shared, &mut args)?
+            self.stream.launch(&func, grid, block, shared, &mut args)?
         }
         Ok(())
     }
 
-    
     #[inline(always)]
     fn cu_check(&self, res: cu::CUresult, ctx: &'static str) -> Result<(), CudaEhlersPmaError> {
         if res == cu::CUresult::CUDA_SUCCESS {
@@ -538,7 +533,6 @@ impl CudaEhlersPma {
         let _ = cu::cuMemHostUnregister(ptr);
     }
 
-    /// Synchronous H2D copy using page-locked registration to avoid hidden staging.
     fn h2d_copy_pinned<T: Copy + DeviceCopy>(
         &self,
         dst: &mut DeviceBuffer<T>,
@@ -556,7 +550,6 @@ impl CudaEhlersPma {
                 self.unregister_host(hptr);
                 Ok(())
             } else {
-                // Fallback to blocking driver copy (the driver may stage via its own pinned buffer)
                 let dptr = dst.as_device_ptr().as_raw() as cu::CUdeviceptr;
                 self.cu_check(
                     cu::cuMemcpyHtoD_v2(dptr, hptr, bytes),
@@ -567,7 +560,6 @@ impl CudaEhlersPma {
         }
     }
 
-    /// Synchronous D2H copy using page-locked registration to avoid hidden staging.
     fn d2h_copy_pinned<T: Copy + DeviceCopy>(
         &self,
         dst: &mut [T],
@@ -585,7 +577,6 @@ impl CudaEhlersPma {
                 self.unregister_host(hptr);
                 Ok(())
             } else {
-                // Fallback to blocking driver copy
                 let dptr = src.as_device_ptr().as_raw() as cu::CUdeviceptr;
                 self.cu_check(
                     cu::cuMemcpyDtoH_v2(hptr, dptr, bytes),
@@ -669,7 +660,7 @@ impl CudaEhlersPma {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(two_out))
             .ok_or_else(|| CudaEhlersPmaError::InvalidInput("byte size overflow".into()))?;
-        // Keep a conservative headroom similar to ALMA (~64MB)
+
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
@@ -690,8 +681,6 @@ impl CudaEhlersPma {
             &mut d_predict_tm,
             &mut d_trigger_tm,
         )?;
-
-        // No explicit sync required before returning device buffers.
 
         Ok(DeviceEhlersPmaPair {
             predict: DeviceArrayF32 {
@@ -811,7 +800,6 @@ impl CudaEhlersPma {
         Ok(())
     }
 
-    /// Launch the batch (one series × many combos) path and return VRAM handles.
     pub fn ehlers_pma_batch_dev(
         &self,
         prices: &[f32],
@@ -821,7 +809,6 @@ impl CudaEhlersPma {
         self.run_batch_kernel(prices, &combos, first_valid, series_len)
     }
 
-    /// Copy the batch result back to host memory (FP32) while returning metadata.
     pub fn ehlers_pma_batch_into_host_f32(
         &self,
         prices: &[f32],
@@ -846,8 +833,6 @@ impl CudaEhlersPma {
         Ok((pair.rows(), pair.cols(), combos))
     }
 
-    /// Batch launch using device-resident price series. Caller supplies
-    /// `series_len` and `first_valid`.
     pub fn ehlers_pma_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -866,12 +851,15 @@ impl CudaEhlersPma {
                 series_len.saturating_sub(first_valid)
             )));
         }
-        // Ensure the current device matches this wrapper's device
+
         unsafe {
             let mut cur: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut cur);
             if cur as u32 != self.device_id {
-                return Err(CudaEhlersPmaError::DeviceMismatch { buf: self.device_id, current: cur as u32 });
+                return Err(CudaEhlersPmaError::DeviceMismatch {
+                    buf: self.device_id,
+                    current: cur as u32,
+                });
             }
         }
         let combos = expand_grid(sweep);
@@ -882,7 +870,7 @@ impl CudaEhlersPma {
         }
 
         let n_combos = combos.len();
-        
+
         let elem = std::mem::size_of::<f32>();
         let out_elems = n_combos
             .checked_mul(series_len)
@@ -893,7 +881,7 @@ impl CudaEhlersPma {
         let required = out_bytes_one
             .checked_mul(2)
             .ok_or_else(|| CudaEhlersPmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
         let mut d_predict: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * series_len)? };
@@ -908,7 +896,6 @@ impl CudaEhlersPma {
             &mut d_predict,
             &mut d_trigger,
         )?;
-        
 
         Ok(DeviceEhlersPmaPair {
             predict: DeviceArrayF32 {
@@ -926,7 +913,6 @@ impl CudaEhlersPma {
         })
     }
 
-    /// Batch launch using pre-allocated device buffers (benchmark helper).
     #[allow(clippy::too_many_arguments)]
     pub fn ehlers_pma_batch_device(
         &self,
@@ -947,8 +933,17 @@ impl CudaEhlersPma {
                 "arguments exceed kernel limits".into(),
             ));
         }
-        
-        unsafe { let mut cur: i32 = 0; let _ = cu::cuCtxGetDevice(&mut cur); if cur as u32 != self.device_id { return Err(CudaEhlersPmaError::DeviceMismatch { buf: self.device_id, current: cur as u32 }); } }
+
+        unsafe {
+            let mut cur: i32 = 0;
+            let _ = cu::cuCtxGetDevice(&mut cur);
+            if cur as u32 != self.device_id {
+                return Err(CudaEhlersPmaError::DeviceMismatch {
+                    buf: self.device_id,
+                    current: cur as u32,
+                });
+            }
+        }
         self.launch_batch_kernel_select(
             d_prices,
             series_len,
@@ -959,7 +954,6 @@ impl CudaEhlersPma {
         )
     }
 
-    /// Many-series launch returning VRAM handles (time-major input/output).
     pub fn ehlers_pma_many_series_one_param_time_major_dev(
         &self,
         prices_tm: &[f32],
@@ -970,7 +964,6 @@ impl CudaEhlersPma {
         self.run_many_series_kernel(prices_tm, cols, rows, &first_valids)
     }
 
-    /// Copy many-series outputs back to host memory (time-major layout).
     pub fn ehlers_pma_many_series_one_param_time_major_into_host_f32(
         &self,
         prices_tm: &[f32],
@@ -994,7 +987,6 @@ impl CudaEhlersPma {
         Ok(())
     }
 
-    /// Many-series launch using pre-allocated device buffers (benchmark helper).
     #[allow(clippy::too_many_arguments)]
     pub fn ehlers_pma_many_series_one_param_device(
         &self,
@@ -1015,8 +1007,17 @@ impl CudaEhlersPma {
                 "arguments exceed kernel limits".into(),
             ));
         }
-        
-        unsafe { let mut cur: i32 = 0; let _ = cu::cuCtxGetDevice(&mut cur); if cur as u32 != self.device_id { return Err(CudaEhlersPmaError::DeviceMismatch { buf: self.device_id, current: cur as u32 }); } }
+
+        unsafe {
+            let mut cur: i32 = 0;
+            let _ = cu::cuCtxGetDevice(&mut cur);
+            if cur as u32 != self.device_id {
+                return Err(CudaEhlersPmaError::DeviceMismatch {
+                    buf: self.device_id,
+                    current: cur as u32,
+                });
+            }
+        }
         self.launch_many_series_kernel_select(
             d_prices_tm,
             cols,
@@ -1027,8 +1028,6 @@ impl CudaEhlersPma {
         )
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -1088,8 +1087,10 @@ pub mod benches {
 
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
         let out_elems = series_len.checked_mul(n_combos).expect("out size");
-        let d_predict: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_predict");
-        let d_trigger: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_trigger");
+        let d_predict: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_predict");
+        let d_trigger: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_trigger");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(PmaBatchDevState {
@@ -1135,8 +1136,8 @@ pub mod benches {
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_LEN;
         let data_tm = gen_time_major_prices(cols, rows);
-        let first_valids =
-            CudaEhlersPma::prepare_many_series_inputs(&data_tm, cols, rows).expect("pma prepare many");
+        let first_valids = CudaEhlersPma::prepare_many_series_inputs(&data_tm, cols, rows)
+            .expect("pma prepare many");
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
         let elems = cols.checked_mul(rows).expect("elems");

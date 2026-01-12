@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::rsx::{
     rsx_batch_with_kernel, rsx_with_kernel, RsxBatchRange, RsxInput, RsxParams,
 };
@@ -59,8 +57,8 @@ fn rsx_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let atol = 6e-1; 
-    let rtol = 1e-1; 
+    let atol = 6e-1;
+    let rtol = 1e-1;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -96,7 +94,6 @@ fn rsx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

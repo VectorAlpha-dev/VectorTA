@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::linearreg_angle::{
     linearreg_angle_batch_with_kernel, Linearreg_angleBatchRange, Linearreg_angleBuilder,
     Linearreg_angleParams,
@@ -82,19 +80,17 @@ fn linearreg_angle_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
-            
             let x = (r as f64) + (s as f64) * 0.25;
             data_tm[r * cols + s] = (x * 0.002).sin() + 0.0003 * x;
         }
     }
     let period = 21usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

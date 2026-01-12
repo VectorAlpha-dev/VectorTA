@@ -50,7 +50,6 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let (high, low) = synth_from_close(&close);
 
-    
     let high_f32_round: Vec<f64> = high.iter().map(|&v| (v as f32) as f64).collect();
     let low_f32_round: Vec<f64> = low.iter().map(|&v| (v as f32) as f64).collect();
     let close_f32_round: Vec<f64> = close.iter().map(|&v| (v as f32) as f64).collect();
@@ -92,7 +91,6 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_d.buf.copy_to(&mut d)?;
     dev_j.buf.copy_to(&mut j)?;
 
-    
     let mut cpu_finite = 0usize;
     let mut gpu_finite = 0usize;
     for i in (cpu.cols / 2)..(cpu.rows * cpu.cols) {
@@ -103,7 +101,7 @@ fn kdj_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             gpu_finite += 1;
         }
     }
-    
+
     assert!(
         gpu_finite * 2 >= cpu_finite,
         "GPU finite ratio too low: gpu={} cpu={}",
@@ -142,7 +140,6 @@ fn kdj_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let mut cpu_k_tm = vec![f64::NAN; cols * rows];
     let mut cpu_d_tm = vec![f64::NAN; cols * rows];
     let mut cpu_j_tm = vec![f64::NAN; cols * rows];
@@ -174,7 +171,6 @@ fn kdj_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let h_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let l_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let c_f32: Vec<f32> = close_tm.iter().map(|&v| v as f32).collect();

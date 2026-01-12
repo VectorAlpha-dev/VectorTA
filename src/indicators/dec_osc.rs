@@ -1,35 +1,3 @@
-//! # Decycler Oscillator (DEC_OSC)
-//!
-//! A trend-following oscillator that uses cascaded high-pass filters to remove cyclical
-//! components from price data, leaving only the long-term trend. The indicator applies
-//! two sequential 2-pole high-pass filters to eliminate shorter-term cycles, then scales
-//! the result to show the percentage deviation from the original price series. Useful for
-//! identifying the underlying trend strength without short-term noise.
-//!
-//! ## Parameters
-//! - **hp_period**: Period for the high-pass filters (default: 125)
-//! - **k**: Multiplier for scaling the oscillator output (default: 1.0)
-//!
-//! ## Inputs
-//! - Single price array (typically close prices)
-//! - Supports both raw slices and Candles with source selection
-//!
-//! ## Returns
-//! - **`Ok(DecOscOutput)`** containing a `Vec<f64>` matching input length
-//! - Values represent trend strength as percentage of price
-//! - Leading NaNs for first 2 values during filter initialization
-//! - Positive values indicate uptrend, negative indicate downtrend
-//!
-//! ## Developer Notes (Implementation Status)
-//! - **SIMD Kernels**:
-//!   - AVX2/AVX512: kept as stubs by design (delegate to scalar). The inner loop is a 2-pole IIR with loop-carried dependencies; direct time-axis SIMD does not yield wins without look-ahead transforms and adds complexity. Runtime selection remains, but stubs short-circuit to scalar for correctness and speed.
-//! - **Scalar Path**: optimized to precompute constants, reduce multiplies, and reuse prior raw samples to cut loads; semantics unchanged (warmup handling preserved).
-//! - **Streaming Performance**: O(1) with maintained filter state.
-//! - **Memory Optimization**: YES — uses `alloc_with_nan_prefix` and `make_uninit_matrix` helpers.
-//! - **Batch Operations**: Supported; parallel row execution. A future optimization is to group rows by equal `hp_period` and SIMD-scale across `k` per tick to avoid redundant filter work.
-//! - **Decision**: Single-series SIMD remains disabled due to IIR feedback; consider row-specific SIMD across `k` only if period-grouped workloads are common and show >5% gains.
-//! - **CUDA**: Wrapper present with typed errors and pre-synchronized launches; Python interop provides CAI v3 + DLPack and retains the CUDA context with the returned VRAM handle.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -38,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -86,7 +54,10 @@ pub struct DecOscOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct DecOscParams {
     pub hp_period: Option<usize>,
     pub k: Option<f64>,
@@ -228,7 +199,11 @@ pub enum DecOscError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("dec_osc: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("dec_osc: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -307,12 +282,7 @@ pub fn dec_osc_with_kernel(
     Ok(DecOscOutput { values: out })
 }
 
-/// Write DEC_OSC results into a caller-provided output slice without allocating.
-///
-/// - Preserves the same NaN warmup prefix as the Vec-returning API (first-valid + 2).
-/// - The output slice length must match the input length.
-/// - Uses `Kernel::Auto` to dispatch to the existing compute path.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dec_osc_into(out: &mut [f64], input: &DecOscInput) -> Result<(), DecOscError> {
     dec_osc_into_slice(out, input, Kernel::Auto)
@@ -344,7 +314,6 @@ pub fn dec_osc_into_slice(
         }
     }
 
-    // Ensure warmup period is filled with NaN
     let warmup_end = first + 2;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -375,7 +344,6 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
         return;
     }
 
-    // Precompute constants once; use sin_cos to reduce transcendentals.
     let p = period as f64;
     let half_p = p * 0.5;
 
@@ -399,11 +367,9 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
 
     let scale = 100.0 * k_val;
 
-    // Warmup exactly two leading NaNs from `first`.
     out[first] = f64::NAN;
     out[first + 1] = f64::NAN;
 
-    // Seed states to match existing behavior and cache prior raw samples.
     let mut x2 = data[first];
     let mut x1 = data[first + 1];
     let mut hp_prev_2 = x2;
@@ -411,25 +377,20 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
     let mut decosc_prev_2 = 0.0f64;
     let mut decosc_prev_1 = 0.0f64;
 
-    // Main loop: fuse filter sections and scale; keep scalar-safe.
     for i in (first + 2)..len {
         let d0 = data[i];
 
-        // First 2‑pole high‑pass on raw data (reuse cached x1/x2)
         let dx = d0 - 2.0 * x1 + x2;
         let hp0 = c1 * dx + two_oma1 * hp_prev_1 - oma1_sq * hp_prev_2;
 
-        // Decycle and second high‑pass on decycled series
         let dec = d0 - hp0;
         let d_dec1 = x1 - hp_prev_1;
         let d_dec2 = x2 - hp_prev_2;
         let decdx = dec - 2.0 * d_dec1 + d_dec2;
         let osc0 = c2 * decdx + two_oma2 * decosc_prev_1 - oma2_sq * decosc_prev_2;
 
-        // Final percentage scaling vs price
         out[i] = scale * osc0 / d0;
 
-        // Roll states and cached raw samples
         hp_prev_2 = hp_prev_1;
         hp_prev_1 = hp0;
         decosc_prev_2 = decosc_prev_1;
@@ -442,7 +403,6 @@ pub fn dec_osc_scalar(data: &[f64], period: usize, k_val: f64, first: usize, out
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn dec_osc_avx2(data: &[f64], period: usize, k_val: f64, first: usize, out: &mut [f64]) {
-    // AVX2 stub - call scalar.
     dec_osc_scalar(data, period, k_val, first, out)
 }
 
@@ -455,7 +415,6 @@ pub unsafe fn dec_osc_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    // AVX512 short stub - call scalar.
     dec_osc_scalar(data, period, k_val, first, out)
 }
 
@@ -468,7 +427,6 @@ pub unsafe fn dec_osc_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    // AVX512 long stub - call scalar.
     dec_osc_scalar(data, period, k_val, first, out)
 }
 
@@ -589,22 +547,30 @@ impl DecOscBatchOutput {
 #[inline(always)]
 fn expand_grid_checked(r: &DecOscBatchRange) -> Result<Vec<DecOscParams>, DecOscError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, DecOscError> {
-        if step == 0 || start == end { return Ok(vec![start]); }
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
         let mut out = Vec::new();
         if start < end {
             let mut v = start;
             while v <= end {
                 out.push(v);
-                v = match v.checked_add(step) { Some(n) if n != v => n, _ => break };
+                v = match v.checked_add(step) {
+                    Some(n) if n != v => n,
+                    _ => break,
+                };
             }
         } else {
-            // reversed bounds
             let mut v = start;
             while v >= end {
                 out.push(v);
-                if v < end + step { break; }
+                if v < end + step {
+                    break;
+                }
                 v -= step;
-                if v == 0 { break; }
+                if v == 0 {
+                    break;
+                }
             }
         }
         if out.is_empty() {
@@ -613,29 +579,43 @@ fn expand_grid_checked(r: &DecOscBatchRange) -> Result<Vec<DecOscParams>, DecOsc
         Ok(out)
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Vec<f64> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return vec![start];
+        }
         let mut v = Vec::new();
         if start <= end {
             let mut x = start;
-            while x <= end + 1e-12 { v.push(x); x += step; }
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += step;
+            }
         } else {
             let mut x = start;
-            while x >= end - 1e-12 { v.push(x); x -= step.abs(); }
+            while x >= end - 1e-12 {
+                v.push(x);
+                x -= step.abs();
+            }
         }
         v
     }
 
     let periods = axis_usize(r.hp_period)?;
     let ks = axis_f64(r.k);
-    let cap = periods.len().checked_mul(ks.len()).ok_or(DecOscError::InvalidRange {
-        start: r.hp_period.0,
-        end: r.hp_period.1,
-        step: r.hp_period.2,
-    })?;
+    let cap = periods
+        .len()
+        .checked_mul(ks.len())
+        .ok_or(DecOscError::InvalidRange {
+            start: r.hp_period.0,
+            end: r.hp_period.1,
+            step: r.hp_period.2,
+        })?;
     let mut out = Vec::with_capacity(cap);
     for &p in &periods {
         for &k in &ks {
-            out.push(DecOscParams { hp_period: Some(p), k: Some(k) });
+            out.push(DecOscParams {
+                hp_period: Some(p),
+                k: Some(k),
+            });
         }
     }
     Ok(out)
@@ -682,20 +662,18 @@ fn dec_osc_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(DecOscError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    let _total = rows.checked_mul(cols).ok_or(DecOscError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
 
-    // Use uninitialized memory with proper initialization (following ALMA pattern)
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warmup periods for each parameter combination
     let warmup_periods: Vec<usize> = combos.iter().map(|_| first + 2).collect();
 
-    // Initialize matrix prefixes with NaN for warmup periods
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    // Use ManuallyDrop to avoid double-free (following ALMA pattern)
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -734,7 +712,6 @@ fn dec_osc_batch_inner(
         }
     }
 
-    // Convert uninitialized memory to Vec (following ALMA pattern)
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -777,14 +754,18 @@ pub fn dec_osc_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(DecOscError::InvalidRange { start: rows, end: cols, step: 0 })?;
+    let expected = rows.checked_mul(cols).ok_or(DecOscError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
     if out.len() != expected {
-        return Err(DecOscError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(DecOscError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    // Cast out -> MaybeUninit and initialize prefixes via helper
     let warmups: Vec<usize> = combos.iter().map(|_| first + 2).collect();
 
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
@@ -792,7 +773,6 @@ pub fn dec_osc_batch_inner_into(
     };
     init_matrix_prefixes(out_mu, cols, &warmups);
 
-    // Compute rows
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let dst: &mut [f64] =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
@@ -889,41 +869,31 @@ pub unsafe fn dec_osc_row_avx512_long(
     dec_osc_scalar(data, period, k_val, first, out)
 }
 
-// Decision: Streaming path replaced with FMA-based O(1) kernel; outputs unchanged.
-
 #[derive(Debug, Clone)]
 pub struct DecOscStream {
-    // Params
     period: usize,
-    scale: f64, // 100.0 * k
+    scale: f64,
 
-    // Section 1 coeffs
     c1: f64,
     two_oma1: f64,
     oma1_sq: f64,
 
-    // Section 2 coeffs
     c2: f64,
     two_oma2: f64,
     oma2_sq: f64,
 
-    // Raw sample cache (x[t-1], x[t-2])
     x1: f64,
     x2: f64,
 
-    // 1st HP stage past outputs: hp[t-1], hp[t-2]
     hp1: f64,
     hp2: f64,
 
-    // Decycled series (dec = x - hp) history: dec[t-1], dec[t-2]
     dec1: f64,
     dec2: f64,
 
-    // 2nd HP stage past outputs: osc[t-1], osc[t-2]
     osc1: f64,
     osc2: f64,
 
-    // Warmup counter
     idx: usize,
 }
 
@@ -942,11 +912,9 @@ impl DecOscStream {
             return Err(DecOscError::InvalidK { k });
         }
 
-        // ---- Precompute filter constants (Ehlers two‑pole HP, Q≈0.707) ----
-        // Use sin_cos once per section; faster & often more precise than separate calls.
         let p = period as f64;
         let angle1 = 2.0 * std::f64::consts::PI * 0.707 / p;
-        let (sin1, cos1) = angle1.sin_cos(); // single call, two results
+        let (sin1, cos1) = angle1.sin_cos();
         let alpha1 = 1.0 + ((sin1 - 1.0) / cos1);
         let t1 = 1.0 - 0.5 * alpha1;
         let c1 = t1 * t1;
@@ -992,51 +960,40 @@ impl DecOscStream {
         })
     }
 
-    /// O(1) update. Returns `None` for the first two samples (warmup), mirroring the batch path’s NaNs.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Warmup 0: seed with the first value (match batch: use raw value as initial HP state)
         if self.idx == 0 {
             self.idx = 1;
             self.x2 = value;
             self.x1 = value;
             self.hp2 = value;
             self.hp1 = value;
-            // dec1/dec2 = 0, osc1/osc2 = 0 (already)
+
             return None;
         }
 
-        // Warmup 1: second tick; keep seeds consistent and still return None
         if self.idx == 1 {
             self.idx = 2;
             self.x2 = self.x1;
             self.x1 = value;
             self.hp2 = self.hp1;
             self.hp1 = value;
-            // dec at this step is 0, so just keep dec1/dec2 = 0
+
             return None;
         }
 
-        // ----- Main path -----
-        // First 2‑pole HPF on raw data: hp = c1*(x - 2*x1 + x2) + 2*(1−α1)*hp1 − (1−α1)^2*hp2
         let dx = value - self.x1 - self.x1 + self.x2;
 
-        // Use mul_add to get FMA on capable CPUs (fewer roundings, often faster).
-        // hp = (-oma1_sq)*hp2 + c1*dx + two_oma1*hp1
         let hp = (-self.oma1_sq).mul_add(self.hp2, self.c1.mul_add(dx, self.two_oma1 * self.hp1));
 
-        // Decycle
         let dec = value - hp;
 
-        // Second 2‑pole HPF on decycled series: osc = c2*(dec - 2*dec1 + dec2) + 2*(1−α2)*osc1 − (1−α2)^2*osc2
         let decdx = dec - self.dec1 - self.dec1 + self.dec2;
         let osc =
             (-self.oma2_sq).mul_add(self.osc2, self.c2.mul_add(decdx, self.two_oma2 * self.osc1));
 
-        // Output: percentage of price
         let out = (self.scale * osc) / value;
 
-        // Roll states
         self.hp2 = self.hp1;
         self.hp1 = hp;
 
@@ -1223,57 +1180,56 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations for DEC_OSC
         let test_params = vec![
-            DecOscParams::default(), // hp_period: 125, k: 1.0
+            DecOscParams::default(),
             DecOscParams {
                 hp_period: Some(2),
                 k: Some(1.0),
-            }, // minimum viable period
+            },
             DecOscParams {
                 hp_period: Some(10),
                 k: Some(1.0),
-            }, // small period
+            },
             DecOscParams {
                 hp_period: Some(50),
                 k: Some(1.0),
-            }, // medium period
+            },
             DecOscParams {
                 hp_period: Some(125),
                 k: Some(1.0),
-            }, // default period
+            },
             DecOscParams {
                 hp_period: Some(200),
                 k: Some(1.0),
-            }, // large period
+            },
             DecOscParams {
                 hp_period: Some(500),
                 k: Some(1.0),
-            }, // very large period
+            },
             DecOscParams {
                 hp_period: Some(50),
                 k: Some(0.5),
-            }, // small k
+            },
             DecOscParams {
                 hp_period: Some(50),
                 k: Some(2.0),
-            }, // large k
+            },
             DecOscParams {
                 hp_period: Some(125),
                 k: Some(0.1),
-            }, // very small k
+            },
             DecOscParams {
                 hp_period: Some(125),
                 k: Some(10.0),
-            }, // very large k
+            },
             DecOscParams {
                 hp_period: Some(20),
                 k: Some(1.5),
-            }, // mixed params
+            },
             DecOscParams {
                 hp_period: Some(100),
                 k: Some(0.75),
-            }, // mixed params
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1282,12 +1238,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1340,7 +1295,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! generate_all_dec_osc_tests {
@@ -1441,16 +1396,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations for DEC_OSC
         let test_configs = vec![
-            // (hp_period_start, hp_period_end, hp_period_step, k_start, k_end, k_step)
-            (2, 10, 2, 1.0, 1.0, 0.0),     // Small periods, fixed k
-            (10, 50, 10, 1.0, 1.0, 0.0),   // Medium periods, fixed k
-            (50, 150, 25, 1.0, 1.0, 0.0),  // Large periods, fixed k
-            (125, 125, 0, 0.5, 2.0, 0.5),  // Fixed period, varying k
-            (20, 40, 5, 0.5, 1.5, 0.25),   // Mixed sweep
-            (100, 200, 50, 1.0, 1.0, 0.0), // Very large periods
-            (2, 5, 1, 0.1, 10.0, 4.95),    // Dense small range with extreme k
+            (2, 10, 2, 1.0, 1.0, 0.0),
+            (10, 50, 10, 1.0, 1.0, 0.0),
+            (50, 150, 25, 1.0, 1.0, 0.0),
+            (125, 125, 0, 0.5, 2.0, 0.5),
+            (20, 40, 5, 0.5, 1.5, 0.25),
+            (100, 200, 50, 1.0, 1.0, 0.0),
+            (2, 5, 1, 0.1, 10.0, 4.95),
         ];
 
         for (cfg_idx, &(hp_start, hp_end, hp_step, k_start, k_end, k_step)) in
@@ -1458,14 +1411,12 @@ mod tests {
         {
             let mut builder = DecOscBatchBuilder::new().kernel(kernel);
 
-            // Configure period range
             if hp_step > 0 {
                 builder = builder.hp_period_range(hp_start, hp_end, hp_step);
             } else {
                 builder = builder.hp_period_range(hp_start, hp_start, 1);
             }
 
-            // Configure k range
             if k_step > 0.0 {
                 builder = builder.k_range(k_start, k_end, k_step);
             }
@@ -1482,7 +1433,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1541,7 +1491,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1553,7 +1503,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy 1: Random price data with full hp_period range (3-200)
         let strat_random = (3usize..=200).prop_flat_map(|hp_period| {
             (
                 prop::collection::vec(
@@ -1562,18 +1511,16 @@ mod tests {
                     hp_period + 10..400,
                 ),
                 Just(hp_period),
-                (0.1f64..3.0f64), // k multiplier
+                (0.1f64..3.0f64),
             )
         });
 
-        // Strategy 2: Constant data (should produce oscillator near 0 after warmup)
         let strat_constant = (3usize..=100, 0.1f64..3.0f64).prop_map(|(hp_period, k)| {
-            let value = 1000.0; // Use larger value to avoid division issues
+            let value = 1000.0;
             let data = vec![value; hp_period.max(10) + 20];
             (data, hp_period, k)
         });
 
-        // Strategy 3: Trending data (monotonic increasing/decreasing)
         let strat_trending = (3usize..=100, 0.1f64..3.0f64, prop::bool::ANY).prop_map(
             |(hp_period, k, increasing)| {
                 let len = hp_period.max(10) + 50;
@@ -1586,7 +1533,6 @@ mod tests {
             },
         );
 
-        // Strategy 4: Small k values to test proportionality
         let strat_small_k = (10usize..=50, 0.01f64..0.5f64).prop_flat_map(|(hp_period, k)| {
             (
                 prop::collection::vec(
@@ -1598,7 +1544,6 @@ mod tests {
             )
         });
 
-        // Strategy 5: High volatility data to test filter response
         let strat_volatile = (5usize..=50, 0.1f64..2.0f64).prop_flat_map(|(hp_period, k)| {
             (
                 prop::collection::vec(
@@ -1613,7 +1558,6 @@ mod tests {
             )
         });
 
-        // Combine all strategies
         let combined_strat = prop::strategy::Union::new(vec![
             strat_random.boxed(),
             strat_constant.boxed(),
@@ -1630,21 +1574,17 @@ mod tests {
                 };
                 let input = DecOscInput::from_slice(&data, params);
 
-                // Get outputs from tested kernel and reference scalar kernel
                 let DecOscOutput { values: out } = dec_osc_with_kernel(&input, kernel).unwrap();
                 let DecOscOutput { values: ref_out } =
                     dec_osc_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Find first non-NaN value
                 let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-                let warmup_end = first + 2; // DEC_OSC needs two seeded samples
+                let warmup_end = first + 2;
 
-                // Property validations
                 for i in warmup_end..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    // Property 1: Finite values after warmup
                     prop_assert!(
                         y.is_finite(),
                         "[{}] Output should be finite at index {} (after warmup): got {}",
@@ -1653,18 +1593,15 @@ mod tests {
                         y
                     );
 
-                    // Property 2: Graduated magnitude bounds based on hp_period
-                    // DEC_OSC can produce extreme values especially with small periods
-                    // Skip magnitude check for hp_period=2 as it can produce mathematically valid but extreme values
                     if hp_period > 2 {
                         let magnitude_limit = if hp_period >= 50 {
-                            5000.0 // ±5,000% for large periods
+                            5000.0
                         } else if hp_period >= 20 {
-                            20000.0 // ±20,000% for medium periods
+                            20000.0
                         } else if hp_period >= 10 {
-                            100000.0 // ±100,000% for small-medium periods
+                            100000.0
                         } else {
-                            1000000.0 // ±1,000,000% for very small periods (3-9)
+                            1000000.0
                         };
 
                         prop_assert!(
@@ -1674,13 +1611,10 @@ mod tests {
 						);
                     }
 
-                    // Property 3: For constant data, oscillator should converge
-                    // Skip for hp_period=2 which can produce extreme values even with constant data
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                         && i > first + hp_period * 3
                         && hp_period > 2
                     {
-                        // Allow more tolerance for small periods which can be unstable
                         let convergence_limit = if hp_period < 10 { 10.0 } else { 0.1 };
                         prop_assert!(
 							y.abs() <= convergence_limit,
@@ -1689,7 +1623,6 @@ mod tests {
 						);
                     }
 
-                    // Property 4: Kernel consistency check with tighter tolerance
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -1706,8 +1639,6 @@ mod tests {
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    // Note: Since AVX2/AVX512 are stubs that call scalar, they should be identical
-                    // but floating-point operations can have slight differences due to compiler optimizations
                     prop_assert!(
                         (y - r).abs() <= 1e-7 || ulp_diff <= 20,
                         "[{}] Kernel mismatch at index {}: {} vs {} (ULP={}, diff={})",
@@ -1719,7 +1650,6 @@ mod tests {
                         (y - r).abs()
                     );
 
-                    // Property 5: No poison values
                     prop_assert!(
                         y_bits != 0x11111111_11111111
                             && y_bits != 0x22222222_22222222
@@ -1731,20 +1661,15 @@ mod tests {
                         y_bits
                     );
 
-                    // Property 6: Basic k parameter validation
-                    // Since k multiplies the output, with k=0.01, values should generally be smaller
                     if k < 0.1 && i > first + hp_period * 2 && hp_period > 2 {
-                        // Very small k should produce smaller outputs on average
-                        // But allow for filter transients and edge effects
-                        // Calculate appropriate limit based on period
                         let k_limit = if hp_period >= 50 {
-                            10000.0 // 2x the normal limit for large periods
+                            10000.0
                         } else if hp_period >= 20 {
-                            40000.0 // 2x the normal limit for medium periods
+                            40000.0
                         } else if hp_period >= 10 {
-                            200000.0 // 2x the normal limit for small-medium periods
+                            200000.0
                         } else {
-                            2000000.0 // 2x the normal limit for very small periods (3-9)
+                            2000000.0
                         };
 
                         prop_assert!(
@@ -1758,7 +1683,6 @@ mod tests {
                     }
                 }
 
-                // Property 6: Warmup period should have NaN values
                 for i in 0..warmup_end.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1776,11 +1700,9 @@ mod tests {
         Ok(())
     }
 
-    // Parity test: native no-alloc API matches Vec-returning API
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_dec_osc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input: linear drift + sinusoid
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
@@ -1791,16 +1713,13 @@ mod tests {
 
         let input = DecOscInput::from_slice(&data, DecOscParams::default());
 
-        // Baseline via existing API
         let baseline = dec_osc(&input)?.values;
 
-        // Preallocate output and call the new into API
         let mut out = vec![0.0; n];
         super::dec_osc_into(&mut out, &input)?;
 
         assert_eq!(baseline.len(), out.len());
 
-        // Helper: NaN equals NaN, otherwise exact equality preferred
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1941,13 +1860,12 @@ pub fn dec_osc_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------- CUDA Python bindings ----------
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaDecOsc;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaDecOsc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1982,7 +1900,11 @@ pub fn dec_osc_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((inner, ctx, dev_id))
     })?;
-    Ok(DecOscDeviceArrayF32Py { inner: Some(inner), _ctx_guard: ctx, _device_id: dev_id })
+    Ok(DecOscDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx_guard: ctx,
+        _device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2022,10 +1944,13 @@ pub fn dec_osc_cuda_many_series_one_param_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((inner, ctx, dev_id))
     })?;
-    Ok(DecOscDeviceArrayF32Py { inner: Some(inner), _ctx_guard: ctx, _device_id: dev_id })
+    Ok(DecOscDeviceArrayF32Py {
+        inner: Some(inner),
+        _ctx_guard: ctx,
+        _device_id: dev_id,
+    })
 }
 
-// A dec_osc-specific Python VRAM handle that keeps the CUDA context alive.
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DecOscDeviceArrayF32")]
 pub struct DecOscDeviceArrayF32Py {
@@ -2055,12 +1980,14 @@ impl DecOscDeviceArrayF32Py {
             inner.device_ptr() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
@@ -2072,8 +1999,7 @@ impl DecOscDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2086,16 +2012,13 @@ impl DecOscDeviceArrayF32Py {
                             "device copy not implemented for __dlpack__",
                         ));
                     } else {
-                        return Err(PyValueError::new_err(
-                            "dl_device mismatch for __dlpack__",
-                        ));
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                     }
                 }
             }
         }
         let _ = stream;
 
-        
         let inner = self
             .inner
             .take()
@@ -2111,7 +2034,7 @@ impl DecOscDeviceArrayF32Py {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dec_osc_js(data: &[f64], hp_period: usize, k: f64) -> Result<Vec<f64>, JsValue> {
     let params = DecOscParams {
@@ -2133,7 +2056,7 @@ pub fn dec_osc_js(data: &[f64], hp_period: usize, k: f64) -> Result<Vec<f64>, Js
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dec_osc_into(
     in_ptr: *const f64,
@@ -2160,7 +2083,6 @@ pub fn dec_osc_into(
         let kernel = Kernel::Auto;
 
         if in_ptr == out_ptr as *const f64 {
-            
             let mut temp = vec![0.0; len];
             dec_osc_into_slice(&mut temp, &input, kernel)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2175,7 +2097,7 @@ pub fn dec_osc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dec_osc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2184,7 +2106,7 @@ pub fn dec_osc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dec_osc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2194,14 +2116,14 @@ pub fn dec_osc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DecOscBatchConfig {
     pub hp_period_range: (usize, usize, usize),
     pub k_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DecOscBatchJsOutput {
     pub values: Vec<f64>,
@@ -2210,7 +2132,7 @@ pub struct DecOscBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = dec_osc_batch)]
 pub fn dec_osc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: DecOscBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2240,7 +2162,7 @@ pub fn dec_osc_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dec_osc_batch_into(
     in_ptr: *const f64,
@@ -2264,8 +2186,7 @@ pub fn dec_osc_batch_into(
             k: (k_start, k_end, k_step),
         };
 
-        let combos = expand_grid_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows

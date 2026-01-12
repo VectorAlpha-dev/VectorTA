@@ -1,49 +1,19 @@
-//! # Choppiness Index (CHOP)
-//!
-//! A volatility indicator that measures whether a market is trending or consolidating (choppy).
-//! The index ranges from 0 to 100, where higher values indicate more choppiness (sideways movement)
-//! and lower values indicate stronger trending behavior. CHOP uses the ratio of the sum of true ranges
-//! to the price range over a period, then applies a logarithmic transformation to normalize the output.
-//!
-//! ## Parameters
-//! - **period**: Rolling window length for calculations (default: 14)
-//! - **scalar**: Multiplicative scaling factor for output normalization (default: 100.0)
-//! - **drift**: ATR period for true range calculation (default: 1)
-//!
-//! ## Inputs
-//! - Requires high, low, and close price arrays
-//! - Supports both raw slices and Candles data structure
-//!
-//! ## Returns
-//! - **`Ok(ChopOutput)`** containing a `Vec<f64>` matching input length
-//! - Values range from 0-100, with NaN during warmup period
-//! - High values (>61.8): Choppy/ranging market
-//! - Low values (<38.2): Trending market
-//!
-//! ## Developer Notes (Implementation Status)
-//! - Decision log: SIMD present but delegates to the scalar kernel; CUDA wrapper present. SIMD disabled by
-//!   default because CHOP’s deques/TR recurrence are data-dependent with marginal wide-lane benefit; outputs
-//!   preserved. Python interop provides CAI v3 + DLPack when CUDA is enabled.
-//! - Scalar path: Optimized single-pass implementation using rolling ATR sum and monotonic deques; O(1)
-//!   per-bar update after warmup. Warmup handling and allocation follow alma.rs patterns.
-//! - Batch: Supported via parallel per-row evaluation.
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
-use pyo3::exceptions::PyValueError;
-#[cfg(feature = "python")]
 use pyo3::exceptions::PyBufferError;
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
@@ -65,9 +35,9 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::oscillators::CudaChop;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::chop_wrapper::DeviceArrayF32 as DeviceArrayF32Chop;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::oscillators::CudaChop;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
@@ -87,7 +57,10 @@ pub struct ChopOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ChopParams {
     pub period: Option<usize>,
     pub scalar: Option<f64>,
@@ -253,7 +226,11 @@ pub enum ChopError {
     #[error("chop: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("chop: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("chop: invalid input: {0}")]
     InvalidInput(String),
     #[error("chop: underlying function failed: {0}")]
@@ -275,7 +252,6 @@ pub fn chop_with_kernel(input: &ChopInput, kernel: Kernel) -> Result<ChopOutput,
         ChopData::Slice { high, low, close } => (*high, *low, *close),
     };
 
-    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -375,7 +351,6 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
         ChopData::Slice { high, low, close } => (*high, *low, *close),
     };
 
-    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -388,7 +363,10 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
     }
 
     if dst.len() != len {
-        return Err(ChopError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(ChopError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let period = input.get_period();
@@ -463,7 +441,6 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
         }
     }
 
-    
     let warmup_end = first_valid_idx + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -472,21 +449,18 @@ pub fn chop_into_slice(dst: &mut [f64], input: &ChopInput, kern: Kernel) -> Resu
     Ok(())
 }
 
-/// Writes CHOP values into a caller-provided output slice without allocating.
-///
-/// - Preserves this module's NaN warmup semantics (prefix up to `first + period - 1`).
-/// - `out.len()` must equal the input length; returns the module's length error on mismatch.
-/// - Uses kernel auto-detection (same path as `chop()`), delegating to the existing compute kernels.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn chop_into(input: &ChopInput, out: &mut [f64]) -> Result<(), ChopError> {
-    
     let len = match &input.data {
         ChopData::Candles(c) => c.close.len(),
         ChopData::Slice { close, .. } => close.len(),
     };
     if out.len() != len {
-        return Err(ChopError::OutputLengthMismatch { expected: len, got: out.len() });
+        return Err(ChopError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
     }
     chop_into_slice(out, input, Kernel::Auto)
 }
@@ -508,20 +482,16 @@ pub unsafe fn chop_scalar(
         return;
     }
 
-    
     let alpha = 1.0 / (drift as f64);
     let logp = (period as f64).log10();
 
-    
     let mut atr_ring = vec![0.0_f64; period];
     let mut atr_ring_idx: usize = 0;
     let mut rolling_sum_atr: f64 = 0.0;
 
-    
     let mut rma_atr = f64::NAN;
     let mut sum_tr: f64 = 0.0;
 
-    
     let mut dq_high: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_low: VecDeque<usize> = VecDeque::with_capacity(period);
 
@@ -553,7 +523,6 @@ pub unsafe fn chop_scalar(
         }
         prev_close = close[i];
 
-        
         let current_atr = if rel < drift {
             if rel == drift - 1 {
                 rma_atr
@@ -564,7 +533,6 @@ pub unsafe fn chop_scalar(
             rma_atr
         };
 
-        
         let oldest = atr_ring[atr_ring_idx];
         rolling_sum_atr -= oldest;
         let new_val = if current_atr.is_nan() {
@@ -579,7 +547,6 @@ pub unsafe fn chop_scalar(
             atr_ring_idx = 0;
         }
 
-        
         let win_start = i.saturating_sub(period - 1);
         while let Some(&front_idx) = dq_high.front() {
             if front_idx < win_start {
@@ -846,7 +813,12 @@ fn expand_grid(r: &ChopBatchRange) -> Result<Vec<ChopParams>, ChopError> {
             while v <= end {
                 out.push(v);
                 match v.checked_add(step) {
-                    Some(next) => { if next == v { break; } v = next; }
+                    Some(next) => {
+                        if next == v {
+                            break;
+                        }
+                        v = next;
+                    }
                     None => break,
                 }
             }
@@ -854,9 +826,13 @@ fn expand_grid(r: &ChopBatchRange) -> Result<Vec<ChopParams>, ChopError> {
             let mut v = start;
             while v >= end {
                 out.push(v);
-                if v < end + step { break; }
+                if v < end + step {
+                    break;
+                }
                 v -= step;
-                if v == 0 { break; }
+                if v == 0 {
+                    break;
+                }
             }
         }
         if out.is_empty() {
@@ -879,13 +855,19 @@ fn expand_grid(r: &ChopBatchRange) -> Result<Vec<ChopParams>, ChopError> {
             let mut x = start;
             while x >= end - 1e-12 {
                 v.push(x);
-                x += step; 
+                x += step;
             }
         } else {
-            return Err(ChopError::InvalidInput("axis_f64 step direction invalid".into()));
+            return Err(ChopError::InvalidInput(
+                "axis_f64 step direction invalid".into(),
+            ));
         }
         if v.is_empty() {
-            return Err(ChopError::InvalidRange { start: start as usize, end: end as usize, step: step.abs() as usize });
+            return Err(ChopError::InvalidRange {
+                start: start as usize,
+                end: end as usize,
+                step: step.abs() as usize,
+            });
         }
         Ok(v)
     }
@@ -901,7 +883,11 @@ fn expand_grid(r: &ChopBatchRange) -> Result<Vec<ChopParams>, ChopError> {
     for &p in &periods {
         for &s in &scalars {
             for &d in &drifts {
-                out.push(ChopParams { period: Some(p), scalar: Some(s), drift: Some(d) });
+                out.push(ChopParams {
+                    period: Some(p),
+                    scalar: Some(s),
+                    drift: Some(d),
+                });
             }
         }
     }
@@ -938,7 +924,7 @@ fn chop_batch_inner(
     parallel: bool,
 ) -> Result<ChopBatchOutput, ChopError> {
     let combos = expand_grid(sweep)?;
-    
+
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -959,8 +945,7 @@ fn chop_batch_inner(
 
     let rows = combos.len();
     let cols = len;
-    rows
-        .checked_mul(cols)
+    rows.checked_mul(cols)
         .ok_or_else(|| ChopError::InvalidInput("rows*cols overflow".into()))?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -1104,9 +1089,6 @@ pub unsafe fn chop_row_avx512_long(
     chop_avx512(high, low, close, period, drift, scalar, first, out)
 }
 
-
-
-
 #[derive(Copy, Clone, Debug)]
 struct Node {
     idx: u64,
@@ -1119,20 +1101,16 @@ pub struct ChopStream {
     drift: usize,
     scalar: f64,
 
-    
-    inv_drift: f64, 
-    scale_ln: f64,  
+    inv_drift: f64,
+    scale_ln: f64,
 
-    
     atr_ring: Vec<f64>,
     ring_idx: usize,
     rolling_sum_atr: f64,
 
-    
     dq_high: VecDeque<Node>,
     dq_low: VecDeque<Node>,
 
-    
     rma_atr: f64,
     sum_tr: f64,
     count: u64,
@@ -1180,7 +1158,6 @@ impl ChopStream {
         })
     }
 
-    /// O(1) amortized per bar
     #[inline]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         let idx_ring = self.ring_idx;
@@ -1188,7 +1165,6 @@ impl ChopStream {
         self.count = self.count.saturating_add(1);
         let this_idx = self.count - 1;
 
-        
         let tr = if self.count == 1 {
             self.prev_close = close;
             self.sum_tr = high - low;
@@ -1201,7 +1177,6 @@ impl ChopStream {
             hl.max(hc).max(lc)
         };
 
-        
         if (self.count as usize) <= self.drift {
             if self.count != 1 {
                 self.sum_tr += tr;
@@ -1219,7 +1194,6 @@ impl ChopStream {
             self.rma_atr
         };
 
-        
         let newest = if current_atr.is_nan() {
             0.0
         } else {
@@ -1229,7 +1203,6 @@ impl ChopStream {
         self.atr_ring[idx_ring] = newest;
         self.rolling_sum_atr += newest - oldest;
 
-        
         let win_start = self.count.saturating_sub(self.period as u64);
 
         while let Some(&front) = self.dq_high.front() {
@@ -1274,7 +1247,6 @@ impl ChopStream {
         if self.count >= self.period as u64 {
             let range = self.dq_high.front().unwrap().val - self.dq_low.front().unwrap().val;
             if range > 0.0 && self.rolling_sum_atr > 0.0 {
-                
                 let ratio = self.rolling_sum_atr / range;
                 let y = if (ratio - 1.0).abs() < 1e-8 {
                     self.scale_ln * (ratio - 1.0).ln_1p()
@@ -1300,7 +1272,6 @@ mod tests {
 
     #[test]
     fn test_chop_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
@@ -1312,8 +1283,12 @@ mod tests {
             let l0 = base - 1.0 - 0.12 * (t * 0.23).cos();
             let (lo, hi) = if l0 <= h0 { (l0, h0) } else { (h0, l0) };
             let mut c0 = 0.5 * (lo + hi) + 0.2 * (t * 0.17).sin();
-            if c0 < lo { c0 = lo; }
-            if c0 > hi { c0 = hi; }
+            if c0 < lo {
+                c0 = lo;
+            }
+            if c0 > hi {
+                c0 = hi;
+            }
             high.push(hi);
             low.push(lo);
             close.push(c0);
@@ -1321,18 +1296,15 @@ mod tests {
 
         let input = ChopInput::from_slices(&high, &low, &close, ChopParams::default());
 
-        
         let baseline = chop(&input)?.values;
 
-        
         let mut out = vec![0.0; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             chop_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             chop_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1341,7 +1313,13 @@ mod tests {
             if a.is_nan() || b.is_nan() {
                 assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}", i);
             } else {
-                assert!((a - b).abs() <= 1e-12, "Value mismatch at index {}: {} vs {}", i, a, b);
+                assert!(
+                    (a - b).abs() <= 1e-12,
+                    "Value mismatch at index {}: {} vs {}",
+                    i,
+                    a,
+                    b
+                );
             }
         }
         Ok(())
@@ -1503,7 +1481,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_chop_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1511,20 +1488,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = ChopInput::with_default_candles(&candles);
         let output = chop_with_kernel(&input, kernel)?;
 
-        
         for (i, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1532,7 +1505,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1540,7 +1512,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1549,7 +1520,6 @@ mod tests {
             }
         }
 
-        
         let param_combinations = vec![
             ChopParams {
                 period: Some(10),
@@ -1605,7 +1575,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_chop_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1667,24 +1636,23 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (50usize..400).prop_flat_map(|size| {
             (
-                10.0f64..1000.0f64, 
-                0.0f64..0.1f64,     
-                -0.02f64..0.02f64,  
+                10.0f64..1000.0f64,
+                0.0f64..0.1f64,
+                -0.02f64..0.02f64,
                 prop::collection::vec((0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0), size),
-                0u8..5, 
+                0u8..5,
                 Just(size),
-                5usize..50,        
-                50.0f64..200.0f64, 
-                1usize..5,         
+                5usize..50,
+                50.0f64..200.0f64,
+                1usize..5,
             )
         });
 
         proptest::test_runner::TestRunner::default()
 			.run(&strat, |(base_price, volatility, trend, random_factors, market_type, size, period, scalar, drift)| {
-				
+
 				let mut high_data = Vec::with_capacity(size);
 				let mut low_data = Vec::with_capacity(size);
 				let mut close_data = Vec::with_capacity(size);
@@ -1696,64 +1664,64 @@ mod tests {
 					let (r1, r2, r3, r4) = random_factors[i];
 					let range = current_price * volatility;
 
-					
+
 					let (open, high, low, close) = match market_type {
 						0 => {
-							
+
 							let open = current_price;
 							let close = current_price + range * (0.5 + r1 * 0.5) + (trend * current_price);
 							let high = close.max(open) + range * r2 * 0.3;
 							let low = close.min(open) - range * r3 * 0.2;
-							
+
 							let high_adjusted = high + range * r4 * 0.1;
 							current_price = close;
 							(open, high_adjusted, low, close)
 						}
 						1 => {
-							
+
 							let open = current_price;
 							let close = current_price - range * (0.5 + r1 * 0.5) - (trend.abs() * current_price);
 							let high = close.max(open) + range * r2 * 0.2;
 							let low = close.min(open) - range * r3 * 0.3;
-							
+
 							let low_adjusted = low - range * r4 * 0.1;
 							current_price = close;
 							(open, high, low_adjusted, close)
 						}
 						2 => {
-							
+
 							let open = current_price;
 							let direction = if r1 > 0.5 { 1.0 } else { -1.0 };
 							let close = current_price + direction * range * r2 * 0.5;
 							let high = open.max(close) + range * r3 * 0.4;
 							let low = open.min(close) - range * r4 * 0.4;
-							
+
 							current_price = base_price * 0.15 + current_price * 0.85;
 							(open, high, low, close)
 						}
 						3 => {
-							
+
 							let open = current_price;
 							let close = current_price + range * (r1 - 0.5) * 2.0;
 							let high = open.max(close) + range * r2 * 1.2;
 							let low = open.min(close) - range * r3 * 1.2;
-							
+
 							let high_wick = high + range * r4 * 0.3;
 							current_price = close;
 							(open, high_wick, low, close)
 						}
 						4 | _ => {
-							
+
 							let tiny_move = range * 0.01 * (r1 - 0.5);
 							let open = current_price;
 							let close = current_price + tiny_move;
-							
+
 							if r2 < 0.1 {
-								
+
 								let price = current_price;
 								(price, price, price, price)
 							} else {
-								
+
 								let high = open.max(close) + range * 0.001 * r3;
 								let low = open.min(close) - range * 0.001 * r4;
 								current_price = close;
@@ -1762,11 +1730,11 @@ mod tests {
 						}
 					};
 
-					
+
 					let high_final = high.max(open).max(close);
 					let low_final = low.min(open).min(close);
 
-					
+
 					debug_assert!(high_final >= low_final, "High must be >= Low");
 					debug_assert!(high_final >= open && high_final >= close, "High must be >= Open and Close");
 					debug_assert!(low_final <= open && low_final <= close, "Low must be <= Open and Close");
@@ -1777,7 +1745,7 @@ mod tests {
 					close_data.push(close);
 				}
 
-				
+
 				let params = ChopParams {
 					period: Some(period),
 					scalar: Some(scalar),
@@ -1785,32 +1753,32 @@ mod tests {
 				};
 				let input = ChopInput::from_slices(&high_data, &low_data, &close_data, params.clone());
 
-				
+
 				let result = chop_with_kernel(&input, kernel)?;
 				let reference = chop_with_kernel(&input, Kernel::Scalar)?;
 
-				
+
 				let first_valid_idx = (0..size).find(|&i| {
 					!(high_data[i].is_nan() || low_data[i].is_nan() || close_data[i].is_nan())
 				}).unwrap_or(0);
 				let warmup_period = first_valid_idx + period - 1;
 
-				
+
 				let mut valid_chop_values = Vec::new();
 
-				
+
 				for i in 0..size {
 					let y = result.values[i];
 					let r = reference.values[i];
 
-					
+
 					prop_assert!(
 						y.is_nan() || y.is_finite(),
 						"[{}] CHOP at index {} is not finite or NaN: {}",
 						test_name, i, y
 					);
 
-					
+
 					if i < warmup_period {
 						prop_assert!(
 							y.is_nan(),
@@ -1819,46 +1787,46 @@ mod tests {
 						);
 					}
 
-					
+
 					if i >= warmup_period && !high_data[i].is_nan() && !low_data[i].is_nan() && !close_data[i].is_nan() {
-						
+
 						let window_start = i.saturating_sub(period - 1);
 						let window_valid = (window_start..=i).all(|j| {
 							!high_data[j].is_nan() && !low_data[j].is_nan() && !close_data[j].is_nan()
 						});
 
 						if window_valid {
-							
+
 							let window_high_max = (window_start..=i).map(|j| high_data[j]).fold(f64::NEG_INFINITY, f64::max);
 							let window_low_min = (window_start..=i).map(|j| low_data[j]).fold(f64::INFINITY, f64::min);
 							let range = window_high_max - window_low_min;
 
 							if range > 1e-10 {
-								
+
 								if !y.is_nan() {
-									
-									
-									
-									let normalized_bound = scalar * 1.5; 
+
+
+
+									let normalized_bound = scalar * 1.5;
 									prop_assert!(
 										y >= -normalized_bound && y <= normalized_bound,
 										"[{}] CHOP at index {} out of reasonable bounds: {} (scalar={}, bounds=±{})",
 										test_name, i, y, scalar, normalized_bound
 									);
 
-									
+
 									valid_chop_values.push(y);
 								}
 							} else if range == 0.0 {
-								
+
 								prop_assert!(
 									y.is_nan(),
 									"[{}] CHOP at index {} should be NaN when range=0 but got: {}",
 									test_name, i, y
 								);
 							} else {
-								
-								
+
+
 								prop_assert!(
 									y.is_nan() || y.is_finite(),
 									"[{}] CHOP at index {} should be finite or NaN with tiny range: {}",
@@ -1868,7 +1836,7 @@ mod tests {
 						}
 					}
 
-					
+
 					if y.is_finite() && r.is_finite() {
 						let ulp_diff = y.to_bits().abs_diff(r.to_bits());
 						prop_assert!(
@@ -1884,10 +1852,10 @@ mod tests {
 						);
 					}
 
-					
+
 					if (high_data[i] - low_data[i]).abs() < 1e-10 && i >= warmup_period {
-						
-						
+
+
 						prop_assert!(
 							y.is_nan() || y.is_finite(),
 							"[{}] CHOP at flat candle index {} is invalid: {}",
@@ -1897,7 +1865,7 @@ mod tests {
 
 				}
 
-				
+
 				if valid_chop_values.len() > 20 {
 					let avg_chop = valid_chop_values.iter().sum::<f64>() / valid_chop_values.len() as f64;
 					let median_idx = valid_chop_values.len() / 2;
@@ -1905,42 +1873,42 @@ mod tests {
 					sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 					let median_chop = sorted_values[median_idx];
 
-					
+
 					match market_type {
 						0 | 1 => {
-							
-							
+
+
 							prop_assert!(
 								avg_chop.is_finite() && median_chop.is_finite(),
 								"[{}] Trending market (type {}) has non-finite CHOP: avg={}, median={}",
 								test_name, market_type, avg_chop, median_chop
 							);
-							
+
 							let threshold = scalar * 0.6;
 							if avg_chop > threshold && median_chop > threshold {
-								
-								
+
+
 								prop_assert!(true);
 							}
 						}
 						2 => {
-							
-							
+
+
 							prop_assert!(
 								avg_chop.is_finite() && median_chop.is_finite(),
 								"[{}] Choppy market has non-finite CHOP: avg={}, median={}",
 								test_name, avg_chop, median_chop
 							);
-							
+
 							let threshold = scalar * 0.3;
 							if avg_chop < threshold && median_chop < threshold {
-								
+
 								prop_assert!(true);
 							}
 						}
 						3 => {
-							
-							
+
+
 							prop_assert!(
 								avg_chop.is_finite(),
 								"[{}] Volatile market has non-finite average CHOP: {}",
@@ -1948,8 +1916,8 @@ mod tests {
 							);
 						}
 						4 => {
-							
-							
+
+
 							if avg_chop.is_finite() {
 								prop_assert!(
 									avg_chop >= -scalar && avg_chop <= scalar,
@@ -1962,9 +1930,9 @@ mod tests {
 					}
 				}
 
-				
+
 				if size >= period * 3 {
-					
+
 					let seg1_end = period * 2;
 					let seg2_start = period;
 					let seg2_end = period * 3;
@@ -1985,12 +1953,12 @@ mod tests {
 							let seg1_avg = seg1_values.iter().sum::<f64>() / seg1_values.len() as f64;
 							let seg2_avg = seg2_values.iter().sum::<f64>() / seg2_values.len() as f64;
 
-							
-							
+
+
 							if market_type == 4 && seg1_avg.abs() > 1e-6 && seg2_avg.abs() > 1e-6 {
 								let diff_ratio = (seg1_avg - seg2_avg).abs() / seg1_avg.abs().max(seg2_avg.abs());
 								prop_assert!(
-									diff_ratio < 0.8,  
+									diff_ratio < 0.8,
 									"[{}] Flat market segments have inconsistent CHOP: seg1_avg={}, seg2_avg={}, diff_ratio={}",
 									test_name, seg1_avg, seg2_avg, diff_ratio
 								);
@@ -2059,7 +2027,6 @@ mod tests {
 
         let out = builder.apply_slices(high, low, close)?;
 
-        
         for p in 14..=16 {
             for s in [100.0, 101.0, 102.0] {
                 for d in 1..=2 {
@@ -2095,7 +2062,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2107,7 +2073,6 @@ mod tests {
         let low = c.low.as_slice();
         let close = c.close.as_slice();
 
-        
         let output = ChopBatchBuilder::new()
             .kernel(kernel)
             .period_range(10, 30, 10)
@@ -2115,9 +2080,7 @@ mod tests {
             .drift_range(1, 3, 1)
             .apply_slices(high, low, close)?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -2126,7 +2089,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2134,7 +2096,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2142,7 +2103,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2154,7 +2114,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2186,7 +2145,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
 #[inline(always)]
 fn chop_batch_inner_into(
     high: &[f64],
@@ -2199,7 +2157,6 @@ fn chop_batch_inner_into(
 ) -> Result<Vec<ChopParams>, ChopError> {
     let combos = expand_grid(sweep)?;
 
-    
     if !(high.len() == low.len() && low.len() == close.len()) {
         return Err(ChopError::UnderlyingFunctionFailed(
             "mismatched input lengths".to_string(),
@@ -2211,7 +2168,6 @@ fn chop_batch_inner_into(
         return Err(ChopError::EmptyData);
     }
 
-    
     let first = (0..len)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
         .ok_or(ChopError::AllValuesNaN)?;
@@ -2235,7 +2191,6 @@ fn chop_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -2249,7 +2204,6 @@ fn chop_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let actual = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2258,7 +2212,7 @@ fn chop_batch_inner_into(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => actual, 
+        _ => actual,
     };
 
     let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
@@ -2395,7 +2349,6 @@ pub fn chop_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    
     let arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let out_slice = unsafe { arr.as_slice_mut()? };
 
@@ -2444,7 +2397,6 @@ pub fn chop_batch_py<'py>(
     )?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "chop_cuda_batch_dev")]
@@ -2514,7 +2466,6 @@ pub fn chop_cuda_many_series_one_param_dev_py(
     Ok(ChopDeviceArrayF32Py { inner: Some(inner) })
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct ChopDeviceArrayF32Py {
@@ -2540,7 +2491,7 @@ impl ChopDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (row_stride, itemsize))?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Stream omitted: kernels synchronize before returning
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2562,7 +2513,6 @@ impl ChopDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2585,7 +2535,6 @@ impl ChopDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // copy=True is not yet supported (no cross-device copy path here).
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py).unwrap_or(false);
             if do_copy {
@@ -2609,7 +2558,7 @@ impl ChopDeviceArrayF32Py {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chop_js(
     high: &[f64],
@@ -2635,7 +2584,7 @@ pub fn chop_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chop_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2643,7 +2592,7 @@ pub fn chop_alloc(len: usize) -> *mut f64 {
     std::mem::forget(v);
     ptr
 }
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chop_free(ptr: *mut f64, len: usize) {
     if ptr.is_null() || len == 0 {
@@ -2654,7 +2603,7 @@ pub fn chop_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chop_into(
     high_ptr: *const f64,
@@ -2689,7 +2638,7 @@ pub fn chop_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ChopBatchConfig {
     pub period_range: (usize, usize, usize),
@@ -2697,7 +2646,7 @@ pub struct ChopBatchConfig {
     pub drift_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ChopBatchJsOutput {
     pub values: Vec<f64>,
@@ -2706,7 +2655,7 @@ pub struct ChopBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = chop_batch)]
 pub fn chop_batch_unified_js(
     high: &[f64],
@@ -2751,7 +2700,7 @@ pub fn chop_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chop_batch_into(
     high_ptr: *const f64,

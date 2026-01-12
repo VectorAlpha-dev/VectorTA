@@ -2,13 +2,13 @@ use std::os::raw::{c_double, c_int};
 use std::time::{Duration, Instant};
 use std::slice;
 
-/// Minimal FFI function for measuring pure overhead
+
 #[no_mangle]
 pub unsafe extern "C" fn noop() -> c_int {
     0
 }
 
-/// FFI function that just copies data (memory bandwidth test)
+
 #[no_mangle]
 pub unsafe extern "C" fn copy_array(
     size: c_int,
@@ -25,7 +25,7 @@ pub unsafe extern "C" fn copy_array(
     0
 }
 
-/// FFI function with typical validation overhead
+
 #[no_mangle]
 pub unsafe extern "C" fn validated_sum(
     size: c_int,
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn validated_sum(
     0
 }
 
-/// Measure pure FFI call overhead
+
 pub fn measure_ffi_overhead(iterations: usize) -> Duration {
     let start = Instant::now();
     for _ in 0..iterations {
@@ -53,7 +53,7 @@ pub fn measure_ffi_overhead(iterations: usize) -> Duration {
     start.elapsed()
 }
 
-/// Measure FFI memory marshalling overhead
+
 pub fn measure_marshalling_overhead(data: &[f64], iterations: usize) -> Duration {
     let mut output = vec![0.0; data.len()];
     let start = Instant::now();
@@ -71,7 +71,7 @@ pub fn measure_marshalling_overhead(data: &[f64], iterations: usize) -> Duration
     start.elapsed()
 }
 
-/// Measure validation and conversion overhead
+
 pub fn measure_validation_overhead(data: &[f64], iterations: usize) -> Duration {
     let mut result = 0.0;
     let start = Instant::now();
@@ -89,7 +89,7 @@ pub fn measure_validation_overhead(data: &[f64], iterations: usize) -> Duration 
     start.elapsed()
 }
 
-/// Represents different FFI overhead components
+
 #[derive(Debug, Clone)]
 pub struct FfiOverheadProfile {
     pub call_overhead_ns: f64,
@@ -98,21 +98,21 @@ pub struct FfiOverheadProfile {
 }
 
 impl FfiOverheadProfile {
-    /// Profile FFI overhead for a given data size
+
     pub fn profile(data_size: usize, iterations: usize) -> Self {
-        
+
         let data: Vec<f64> = (0..data_size).map(|i| i as f64).collect();
 
-        
+
         let call_duration = measure_ffi_overhead(iterations);
         let call_overhead_ns = call_duration.as_nanos() as f64 / iterations as f64;
 
-        
+
         let marshalling_duration = measure_marshalling_overhead(&data, iterations);
         let marshalling_overhead_ns = marshalling_duration.as_nanos() as f64 / iterations as f64;
         let marshalling_overhead_ns_per_kb = marshalling_overhead_ns / (data_size as f64 * 8.0 / 1024.0);
 
-        
+
         let validation_duration = measure_validation_overhead(&data, iterations);
         let validation_total_ns = validation_duration.as_nanos() as f64 / iterations as f64;
         let validation_overhead_ns = (validation_total_ns - call_overhead_ns).max(0.0);
@@ -124,7 +124,7 @@ impl FfiOverheadProfile {
         }
     }
 
-    /// Estimate total FFI overhead for a given data size
+
     pub fn estimate_overhead(&self, data_size_bytes: usize) -> Duration {
         let data_size_kb = data_size_bytes as f64 / 1024.0;
         let total_ns = self.call_overhead_ns +
@@ -133,7 +133,7 @@ impl FfiOverheadProfile {
         Duration::from_nanos(total_ns as u64)
     }
 
-    /// Subtract estimated FFI overhead from a measured duration
+
     pub fn compensate(&self, measured: Duration, data_size_bytes: usize) -> Duration {
         let overhead = self.estimate_overhead(data_size_bytes);
         measured.saturating_sub(overhead)
@@ -148,13 +148,13 @@ mod tests {
     fn test_ffi_overhead_measurement() {
         let profile = FfiOverheadProfile::profile(1000, 10000);
 
-        
+
         assert!(profile.call_overhead_ns > 0.0);
         assert!(profile.marshalling_overhead_ns_per_kb > 0.0);
         assert!(profile.validation_overhead_ns >= 0.0);
 
-        
-        let overhead = profile.estimate_overhead(8000); 
+
+        let overhead = profile.estimate_overhead(8000);
         assert!(overhead.as_nanos() > 0);
     }
 
@@ -164,7 +164,7 @@ mod tests {
         let measured = Duration::from_micros(100);
         let compensated = profile.compensate(measured, 8000);
 
-        
+
         assert!(compensated <= measured);
     }
 }

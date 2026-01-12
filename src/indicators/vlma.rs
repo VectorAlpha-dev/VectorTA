@@ -1,25 +1,3 @@
-//! # Variable Length Moving Average (VLMA)
-//!
-//! VLMA is an adaptive moving average that adjusts its period dynamically based on price deviation
-//! from a reference moving average, becoming faster in trends and slower in consolidations.
-//!
-//! ## Parameters
-//! - **min_period**: Minimum adaptive period. Defaults to 5.
-//! - **max_period**: Maximum adaptive period. Defaults to 50.
-//! - **matype**: Moving average type for reference. Defaults to "sma".
-//! - **devtype**: Deviation type (0=std, 1=mad, 2=median). Defaults to 0.
-//!
-//! ## Returns
-//! - **`Ok(VlmaOutput)`** containing a `Vec<f64>` of adaptive moving average values matching input length.
-//! - **`Err(VlmaError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - SIMD: AVX2/AVX512 remain stubs (delegate to scalar). VLMA is sequential and branchy; runtime selection
-//!   short-circuits to the scalar path for portability and simplicity.
-//! - CUDA: wrapper provides one-series × many-params and many-series × one-param kernels, returning VRAM
-//!   handles compatible with Python CAI v3 and DLPack v1.x. Numerical outputs match the scalar path.
-//! - Scalar/Batch: hot loops reuse ALMA-style helpers (warmup handling, uninitialized matrices, prefix sums)
-//!   and keep all error/parameter validation on the CPU side; reference outputs and tests remain unchanged.
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -31,18 +9,18 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaVlma};
 use crate::indicators::deviation::{deviation, DevInput, DevParams};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 use crate::indicators::moving_averages::ma::{ma, MaData};
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -69,11 +47,8 @@ impl<'a> AsRef<[f64]> for VlmaInput<'a> {
     }
 }
 
-
-
 #[inline(always)]
 fn fast_ema_update(last: f64, x: f64, sc: f64) -> f64 {
-    
     (x - last).mul_add(sc, last)
 }
 
@@ -93,7 +68,7 @@ fn fast_clamp_period(p: isize, min_p: usize, max_p: usize) -> usize {
 #[inline(always)]
 fn fast_std_from_sums(sum: f64, sumsq: f64, inv_n: f64) -> (f64, f64) {
     let m = sum * inv_n;
-    
+
     let var = (-m).mul_add(m, sumsq * inv_n);
     let dv = if var <= 0.0 { 0.0 } else { var.sqrt() };
     (m, dv)
@@ -114,7 +89,10 @@ pub struct VlmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VlmaParams {
     pub min_period: Option<usize>,
     pub max_period: Option<usize>,
@@ -285,7 +263,11 @@ pub enum VlmaError {
     #[error("vlma: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vlma: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("vlma: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("vlma: Error in MA calculation: {0}")]
@@ -308,12 +290,7 @@ pub fn vlma_with_kernel(input: &VlmaInput, kernel: Kernel) -> Result<VlmaOutput,
     Ok(VlmaOutput { values: out })
 }
 
-/// Writes VLMA results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API: the value at
-///   `first_valid` is kept, all other warmup positions are set to NaN.
-/// - The length of `out` must equal the input length, otherwise an error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn vlma_into(input: &VlmaInput, out: &mut [f64]) -> Result<(), VlmaError> {
     vlma_into_slice(out, input, Kernel::Auto)
 }
@@ -328,11 +305,10 @@ pub fn vlma_into_slice(dst: &mut [f64], input: &VlmaInput, kern: Kernel) -> Resu
         });
     }
     vlma_compute_into(data, min_p, max_p, &matype, devtype, first, chosen, dst)?;
-    
+
     let warm_end = first + max_p - 1;
     for i in 0..warm_end {
         if i != first {
-            
             dst[i] = f64::NAN;
         }
     }
@@ -403,7 +379,6 @@ fn vlma_compute_into(
     unsafe {
         match kernel {
             Kernel::Scalar | Kernel::ScalarBatch => {
-                // Fast path: inline SMA + stddev when requested (matches reference semantics)
                 if matype == "sma" && devtype == 0 {
                     vlma_scalar_sma_stddev_into(data, min_period, max_period, first, out)?;
                 } else {
@@ -424,9 +399,6 @@ fn vlma_compute_into(
     Ok(())
 }
 
-/// Classic kernel optimization for VLMA with inline SMA calculation
-/// This eliminates the function call overhead for the reference MA calculation
-/// Optimized for the default MA type: SMA
 pub unsafe fn vlma_scalar_classic(
     data: &[f64],
     min_period: usize,
@@ -436,7 +408,6 @@ pub unsafe fn vlma_scalar_classic(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
-    // Delegate to fast SMA+StdDev path if applicable; else fallback to generic scalar
     if matype == "sma" && devtype == 0 {
         return vlma_scalar_sma_stddev_into(data, min_period, max_period, first_valid, out);
     }
@@ -451,9 +422,6 @@ pub unsafe fn vlma_scalar_classic(
     )
 }
 
-/// Optimized VLMA path for matype="sma" and devtype=0 (standard deviation)
-/// Computes rolling SMA and stddev in a single O(n) pass with NaN tracking,
-/// and applies the same band logic and warmup semantics as the reference path.
 #[inline(always)]
 pub unsafe fn vlma_scalar_sma_stddev_into(
     data: &[f64],
@@ -468,12 +436,10 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
         return Ok(());
     }
 
-    // Warmup and initial seed
     let warm_end = first_valid + max_period - 1;
     let x0 = *data.get_unchecked(first_valid);
     *out.get_unchecked_mut(first_valid) = x0;
 
-    // Period LUT and state
     let min_pi = if min_period == 0 { 1 } else { min_period };
     let max_pi = core::cmp::max(max_period, min_pi);
     let mut last_p: usize = max_pi;
@@ -484,14 +450,11 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
     }
     let sc_ptr = sc_lut.as_ptr();
 
-    // Bands constants
     const D175: f64 = 1.75;
     const D025: f64 = 0.25;
 
-    // EMA-like state
     let mut last_val = x0;
 
-    // 1) Advance warmup without adaptation (match reference behavior)
     let mut i = first_valid + 1;
     while i < len && i < warm_end {
         let x = *data.get_unchecked(i);
@@ -506,7 +469,6 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
         return Ok(());
     }
 
-    // 2) Initialize rolling sums for the first full window ending at warm_end
     let mut sum = 0.0_f64;
     let mut sumsq = 0.0_f64;
     let mut nan_count: usize = 0;
@@ -521,16 +483,13 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
     }
     let inv_n = 1.0 / (max_period as f64);
 
-    // 3) Steady-state loop: compute mean/dev on the fly and adapt period
     i = warm_end;
     while i < len {
         let x = *data.get_unchecked(i);
 
         if x.is_nan() {
-            // passthrough NaN after warmup; keep last state
             *out.get_unchecked_mut(i) = f64::NAN;
         } else {
-            // Mean and stddev for current window (ending at i)
             let (m, dv) = if nan_count == 0 {
                 let m = sum * inv_n;
                 let var = (sumsq * inv_n) - m * m;
@@ -540,7 +499,6 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
                 (f64::NAN, f64::NAN)
             };
 
-            // Adapt period using same band rules
             let prev_p = if last_p == 0 { max_pi } else { last_p };
             let mut next_p = prev_p;
             if m.is_finite() && dv.is_finite() {
@@ -563,14 +521,12 @@ pub unsafe fn vlma_scalar_sma_stddev_into(
                 };
             }
 
-            // EMA-like update
             let sc = *sc_ptr.add(next_p);
             last_val = fast_ema_update(last_val, x, sc);
             last_p = next_p;
             *out.get_unchecked_mut(i) = last_val;
         }
 
-        // Prepare rolling window for next position (i+1)
         let next = i + 1;
         if next < len {
             let out_idx = next - max_period;
@@ -608,7 +564,6 @@ unsafe fn vlma_scalar_into(
 ) -> Result<(), VlmaError> {
     debug_assert_eq!(out.len(), data.len());
 
-    // Reference series via existing builders to preserve semantics/accuracy
     let mean = ma(matype, MaData::Slice(data), max_period)
         .map_err(|e| VlmaError::MaError(e.to_string()))?;
     let dev = deviation(&DevInput::from_slice(
@@ -625,35 +580,28 @@ unsafe fn vlma_scalar_into(
         return Ok(());
     }
 
-    // Warmup boundary; caller will set warmup NaNs afterwards
     let warm_end = first_valid + max_period - 1;
 
-    // Initial state and seed
     let x0 = *data.get_unchecked(first_valid);
     *out.get_unchecked_mut(first_valid) = x0;
 
-    // Keep periods as integer indices and precompute smoothing constants
     let min_pi = if min_period == 0 { 1 } else { min_period };
     let max_pi = core::cmp::max(max_period, min_pi);
     let mut last_p: usize = max_pi;
 
-    // sc_lut[p] = 2 / (p + 1)
     let mut sc_lut = Vec::with_capacity(max_pi + 1);
-    sc_lut.push(0.0); // unused index 0
+    sc_lut.push(0.0);
     for p in 1..=max_pi {
         sc_lut.push(2.0 / (p as f64 + 1.0));
     }
     debug_assert_eq!(sc_lut.len(), max_pi + 1);
     let sc_ptr = sc_lut.as_ptr();
 
-    // Band multipliers
     const D175: f64 = 1.75;
     const D025: f64 = 0.25;
 
-    // Current EMA-like value
     let mut last_val = x0;
 
-    // Phase 1: advance through warmup without writes (except first_valid already written)
     let mut i = first_valid + 1;
     while i < len && i < warm_end {
         let x = *data.get_unchecked(i);
@@ -665,7 +613,6 @@ unsafe fn vlma_scalar_into(
         let m = mean[i];
         let dv = dev[i];
 
-        // Previous period and next period selection
         let prev_p = if last_p == 0 { max_pi } else { last_p };
         let mut next_p = prev_p;
 
@@ -678,10 +625,9 @@ unsafe fn vlma_scalar_into(
             let c = m + d025;
             let d = m + d175;
 
-            // delta = +1 in [b, c], -1 if < a or > d, else 0
             let inc_fast = ((x < a) as i32) | ((x > d) as i32);
             let inc_slow = ((x >= b) as i32) & ((x <= c) as i32);
-            let delta = inc_slow - inc_fast; // -1, 0, or +1
+            let delta = inc_slow - inc_fast;
 
             let p_tmp = prev_p as isize + delta as isize;
             next_p = if p_tmp < min_pi as isize {
@@ -693,7 +639,6 @@ unsafe fn vlma_scalar_into(
             };
         }
 
-        // EMA-like update: y = last + sc * (x - last)
         let sc = *sc_ptr.add(next_p);
         last_val = (x - last_val).mul_add(sc, last_val);
         last_p = next_p;
@@ -701,12 +646,10 @@ unsafe fn vlma_scalar_into(
         i += 1;
     }
 
-    // Phase 2: steady-state with writes
     while i < len {
         let x = *data.get_unchecked(i);
 
         if x.is_nan() {
-            // Explicit NaN passthrough after warmup
             *out.get_unchecked_mut(i) = f64::NAN;
             i += 1;
             continue;
@@ -773,7 +716,6 @@ unsafe fn vlma_row_scalar(
     )
 }
 
-/// Row-optimized VLMA using shared prefix sums (SMA + stddev only)
 #[inline(always)]
 unsafe fn vlma_row_fast_sma_std_prefix(
     data: &[f64],
@@ -793,14 +735,13 @@ unsafe fn vlma_row_fast_sma_std_prefix(
 
     let warm_end = first_valid + max_period - 1;
     let x0 = *data.get_unchecked(first_valid);
-    // Initial value at first_valid is pre-set by caller; keep in sync
+
     *out.get_unchecked_mut(first_valid) = x0;
 
     let min_pi = if min_period == 0 { 1 } else { min_period };
     let max_pi = core::cmp::max(max_period, min_pi);
     let mut last_p: usize = max_pi;
 
-    // Smoothing constants LUT
     let mut sc_lut = Vec::with_capacity(max_pi + 1);
     sc_lut.push(0.0);
     for p in 1..=max_pi {
@@ -813,7 +754,6 @@ unsafe fn vlma_row_fast_sma_std_prefix(
 
     let mut last_val = x0;
 
-    // Warmup advance
     let mut i = first_valid + 1;
     while i < len && i < warm_end {
         let x = *data.get_unchecked(i);
@@ -827,13 +767,11 @@ unsafe fn vlma_row_fast_sma_std_prefix(
         return Ok(());
     }
 
-    // Steady-state
     while i < len {
         let x = *data.get_unchecked(i);
         if !x.is_finite() {
             *out.get_unchecked_mut(i) = f64::NAN;
         } else {
-            // Window [i-max_period+1, i]
             let start = i + 1 - max_period;
             let cnt = *ps_cnt.get_unchecked(i + 1) - *ps_cnt.get_unchecked(start);
             let (m, dv) = if cnt == max_period {
@@ -891,7 +829,6 @@ unsafe fn vlma_avx2_into(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
-    // For now, delegate to scalar implementation
     vlma_scalar_into(
         data,
         min_period,
@@ -992,7 +929,6 @@ unsafe fn vlma_avx512_short_into(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
-    // For now, delegate to scalar implementation
     vlma_scalar_into(
         data,
         min_period,
@@ -1015,7 +951,6 @@ unsafe fn vlma_avx512_long_into(
     first_valid: usize,
     out: &mut [f64],
 ) -> Result<(), VlmaError> {
-    // For now, delegate to scalar implementation
     vlma_scalar_into(
         data,
         min_period,
@@ -1027,10 +962,8 @@ unsafe fn vlma_avx512_long_into(
     )
 }
 
-// Decision: Streaming kernel is O(1) for SMA+stddev using rolling sums; fall back to O(n) otherwise.
 #[derive(Debug, Clone)]
 pub struct VlmaStream {
-    // existing/public-facing fields
     min_period: usize,
     max_period: usize,
     matype: String,
@@ -1038,16 +971,15 @@ pub struct VlmaStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    period: f64, // tracked as f64 for API parity
+    period: f64,
     last_val: f64,
 
-    // O(1) state for SMA + stddev fast path
     sum: f64,
     sumsq: f64,
     nan_count: usize,
     inv_n: f64,
-    last_p: usize,    // integer period mirror for LUT index
-    sc_lut: Vec<f64>, // sc_lut[p] = 2/(p+1), index 0 unused
+    last_p: usize,
+    sc_lut: Vec<f64>,
 }
 
 impl VlmaStream {
@@ -1070,9 +1002,8 @@ impl VlmaStream {
             });
         }
 
-        // Precompute smoothing constants α = 2/(p+1) for p∈[1..=max_period].
         let mut sc_lut = Vec::with_capacity(max_period + 1);
-        sc_lut.push(0.0); // index 0 unused for alignment with period indexing
+        sc_lut.push(0.0);
         for p in 1..=max_period {
             sc_lut.push(2.0 / (p as f64 + 1.0));
         }
@@ -1085,10 +1016,9 @@ impl VlmaStream {
             buffer: vec![f64::NAN; max_period],
             head: 0,
             filled: false,
-            period: max_period as f64, // start at the slowest
+            period: max_period as f64,
             last_val: f64::NAN,
 
-            // O(1) rolling statistics state
             sum: 0.0,
             sumsq: 0.0,
             nan_count: 0,
@@ -1098,10 +1028,8 @@ impl VlmaStream {
         })
     }
 
-    /// O(1) streaming update for (matype="sma", devtype=0). Falls back to O(n) build for others.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Ring buffer bookkeeping
         let out_idx = self.head;
         let v_out = self.buffer[out_idx];
         self.buffer[out_idx] = value;
@@ -1111,7 +1039,6 @@ impl VlmaStream {
             self.filled = true;
         }
 
-        // Maintain rolling sums when window full
         if self.filled {
             if v_out.is_finite() {
                 self.sum -= v_out;
@@ -1127,9 +1054,7 @@ impl VlmaStream {
             self.nan_count += 1;
         }
 
-        // Fast path: SMA reference + standard deviation bands
         if self.matype == "sma" && self.devtype == 0 {
-            // Warmup: seed on first finite value, then emit None until the first full window.
             if !self.filled {
                 if self.last_val.is_nan() {
                     if value.is_finite() {
@@ -1146,12 +1071,10 @@ impl VlmaStream {
                 return None;
             }
 
-            // Steady-state: handle NaN input by emitting NaN and not changing state
             if !value.is_finite() {
                 return Some(f64::NAN);
             }
 
-            // Compute mean and stddev when no NaNs in the window
             let (m, dv) = if self.nan_count == 0 {
                 let mean = self.sum * self.inv_n;
                 let var = (self.sumsq * self.inv_n) - mean * mean;
@@ -1161,7 +1084,6 @@ impl VlmaStream {
                 (f64::NAN, f64::NAN)
             };
 
-            // Adapt period by ±1 within [min_period, max_period]
             let mut next_p = self.last_p;
             if m.is_finite() && dv.is_finite() {
                 let d175 = dv * 1.75;
@@ -1173,7 +1095,7 @@ impl VlmaStream {
 
                 let inc_fast = ((value < a) as i32) | ((value > d) as i32);
                 let inc_slow = ((value >= b) as i32) & ((value <= c) as i32);
-                let delta = inc_slow - inc_fast; // -1, 0, +1
+                let delta = inc_slow - inc_fast;
                 let p_tmp = self.last_p as isize + delta as isize;
                 next_p = if p_tmp < self.min_period as isize {
                     self.min_period
@@ -1184,7 +1106,6 @@ impl VlmaStream {
                 };
             }
 
-            // EMA-like smoothing with α from LUT
             let sc = self.sc_lut[next_p];
             self.last_val = fast_ema_update(self.last_val, value, sc);
             self.last_p = next_p;
@@ -1192,7 +1113,6 @@ impl VlmaStream {
             return Some(self.last_val);
         }
 
-        // --- Generic fallback (non-SMA or non-stddev): O(n) window rebuild ---
         let mut window: Vec<f64> = Vec::with_capacity(self.max_period);
         for i in 0..self.max_period {
             let idx = (self.head + i) % self.max_period;
@@ -1202,7 +1122,6 @@ impl VlmaStream {
             }
         }
         if window.len() < self.max_period {
-            // Not enough finite values yet for this path; preserve warmup EMA seeding
             if self.last_val.is_nan() && value.is_finite() {
                 self.last_val = value;
                 return Some(value);
@@ -1214,7 +1133,6 @@ impl VlmaStream {
             return None;
         }
 
-        // Reference mean via selected MA and deviation
         let mean = match ma(&self.matype, MaData::Slice(&window), self.max_period) {
             Ok(v) => *v.last().unwrap_or(&f64::NAN),
             Err(_) => return None,
@@ -1495,7 +1413,6 @@ fn vlma_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // Allocate uninit matrix, then set warmup prefixes per-row.
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warms: Vec<usize> = combos
         .iter()
@@ -1503,18 +1420,15 @@ fn vlma_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    // Cast to &mut [f64] like ALMA
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // VLMA specific: Restore the initial value at first_valid for each row
-    // (init_matrix_prefixes sets all warmup values to NaN, but VLMA needs first_valid preserved)
     for row in 0..rows {
         let row_start = row * cols;
         out[row_start + first] = data[first];
     }
-    // Compute rows
+
     let simd_kern = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -1529,7 +1443,6 @@ fn vlma_batch_inner(
     };
     vlma_batch_inner_into(data, sweep, simd_kern, parallel, out)?;
 
-    // Reclaim into Vec<f64>
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -1569,18 +1482,15 @@ pub fn vlma_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    // Detect if we can use the shared-prefix fast path (SMA + stddev rows present)
     let any_sma_std = combos
         .iter()
         .any(|c| c.matype.as_deref() == Some("sma") && c.devtype == Some(0));
 
-    // Optional shared prefix sums for mean/stddev across rows
     let (ps_sum, ps_sumsq, ps_cnt);
     let ps_sum_ref: Option<&[f64]>;
     let ps_sumsq_ref: Option<&[f64]>;
     let ps_cnt_ref: Option<&[usize]>;
     if any_sma_std {
-        // Build prefix sums once: ps[i+1] = sum of finite(data[0..=i])
         let mut sum = 0.0_f64;
         let mut sumsq = 0.0_f64;
         let mut cnt = 0_usize;
@@ -1657,7 +1567,6 @@ pub fn vlma_batch_inner_into(
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx512 => {
-                // Fall back to scalar when AVX is not available
                 vlma_row_scalar(
                     data, min_period, max_period, matype, devtype, first, out_row,
                 )
@@ -1784,18 +1693,16 @@ pub fn vlma_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize warmup NaN prefixes for each row
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.max_period.unwrap() - 1;
         let row_start = row * cols;
         for i in 0..warmup.min(cols) {
             if i != first {
-                // Preserve initial value at first_valid
                 slice_out[row_start + i] = f64::NAN;
             }
         }
-        // VLMA specific: Set initial value at first_valid
+
         if first < cols {
             slice_out[row_start + first] = slice_in[first];
         }
@@ -1856,7 +1763,6 @@ pub fn vlma_batch_py<'py>(
     Ok(dict)
 }
 
-// ------------------------ Python CUDA bindings ------------------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "vlma_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, min_period_range=(5, 5, 0), max_period_range=(50, 50, 0), devtype_range=(0, 0, 0), matype="sma", device_id=0))]
@@ -1922,9 +1828,7 @@ pub fn vlma_cuda_many_series_one_param_dev_py(
     make_device_array_py(device_id, inner)
 }
 
-// WASM bindings following ALMA pattern
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vlma_js(
     data: &[f64],
@@ -1946,7 +1850,7 @@ pub fn vlma_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vlma_into(
     in_ptr: *const f64,
@@ -1985,7 +1889,7 @@ pub fn vlma_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vlma_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1994,7 +1898,7 @@ pub fn vlma_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vlma_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2004,7 +1908,7 @@ pub fn vlma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VlmaBatchConfig {
     pub min_period_range: (usize, usize, usize),
@@ -2013,7 +1917,7 @@ pub struct VlmaBatchConfig {
     pub matype: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VlmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2022,7 +1926,7 @@ pub struct VlmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = vlma_batch)]
 pub fn vlma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: VlmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2049,7 +1953,7 @@ pub fn vlma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vlma_batch_into(
     in_ptr: *const f64,
@@ -2099,24 +2003,20 @@ mod tests {
     use super::*;
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
-    
+
     #[test]
     fn test_vlma_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Use existing CSV dataset for parity check
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = VlmaInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
         let base = vlma(&input)?.values;
 
-        // No-allocation API into a caller-provided buffer
         let mut out = vec![0.0f64; base.len()];
         super::vlma_into(&input, &mut out)?;
 
         assert_eq!(base.len(), out.len());
 
-        // Helper: treat NaN == NaN, else require exact (or tight epsilon) equality
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -2313,9 +2213,7 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test parameters
         let strat = (2usize..=20, 0.001f64..1e6f64).prop_flat_map(|(min_period, scalar)| {
-            // max_period must be > min_period
             let max_period_start = min_period + 1;
             (
                 prop::collection::vec(
@@ -2326,14 +2224,14 @@ mod tests {
                 Just(min_period),
                 (max_period_start..=50),
                 prop::sample::select(vec!["sma", "ema", "wma"]),
-                (0usize..=2), // devtype: 0=std, 1=mad, 2=median
+                (0usize..=2),
                 Just(scalar),
             )
         });
 
         proptest::test_runner::TestRunner::default()
 			.run(&strat, |(data, min_period, max_period, matype, devtype, scalar)| {
-				// Ensure max_period is valid for the data length
+
 				if max_period > data.len() {
 					return Ok(());
 				}
@@ -2346,18 +2244,18 @@ mod tests {
 				};
 				let input = VlmaInput::from_slice(&data, params.clone());
 
-				// Test with specified kernel
+
 				let VlmaOutput { values: out } = vlma_with_kernel(&input, kernel).unwrap();
 
-				// Also compute with scalar kernel for comparison
+
 				let VlmaOutput { values: ref_out } = vlma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				// Property 1: Warmup period validation
-				// VLMA sets an initial value at first_valid, then NaN until max_period - 1
+
+
 				let first_valid = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
 				let expected_warmup = first_valid + max_period - 1;
 
-				// Check that first_valid has a value (if it exists)
+
 				if first_valid < out.len() {
 					prop_assert!(
 						!out[first_valid].is_nan(),
@@ -2365,7 +2263,7 @@ mod tests {
 						first_valid
 					);
 
-					// Property 1b: Initial value should equal first data point
+
 					prop_assert!(
 						(out[first_valid] - data[first_valid]).abs() < 1e-9,
 						"Initial VLMA value {} should equal first data point {} at index {}",
@@ -2375,7 +2273,7 @@ mod tests {
 					);
 				}
 
-				// Check NaN values between first_valid+1 and expected_warmup
+
 				for i in (first_valid + 1)..expected_warmup.min(out.len()) {
 					prop_assert!(
 						out[i].is_nan(),
@@ -2385,7 +2283,7 @@ mod tests {
 					);
 				}
 
-				// Property 2: Regular values should start at expected_warmup
+
 				if expected_warmup < out.len() {
 					prop_assert!(
 						!out[expected_warmup].is_nan(),
@@ -2394,12 +2292,12 @@ mod tests {
 					);
 				}
 
-				// Property 3: Output bounds - VLMA should be within exact data range
+
 				let data_min = data.iter().cloned().fold(f64::INFINITY, f64::min);
 				let data_max = data.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
 				for (i, &val) in out.iter().enumerate() {
-					if !val.is_nan() && i != first_valid { // Skip first_valid as it equals the data point
+					if !val.is_nan() && i != first_valid {
 						prop_assert!(
 							val >= data_min - 1e-9 && val <= data_max + 1e-9,
 							"VLMA at index {} = {} is outside data range [{}, {}]",
@@ -2411,9 +2309,9 @@ mod tests {
 					}
 				}
 
-				// Property 4: Convergence for constant data
+
 				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
-					// For constant data, VLMA should converge to that constant
+
 					for (i, &val) in out.iter().enumerate() {
 						if !val.is_nan() && i >= expected_warmup + 10 {
 							prop_assert!(
@@ -2427,8 +2325,8 @@ mod tests {
 					}
 				}
 
-				// Property 5: Smoothness - once the output has settled into the same range as the
-				// input segment, VLMA should not increase variance relative to the raw series.
+
+
 				if data.len() >= max_period * 2 {
 					let stable_end = data.len();
 					let stable_start = stable_end - max_period;
@@ -2462,8 +2360,8 @@ mod tests {
 							.sum::<f64>()
 							/ input_segment.len() as f64;
 
-						// Avoid brittle comparisons in near-constant segments where small transients
-						// can dominate the variance ratio.
+
+
 						if input_var > 1e-18 {
 							let output_mean: f64 =
 								valid_outputs.iter().sum::<f64>() / valid_outputs.len() as f64;
@@ -2483,21 +2381,21 @@ mod tests {
 					}
 				}
 
-				// Property 5b: Adaptive period behavior test
-				// For volatile data, VLMA should show adaptive behavior
+
+
 				if data.len() >= max_period * 3 {
-					// Calculate volatility in two different regions
+
 					let mid_point = data.len() / 2;
 					let region1_start = expected_warmup + max_period;
 
-					// Ensure mid_point is after region1_start to avoid underflow
+
 					if mid_point > region1_start && data.len() > mid_point + max_period {
 						let region1_end = region1_start + max_period.min((mid_point - region1_start) / 2);
 						let region2_start = mid_point + max_period;
 						let region2_end = region2_start + max_period.min((data.len() - region2_start) / 2);
 
 						if region1_end > region1_start && region2_end > region2_start {
-							// Calculate standard deviation for each region
+
 							let calc_std = |segment: &[f64]| -> f64 {
 								let mean = segment.iter().sum::<f64>() / segment.len() as f64;
 								let variance = segment.iter()
@@ -2513,9 +2411,9 @@ mod tests {
 								let std1 = calc_std(region1_data);
 								let std2 = calc_std(region2_data);
 
-								// If one region is significantly more volatile than the other
+
 								if (std1 > std2 * 2.0 || std2 > std1 * 2.0) && std1 > 1e-6 && std2 > 1e-6 {
-									// VLMA outputs should show some difference between regions
+
 									let out1: Vec<f64> = out[region1_start..region1_end.min(out.len())]
 										.iter()
 										.filter(|x| !x.is_nan())
@@ -2531,7 +2429,7 @@ mod tests {
 										let out_std1 = calc_std(&out1);
 										let out_std2 = calc_std(&out2);
 
-										// The region with higher volatility should have different characteristics
+
 										prop_assert!(
 											(out_std1 - out_std2).abs() > 1e-10 || (std1 - std2).abs() < 1e-6,
 											"VLMA should show adaptive behavior: region1 std={}, region2 std={}, but outputs are too similar",
@@ -2545,7 +2443,7 @@ mod tests {
 					}
 				}
 
-				// Property 6: Kernel consistency
+
 				for i in expected_warmup..out.len().min(ref_out.len()) {
 					let y = out[i];
 					let r = ref_out[i];
@@ -2561,7 +2459,7 @@ mod tests {
 						continue;
 					}
 
-					// Check ULP difference for floating point comparison
+
 					let y_bits = y.to_bits();
 					let r_bits = r.to_bits();
 					let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -2576,7 +2474,7 @@ mod tests {
 					);
 				}
 
-				// Property 7: No poison values (in debug builds)
+
 				#[cfg(debug_assertions)]
 				for (i, &val) in out.iter().enumerate() {
 					if !val.is_nan() {
@@ -2593,8 +2491,8 @@ mod tests {
 					}
 				}
 
-				// Property 8: Monotonicity trend preservation
-				// If data is strictly increasing/decreasing, VLMA should follow the trend
+
+
 				let is_increasing = data.windows(2).all(|w| w[1] >= w[0]);
 				let is_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
@@ -2606,12 +2504,12 @@ mod tests {
 						.collect();
 
 					if valid_outputs.len() >= 10 {
-						// Check last 5 values follow the trend
+
 						let last_5 = &valid_outputs[valid_outputs.len() - 5..];
 						if is_increasing {
 							for w in last_5.windows(2) {
 								prop_assert!(
-									w[1].1 >= w[0].1 * 0.999, // Tighter tolerance of 0.1%
+									w[1].1 >= w[0].1 * 0.999,
 									"VLMA should be non-decreasing for increasing data at indices {}-{}: {} > {}",
 									w[0].0,
 									w[1].0,
@@ -2622,7 +2520,7 @@ mod tests {
 						} else if is_decreasing {
 							for w in last_5.windows(2) {
 								prop_assert!(
-									w[1].1 <= w[0].1 * 1.001, // Tighter tolerance of 0.1%
+									w[1].1 <= w[0].1 * 1.001,
 									"VLMA should be non-increasing for decreasing data at indices {}-{}: {} < {}",
 									w[0].0,
 									w[1].0,
@@ -2634,7 +2532,7 @@ mod tests {
 					}
 				}
 
-				// Property 9: Determinism - same input produces same output
+
 				let input2 = VlmaInput::from_slice(&data, params);
 				let VlmaOutput { values: out2 } = vlma_with_kernel(&input2, kernel).unwrap();
 
@@ -2672,74 +2570,62 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            // Default parameters
             VlmaParams::default(),
-            // Minimum periods
             VlmaParams {
                 min_period: Some(1),
                 max_period: Some(2),
                 matype: Some("sma".to_string()),
                 devtype: Some(0),
             },
-            // Small periods
             VlmaParams {
                 min_period: Some(2),
                 max_period: Some(10),
                 matype: Some("sma".to_string()),
                 devtype: Some(0),
             },
-            // Medium periods with EMA
             VlmaParams {
                 min_period: Some(10),
                 max_period: Some(30),
                 matype: Some("ema".to_string()),
                 devtype: Some(0),
             },
-            // Large periods
             VlmaParams {
                 min_period: Some(20),
                 max_period: Some(100),
                 matype: Some("sma".to_string()),
                 devtype: Some(0),
             },
-            // Very large periods with WMA
             VlmaParams {
                 min_period: Some(50),
                 max_period: Some(200),
                 matype: Some("wma".to_string()),
                 devtype: Some(0),
             },
-            // Different deviation type (MAD)
             VlmaParams {
                 min_period: Some(5),
                 max_period: Some(25),
                 matype: Some("sma".to_string()),
                 devtype: Some(1),
             },
-            // Different deviation type (Median)
             VlmaParams {
                 min_period: Some(5),
                 max_period: Some(25),
                 matype: Some("ema".to_string()),
                 devtype: Some(2),
             },
-            // Edge case: min close to max
             VlmaParams {
                 min_period: Some(19),
                 max_period: Some(20),
                 matype: Some("sma".to_string()),
                 devtype: Some(0),
             },
-            // Another combination
             VlmaParams {
                 min_period: Some(3),
                 max_period: Some(15),
                 matype: Some("wma".to_string()),
                 devtype: Some(1),
             },
-            // Large range
             VlmaParams {
                 min_period: Some(5),
                 max_period: Some(100),
@@ -2754,12 +2640,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2815,7 +2700,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_vlma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! generate_all_vlma_tests {
@@ -2888,18 +2773,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
         let test_configs = vec![
-            // (min_start, min_end, min_step, max_start, max_end, max_step, matype, dev_start, dev_end, dev_step)
-            (2, 10, 2, 10, 20, 2, "sma", 0, 0, 0), // Small periods
-            (5, 25, 5, 25, 50, 5, "sma", 0, 2, 1), // Medium periods with devtype sweep
-            (10, 50, 10, 50, 100, 10, "ema", 0, 0, 0), // Large periods with EMA
-            (1, 5, 1, 5, 10, 1, "sma", 0, 0, 0),   // Dense small range
-            (5, 5, 0, 20, 100, 20, "wma", 0, 2, 2), // Static min, sweep max
-            (2, 10, 4, 20, 20, 0, "sma", 1, 1, 0), // Sweep min, static max, MAD
-            (3, 15, 3, 15, 30, 3, "ema", 2, 2, 0), // Median deviation
-            (20, 50, 15, 60, 150, 30, "sma", 0, 2, 1), // Large ranges
-            (5, 5, 0, 50, 50, 0, "sma", 0, 2, 1),  // Default with devtype sweep
+            (2, 10, 2, 10, 20, 2, "sma", 0, 0, 0),
+            (5, 25, 5, 25, 50, 5, "sma", 0, 2, 1),
+            (10, 50, 10, 50, 100, 10, "ema", 0, 0, 0),
+            (1, 5, 1, 5, 10, 1, "sma", 0, 0, 0),
+            (5, 5, 0, 20, 100, 20, "wma", 0, 2, 2),
+            (2, 10, 4, 20, 20, 0, "sma", 1, 1, 0),
+            (3, 15, 3, 15, 30, 3, "ema", 2, 2, 0),
+            (20, 50, 15, 60, 150, 30, "sma", 0, 2, 1),
+            (5, 5, 0, 50, 50, 0, "sma", 0, 2, 1),
         ];
 
         for (
@@ -2920,7 +2803,6 @@ mod tests {
         {
             let mut builder = VlmaBatchBuilder::new().kernel(kernel);
 
-            // Configure ranges
             if min_step > 0 {
                 builder = builder.min_period_range(min_start, min_end, min_step);
             } else {
@@ -2953,7 +2835,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \

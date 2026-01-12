@@ -1,25 +1,3 @@
-//! # Average Directional Index (ADX)
-//!
-//! The Average Directional Index (ADX) is a technical indicator that measures the strength
-//! of a prevailing trend by comparing consecutive bars' highs and lows. The ADX uses
-//! smoothed values of the directional movement (positive and negative) to arrive at a single
-//! value that signals the intensity of price movement.
-//!
-//! ## Parameters
-//! - **period**: Smoothing period (default 14).
-//!
-//! ## Errors
-//! - **CandleFieldError**: adx: An error occurred while selecting fields from the `Candles`.
-//! - **InvalidPeriod**: adx: The specified `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: adx: Not enough valid data points to compute ADX. Requires at least `period + 1` bars.
-//!
-//! ## Returns
-//! - **`Ok(AdxOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(AdxError)`** otherwise.
-//!
-//! ## Decision Log
-//! SIMD enabled (AVX2/AVX512 warmup-only) with scalar main loop for determinism; CUDA wrapper returns typed errors and VRAM handles; Python interop provides CAI v3 + DLPack v1.x. Numerical outputs and NaN warmup semantics match the scalar reference.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -29,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
@@ -66,7 +44,10 @@ pub struct AdxOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AdxParams {
     pub period: Option<usize>,
 }
@@ -195,7 +176,11 @@ pub enum AdxError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("adx: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("adx: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -217,11 +202,7 @@ pub fn adx(input: &AdxInput) -> Result<AdxOutput, AdxError> {
     adx_with_kernel(input, Kernel::Auto)
 }
 
-/// Writes ADX values into a caller-provided buffer without allocating.
-///
-/// - Preserves the module’s NaN warmup semantics (first-valid index + `2*period-1`).
-/// - `out.len()` must equal the input length; returns the module’s error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn adx_into(input: &AdxInput, out: &mut [f64]) -> Result<(), AdxError> {
     adx_into_slice(out, input, Kernel::Auto)
@@ -321,18 +302,15 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
         return;
     }
 
-    
     let period_f64 = period as f64;
     let reciprocal_period = 1.0 / period_f64;
     let one_minus_rp = 1.0 - reciprocal_period;
     let period_minus_one = period_f64 - 1.0;
 
-    
     let mut tr_sum = 0.0f64;
     let mut plus_dm_sum = 0.0f64;
     let mut minus_dm_sum = 0.0f64;
 
-    
     let mut prev_h = high[0];
     let mut prev_l = low[0];
     let mut prev_c = close[0];
@@ -342,13 +320,11 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
         let ch = high[i];
         let cl = low[i];
 
-        
         let hl = ch - cl;
         let hpc = (ch - prev_c).abs();
         let lpc = (cl - prev_c).abs();
         let tr = hl.max(hpc).max(lpc);
 
-        
         let up = ch - prev_h;
         let down = prev_l - cl;
         if up > down && up > 0.0 {
@@ -359,19 +335,16 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
         }
         tr_sum += tr;
 
-        
         prev_h = ch;
         prev_l = cl;
         prev_c = close[i];
         i += 1;
     }
 
-    
     let mut atr = tr_sum;
     let mut plus_dm_smooth = plus_dm_sum;
     let mut minus_dm_smooth = minus_dm_sum;
 
-    
     let (plus_di_prev, minus_di_prev) = if atr != 0.0 {
         (
             (plus_dm_smooth / atr) * 100.0,
@@ -389,12 +362,10 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
     let mut dx_count = 1usize;
     let mut last_adx = 0.0f64;
 
-    
     let mut prev_h = high[period];
     let mut prev_l = low[period];
     let mut prev_c = close[period];
 
-    
     let mut i = period + 1;
     while i < len {
         let ch = high[i];
@@ -410,12 +381,10 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
         let plus_dm = if up > down && up > 0.0 { up } else { 0.0 };
         let minus_dm = if down > up && down > 0.0 { down } else { 0.0 };
 
-        
         atr = atr * one_minus_rp + tr;
         plus_dm_smooth = plus_dm_smooth * one_minus_rp + plus_dm;
         minus_dm_smooth = minus_dm_smooth * one_minus_rp + minus_dm;
 
-        
         let (plus_di, minus_di) = if atr != 0.0 {
             (
                 (plus_dm_smooth / atr) * 100.0,
@@ -431,7 +400,6 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
             0.0
         };
 
-        
         if dx_count < period {
             dx_sum += dx;
             dx_count += 1;
@@ -444,7 +412,6 @@ pub fn adx_scalar(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
             out[i] = last_adx;
         }
 
-        
         prev_h = ch;
         prev_l = cl;
         prev_c = close[i];
@@ -471,7 +438,6 @@ pub fn adx_avx2(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &m
         let lp = low.as_ptr();
         let cp = close.as_ptr();
 
-        
         let mut tr_sum = 0.0f64;
         let mut plus_dm_sum = 0.0f64;
         let mut minus_dm_sum = 0.0f64;
@@ -528,7 +494,6 @@ pub fn adx_avx2(high: &[f64], low: &[f64], close: &[f64], period: usize, out: &m
             plus_dm_sum += buf_p[3];
             minus_dm_sum += buf_m[3];
 
-            
             prev_h_scalar = *hp.add(i + 3);
             prev_l_scalar = *lp.add(i + 3);
             prev_c_scalar = *cp.add(i + 3);
@@ -725,7 +690,6 @@ pub fn adx_avx512(high: &[f64], low: &[f64], close: &[f64], period: usize, out: 
             plus_dm_sum += buf_p[7];
             minus_dm_sum += buf_m[7];
 
-            
             prev_h_scalar = *hp.add(i + 7);
             prev_l_scalar = *lp.add(i + 7);
             prev_c_scalar = *cp.add(i + 7);
@@ -863,9 +827,7 @@ pub fn adx_batch_with_kernel(
         Kernel::Avx2 => Kernel::Avx2Batch,
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => Kernel::Avx512Batch,
-        _ => {
-            return Err(AdxError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(AdxError::InvalidKernelForBatch(k)),
     };
 
     let simd = match kernel {
@@ -1096,7 +1058,6 @@ unsafe fn precompute_streams_avx512(
         _mm512_storeu_pd(buf_p.as_mut_ptr(), plus_v);
         _mm512_storeu_pd(buf_m.as_mut_ptr(), minus_v);
 
-        
         for k in 0..8 {
             tr.push(buf_tr[k]);
             pdm.push(buf_p[k]);
@@ -1201,7 +1162,6 @@ impl AdxBatchOutput {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::adx_wrapper::CudaAdx;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1237,7 +1197,8 @@ pub fn adx_cuda_batch_dev_py<'py>(
         let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
-        let (dev_arr, cmb) = cuda.adx_batch_dev(h, l, c, &sweep)
+        let (dev_arr, cmb) = cuda
+            .adx_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((dev_arr, cmb, ctx, dev_id))
     })?;
@@ -1277,13 +1238,13 @@ pub fn adx_cuda_many_series_one_param_dev_py(
         let cuda = CudaAdx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.ctx();
         let dev_id = cuda.device_id();
-        let arr = cuda.adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+        let arr = cuda
+            .adx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, pyo3::PyErr>((arr, ctx, dev_id))
     })?;
     Ok(DeviceArrayF32AdxPy::new(inner, ctx, dev_id))
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Adx", unsendable)]
@@ -1298,7 +1259,9 @@ pub struct DeviceArrayF32AdxPy {
 impl DeviceArrayF32AdxPy {
     #[new]
     fn py_new() -> PyResult<Self> {
-        Err(pyo3::exceptions::PyTypeError::new_err("use factory methods from CUDA functions"))
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "use factory methods from CUDA functions",
+        ))
     }
 
     #[getter]
@@ -1315,15 +1278,18 @@ impl DeviceArrayF32AdxPy {
             ),
         )?;
         let size = inner.rows.saturating_mul(inner.cols);
-        let ptr = if size == 0 { 0usize } else { inner.device_ptr() as usize };
+        let ptr = if size == 0 {
+            0usize
+        } else {
+            inner.device_ptr() as usize
+        };
         d.set_item("data", (ptr, false))?;
-        // Stream omitted: kernels synchronize before returning the handle (CAI v3).
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
-        // Discover allocation device from pointer attributes to avoid relying on current context.
         let mut device_ordinal: i32 = 0;
         unsafe {
             let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
@@ -1336,7 +1302,6 @@ impl DeviceArrayF32AdxPy {
             if err == cust::sys::CUresult::CUDA_SUCCESS {
                 device_ordinal = value.assume_init();
             } else {
-                // Fallback: try current device
                 let _ = cust::sys::cuCtxGetDevice(&mut device_ordinal);
             }
         }
@@ -1352,8 +1317,7 @@ impl DeviceArrayF32AdxPy {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1373,9 +1337,8 @@ impl DeviceArrayF32AdxPy {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -1422,15 +1385,19 @@ fn expand_grid(r: &AdxBatchRange) -> Vec<AdxParams> {
         if start < end {
             return (start..=end).step_by(step.max(1)).collect();
         }
-        // reversed bounds: start > end
+
         let mut v = Vec::new();
         let mut cur = start;
         let s = step.max(1);
         while cur >= end {
             v.push(cur);
-            if cur < s { break; }
+            if cur < s {
+                break;
+            }
             cur -= s;
-            if cur == usize::MAX { break; }
+            if cur == usize::MAX {
+                break;
+            }
         }
         v
     }
@@ -1466,15 +1433,16 @@ fn adx_batch_inner_into(
 
     let rows = combos.len();
     let cols = close.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(AdxError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(AdxError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
-        return Err(AdxError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(AdxError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
     let first = first_valid_triple(high, low, close);
@@ -1486,7 +1454,6 @@ fn adx_batch_inner_into(
         });
     }
 
-    // initialize only warm prefixes
     let mut warms: Vec<usize> = Vec::with_capacity(combos.len());
     for c in &combos {
         let p = c.period.unwrap();
@@ -1525,7 +1492,6 @@ fn adx_batch_inner_into(
             }
         };
 
-        // Per-row smoother over shared streams (enabled for large row sweeps)
         let do_row_shared = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
             let p = combos[row].period.unwrap();
             let row_f64 =
@@ -1537,7 +1503,6 @@ fn adx_batch_inner_into(
             let one_minus_rp = 1.0 - rp;
             let pm1 = pf - 1.0;
 
-            // Warmup sums over j = 1..=p using precomputed streams
             let mut atr = 0.0f64;
             let mut plus_s = 0.0f64;
             let mut minus_s = 0.0f64;
@@ -1562,7 +1527,6 @@ fn adx_batch_inner_into(
             let mut dx_count = 1usize;
             let mut last_adx = 0.0f64;
 
-            // Sequential smoothing over j = p+1..tail_len-1
             let tail_len = tr_stream.len();
             let mut j = p + 1;
             while j < tail_len {
@@ -1621,7 +1585,6 @@ fn adx_batch_inner_into(
         return Ok(combos);
     }
 
-    // Fallback: original per-row computation (good for few rows)
     let do_row = |row: usize, row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let p = combos[row].period.unwrap();
         let row_f64 =
@@ -1674,7 +1637,6 @@ pub fn adx_batch_slice(
     sweep: &AdxBatchRange,
     kern: Kernel,
 ) -> Result<AdxBatchOutput, AdxError> {
-    // Map batch kernels to SIMD kernels
     let simd_kern = match kern {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -1734,17 +1696,13 @@ fn adx_batch_inner(
         });
     }
 
-    // 1) allocate rows×cols uninit
-    let _cap = rows
-        .checked_mul(cols)
-        .ok_or(AdxError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let _cap = rows.checked_mul(cols).ok_or(AdxError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // 2) per-row warm prefixes: first + 2*period - 1
     let mut warm: Vec<usize> = Vec::with_capacity(combos.len());
     for c in &combos {
         let p = c.period.unwrap();
@@ -1764,7 +1722,6 @@ fn adx_batch_inner(
     }
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // 3) compute into the matrix in place using shared TR/+DM/−DM streams (for many rows)
     let mut guard = ManuallyDrop::new(buf_mu);
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -1790,7 +1747,6 @@ fn adx_batch_inner(
             let pm1 = pf - 1.0;
             let dst_tail = &mut out_row[first..];
 
-            // warmup sums j=1..=p
             let mut atr = 0.0f64;
             let mut plus_s = 0.0f64;
             let mut minus_s = 0.0f64;
@@ -1815,7 +1771,6 @@ fn adx_batch_inner(
             let mut dx_count = 1usize;
             let mut last_adx = 0.0f64;
 
-            // main pass j=p+1 .. tail_len-1
             let tail_len = tr_stream.len();
             let mut j = p + 1;
             while j < tail_len {
@@ -1882,7 +1837,6 @@ fn adx_batch_inner(
         });
     }
 
-    // Fallback: original per-row computation (good for few rows)
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
         let pf = p as f64;
@@ -1991,8 +1945,6 @@ pub unsafe fn adx_row_avx512_long(
     adx_avx512(high, low, close, period, out)
 }
 
-// Decision: Streaming kernel uses TR identity and single reciprocal for DI.
-// Preserves Wilder arithmetic order; O(1) per tick; matches batch within 1e-8.
 #[derive(Debug, Clone)]
 pub struct AdxStream {
     period: usize,
@@ -2034,7 +1986,6 @@ impl AdxStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // Stage 0: seed with the very first bar
         if self.count == 0 {
             self.prev_high = high;
             self.prev_low = low;
@@ -2043,11 +1994,9 @@ impl AdxStream {
             return None;
         }
 
-        // Wilder True Range via identity: TR = max(H, prevC) - min(L, prevC)
         let prev_c = self.prev_close;
         let tr = high.max(prev_c) - low.min(prev_c);
 
-        // Directional movement gating (Wilder)
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
         let plus_dm = if up_move > down_move && up_move > 0.0 {
@@ -2063,14 +2012,12 @@ impl AdxStream {
 
         self.count += 1;
 
-        // Warmup: accumulate sums for the first 'period' bars after the seed
         if self.count <= self.period + 1 {
             self.atr += tr;
             self.plus_dm_smooth += plus_dm;
             self.minus_dm_smooth += minus_dm;
 
             if self.count == self.period + 1 {
-                // DI via single reciprocal to avoid two divisions
                 let inv_atr100 = if self.atr != 0.0 {
                     100.0 / self.atr
                 } else {
@@ -2088,24 +2035,20 @@ impl AdxStream {
                 self.dx_count = 1;
             }
 
-            // advance prev*
             self.prev_high = high;
             self.prev_low = low;
             self.prev_close = close;
             return None;
         }
 
-        // --- Main streaming pass (O(1)) ---
         let rp = 1.0 / (self.period as f64);
         let one_minus_rp = 1.0 - rp;
         let period_minus_one = (self.period as f64) - 1.0;
 
-        // Wilder smoothing (no FMA)
         self.atr = self.atr * one_minus_rp + tr;
         self.plus_dm_smooth = self.plus_dm_smooth * one_minus_rp + plus_dm;
         self.minus_dm_smooth = self.minus_dm_smooth * one_minus_rp + minus_dm;
 
-        // One division to compute both DI's
         let inv_atr100 = if self.atr != 0.0 {
             100.0 / self.atr
         } else {
@@ -2115,14 +2058,12 @@ impl AdxStream {
         let minus_di = self.minus_dm_smooth * inv_atr100;
         let sum_di = plus_di + minus_di;
 
-        
         let dx = if sum_di != 0.0 {
             ((plus_di - minus_di).abs() / sum_di) * 100.0
         } else {
             0.0
         };
 
-        
         let out = if self.dx_count < self.period {
             self.dx_sum += dx;
             self.dx_count += 1;
@@ -2137,7 +2078,6 @@ impl AdxStream {
             Some(self.last_adx)
         };
 
-        
         self.prev_high = high;
         self.prev_low = low;
         self.prev_close = close;
@@ -2154,7 +2094,6 @@ mod tests {
 
     #[test]
     fn test_adx_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
@@ -2172,24 +2111,20 @@ mod tests {
 
         let input = AdxInput::from_slices(&high, &low, &close, AdxParams::default());
 
-        
         let AdxOutput { values: expected } = adx(&input)?;
 
-        
         let mut got = vec![0.0; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             adx_into(&input, &mut got)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             return Ok(());
         }
 
         assert_eq!(expected.len(), got.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
@@ -2411,12 +2346,10 @@ mod tests {
         ];
 
         for params in test_params {
-            
             let input =
                 AdxInput::from_slices(&candles.high, &candles.low, &candles.close, params.clone());
             let output = adx_with_kernel(&input, kernel)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() || val.is_infinite() {
                     continue;
@@ -2479,19 +2412,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100).prop_flat_map(|period| {
-            
             (
-                (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()), 
-                (0.01f64..0.2f64),                                          
-                period + 1..400, 
+                (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
+                (0.01f64..0.2f64),
+                period + 1..400,
             )
                 .prop_flat_map(move |(base_price, volatility, len)| {
-                    
                     prop::collection::vec(
                         (0f64..1f64).prop_map(move |rand| {
-                            
                             let change = (rand - 0.5) * volatility * base_price.abs();
                             let open = base_price + change;
                             let close = open + (rand - 0.5) * volatility * base_price.abs() * 0.5;
@@ -2526,7 +2455,6 @@ mod tests {
                 let AdxOutput { values: ref_out } =
                     adx_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let warmup_period = 2 * period - 1;
                 for i in 0..warmup_period.min(out.len()) {
                     prop_assert!(
@@ -2538,7 +2466,6 @@ mod tests {
                     );
                 }
 
-                
                 if out.len() > warmup_period + 10 {
                     for i in (warmup_period + 10)..out.len() {
                         prop_assert!(
@@ -2550,7 +2477,6 @@ mod tests {
                     }
                 }
 
-                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         prop_assert!(
@@ -2563,8 +2489,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let const_price = 100.0;
                 let const_highs = vec![const_price; closes.len()];
                 let const_lows = vec![const_price; closes.len()];
@@ -2573,11 +2497,10 @@ mod tests {
                     AdxInput::from_slices(&const_highs, &const_lows, &const_closes, params.clone());
 
                 if let Ok(AdxOutput { values: const_out }) = adx_with_kernel(&const_input, kernel) {
-                    
                     for i in warmup_period..const_out.len() {
                         if !const_out[i].is_nan() {
                             prop_assert!(
-								const_out[i] <= 1.0,  
+								const_out[i] <= 1.0,
 								"[{}] Property 4: ADX should be near 0 for constant prices, got {} at index {}",
 								test_name, const_out[i], i
 							);
@@ -2585,7 +2508,6 @@ mod tests {
                     }
                 }
 
-                
                 prop_assert_eq!(
                     out.len(),
                     ref_out.len(),
@@ -2621,15 +2543,13 @@ mod tests {
                     );
                 }
 
-                
                 if period == 2 {
-                    
                     prop_assert!(
                         out.len() == closes.len(),
                         "[{}] Property 6: Output length mismatch with period=2",
                         test_name
                     );
-                    
+
                     if out.len() > 3 {
                         prop_assert!(
                             !out[3].is_nan(),
@@ -2639,15 +2559,13 @@ mod tests {
                     }
                 }
 
-                
-                
                 let trend_len = closes.len();
                 let mut trend_highs = Vec::with_capacity(trend_len);
                 let mut trend_lows = Vec::with_capacity(trend_len);
                 let mut trend_closes = Vec::with_capacity(trend_len);
 
                 for i in 0..trend_len {
-                    let base = 100.0 + (i as f64) * 2.0; 
+                    let base = 100.0 + (i as f64) * 2.0;
                     trend_lows.push(base - 0.5);
                     trend_highs.push(base + 0.5);
                     trend_closes.push(base);
@@ -2657,7 +2575,6 @@ mod tests {
                     AdxInput::from_slices(&trend_highs, &trend_lows, &trend_closes, params.clone());
 
                 if let Ok(AdxOutput { values: trend_out }) = adx_with_kernel(&trend_input, kernel) {
-                    
                     let last_valid_adx = trend_out
                         .iter()
                         .rposition(|&v| !v.is_nan())
@@ -2665,7 +2582,7 @@ mod tests {
 
                     if let Some(adx_val) = last_valid_adx {
                         prop_assert!(
-                            adx_val > 20.0, 
+                            adx_val > 20.0,
                             "[{}] Property 7: Strong trend should produce high ADX, got {}",
                             test_name,
                             adx_val
@@ -2673,15 +2590,13 @@ mod tests {
                     }
                 }
 
-                
-                
                 let doji_price = 100.0;
                 let mut doji_highs = Vec::with_capacity(closes.len());
                 let mut doji_lows = Vec::with_capacity(closes.len());
                 let mut doji_closes = Vec::with_capacity(closes.len());
 
                 for _ in 0..closes.len() {
-                    doji_highs.push(doji_price + 0.01); 
+                    doji_highs.push(doji_price + 0.01);
                     doji_lows.push(doji_price - 0.01);
                     doji_closes.push(doji_price);
                 }
@@ -2690,11 +2605,10 @@ mod tests {
                     AdxInput::from_slices(&doji_highs, &doji_lows, &doji_closes, params.clone());
 
                 if let Ok(AdxOutput { values: doji_out }) = adx_with_kernel(&doji_input, kernel) {
-                    
                     for i in warmup_period..doji_out.len() {
                         if !doji_out[i].is_nan() {
                             prop_assert!(
-								doji_out[i] <= 30.0,  
+								doji_out[i] <= 30.0,
 								"[{}] Property 8: Low movement should produce low ADX, got {} at index {}",
 								test_name, doji_out[i], i
 							);
@@ -2702,8 +2616,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if out.len() > warmup_period {
                     prop_assert!(
                         !out[warmup_period].is_nan(),
@@ -2721,7 +2633,6 @@ mod tests {
                     }
                 }
 
-                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out.iter().enumerate() {
@@ -2741,7 +2652,6 @@ mod tests {
                     }
                 }
 
-                
                 for (i, &(h, l, c)) in bars.iter().enumerate() {
                     prop_assert!(
                         h >= l,
@@ -2845,9 +2755,9 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (5, 20, 5), 
+            (5, 20, 5),
             (10, 30, 10),
-            (14, 14, 1), 
+            (14, 14, 1),
             (20, 50, 15),
             (2, 10, 2),
         ];
@@ -2858,7 +2768,6 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() || val.is_infinite() {
                     continue;
@@ -2915,12 +2824,10 @@ mod tests {
                 }
             }
 
-            
             let params = expand_grid(&AdxBatchRange {
                 period: (p_start, p_end, p_step),
             });
 
-            
             for p in &params {
                 if let Some(slice) = output.values_for(p) {
                     for (idx, &val) in slice.iter().enumerate() {
@@ -2993,28 +2900,23 @@ pub fn adx_py<'py>(
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
 
-    
     if high_slice.len() != low_slice.len() || high_slice.len() != close_slice.len() {
         return Err(PyValueError::new_err(
             "Input arrays must have the same length",
         ));
     }
 
-    
     let kern = validate_kernel(kernel, false)?;
 
-    
     let params = AdxParams {
         period: Some(period),
     };
     let adx_in = AdxInput::from_slices(high_slice, low_slice, close_slice, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| adx_with_kernel(&adx_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -3037,8 +2939,6 @@ impl AdxStreamPy {
         Ok(AdxStreamPy { stream })
     }
 
-    /// Updates the stream with new high, low, close values and returns the calculated ADX value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
         self.stream.update(high, low, close)
     }
@@ -3082,7 +2982,6 @@ pub fn adx_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
     py.allow_threads(|| {
-        
         let k = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             other => other,
@@ -3112,7 +3011,7 @@ pub fn adx_batch_py<'py>(
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_alloc(len: usize) -> *mut f64 {
     let mut v: Vec<f64> = Vec::with_capacity(len);
@@ -3121,7 +3020,7 @@ pub fn adx_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -3129,7 +3028,7 @@ pub fn adx_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_into(
     h_ptr: *const f64,
@@ -3164,7 +3063,7 @@ pub fn adx_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_js(
     high: &[f64],
@@ -3172,7 +3071,6 @@ pub fn adx_js(
     close: &[f64],
     period: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    
     if high.len() != low.len() || high.len() != close.len() {
         return Err(JsValue::from_str("Input arrays must have the same length"));
     }
@@ -3182,7 +3080,7 @@ pub fn adx_js(
     };
     let input = AdxInput::from_slices(high, low, close, params);
 
-    let mut output = vec![0.0; high.len()]; 
+    let mut output = vec![0.0; high.len()];
     #[cfg(target_arch = "wasm32")]
     let kernel = Kernel::Scalar;
     #[cfg(not(target_arch = "wasm32"))]
@@ -3193,7 +3091,7 @@ pub fn adx_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_batch_into(
     h_ptr: *const f64,
@@ -3239,7 +3137,7 @@ pub fn adx_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_batch_js(
     high: &[f64],
@@ -3249,7 +3147,6 @@ pub fn adx_batch_js(
     period_end: usize,
     period_step: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    
     if high.len() != low.len() || high.len() != close.len() {
         return Err(JsValue::from_str("Input arrays must have the same length"));
     }
@@ -3258,7 +3155,6 @@ pub fn adx_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    
     #[cfg(target_arch = "wasm32")]
     let kernel = Kernel::Scalar;
     #[cfg(not(target_arch = "wasm32"))]
@@ -3269,7 +3165,7 @@ pub fn adx_batch_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adx_batch_metadata_js(
     period_start: usize,
@@ -3289,14 +3185,13 @@ pub fn adx_batch_metadata_js(
     Ok(metadata)
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AdxBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AdxBatchJsOutput {
     pub values: Vec<f64>,
@@ -3305,7 +3200,7 @@ pub struct AdxBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = adx_batch)]
 pub fn adx_batch_unified_js(
     high: &[f64],
@@ -3313,12 +3208,10 @@ pub fn adx_batch_unified_js(
     close: &[f64],
     config: JsValue,
 ) -> Result<JsValue, JsValue> {
-    
     if high.len() != low.len() || high.len() != close.len() {
         return Err(JsValue::from_str("Input arrays must have the same length"));
     }
 
-    
     let config: AdxBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -3326,7 +3219,6 @@ pub fn adx_batch_unified_js(
         period: config.period_range,
     };
 
-    
     #[cfg(target_arch = "wasm32")]
     let kernel = Kernel::ScalarBatch;
     #[cfg(not(target_arch = "wasm32"))]
@@ -3335,7 +3227,6 @@ pub fn adx_batch_unified_js(
     let output = adx_batch_inner(high, low, close, &sweep, kernel, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let js_output = AdxBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -3343,14 +3234,10 @@ pub fn adx_batch_unified_js(
         cols: output.cols,
     };
 
-    
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-
-/// Core helper function that writes directly to output slice - no allocations
 #[inline]
 pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result<(), AdxError> {
     let (high, low, close) = match &input.data {
@@ -3374,7 +3261,10 @@ pub fn adx_into_slice(dst: &mut [f64], input: &AdxInput, kern: Kernel) -> Result
     }
     let len = close.len();
     if dst.len() != len {
-        return Err(AdxError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(AdxError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
     if len == 0 {
         return Err(AdxError::EmptyInputData);

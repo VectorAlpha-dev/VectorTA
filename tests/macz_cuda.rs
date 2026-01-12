@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::macz::{
     macz_batch_with_kernel_vol, macz_with_kernel, MaczBatchRange, MaczInput, MaczParams,
 };
@@ -69,7 +67,7 @@ fn macz_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut hist_host = vec![0f32; hist_dev.len()];
     hist_dev.buf.copy_to(&mut hist_host)?;
 
-    let tol = 5e-3; 
+    let tol = 5e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = hist_host[idx] as f64;
@@ -116,7 +114,6 @@ fn macz_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         gamma: Some(0.02),
     };
 
-    
     let mut cpu_hist_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

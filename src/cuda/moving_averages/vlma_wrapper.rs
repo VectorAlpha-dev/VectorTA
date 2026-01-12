@@ -1,16 +1,3 @@
-//! CUDA wrapper for Variable Length Moving Average (VLMA)
-//!
-//! Scope (matching CPU fast path and ALMA-style API):
-//! - One-series × many-params using SMA reference + StdDev bands via host prefix sums.
-//! - Many-series × one-param (time-major) using per-series rolling sums on device.
-//!
-//! Parity guarantees:
-//! - Warmup/NaN semantics identical to scalar VLMA: preserve the value at `first_valid`,
-//!   write NaN elsewhere before warmup; pass through NaNs after warmup without state updates.
-//! - API shape mirrors ALMA: device-backed array handle, NON_BLOCKING stream, JIT options
-//!   with DetermineTargetFromContext + OptLevel O2, VRAM checks, and optional debug logging
-//!   of selected kernels when BENCH_DEBUG=1.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -33,16 +20,18 @@ pub enum CudaVlmaError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
     LaunchConfigTooLarge {
         gx: u32,
         gy: u32,
@@ -56,8 +45,6 @@ pub enum CudaVlmaError {
     #[error("not implemented")]
     NotImplemented,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -122,8 +109,7 @@ impl CudaVlma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -208,7 +194,6 @@ impl CudaVlma {
         }
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -286,7 +271,6 @@ impl CudaVlma {
         Ok(())
     }
 
-    
     fn build_prefixes(data: &[f32]) -> (Vec<f64>, Vec<f64>, Vec<i32>) {
         let n = data.len();
         let mut ps = vec![0.0f64; n + 1];
@@ -312,15 +296,14 @@ impl CudaVlma {
     }
 
     fn expand_supported_combos(sweep: &VlmaBatchRange) -> Result<Vec<VlmaParams>, CudaVlmaError> {
-        let combos = expand_grid_vlma(sweep)
-            .map_err(|e| CudaVlmaError::InvalidInput(e.to_string()))?;
+        let combos =
+            expand_grid_vlma(sweep).map_err(|e| CudaVlmaError::InvalidInput(e.to_string()))?;
         Ok(combos
             .into_iter()
             .filter(|p| p.matype.as_deref() == Some("sma") && p.devtype == Some(0))
             .collect())
     }
 
-    
     fn launch_batch(
         &mut self,
         d_prices: &DeviceBuffer<f32>,
@@ -341,7 +324,6 @@ impl CudaVlma {
                 name: "vlma_batch_sma_std_prefix_f32",
             })?;
 
-        
         let bx = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
             BatchKernelPolicy::Auto => 128,
@@ -449,7 +431,6 @@ impl CudaVlma {
         Ok(())
     }
 
-    
     pub fn vlma_batch_dev(
         &mut self,
         data_f32: &[f32],
@@ -464,14 +445,13 @@ impl CudaVlma {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaVlmaError::InvalidInput("all values are NaN".into()))?;
 
-        
         let combos = Self::expand_supported_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaVlmaError::InvalidInput(
                 "no supported parameter combinations (require matype='sma', devtype=0)".into(),
             ));
         }
-        
+
         for c in &combos {
             let max_p = c.max_period.unwrap_or(0);
             if max_p == 0 || max_p > len {
@@ -490,7 +470,6 @@ impl CudaVlma {
             }
         }
 
-        
         let (ps, pss, pn) = Self::build_prefixes(data_f32);
         let n = len;
         let m = combos.len();
@@ -512,7 +491,7 @@ impl CudaVlma {
             .and_then(|x| x.checked_add(periods_b))
             .and_then(|x| x.checked_add(out_b))
             .ok_or_else(|| CudaVlmaError::InvalidInput("total VRAM size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(bytes, headroom) {
             if let Some((free, _total)) = Self::device_mem_info() {
                 return Err(CudaVlmaError::OutOfMemory {
@@ -521,11 +500,12 @@ impl CudaVlma {
                     headroom,
                 });
             } else {
-                return Err(CudaVlmaError::InvalidInput("insufficient device memory".into()));
+                return Err(CudaVlmaError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
-        
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_ps = DeviceBuffer::from_slice(&ps)?;
         let d_pss = DeviceBuffer::from_slice(&pss)?;
@@ -541,13 +521,11 @@ impl CudaVlma {
         let d_min = DeviceBuffer::from_slice(&min_periods)?;
         let d_max = DeviceBuffer::from_slice(&max_periods)?;
 
-        
         let total_elems = m
             .checked_mul(n)
             .ok_or_else(|| CudaVlmaError::InvalidInput("m * n overflowed".into()))?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(total_elems) }?;
 
-        
         self.launch_batch(
             &d_prices,
             &d_ps,
@@ -598,7 +576,6 @@ impl CudaVlma {
             return Err(CudaVlmaError::InvalidInput("invalid periods".into()));
         }
 
-        
         let mut first_valids = Vec::with_capacity(cols);
         for s in 0..cols {
             let mut fv: Option<usize> = None;
@@ -622,7 +599,6 @@ impl CudaVlma {
             first_valids.push(fv as i32);
         }
 
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaVlmaError::InvalidInput("cols * rows overflowed".into()))?;
@@ -644,7 +620,9 @@ impl CudaVlma {
                     headroom,
                 });
             } else {
-                return Err(CudaVlmaError::InvalidInput("insufficient device memory".into()));
+                return Err(CudaVlmaError::InvalidInput(
+                    "insufficient device memory".into(),
+                ));
             }
         }
 
@@ -671,7 +649,6 @@ impl CudaVlma {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -684,7 +661,7 @@ pub mod benches {
     fn bytes_one_series_many_params() -> usize {
         let in_b = ONE_SERIES_LEN * 4;
         let out_b = ONE_SERIES_LEN * PARAM_SWEEP * 4;
-        
+
         in_b + out_b + (ONE_SERIES_LEN + 1) * (8 + 8 + 4) + 64 * 1024 * 1024
     }
 
@@ -730,15 +707,18 @@ pub mod benches {
             matype: ("sma".to_string(), "sma".to_string(), "".to_string()),
             devtype: (0, 0, 0),
         };
-        let first_valid = price
-            .iter()
-            .position(|v| !v.is_nan())
-            .unwrap_or(0);
+        let first_valid = price.iter().position(|v| !v.is_nan()).unwrap_or(0);
         let combos = CudaVlma::expand_supported_combos(&sweep).expect("vlma expand combos");
         let n_combos = combos.len();
         let (ps, pss, pn) = CudaVlma::build_prefixes(&price);
-        let min_periods: Vec<i32> = combos.iter().map(|c| c.min_period.unwrap_or(1) as i32).collect();
-        let max_periods: Vec<i32> = combos.iter().map(|c| c.max_period.unwrap_or(1) as i32).collect();
+        let min_periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.min_period.unwrap_or(1) as i32)
+            .collect();
+        let max_periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.max_period.unwrap_or(1) as i32)
+            .collect();
 
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
         let d_ps = DeviceBuffer::from_slice(&ps).expect("d_ps");

@@ -1,36 +1,3 @@
-//! # Exponential Moving Average (EMA)
-//!
-//! Decision log: SIMD disabled (sequential recurrence; stubs fallback to scalar). CUDA wrappers enabled with
-//! typed errors and VRAM headroom checks; Python exposes CAI v3 and DLPack with a context guard. No reference
-//! output changes; performance unchanged vs. prior scalar semantics.
-//!
-//! The Exponential Moving Average (EMA) provides a moving average that
-//! places a greater weight and significance on the most recent data points.
-//! The EMA reacts faster to recent price changes than the simple moving average (SMA).
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points, default: 9).
-//!
-//! ## Inputs
-//! - **data**: Time series data as a slice of f64 values or Candles with source selection.
-//!
-//! ## Returns
-//! - **`Ok(EmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//!   Leading values up to period-1 are NaN during the warmup period.
-//! - **`Err(EmaError)`** on invalid input or parameters.
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **AVX512 kernel**: ❌ Stub only - falls back to scalar implementation
-//! - **Streaming update**: ✅ O(1) complexity – uses precomputed reciprocals + FMA in warmup for fewer divisions
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix) for output vectors
-//! - **Note**: EMA is inherently sequential (each value depends on the previous), making SIMD parallelization
-//!   less beneficial than for window-based indicators. The scalar implementation is already optimal.
-//! - **Batch (rows) SIMD**: ❌ Not implemented; EMA row kernels retain a scalar per-row update with unchecked indexing
-//!   and fast finite checks. Vertical SIMD across rows may be revisited if typical row-counts justify the complexity.
-//!
-//! Decision: Streaming kernel uses FMA and precomputed 1/n for warmup; outputs match batch within existing tolerances.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -65,11 +32,10 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct EmaDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, 
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -79,7 +45,10 @@ pub struct EmaDeviceArrayF32Py {
 #[pymethods]
 impl EmaDeviceArrayF32Py {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
         d.set_item("shape", (self.rows, self.cols))?;
         d.set_item("typestr", "<f4")?;
@@ -97,11 +66,13 @@ impl EmaDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        d.set_item("version", 3)?; // producer sync in wrapper; omit 'stream'
+        d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -112,8 +83,7 @@ impl EmaDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -133,7 +103,6 @@ impl EmaDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let buf = self
             .buf
             .take()
@@ -179,7 +148,10 @@ pub struct EmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct EmaParams {
     pub period: Option<usize>,
 }
@@ -295,7 +267,11 @@ pub enum EmaError {
     #[error("ema: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("ema: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("ema: Invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("ema: arithmetic overflow while computing {context}")]
@@ -371,7 +347,6 @@ fn ema_compute_into(
                 ema_avx512_into(data, period, first, alpha, beta, out)
             }
 
-            // Fallback to scalar when AVX* is requested but not built/available
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
                 ema_scalar_into(data, period, first, alpha, beta, out)
@@ -390,17 +365,10 @@ pub fn ema_with_kernel(input: &EmaInput, kernel: Kernel) -> Result<EmaOutput, Em
     Ok(EmaOutput { values: out })
 }
 
-/// Compute EMA directly into a caller-provided buffer without allocations.
-///
-/// - Preserves the module's warmup semantics: fills the NaN prefix up to the
-///   first finite input value using the same quiet-NaN pattern as `alloc_with_nan_prefix`.
-/// - Writes results in-place for the remaining entries via the selected kernel (Auto).
-/// - `out.len()` must equal the input length; returns the existing length/period error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn ema_into(input: &EmaInput, out: &mut [f64]) -> Result<(), EmaError> {
     let (data, period, first, alpha, beta, chosen) = ema_prepare(input, Kernel::Auto)?;
 
-    
     if out.len() != data.len() {
         return Err(EmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -408,14 +376,11 @@ pub fn ema_into(input: &EmaInput, out: &mut [f64]) -> Result<(), EmaError> {
         });
     }
 
-    
-    
     let warm = first.min(out.len());
     for i in 0..warm {
         out[i] = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     ema_compute_into(data, period, first, alpha, beta, chosen, out);
 
     Ok(())
@@ -423,18 +388,14 @@ pub fn ema_into(input: &EmaInput, out: &mut [f64]) -> Result<(), EmaError> {
 
 #[inline(always)]
 fn is_finite_fast(x: f64) -> bool {
-    
     const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
     (x.to_bits() & EXP_MASK) != EXP_MASK
 }
 
-/// Computes EMA directly into a provided output slice, avoiding allocation.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn ema_into_slice(dst: &mut [f64], input: &EmaInput, kern: Kernel) -> Result<(), EmaError> {
     let (data, period, first, alpha, beta, chosen) = ema_prepare(input, kern)?;
 
-    
     if dst.len() != data.len() {
         return Err(EmaError::OutputLengthMismatch {
             expected: data.len(),
@@ -442,10 +403,8 @@ pub fn ema_into_slice(dst: &mut [f64], input: &EmaInput, kern: Kernel) -> Result
         });
     }
 
-    
     ema_compute_into(data, period, first, alpha, beta, chosen, dst);
 
-    
     for v in &mut dst[..first] {
         *v = f64::NAN;
     }
@@ -479,12 +438,10 @@ unsafe fn ema_scalar_into(
     let len = data.len();
     debug_assert_eq!(out.len(), len);
 
-    
     let mut mean = *data.get_unchecked(first_val);
     *out.get_unchecked_mut(first_val) = mean;
     let mut valid_count = 1usize;
 
-    
     let warmup_end = (first_val + period).min(len);
     for i in (first_val + 1)..warmup_end {
         let x = *data.get_unchecked(i);
@@ -493,11 +450,10 @@ unsafe fn ema_scalar_into(
             let vc = valid_count as f64;
             mean = ((vc - 1.0) * mean + x) / vc;
         }
-        
+
         *out.get_unchecked_mut(i) = mean;
     }
 
-    
     if warmup_end < len {
         let mut prev = mean;
         for i in warmup_end..len {
@@ -505,7 +461,7 @@ unsafe fn ema_scalar_into(
             if is_finite_fast(x) {
                 prev = beta.mul_add(prev, alpha * x);
             }
-            
+
             *out.get_unchecked_mut(i) = prev;
         }
     }
@@ -567,7 +523,7 @@ pub struct EmaStream {
     count: usize,
     mean: f64,
     filled: bool,
-    
+
     inv: Box<[f64]>,
 }
 
@@ -581,11 +537,10 @@ impl EmaStream {
                 data_len: 0,
             });
         }
-        
+
         let alpha = 2.0 / (period as f64 + 1.0);
         let beta = 1.0 - alpha;
 
-        
         let mut inv = Vec::with_capacity(period);
         for n in 1..=period {
             inv.push(1.0 / n as f64);
@@ -602,10 +557,8 @@ impl EmaStream {
         })
     }
 
-    /// O(1) update. Returns None until the stream has seen `period` finite values.
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        
         if !is_finite_fast(x) {
             return if self.filled { Some(self.mean) } else { None };
         }
@@ -614,15 +567,11 @@ impl EmaStream {
         let c = self.count;
 
         if c == 1 {
-            
             self.mean = x;
         } else if c <= self.period {
-            
-            
             let inv = self.inv[c - 1];
             self.mean = (x - self.mean).mul_add(inv, self.mean);
         } else {
-            
             self.mean = self.beta.mul_add(self.mean, self.alpha * x);
         }
 
@@ -741,17 +690,24 @@ impl EmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EmaBatchRange) -> Result<Vec<EmaParams>, EmaError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        
         if step == 0 || start == end {
             return vec![start];
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis_usize(r.period);
     if periods.is_empty() {
-        return Err(EmaError::InvalidRange { start: r.period.0, end: r.period.1, step: r.period.2 });
+        return Err(EmaError::InvalidRange {
+            start: r.period.0,
+            end: r.period.1,
+            step: r.period.2,
+        });
     }
     let mut out = Vec::with_capacity(periods.len());
     for &p in &periods {
@@ -798,13 +754,11 @@ fn ema_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(EmaError::AllValuesNaN)?;
 
-    
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(EmaError::ArithmeticOverflow { context: "rows*cols" })?;
+    let _total = rows.checked_mul(cols).ok_or(EmaError::ArithmeticOverflow {
+        context: "rows*cols",
+    })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = std::iter::repeat(first).take(rows).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
@@ -838,7 +792,6 @@ fn ema_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<EmaParams>, EmaError> {
-    
     let combos = expand_grid(sweep)?;
 
     if data.is_empty() {
@@ -860,16 +813,13 @@ fn ema_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let raw = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
@@ -881,7 +831,6 @@ fn ema_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -912,12 +861,10 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 
     let len = data.len();
 
-    
     let mut mean = unsafe { *data.get_unchecked(first) };
     unsafe { *out.get_unchecked_mut(first) = mean };
     let mut valid_count = 1usize;
 
-    
     let warmup_end = (first + period).min(len);
     for i in (first + 1)..warmup_end {
         let x = unsafe { *data.get_unchecked(i) };
@@ -926,11 +873,10 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
             let vc = valid_count as f64;
             mean = ((vc - 1.0) * mean + x) / vc;
         }
-        
+
         unsafe { *out.get_unchecked_mut(i) = mean };
     }
 
-    
     if warmup_end < len {
         let mut prev = mean;
         for i in warmup_end..len {
@@ -938,7 +884,7 @@ unsafe fn ema_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
             if is_finite_fast(x) {
                 prev = beta.mul_add(prev, alpha * x);
             }
-            
+
             unsafe { *out.get_unchecked_mut(i) = prev };
         }
     }
@@ -962,11 +908,10 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
-    
-    #[cfg(not(feature = "wasm"))]
+
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_ema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let mut data = Vec::with_capacity(256);
         for _ in 0..5 {
             data.push(f64::NAN);
@@ -1205,10 +1150,9 @@ mod tests {
         })?;
         let mut stream_values = Vec::with_capacity(candles.close.len());
 
-        
         for (i, &price) in candles.close.iter().enumerate() {
             let stream_val = stream.update(price);
-            
+
             if i < period - 1 {
                 assert!(
                     stream_val.is_none(),
@@ -1224,7 +1168,6 @@ mod tests {
 
         assert_eq!(batch_output.len(), stream_values.len());
 
-        
         for (i, (&b, &s)) in batch_output
             .iter()
             .zip(&stream_values)
@@ -1248,7 +1191,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_ema_no_poison(
         test_name: &str,
@@ -1259,7 +1201,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_periods = vec![2, 5, 9, 14, 20, 50, 100, 200];
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
@@ -1274,16 +1215,13 @@ mod tests {
                 );
                 let output = ema_with_kernel(&input, kernel)?;
 
-                
                 for (i, &val) in output.values.iter().enumerate() {
-                    
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1291,7 +1229,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1299,7 +1236,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1313,7 +1249,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_ema_no_poison(
         _test_name: &str,
@@ -1329,10 +1264,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
-                
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                     period + 10..400,
@@ -1348,25 +1281,20 @@ mod tests {
                 };
                 let input = EmaInput::from_slice(&data, params);
 
-                
                 let EmaOutput { values: out } = ema_with_kernel(&input, kernel).unwrap();
 
-                
                 let EmaOutput { values: ref_out } =
                     ema_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let alpha = 2.0 / (period as f64 + 1.0);
                 let beta = 1.0 - alpha;
 
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if i < first_valid {
                         prop_assert!(
                             y.is_nan(),
@@ -1378,7 +1306,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     if i >= first_valid {
                         let window = &data[first_valid..=i];
                         let lo = window
@@ -1405,9 +1332,7 @@ mod tests {
                         }
                     }
 
-                    
                     if period == 1 && i >= first_valid && data[i].is_finite() {
-                        
                         prop_assert!(
                             (y - data[i]).abs() <= 1e-10,
                             "[{}] Period=1 mismatch at idx {}: {} vs {}",
@@ -1418,7 +1343,6 @@ mod tests {
                         );
                     }
 
-                    
                     if i >= first_valid + period {
                         let window_start = i.saturating_sub(period);
                         let window = &data[window_start..=i];
@@ -1438,9 +1362,7 @@ mod tests {
                         }
                     }
 
-                    
                     if !y.is_finite() || !r.is_finite() {
-                        
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
                             "[{}] NaN/infinite mismatch at idx {}: {} vs {}",
@@ -1450,7 +1372,6 @@ mod tests {
                             r
                         );
                     } else {
-                        
                         let abs_diff = (y - r).abs();
                         let rel_diff = if r.abs() > 1e-10 {
                             abs_diff / r.abs()
@@ -1470,9 +1391,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
-                    
                     if i >= first_valid + period
                         && y.is_finite()
                         && out[i - 1].is_finite()
@@ -1481,7 +1399,6 @@ mod tests {
                         let expected_ema = alpha * data[i] + beta * out[i - 1];
                         let diff = (y - expected_ema).abs();
 
-                        
                         prop_assert!(
                             diff <= 1e-9 * ((i - first_valid) as f64).max(1.0),
                             "[{}] EMA recursive property failed at idx {}: {} vs {} (diff={})",
@@ -1493,10 +1410,7 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     if i >= first_valid + period * 2 {
-                        
                         let historical = &data[first_valid..=i];
                         let hist_min = historical
                             .iter()
@@ -1521,7 +1435,6 @@ mod tests {
                     }
                 }
 
-                
                 if first_valid < data.len() && out[first_valid].is_finite() {
                     prop_assert!(
                         (out[first_valid] - data[first_valid]).abs() <= 1e-10,
@@ -1608,7 +1521,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1616,19 +1528,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
         for source in &test_sources {
-            
             let output = EmaBatchBuilder::new()
                 .kernel(kernel)
-                .period_range(2, 200, 3) 
+                .period_range(2, 200, 3)
                 .apply_candles(&c, source)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1637,7 +1545,6 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1645,7 +1552,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1653,7 +1559,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -1663,7 +1568,6 @@ mod tests {
             }
         }
 
-        
         let edge_case_ranges = vec![(2, 5, 1), (190, 200, 2), (50, 100, 10)];
         for (start, end, step) in edge_case_ranges {
             let output = EmaBatchBuilder::new()
@@ -1695,7 +1599,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1731,17 +1634,15 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    
     #[test]
     fn test_batch_stream_consistency() -> Result<(), Box<dyn std::error::Error>> {
-        
         let test_data = vec![
             1.0,
             2.0,
             3.0,
             4.0,
             5.0,
-            f64::NAN, 
+            f64::NAN,
             6.0,
             7.0,
             8.0,
@@ -1757,29 +1658,24 @@ mod tests {
 
         let period = 5;
 
-        
         let params = EmaParams {
             period: Some(period),
         };
         let input = EmaInput::from_slice(&test_data, params.clone());
         let batch_output = ema(&input)?;
 
-        
         let mut stream = EmaStream::try_new(params)?;
         let mut stream_output = Vec::new();
         for &val in &test_data {
             let result = stream.update(val);
-            
-            
+
             stream_output.push(result.unwrap_or(f64::NAN));
         }
 
-        
         for i in period..test_data.len() {
             let batch_val = batch_output.values[i];
             let stream_val = stream_output[i];
 
-            
             if batch_val.is_finite() && stream_val.is_finite() {
                 let diff = (batch_val - stream_val).abs();
                 assert!(
@@ -1802,15 +1698,9 @@ mod tests {
             }
         }
 
-        
         for i in 0..period.min(test_data.len()) {
             if test_data[i].is_finite() {
-                
-                
-                
-                
                 if i > 0 && batch_output.values[i].is_finite() {
-                    
                     assert!(
                         (batch_output.values[i] - test_data[0]).abs() > 1e-10 || i == 0,
                         "Batch should use running mean during warmup, not just first value"
@@ -1822,8 +1712,6 @@ mod tests {
         Ok(())
     }
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "ema")]
@@ -1841,7 +1729,7 @@ pub fn ema_py<'py>(
     let params = EmaParams {
         period: Some(period),
     };
-    
+
     let result_vec: Vec<f64> = if let Ok(slice_in) = data.as_slice() {
         let ema_in = EmaInput::from_slice(slice_in, params);
         py.allow_threads(|| ema_with_kernel(&ema_in, kern).map(|o| o.values))
@@ -1886,7 +1774,6 @@ pub fn ema_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    
     let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
     for r in 0..rows {
         let row_start = r * cols;
@@ -1943,18 +1830,23 @@ pub fn ema_cuda_batch_dev_py(
         period: period_range,
     };
 
-    let (buf, rows, cols, ctx, dev) = py
-        .allow_threads(|| {
-            let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let handle = cuda
-                .ema_batch_dev(slice_in, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
-            let dev = cuda.device_id();
-            Ok::<_, PyErr>((handle.buf, handle.rows, handle.cols, ctx, dev))
-        })?;
+    let (buf, rows, cols, ctx, dev) = py.allow_threads(|| {
+        let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let handle = cuda
+            .ema_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        Ok::<_, PyErr>((handle.buf, handle.rows, handle.cols, ctx, dev))
+    })?;
 
-    Ok(EmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev })
+    Ok(EmaDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1981,18 +1873,23 @@ pub fn ema_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let (buf, rows, cols, ctx, dev) = py
-        .allow_threads(|| {
-            let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let handle = cuda
-                .ema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let ctx = cuda.context_arc();
-            let dev = cuda.device_id();
-            Ok::<_, PyErr>((handle.buf, handle.rows, handle.cols, ctx, dev))
-        })?;
+    let (buf, rows, cols, ctx, dev) = py.allow_threads(|| {
+        let cuda = CudaEma::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let handle = cuda
+            .ema_many_series_one_param_time_major_dev(flat, num_series, series_len, &params)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev = cuda.device_id();
+        Ok::<_, PyErr>((handle.buf, handle.rows, handle.cols, ctx, dev))
+    })?;
 
-    Ok(EmaDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev })
+    Ok(EmaDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev,
+    })
 }
 
 #[cfg(feature = "python")]
@@ -2018,14 +1915,12 @@ impl EmaStreamPy {
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = EmaParams {
@@ -2033,23 +1928,21 @@ pub fn ema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = EmaInput::from_slice(data, params);
 
-    
     let mut output = vec![0.0; data.len()];
 
-    
     ema_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EmaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2058,7 +1951,7 @@ pub struct EmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ema_batch)]
 pub fn ema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: EmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2082,7 +1975,7 @@ pub fn ema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ema_batch_metadata_js(
     period_start: usize,
@@ -2093,8 +1986,7 @@ pub fn ema_batch_metadata_js(
         period: (period_start, period_end, period_step),
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let mut metadata = Vec::with_capacity(combos.len());
 
     for combo in combos {
@@ -2104,22 +1996,18 @@ pub fn ema_batch_metadata_js(
     Ok(metadata)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ema_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ema_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2127,7 +2015,7 @@ pub fn ema_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ema_into(
     in_ptr: *const f64,
@@ -2135,38 +2023,30 @@ pub fn ema_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to ema_into"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        
         let params = EmaParams {
             period: Some(period),
         };
         let input = EmaInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             ema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             ema_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2176,7 +2056,7 @@ pub fn ema_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ema_batch_into(
     in_ptr: *const f64,
@@ -2197,16 +2077,14 @@ pub fn ema_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
-    let rows = combos.len();
-    let cols = len;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos.len();
+        let cols = len;
         let elems = rows
             .checked_mul(cols)
             .ok_or(JsValue::from_str("overflow rows*cols"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, elems);
 
-        
         let first = data
             .iter()
             .position(|x| !x.is_nan())
@@ -2216,7 +2094,6 @@ pub fn ema_batch_into(
             out[s..s + first].fill(f64::NAN);
         }
 
-        
         ema_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

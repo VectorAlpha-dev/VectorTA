@@ -107,7 +107,6 @@ fn deviation_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         devtype: Some(0),
     };
 
-    
     let mut cpu = vec![f32::NAN; rows * cols];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

@@ -1,28 +1,3 @@
-//! # Wilder's Moving Average (Wilders)
-//!
-//! A moving average introduced by J. Welles Wilder, commonly used in indicators such as
-//! the Average Directional Index (ADX). Places a heavier emphasis on new data than an SMA,
-//! but less so than an EMA. Features include kernel selection, batch calculation, AVX stubs,
-//! and streaming in parity with alma.rs.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points).
-//!
-//! ## Returns
-//! - **`Ok(WildersOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(WildersError)`** otherwise.
-//!
-//! ## Developer Status
-//! - **AVX2/AVX512**: Implemented for initial warmup sum (8/4‑wide accumulation);
-//!   rolling recurrence remains scalar due to data dependency. Runtime selection follows alma.rs.
-//! - **Streaming update**: O(1) warm‑up via incremental sum; steady‑state uses `mul_add` (FMA) for speed and single rounding.
-//! - **Memory optimization**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) ✓
-//! - **SIMD note**: For single-series, speedups mainly come from large `period` where warmup dominates.
-//!   Recurrence uses `mul_add` when available for slight speed and improved numerical stability.
-//!
-//! Decision: Streaming enforces a contiguous run of `period` finite values before first output (parity with batch),
-//! then updates with y = (x − y)·(1/period) + y via fused `mul_add`. Matches batch to within FP roundoff.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::wilders_wrapper::DeviceArrayF32Wilders;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -36,9 +11,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -57,8 +32,6 @@ use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
-// --- Input/Output/Params/Builder Structs ---
 
 #[derive(Debug, Clone)]
 pub enum WildersData<'a> {
@@ -85,7 +58,10 @@ pub struct WildersOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct WildersParams {
     pub period: Option<usize>,
 }
@@ -185,8 +161,6 @@ impl WildersBuilder {
     }
 }
 
-// --- Error Handling ---
-
 #[derive(Debug, Error)]
 pub enum WildersError {
     #[error("wilders: Input data slice is empty.")]
@@ -200,16 +174,18 @@ pub enum WildersError {
     #[error("wilders: Output length mismatch: output = {output_len}, data = {data_len}")]
     OutputLengthMismatch { output_len: usize, data_len: usize },
     #[error("wilders: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("wilders: Invalid kernel for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
-    // Back-compat: keep the old variant name to avoid breaking callers. New code should use InvalidKernelForBatch.
+
     #[error("wilders: Invalid kernel type for batch operation: {kernel}")]
     #[allow(dead_code)]
     InvalidKernelType { kernel: String },
 }
-
-// --- API parity main function & kernel dispatch ---
 
 #[inline]
 pub fn wilders(input: &WildersInput) -> Result<WildersOutput, WildersError> {
@@ -244,7 +220,6 @@ pub fn wilders_with_kernel(
         });
     }
 
-    // Check that all values in the initial window are finite
     for i in 0..period {
         if !data[first + i].is_finite() {
             return Err(WildersError::NotEnoughValidData {
@@ -277,17 +252,11 @@ pub fn wilders_with_kernel(
     Ok(WildersOutput { values: out })
 }
 
-/// Writes Wilder's Moving Average into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like `wilders()`/`wilders_with_kernel()`.
-/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` otherwise.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn wilders_into(input: &WildersInput, out: &mut [f64]) -> Result<(), WildersError> {
     wilders_into_slice(out, input, Kernel::Auto)
 }
-
-
 
 #[inline]
 pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
@@ -301,14 +270,10 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
 
     let wma_start = first_valid + period - 1;
 
-    
-    
     unsafe {
-        
         let mut sum = 0.0f64;
         let mut p = data.as_ptr().add(first_valid);
 
-        
         let chunks4 = period / 4;
         for _ in 0..chunks4 {
             sum += *p.add(0) + *p.add(1) + *p.add(2) + *p.add(3);
@@ -322,12 +287,10 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
             _ => core::hint::unreachable_unchecked(),
         }
 
-        
         let inv_n = 1.0 / (period as f64);
         let mut y = sum * inv_n;
         *out.get_unchecked_mut(wma_start) = y;
 
-        
         if period == 1 {
             let mut i = wma_start + 1;
             while i < len {
@@ -338,7 +301,7 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
         }
 
         let alpha = inv_n;
-        
+
         let mut i = wma_start + 1;
         let end_even = wma_start + 1 + ((len - (wma_start + 1)) & !1);
         while i < end_even {
@@ -359,9 +322,6 @@ pub fn wilders_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut
     }
 }
 
-
-
-/// Write directly to output slice - no allocations
 pub fn wilders_into_slice(
     dst: &mut [f64],
     input: &WildersInput,
@@ -398,7 +358,6 @@ pub fn wilders_into_slice(
         });
     }
 
-    
     for i in 0..period {
         if !data[first + i].is_finite() {
             return Err(WildersError::NotEnoughValidData {
@@ -428,7 +387,6 @@ pub fn wilders_into_slice(
         }
     }
 
-    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -436,8 +394,6 @@ pub fn wilders_into_slice(
 
     Ok(())
 }
-
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -454,7 +410,6 @@ pub unsafe fn wilders_avx2(data: &[f64], period: usize, first_valid: usize, out:
 
     let wma_start = first_valid + period - 1;
 
-    
     let mut vacc = _mm256_setzero_pd();
     let mut p = data.as_ptr().add(first_valid);
     let chunks4 = period / 4;
@@ -463,7 +418,7 @@ pub unsafe fn wilders_avx2(data: &[f64], period: usize, first_valid: usize, out:
         vacc = _mm256_add_pd(vacc, v);
         p = p.add(4);
     }
-    
+
     let hi = _mm256_extractf128_pd(vacc, 1);
     let lo = _mm256_castpd256_pd128(vacc);
     let v2 = _mm_add_pd(lo, hi);
@@ -543,7 +498,6 @@ pub unsafe fn wilders_avx512_short(
 
     let wma_start = first_valid + period - 1;
 
-    
     let mut vacc = _mm512_setzero_pd();
     let mut p = data.as_ptr().add(first_valid);
     let chunks8 = period / 8;
@@ -552,7 +506,7 @@ pub unsafe fn wilders_avx512_short(
         vacc = _mm512_add_pd(vacc, v);
         p = p.add(8);
     }
-    
+
     let vhi256 = _mm512_extractf64x4_pd(vacc, 1);
     let vlo256 = _mm512_castpd512_pd256(vacc);
     let v256 = _mm256_add_pd(vlo256, vhi256);
@@ -630,7 +584,6 @@ pub unsafe fn wilders_avx512_long(
 
     let wma_start = first_valid + period - 1;
 
-    
     let mut vacc0 = _mm512_setzero_pd();
     let mut vacc1 = _mm512_setzero_pd();
     let mut p = data.as_ptr().add(first_valid);
@@ -644,7 +597,6 @@ pub unsafe fn wilders_avx512_long(
     }
     let mut vacc = _mm512_add_pd(vacc0, vacc1);
 
-    
     let rem = period - (chunks16 * 16);
     if rem >= 8 {
         let v = _mm512_loadu_pd(p);
@@ -652,7 +604,6 @@ pub unsafe fn wilders_avx512_long(
         p = p.add(8);
     }
 
-    
     let vhi256 = _mm512_extractf64x4_pd(vacc, 1);
     let vlo256 = _mm512_castpd512_pd256(vacc);
     let v256 = _mm256_add_pd(vlo256, vhi256);
@@ -710,20 +661,14 @@ pub unsafe fn wilders_avx512_long(
     }
 }
 
-
-
-/// Streaming Wilder's MA with O(1) warm-up and FMA recurrence.
-/// Requires a contiguous run of `period` finite values before the first output.
 #[derive(Debug, Clone)]
 pub struct WildersStream {
     period: usize,
     alpha: f64,
 
-    // O(1) warm-up state
     warm_sum: f64,
     warm_count: usize,
 
-    // Steady-state
     last: f64,
     started: bool,
 }
@@ -749,17 +694,8 @@ impl WildersStream {
         })
     }
 
-    /// Push one value. Returns `Some(y)` once initialized, else `None` during warm-up.
-    /// Warm-up is O(1) per tick: we incrementally build the initial average instead of
-    /// scanning the whole buffer when it fills.
-    ///
-    /// NaN/inf policy:
-    /// - Before start: require a contiguous run of `period` finite values; any non-finite
-    ///   resets the streak and keeps returning `None`.
-    /// - After start: apply the Wilder recurrence; non-finite inputs propagate per IEEE‑754.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Warm-up path
         if !self.started {
             if !value.is_finite() {
                 self.warm_sum = 0.0;
@@ -774,20 +710,16 @@ impl WildersStream {
                 return None;
             }
 
-            // First output equals the simple average of the first `period` finite values
             let y0 = self.warm_sum / (self.period as f64);
             self.last = y0;
             self.started = true;
             return Some(self.last);
         }
 
-        // Steady-state update with FMA
         self.last = (value - self.last).mul_add(self.alpha, self.last);
         Some(self.last)
     }
 }
-
-// --- Batch Ranges, Builder, Output, Batch Apply ---
 
 #[derive(Clone, Debug)]
 pub struct WildersBatchRange {
@@ -796,7 +728,9 @@ pub struct WildersBatchRange {
 
 impl Default for WildersBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -847,9 +781,7 @@ pub fn wilders_batch_with_kernel(
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
-        _ => {
-            return Err(WildersError::InvalidKernelForBatch(k))
-        }
+        _ => return Err(WildersError::InvalidKernelForBatch(k)),
     };
     let simd = match kernel {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -881,12 +813,9 @@ impl WildersBatchOutput {
     }
 }
 
-// --- Batch Internals & Grid Expansion ---
-
 #[inline(always)]
 fn expand_grid(r: &WildersBatchRange) -> Vec<WildersParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        // Zero step or equal bounds → static value
         if step == 0 || start == end {
             return vec![start];
         }
@@ -897,11 +826,10 @@ fn expand_grid(r: &WildersBatchRange) -> Vec<WildersParams> {
                 out.push(v);
                 match v.checked_add(step) {
                     Some(n) => v = n,
-                    None => break, // overflow guard
+                    None => break,
                 }
             }
         } else {
-            // Reversed bounds: walk downward by `step`
             let mut v = start;
             loop {
                 if v < end {
@@ -913,7 +841,6 @@ fn expand_grid(r: &WildersBatchRange) -> Vec<WildersParams> {
                 }
                 v = v.saturating_sub(step);
                 if v == 0 && end != 0 {
-                    // Prevent infinite loop on extreme underflow scenarios
                     break;
                 }
             }
@@ -957,7 +884,11 @@ fn wilders_batch_inner(
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
-        return Err(WildersError::InvalidRange { start: s, end: e, step: st });
+        return Err(WildersError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
+        });
     }
     let first = data
         .iter()
@@ -972,27 +903,20 @@ fn wilders_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    // Checked arithmetic before allocation
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(WildersError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+
+    let _total = rows.checked_mul(cols).ok_or(WildersError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    // -----------------------------------------
-    // 2. allocate rows×cols uninitialised
-    //    and paint the NaN prefixes
-    // -----------------------------------------
     let mut raw = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut raw, cols, &warm);
 
-    // Precompute prefix sums once for all rows: P[i] = sum(data[first..first+i])
     let mut pref = Vec::with_capacity((cols - first) + 1);
     pref.push(0.0);
     let mut acc = 0.0f64;
@@ -1001,14 +925,10 @@ fn wilders_batch_inner(
         pref.push(acc);
     }
 
-    // -----------------------------------------
-    // 3. helper that fills a single row
-    // -----------------------------------------
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let out_row = std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        // Initial average via prefix sums
         let wma_start = first + period - 1;
         let sum = pref[period] - pref[0];
         let inv_n = 1.0 / (period as f64);
@@ -1044,9 +964,6 @@ fn wilders_batch_inner(
         }
     };
 
-    // -----------------------------------------
-    // 4. run every row
-    // -----------------------------------------
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1067,10 +984,6 @@ fn wilders_batch_inner(
         }
     }
 
-    // -----------------------------------------
-    // 5. convert to Vec<f64> now that everything
-    //    has been fully initialised
-    // -----------------------------------------
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(WildersBatchOutput {
         values,
@@ -1091,7 +1004,11 @@ pub fn wilders_batch_inner_into(
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, st) = sweep.period;
-        return Err(WildersError::InvalidRange { start: s, end: e, step: st });
+        return Err(WildersError::InvalidRange {
+            start: s,
+            end: e,
+            step: st,
+        });
     }
 
     let first = data
@@ -1108,16 +1025,13 @@ pub fn wilders_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    // Guard potential overflow of rows * cols used by callers for preallocation
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(WildersError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
 
-    // 1) Cast to MaybeUninit and paint warm prefixes via helper
+    let _total = rows.checked_mul(cols).ok_or(WildersError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1127,7 +1041,6 @@ pub fn wilders_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // Precompute prefix sums once for all rows: P[i] = sum(data[first..first+i])
     let mut pref = Vec::with_capacity((cols - first) + 1);
     pref.push(0.0);
     let mut acc = 0.0f64;
@@ -1136,13 +1049,11 @@ pub fn wilders_batch_inner_into(
         pref.push(acc);
     }
 
-    // 2) Row writer that fills post-warm cells
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let dst: &mut [f64] =
             std::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        // Initial average via prefix sums
         let wma_start = first + period - 1;
         let sum = pref[period] - pref[0];
         let inv_n = 1.0 / (period as f64);
@@ -1178,7 +1089,6 @@ pub fn wilders_batch_inner_into(
         }
     };
 
-    // 3) Iterate by rows
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1202,8 +1112,6 @@ pub fn wilders_batch_inner_into(
 
     Ok(combos)
 }
-
-// --- Row functions for batch (all just call scalar or AVX stubs) ---
 
 #[inline(always)]
 pub unsafe fn wilders_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
@@ -1242,8 +1150,6 @@ pub unsafe fn wilders_row_avx512_long(data: &[f64], first: usize, period: usize,
     wilders_avx512_long(data, period, first, out)
 }
 
-// --- Unit Tests (feature parity with alma.rs) ---
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1252,7 +1158,6 @@ mod tests {
 
     #[test]
     fn test_wilders_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare input: two NaNs then a ramp of finite values
         let mut data = Vec::with_capacity(256);
         data.push(f64::NAN);
         data.push(f64::NAN);
@@ -1263,30 +1168,38 @@ mod tests {
         let params = WildersParams { period: Some(5) };
         let input = WildersInput::from_slice(&data, params);
 
-        // Baseline via existing Vec-returning API
         let expected = wilders(&input)?.values;
 
-        // Preallocate output and call new into API
         let mut out = vec![0.0; data.len()];
 
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             wilders_into(&input, &mut out)?;
         }
 
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // Fallback in wasm builds: parity still validated via into_slice helper
             wilders_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(out.len(), expected.len());
         for (i, (a, b)) in out.iter().zip(expected.iter()).enumerate() {
             if a.is_nan() || b.is_nan() {
-                assert!(a.is_nan() && b.is_nan(), "NaN parity mismatch at index {}", i);
+                assert!(
+                    a.is_nan() && b.is_nan(),
+                    "NaN parity mismatch at index {}",
+                    i
+                );
             } else {
                 let diff = (a - b).abs();
-                assert!(diff <= 1e-12, "Mismatch at {}: got {}, expected {}, diff {}", i, a, b, diff);
+                assert!(
+                    diff <= 1e-12,
+                    "Mismatch at {}: got {}, expected {}, diff {}",
+                    i,
+                    a,
+                    b,
+                    diff
+                );
             }
         }
         Ok(())
@@ -1455,7 +1368,7 @@ mod tests {
         kernel: Kernel,
     ) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        // Data with NaN in the initial window after first valid value
+
         let data = vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let params = WildersParams { period: Some(5) };
         let input = WildersInput::from_slice(&data, params);
@@ -1484,8 +1397,7 @@ mod tests {
         let params = WildersParams { period: Some(3) };
         let input = WildersInput::from_slice(&data, params);
 
-        // Create a mismatched output buffer
-        let mut out = vec![0.0; 10]; // Wrong size
+        let mut out = vec![0.0; 10];
         let res = wilders_into_slice(&mut out, &input, kernel);
         assert!(
             matches!(
@@ -1506,7 +1418,6 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let sweep = WildersBatchRange { period: (3, 5, 1) };
 
-        // Try to use a non-batch kernel for batch operation
         let res = wilders_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(
             matches!(res, Err(WildersError::InvalidKernelForBatch(_))),
@@ -1560,7 +1471,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_wilders_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1568,20 +1478,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase chance of catching bugs
-        let test_periods = vec![
-            2,   // Small period
-            5,   // Default period
-            10,  // Medium period
-            14,  // Common RSI period
-            20,  // Common period
-            50,  // Large period
-            100, // Very large period
-            200, // Extra large period
-        ];
+        let test_periods = vec![2, 5, 10, 14, 20, 50, 100, 200];
 
         for &period in &test_periods {
-            // Skip if period would be too large for the data
             if period > candles.close.len() {
                 continue;
             }
@@ -1595,16 +1494,13 @@ mod tests {
             );
             let output = wilders_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1612,7 +1508,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1620,7 +1515,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1633,7 +1527,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_wilders_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1692,17 +1585,14 @@ mod tests {
                 let WildersOutput { values: ref_out } =
                     wilders_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first_valid + period - 1;
                 for i in 0..warmup.min(out.len()) {
                     prop_assert!(out[i].is_nan(), "Expected NaN at index {} during warmup", i);
                 }
 
-                
                 for i in warmup..out.len() {
                     if data[i].is_finite() {
                         prop_assert!(
@@ -1713,8 +1603,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if warmup < out.len() {
                     let data_min = data[first_valid..]
                         .iter()
@@ -1739,7 +1627,6 @@ mod tests {
                     }
                 }
 
-                
                 if period == 1 && warmup < out.len() {
                     for i in warmup..out.len() {
                         prop_assert!(
@@ -1752,7 +1639,6 @@ mod tests {
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup < out.len() {
                     let constant_val = data[first_valid];
                     for i in warmup..out.len() {
@@ -1765,9 +1651,6 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if warmup + 1 < out.len() {
                     let alpha = 1.0 / (period as f64);
                     for i in (warmup + 1)..out.len() {
@@ -1782,8 +1665,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if warmup < out.len() && warmup >= period - 1 {
                     let sum: f64 = data[first_valid..first_valid + period].iter().sum();
                     let expected_first = sum / (period as f64);
@@ -1796,7 +1677,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -1851,31 +1731,25 @@ mod tests {
         check_wilders_property
     );
 
-    
     #[test]
     fn test_wilders_invalid_kernel_batch() {
         let _ = check_wilders_invalid_kernel_batch();
     }
 
-    
     #[test]
     fn test_wilders_nan_poisoning_prevented() {
-        
         let data = vec![1.0, 2.0, f64::NAN, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let params = WildersParams { period: Some(5) };
         let input = WildersInput::from_slice(&data, params);
 
-        
         let result = wilders(&input);
         assert!(result.is_err(), "Should fail with NaN in initial window");
 
-        
         let clean_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
         let clean_params = WildersParams { period: Some(5) };
         let clean_input = WildersInput::from_slice(&clean_data, clean_params);
         let clean_result = wilders(&clean_input).unwrap();
 
-        
         for i in 5..clean_result.values.len() {
             assert!(
                 clean_result.values[i].is_finite(),
@@ -1901,7 +1775,6 @@ mod tests {
 
         assert_eq!(row.len(), c.close.len());
 
-        
         let expected = [
             59302.18156619092,
             59277.94525295273,
@@ -1924,7 +1797,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1932,19 +1804,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            (2, 10, 1),    
-            (5, 25, 5),    
-            (10, 30, 10),  
-            (14, 50, 7),   
-            (20, 100, 20), 
-            (50, 200, 50), 
-            (2, 6, 2),     
+            (2, 10, 1),
+            (5, 25, 5),
+            (10, 30, 10),
+            (14, 50, 7),
+            (20, 100, 20),
+            (50, 200, 50),
+            (2, 6, 2),
         ];
 
         for (start, end, step) in batch_configs {
-            
             if start > c.close.len() {
                 continue;
             }
@@ -1954,9 +1824,7 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1966,7 +1834,6 @@ mod tests {
                 let col = idx % output.cols;
                 let period = output.combos[row].period.unwrap_or(0);
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1974,7 +1841,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1982,7 +1848,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) for period {} in range ({}, {}, {})",
@@ -1995,7 +1860,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2071,8 +1935,6 @@ impl WildersStreamPy {
         Ok(WildersStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated Wilder's MA value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2097,7 +1959,6 @@ pub fn wilders_batch_py<'py>(
         period: period_range,
     };
 
-    // Expand grid once to know rows*cols
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
@@ -2112,17 +1973,13 @@ pub fn wilders_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // Pre-allocate NumPy array (1-D, will reshape later)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Parse kernel string to enum with CPU feature validation
     let kern = validate_kernel(kernel, true)?;
 
-    // Heavy work without the GIL
     let combos = py
         .allow_threads(|| {
-            // Resolve Kernel::Auto to a specific kernel
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2133,12 +1990,11 @@ pub fn wilders_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => unreachable!(),
             };
-            // Call the batch function with the pre-allocated buffer
+
             wilders_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2216,7 +2072,6 @@ pub fn wilders_cuda_many_series_one_param_dev_py(
     Ok(WildersDeviceArrayF32Py { inner: Some(inner) })
 }
 
-// Wilders-specific CUDA Array Interface v3 + DLPack (version negotiation) with context guard
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct WildersDeviceArrayF32Py {
@@ -2233,7 +2088,7 @@ impl WildersDeviceArrayF32Py {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let d = PyDict::new(py);
-        
+
         d.set_item("shape", (inner.rows, inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item(
@@ -2244,26 +2099,16 @@ impl WildersDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        
-        let dev = self
-            .inner
-            .as_ref()
-            .map(|h| h.device_id as i32)
-            .unwrap_or(0);
+        let dev = self.inner.as_ref().map(|h| h.device_id as i32).unwrap_or(0);
         (2, dev)
     }
 
-    
-    
-    
-    
-    
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -2275,7 +2120,6 @@ impl WildersDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2296,7 +2140,6 @@ impl WildersDeviceArrayF32Py {
         }
         let _ = stream;
 
-        
         let inner = self
             .inner
             .take()
@@ -2312,7 +2155,7 @@ impl WildersDeviceArrayF32Py {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = WildersParams {
@@ -2328,7 +2171,7 @@ pub fn wilders_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2337,7 +2180,7 @@ pub fn wilders_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2347,7 +2190,7 @@ pub fn wilders_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_into(
     in_ptr: *const f64,
@@ -2372,7 +2215,6 @@ pub fn wilders_into(
         let input = WildersInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             wilders_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2388,13 +2230,13 @@ pub fn wilders_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WildersBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WildersBatchJsOutput {
     pub values: Vec<f64>,
@@ -2403,7 +2245,7 @@ pub struct WildersBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = wilders_batch)]
 pub fn wilders_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: WildersBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2413,7 +2255,6 @@ pub fn wilders_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
         period: config.period_range,
     };
 
-    
     let kernel = match Kernel::Auto {
         Kernel::Auto => detect_best_batch_kernel(),
         k => k,
@@ -2439,7 +2280,7 @@ pub fn wilders_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_batch_js(
     data: &[f64],
@@ -2451,13 +2292,12 @@ pub fn wilders_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    
     wilders_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_batch_into(
     in_ptr: *const f64,
@@ -2486,7 +2326,6 @@ pub fn wilders_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         let kernel = match Kernel::Auto {
             Kernel::Auto => detect_best_batch_kernel(),
             k => k,
@@ -2505,7 +2344,7 @@ pub fn wilders_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wilders_batch_metadata_js(
     period_start: usize,

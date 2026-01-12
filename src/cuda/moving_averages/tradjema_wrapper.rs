@@ -1,16 +1,3 @@
-//! CUDA wrapper for the TrAdjEMA (Trend Adjusted EMA) kernels.
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX load with target-from-context and OptLevel O2, with relaxed fallbacks
-//! - NON_BLOCKING stream
-//! - VRAM estimates + headroom checks; safe grid sizing
-//! - Warmup/NaN semantics match scalar (prefix NaNs until warm)
-//! - Minimal policy + introspection for kernel selection (OneD with block_x)
-//!
-//! Kernels expected:
-//! - `tradjema_batch_f32`                          
-//! - `tradjema_many_series_one_param_time_major_f32` 
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -34,10 +21,26 @@ pub enum CudaTradjemaError {
     Cuda(cust::error::CudaError),
     InvalidInput(String),
     InvalidPolicy(&'static str),
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    MissingKernelSymbol { name: &'static str },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
-    DeviceMismatch { buf: u32, current: u32 },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 
@@ -47,7 +50,11 @@ impl fmt::Display for CudaTradjemaError {
             CudaTradjemaError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaTradjemaError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
             CudaTradjemaError::InvalidPolicy(p) => write!(f, "Invalid policy: {}", p),
-            CudaTradjemaError::OutOfMemory { required, free, headroom } => write!(
+            CudaTradjemaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "out of memory: required={} free={} headroom={}",
                 required, free, headroom
@@ -55,16 +62,21 @@ impl fmt::Display for CudaTradjemaError {
             CudaTradjemaError::MissingKernelSymbol { name } => {
                 write!(f, "missing kernel symbol: {}", name)
             }
-            CudaTradjemaError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaTradjemaError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "launch config too large: grid=({},{},{}) block=({},{},{})",
                 gx, gy, gz, bx, by, bz
             ),
-            CudaTradjemaError::DeviceMismatch { buf, current } => write!(
-                f,
-                "device mismatch: buf={} current={}",
-                buf, current
-            ),
+            CudaTradjemaError::DeviceMismatch { buf, current } => {
+                write!(f, "device mismatch: buf={} current={}", buf, current)
+            }
             CudaTradjemaError::NotImplemented => write!(f, "not implemented"),
         }
     }
@@ -131,7 +143,7 @@ impl CudaTradjema {
         let context = Context::new(device).map_err(CudaTradjemaError::Cuda)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/tradjema_kernel.ptx"));
-        // Prefer target-from-context + O2, then relax
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -143,7 +155,8 @@ impl CudaTradjema {
                 Err(_) => Module::from_ptx(ptx, &[]).map_err(CudaTradjemaError::Cuda)?,
             },
         };
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTradjemaError::Cuda)?;
+        let stream =
+            Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaTradjemaError::Cuda)?;
 
         Ok(Self {
             module,
@@ -169,8 +182,12 @@ impl CudaTradjema {
     pub fn set_policy(&mut self, policy: CudaTradjemaPolicy) {
         self.policy = policy;
     }
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn policy(&self) -> &CudaTradjemaPolicy {
         &self.policy
     }
@@ -181,9 +198,7 @@ impl CudaTradjema {
         self.last_many
     }
     pub fn synchronize(&self) -> Result<(), CudaTradjemaError> {
-        self.stream
-            .synchronize()
-            .map_err(CudaTradjemaError::Cuda)
+        self.stream.synchronize().map_err(CudaTradjemaError::Cuda)
     }
 
     fn mem_check_enabled() -> bool {
@@ -211,12 +226,7 @@ impl CudaTradjema {
 
     #[inline]
     fn smem_bytes_for_len(length: usize) -> usize {
-        // Matches CUDA kernel shared layout:
-        // Batch uses f32 shared arrays; many-series uses f64.
-        // Size for f64 is a safe upper bound for both.
-        // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
-        length
-            * (2 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<i32>())
+        length * (2 * std::mem::size_of::<f64>() + 2 * std::mem::size_of::<i32>())
     }
 
     #[inline]
@@ -247,21 +257,30 @@ impl CudaTradjema {
 
         #[inline]
         fn axis_usize(start: usize, end: usize, step: usize) -> Vec<usize> {
-            if step == 0 { return vec![start]; }
+            if step == 0 {
+                return vec![start];
+            }
             let mut vals = Vec::new();
             if start <= end {
                 let mut v = start;
                 while v <= end {
                     vals.push(v);
-                    match v.checked_add(step) { Some(n) if n > v => v = n, _ => break }
+                    match v.checked_add(step) {
+                        Some(n) if n > v => v = n,
+                        _ => break,
+                    }
                 }
             } else {
                 let mut v = start;
                 loop {
                     vals.push(v);
-                    if v <= end { break; }
+                    if v <= end {
+                        break;
+                    }
                     v = v.saturating_sub(step);
-                    if v < end { break; }
+                    if v < end {
+                        break;
+                    }
                 }
             }
             vals
@@ -269,23 +288,46 @@ impl CudaTradjema {
 
         #[inline]
         fn axis_f64(start: f64, end: f64, step: f64) -> Vec<f64> {
-            if step == 0.0 { return vec![start]; }
+            if step == 0.0 {
+                return vec![start];
+            }
             let mut vals = Vec::new();
             if start <= end {
                 let mut v = start;
-                while v <= end { vals.push(v); v += step; if !v.is_finite() { break; } }
+                while v <= end {
+                    vals.push(v);
+                    v += step;
+                    if !v.is_finite() {
+                        break;
+                    }
+                }
             } else {
                 let mut v = start;
-                while v >= end { vals.push(v); v -= step.abs(); if !v.is_finite() { break; } }
+                while v >= end {
+                    vals.push(v);
+                    v -= step.abs();
+                    if !v.is_finite() {
+                        break;
+                    }
+                }
             }
             vals
         }
 
         let lengths = axis_usize(ls, le, lstep);
         let mults = axis_f64(ms, me, mstep);
-        if lengths.is_empty() || mults.is_empty() { return Vec::new(); }
+        if lengths.is_empty() || mults.is_empty() {
+            return Vec::new();
+        }
         let mut combos = Vec::with_capacity(lengths.len().saturating_mul(mults.len()));
-        for &l in &lengths { for &m in &mults { combos.push(TradjemaParams { length: Some(l), mult: Some(m) }); } }
+        for &l in &lengths {
+            for &m in &mults {
+                combos.push(TradjemaParams {
+                    length: Some(l),
+                    mult: Some(m),
+                });
+            }
+        }
         combos
     }
 
@@ -416,7 +458,6 @@ impl CudaTradjema {
         max_length: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTradjemaError> {
-        // Basic bounds for i32 kernel args
         if series_len > i32::MAX as usize
             || n_combos > i32::MAX as usize
             || first_valid > i32::MAX as usize
@@ -429,9 +470,10 @@ impl CudaTradjema {
         let mut func = self
             .module
             .get_function("tradjema_batch_f32")
-            .map_err(|_| CudaTradjemaError::MissingKernelSymbol { name: "tradjema_batch_f32" })?;
+            .map_err(|_| CudaTradjemaError::MissingKernelSymbol {
+                name: "tradjema_batch_f32",
+            })?;
 
-        // Compute dynamic shared memory and validate against device capability
         let shared_bytes = Self::smem_bytes_for_len(max_length);
         let dev = Device::get_device(self.device_id).map_err(CudaTradjemaError::Cuda)?;
         let max_optin = dev
@@ -444,7 +486,6 @@ impl CudaTradjema {
             )));
         }
 
-        // Favor occupancy-based suggestion; fall back to policy/env
         let fallback_bx = self.choose_batch_block_x();
         let _ = func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize);
         let block_x: u32 = func
@@ -453,7 +494,7 @@ impl CudaTradjema {
             .unwrap_or(fallback_bx)
             .max(32)
             .min(1024);
-        // Record selection for introspection/logging
+
         unsafe {
             (*(self as *const _ as *mut CudaTradjema)).last_batch =
                 Some(BatchKernelSelected::OneD { block_x });
@@ -523,7 +564,8 @@ impl CudaTradjema {
         let mults_bytes = n_combos
             .checked_mul(item_f32)
             .ok_or_else(|| CudaTradjemaError::InvalidInput("byte size overflow".into()))?;
-        let out_elems = n_combos.checked_mul(series_len)
+        let out_elems = n_combos
+            .checked_mul(series_len)
             .ok_or_else(|| CudaTradjemaError::InvalidInput("rows*cols overflow".into()))?;
         let out_bytes = out_elems
             .checked_mul(item_f32)
@@ -543,7 +585,6 @@ impl CudaTradjema {
             });
         }
 
-        // Pinned host buffers + async H2D for better throughput
         let h_high = LockedBuffer::from_slice(high).map_err(CudaTradjemaError::Cuda)?;
         let h_low = LockedBuffer::from_slice(low).map_err(CudaTradjemaError::Cuda)?;
         let h_close = LockedBuffer::from_slice(close).map_err(CudaTradjemaError::Cuda)?;
@@ -670,7 +711,7 @@ impl CudaTradjema {
             series_len,
             max_length,
         )?;
-        // Async device->pinned copy then slice copy for better D2H throughput
+
         let mut pinned: LockedBuffer<f32> =
             unsafe { LockedBuffer::uninitialized(out.len()) }.map_err(CudaTradjemaError::Cuda)?;
         unsafe {
@@ -770,8 +811,6 @@ impl CudaTradjema {
                 name: "tradjema_many_series_one_param_time_major_f32",
             })?;
 
-        // Shared memory layout:
-        // [ f64 min_vals[length] ][ f64 max_vals[length] ][ i32 min_idx[length] ][ i32 max_idx[length] ]
         let shared_bytes = Self::smem_bytes_for_len(length);
         let dev = Device::get_device(self.device_id).map_err(CudaTradjemaError::Cuda)?;
         let max_optin = dev
@@ -859,7 +898,6 @@ impl CudaTradjema {
             });
         }
 
-        // Pinned + async host-to-device
         let h_high = LockedBuffer::from_slice(high_tm).map_err(CudaTradjemaError::Cuda)?;
         let h_low = LockedBuffer::from_slice(low_tm).map_err(CudaTradjemaError::Cuda)?;
         let h_close = LockedBuffer::from_slice(close_tm).map_err(CudaTradjemaError::Cuda)?;
@@ -992,13 +1030,9 @@ impl CudaTradjema {
             length,
             mult,
         )?;
-        arr.buf
-            .copy_to(out_tm)
-            .map_err(CudaTradjemaError::Cuda)
+        arr.buf.copy_to(out_tm).map_err(CudaTradjemaError::Cuda)
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
@@ -1011,7 +1045,6 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        // 3 inputs (H/L/C) + outputs (PARAM_SWEEP rows)
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
@@ -1106,8 +1139,14 @@ pub mod benches {
             CudaTradjema::prepare_batch_inputs(&high, &low, &close, &sweep)
                 .expect("tradjema prepare batch");
         let n_combos = combos.len();
-        let lengths_i32: Vec<i32> = combos.iter().map(|p| p.length.unwrap_or(0) as i32).collect();
-        let mults_f32: Vec<f32> = combos.iter().map(|p| p.mult.unwrap_or(0.0) as f32).collect();
+        let lengths_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.length.unwrap_or(0) as i32)
+            .collect();
+        let mults_f32: Vec<f32> = combos
+            .iter()
+            .map(|p| p.mult.unwrap_or(0.0) as f32)
+            .collect();
 
         let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
         let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
@@ -1162,7 +1201,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("tradjema many-series kernel");
-            self.cuda.stream.synchronize().expect("tradjema many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("tradjema many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1175,9 +1217,10 @@ pub mod benches {
             length: Some(64),
             mult: Some(8.0),
         };
-        let (first_valids, length, mult) =
-            CudaTradjema::prepare_many_series_inputs(&high_tm, &low_tm, &close_tm, cols, rows, &params)
-                .expect("tradjema prepare many");
+        let (first_valids, length, mult) = CudaTradjema::prepare_many_series_inputs(
+            &high_tm, &low_tm, &close_tm, cols, rows, &params,
+        )
+        .expect("tradjema prepare many");
 
         let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
         let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");

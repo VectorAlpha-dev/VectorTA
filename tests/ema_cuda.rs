@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ema::{
     ema_batch_with_kernel, ema_with_kernel, EmaBatchRange, EmaInput, EmaParams,
 };

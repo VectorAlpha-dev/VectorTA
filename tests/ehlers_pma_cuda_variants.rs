@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehlers_pma::{
     ehlers_pma, EhlersPmaBatchRange, EhlersPmaInput, EhlersPmaParams,
 };
@@ -108,7 +106,7 @@ fn compare_many_series(policy: CudaEhlersPmaPolicy, cols: usize, rows: usize) {
         return;
     }
     let tm = gen_time_major_f64(cols, rows);
-    
+
     let mut cpu_predict_tm = vec![f64::NAN; cols * rows];
     let mut cpu_trigger_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {

@@ -1,51 +1,16 @@
-//! # Hull Moving Average (HMA)
-//!
-//! The Hull Moving Average (HMA) is a moving average technique that aims to
-//! minimize lag while providing smooth output. It combines Weighted Moving
-//! Averages of different lengths—namely `period/2` and `period`—to form an
-//! intermediate difference. A final Weighted Moving Average is then applied
-//! using the integer part of `sqrt(period)`, yielding a responsive trend
-//! indication with reduced lag.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points). (defaults to 5)
-//!
-//! ## Returns
-//! - **`Ok(HmaOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(HmaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD: AVX512 is enabled and >5% faster than scalar at 100k on `target-cpu=native`; AVX2 currently delegates to scalar to ensure tight ULP parity in property tests.
-//! - Scalar: staged warm-up + steady-state rolling updates (no O(N) temporaries); identical warmup semantics to ALMA.
-//! - Streaming update: LinWma uses `dot_ring()` (O(n)); acceptable for the streaming API; not used by the main kernels.
-//! - Row-specific batch: not attempted; worthwhile only with shared prefix sums across rows. Revisit if batch grids are large.
-//! - CUDA: wrapper returns VRAM handles with typed errors; interop implements CUDA Array Interface v3 (byte‑strides, stream) and DLPack v1.x with versioned/legacy capsules; primary‑context lifetime held via RAII.
-//! - Memory: uses zero-copy helpers (alloc_with_nan_prefix) and uninitialized matrix init for batch.
-//!
-//! Benchmark notes (target-cpu=native; 100k candles)
-//! - Scalar: 219µs → 211µs (~3–4% faster) after staged warm-up.
-//!   cmd: RUSTFLAGS="-C target-cpu=native" cargo bench --bench indicator_benchmark -- hma/hma_scalar/100k
-//! - AVX2: ~218µs (≈ scalar on this machine).
-//!   cmd: RUSTFLAGS="-C target-cpu=native" cargo +nightly bench --features nightly-avx --bench indicator_benchmark -- hma/hma_avx2/100k
-//! - AVX512: ~143µs (>30% faster than scalar).
-//!   cmd: RUSTFLAGS="-C target-cpu=native" cargo +nightly bench --features nightly-avx --bench indicator_benchmark -- hma/hma_avx512/100k
-//! - Batch (default sweep 5..120 step 1, 100k): ScalarBatch ≈6.45ms; Avx512Batch ≈6.12–6.74ms (small win); Avx2Batch ~6.57–6.99ms.
-//!   cmd: cargo bench --bench indicator_benchmark -- hma_batch/hma_batch_scalarbatch/100k
-//!        cargo +nightly bench --features nightly-avx --bench indicator_benchmark -- hma_batch/hma_batch_avx512batch/100k
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaHma;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaHma;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::memory::DeviceBuffer;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -77,7 +42,10 @@ pub struct HmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct HmaParams {
     pub period: Option<usize>,
 }
@@ -193,7 +161,11 @@ pub enum HmaError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("hma: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("hma: Invalid kernel for batch API: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -216,12 +188,7 @@ pub fn hma(input: &HmaInput) -> Result<HmaOutput, HmaError> {
     hma_with_kernel(input, Kernel::Auto)
 }
 
-/// Writes HMA results into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup semantics identical to the Vec-returning API.
-/// - The output slice length must equal the input length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn hma_into(input: &HmaInput, out: &mut [f64]) -> Result<(), HmaError> {
     hma_into_internal(input, out)
 }
@@ -294,7 +261,10 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
         return Err(HmaError::NoData);
     }
     if out.len() != len {
-        return Err(HmaError::OutputLengthMismatch { expected: len, got: out.len() });
+        return Err(HmaError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
     }
 
     let first = data
@@ -345,7 +315,6 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
         }
     }
 
-    // write only the prefix now (up to but not including first_out)
     let first_out = first + period + sqrt_len - 2;
     for v in &mut out[..first_out] {
         *v = f64::NAN;
@@ -355,8 +324,6 @@ fn hma_with_kernel_into(input: &HmaInput, kernel: Kernel, out: &mut [f64]) -> Re
 
 #[inline]
 pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // Scalar-first staged implementation (branch-reduced steady state)
-    // Matches ALMA-style warmup and zero-copy patterns.
     let len = data.len();
     if period < 2 || first >= len || period > len - first {
         return;
@@ -370,13 +337,11 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    // first index that receives a value
     let first_out = first + period + sq - 2;
     if first_out >= len {
         return;
     }
 
-    // window constants
     let ws_half = (half * (half + 1) / 2) as f64;
     let ws_full = (period * (period + 1) / 2) as f64;
     let ws_sqrt = (sq * (sq + 1) / 2) as f64;
@@ -384,12 +349,10 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     let period_f = period as f64;
     let sq_f = sq as f64;
 
-    // rolling state
     let (mut s_half, mut ws_half_acc) = (0.0, 0.0);
     let (mut s_full, mut ws_full_acc) = (0.0, 0.0);
     let (mut wma_half, mut wma_full) = (f64::NAN, f64::NAN);
 
-    // √n ring buffer (safe zero-init; scalar path remains safe)
     let mut x_buf = vec![0.0f64; sq];
     let mut x_sum = 0.0;
     let mut x_wsum = 0.0;
@@ -397,7 +360,6 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 
     let start = first;
 
-    // Phase 1: accumulate until HALF completes (0 .. half-1)
     for j in 0..half {
         let v = data[start + j];
         let jf = j as f64 + 1.0;
@@ -408,18 +370,15 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
     }
     wma_half = ws_half_acc / ws_half;
 
-    // Phase 2: advance until FULL completes (half .. period-2)
     if period > half + 1 {
         for j in half..(period - 1) {
             let idx = start + j;
             let v = data[idx];
 
-            // FULL still accumulating
             let jf = j as f64 + 1.0;
             s_full += v;
             ws_full_acc = jf.mul_add(v, ws_full_acc);
 
-            // HALF rolling update
             let old_h = data[idx - half];
             let prev = s_half;
             s_half = prev + v - old_h;
@@ -428,7 +387,6 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
     }
 
-    // Phase 3a: j == period-1 (first time FULL completes)
     {
         let j = period - 1;
         let idx = start + j;
@@ -439,7 +397,6 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         ws_full_acc = jf.mul_add(v, ws_full_acc);
         wma_full = ws_full_acc / ws_full;
 
-        // HALF rolling
         let old_h = data[idx - half];
         let prev = s_half;
         s_half = prev + v - old_h;
@@ -456,20 +413,17 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
     }
 
-    // Phase 3b: finish filling √n ring (period .. period+sq-2)
     if sq > 1 {
         for j in period..(period + sq - 1) {
             let idx = start + j;
             let v = data[idx];
 
-            // FULL rolling
             let old_f = data[idx - period];
             let prev_f = s_full;
             s_full = prev_f + v - old_f;
             ws_full_acc = period_f.mul_add(v, ws_full_acc - prev_f);
             wma_full = ws_full_acc / ws_full;
 
-            // HALF rolling
             let old_h = data[idx - half];
             let prev_h = s_half;
             s_half = prev_h + v - old_h;
@@ -477,7 +431,7 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             wma_half = ws_half_acc / ws_half;
 
             let x = 2.0 * wma_half - wma_full;
-            let pos = j + 1 - period; // 1..sq-1
+            let pos = j + 1 - period;
             x_buf[pos] = x;
             x_sum += x;
             x_wsum = (pos as f64 + 1.0).mul_add(x, x_wsum);
@@ -488,27 +442,23 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
     }
 
-    // Phase 4: steady-state (period+sq-1 .. end)
     let mut j = period + sq - 1;
     while j < len - start {
         let idx = start + j;
         let v = data[idx];
 
-        // FULL rolling
         let old_f = data[idx - period];
         let prev_f = s_full;
         s_full = prev_f + v - old_f;
         ws_full_acc = period_f.mul_add(v, ws_full_acc - prev_f);
         wma_full = ws_full_acc / ws_full;
 
-        // HALF rolling
         let old_h = data[idx - half];
         let prev_h = s_half;
         s_half = prev_h + v - old_h;
         ws_half_acc = half_f.mul_add(v, ws_half_acc - prev_h);
         wma_half = ws_half_acc / ws_half;
 
-        // combine and ring update
         let x = 2.0 * wma_half - wma_full;
         let old_x = x_buf[x_head];
         x_buf[x_head] = x;
@@ -529,11 +479,6 @@ pub fn hma_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn hma_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    // AVX2 path delegates to the scalar reference for accuracy alignment.
-    // Rationale: AVX2 showed near-parity performance and tiny rounding-order
-    // differences against the scalar path under property tests with tight ULP
-    // tolerances. Using the scalar reference here ensures bit-stable results
-    // across kernels while keeping the AVX512 path enabled for speed.
     hma_scalar(data, period, first, out)
 }
 
@@ -544,7 +489,6 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
     use aligned_vec::AVec;
     use core::arch::x86_64::*;
 
-    // ---------- parameter & safety checks ----------
     let len = data.len();
     if period < 2 || first >= len || period > len - first {
         return;
@@ -566,18 +510,15 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
         return;
     }
 
-    // ---------- pre-computed window constants ----------
     let ws_half = (half * (half + 1) / 2) as f64;
     let ws_full = (period * (period + 1) / 2) as f64;
     let ws_sqrt = (sq * (sq + 1) / 2) as f64;
-    let sq_f = sq as f64; // for FMA later
+    let sq_f = sq as f64;
 
-    // ---------- rolling state ----------
     let (mut s_half, mut ws_half_acc) = (0.0, 0.0);
     let (mut s_full, mut ws_full_acc) = (0.0, 0.0);
     let (mut wma_half, mut wma_full) = (f64::NAN, f64::NAN);
 
-    // √n ring buffer – 64 B aligned & length rounded up to 8 ×
     let sq_aligned = (sq + 7) & !7;
     let mut x_buf: AVec<f64> = AVec::with_capacity(64, sq_aligned);
     x_buf.resize(sq_aligned, 0.0);
@@ -586,36 +527,30 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
     let mut x_wsum = 0.0;
     let mut x_head = 0usize;
 
-    // lane-local ramp 0‥7 → shifted per block
     const W_RAMP_ARR: [f64; 8] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
 
-    // ❷  Load once into a ZMM register
     let w_ramp: __m512d = _mm512_loadu_pd(W_RAMP_ARR.as_ptr());
 
-    // fast horizontal sum (avoids _mm512_reduce_add_pd latency)
     #[inline(always)]
     unsafe fn horiz_sum(z: __m512d) -> f64 {
-        // Extract upper and lower 256-bit halves
         let hi = _mm512_extractf64x4_pd(z, 1);
         let lo = _mm512_castpd512_pd256(z);
-        // Add them together (now have 4 sums)
+
         let sum256 = _mm256_add_pd(hi, lo);
-        // Horizontal add to get 2 sums
+
         let sum128 = _mm256_hadd_pd(sum256, sum256);
-        // Extract high and low 128-bit parts and add
+
         let hi128 = _mm256_extractf128_pd(sum128, 1);
         let lo128 = _mm256_castpd256_pd128(sum128);
         let final_sum = _mm_add_pd(hi128, lo128);
-        // Extract the final scalar result
+
         _mm_cvtsd_f64(final_sum)
     }
 
-    // ---------- phase 1: warm-up ----------
     for j in 0..(period + sq - 1) {
         let idx = first + j;
-        let val = *data.get_unchecked(idx); // unaligned load OK
+        let val = *data.get_unchecked(idx);
 
-        // full WMA update
         if j < period {
             s_full += val;
             ws_full_acc += (j as f64 + 1.0) * val;
@@ -626,7 +561,6 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
             ws_full_acc = ws_full_acc - prev + (period as f64) * val;
         }
 
-        // half WMA update
         if j < half {
             s_half += val;
             ws_half_acc += (j as f64 + 1.0) * val;
@@ -653,13 +587,12 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
                 x_sum += x_val;
 
                 if pos + 1 == sq {
-                    // first full dot-product (SIMD)
                     let mut acc = _mm512_setzero_pd();
                     let mut i = 0usize;
                     let mut off = 0.0;
                     while i + 8 <= sq {
-                        let x = _mm512_loadu_pd(x_buf.as_ptr().add(i)); // unaligned OK
-                                                                        // use the *vector* you just loaded
+                        let x = _mm512_loadu_pd(x_buf.as_ptr().add(i));
+
                         let w = _mm512_add_pd(w_ramp, _mm512_set1_pd(off + 1.0));
                         acc = _mm512_fmadd_pd(x, w, acc);
                         i += 8;
@@ -669,57 +602,49 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
                     for k in i..sq {
                         x_wsum += x_buf[k] * (k as f64 + 1.0);
                     }
-                    *out.get_unchecked_mut(first_out) = x_wsum / ws_sqrt; // unaligned store
+                    *out.get_unchecked_mut(first_out) = x_wsum / ws_sqrt;
                 }
             }
         }
     }
 
-    // ---------- phase 2: steady-state ----------
     for j in (period + sq - 1)..(len - first) {
         let idx = first + j;
-        let val = *data.get_unchecked(idx); // unaligned load
+        let val = *data.get_unchecked(idx);
 
-        // vectorised rolling update for both WMAs (128-bit packs)
         let old_f = *data.get_unchecked(idx - period);
         let old_h = *data.get_unchecked(idx - half);
 
-        let sum_vec = _mm_set_pd(s_full, s_half); // [hi | lo]
+        let sum_vec = _mm_set_pd(s_full, s_half);
         let old_vec = _mm_set_pd(old_f, old_h);
         let ws_vec = _mm_set_pd(ws_full_acc, ws_half_acc);
         let weights = _mm_set_pd(period as f64, half as f64);
         let v_val = _mm_set1_pd(val);
 
-        // Σ ← Σ − old + val
         let new_sum_vec = _mm_add_pd(_mm_sub_pd(sum_vec, old_vec), v_val);
 
-        // WS ← WS − Σ_prev + w*val  (single FMA)
         let diff = _mm_sub_pd(ws_vec, sum_vec);
         let new_ws_vec = _mm_fmadd_pd(v_val, weights, diff);
 
-        // unpack back to scalars
         s_full = _mm_cvtsd_f64(_mm_unpackhi_pd(new_sum_vec, new_sum_vec));
         s_half = _mm_cvtsd_f64(new_sum_vec);
         ws_full_acc = _mm_cvtsd_f64(_mm_unpackhi_pd(new_ws_vec, new_ws_vec));
         ws_half_acc = _mm_cvtsd_f64(new_ws_vec);
 
-        // derive WMAs & combine
         wma_full = ws_full_acc / ws_full;
         wma_half = ws_half_acc / ws_half;
         let x_val = 2.0 * wma_half - wma_full;
 
-        // ring update – O(1) with fused multiply-add
         let old_x = *x_buf.get_unchecked(x_head);
         *x_buf.get_unchecked_mut(x_head) = x_val;
         x_head = (x_head + 1) % sq;
 
         let prev_sum = x_sum;
         x_sum = prev_sum + x_val - old_x;
-        x_wsum = sq_f.mul_add(x_val, x_wsum - prev_sum); // single FMA
+        x_wsum = sq_f.mul_add(x_val, x_wsum - prev_sum);
 
-        *out.get_unchecked_mut(idx) = x_wsum / ws_sqrt; // unaligned store
+        *out.get_unchecked_mut(idx) = x_wsum / ws_sqrt;
 
-        // software prefetch to L2 ~16 iterations ahead
         let pf = core::cmp::min(idx + 128, len - 1);
         _mm_prefetch(data.as_ptr().add(pf) as *const i8, _MM_HINT_T1);
     }
@@ -728,23 +653,21 @@ pub unsafe fn hma_avx512(data: &[f64], period: usize, first: usize, out: &mut [f
 #[derive(Debug, Clone)]
 struct LinWma {
     period: usize,
-    inv_norm: f64,    // 1.0 / (1 + 2 + ... + n) = 2 / (n*(n+1))
-    buffer: Vec<f64>, // circular buffer (oldest at head)
-    head: usize,      // next position to overwrite (oldest element)
-    filled: bool,     // true once we've pushed >= period samples
-    count: usize,     
+    inv_norm: f64,
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
+    count: usize,
 
-    
-    sum: f64,         
-    wsum: f64,        
-    nan_count: usize, 
-    dirty: bool,      
+    sum: f64,
+    wsum: f64,
+    nan_count: usize,
+    dirty: bool,
 }
 
 impl LinWma {
     #[inline(always)]
     fn new(period: usize) -> Self {
-        
         let norm = (period as f64) * ((period as f64) + 1.0) * 0.5;
         Self {
             period,
@@ -760,8 +683,6 @@ impl LinWma {
         }
     }
 
-    /// Rebuild rolling sum & weighted sum exactly from the current window.
-    /// Called only when `nan_count == 0` but `dirty == true`.
     #[inline(always)]
     fn rebuild(&mut self) {
         self.sum = 0.0;
@@ -774,7 +695,6 @@ impl LinWma {
             if v.is_nan() {
                 self.nan_count += 1;
             } else {
-                
                 self.sum += v;
                 self.wsum = (i as f64 + 1.0).mul_add(v, self.wsum);
             }
@@ -784,13 +704,10 @@ impl LinWma {
         debug_assert!(self.nan_count == 0, "rebuild expected clean window");
     }
 
-    /// O(1) rolling update. Returns None until warmup completes;
-    /// then returns Some(WMA) (NaN if any NaN exists in the window).
     #[inline(always)]
     fn update(&mut self, value: f64) -> Option<f64> {
         let n = self.period as f64;
 
-        
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = if self.head + 1 == self.period {
@@ -799,7 +716,6 @@ impl LinWma {
             self.head + 1
         };
 
-        
         if !self.filled {
             self.count += 1;
 
@@ -807,14 +723,13 @@ impl LinWma {
                 self.nan_count += 1;
                 self.dirty = true;
             } else {
-                
                 self.sum += value;
                 self.wsum = (self.count as f64).mul_add(value, self.wsum);
             }
 
             if self.count == self.period {
                 self.filled = true;
-                
+
                 return Some(if self.nan_count > 0 {
                     f64::NAN
                 } else {
@@ -824,8 +739,6 @@ impl LinWma {
             return None;
         }
 
-        
-        
         if old.is_nan() {
             self.nan_count = self.nan_count.saturating_sub(1);
         }
@@ -833,13 +746,11 @@ impl LinWma {
             self.nan_count += 1;
         }
 
-        
         if self.nan_count > 0 {
-            self.dirty = true; 
+            self.dirty = true;
             return Some(f64::NAN);
         }
 
-        
         if self.dirty {
             self.rebuild();
             self.dirty = false;
@@ -847,12 +758,9 @@ impl LinWma {
             return Some(self.wsum * self.inv_norm);
         }
 
-        
-        
-        
         let prev_sum = self.sum;
         self.sum = prev_sum + value - old;
-        self.wsum = n.mul_add(value, self.wsum - prev_sum); 
+        self.wsum = n.mul_add(value, self.wsum - prev_sum);
 
         Some(self.wsum * self.inv_norm)
     }
@@ -890,14 +798,12 @@ impl HmaStream {
         })
     }
 
-    /// Returns None until sqrt(period) samples of the intermediate series are available.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let full = self.wma_full.update(value);
         let half = self.wma_half.update(value);
 
         if let (Some(f), Some(h)) = (full, half) {
-            
             let x = 2.0f64.mul_add(h, -f);
             self.wma_sqrt.update(x)
         } else {
@@ -1004,19 +910,22 @@ impl HmaBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &HmaBatchRange) -> Vec<HmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        
         if step == 0 || start == end {
             return vec![start];
         }
-        
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let mut v = Vec::new();
         let mut x = lo;
         while x <= hi {
             v.push(x);
             match x.checked_add(step) {
                 Some(nx) => x = nx,
-                None => break, 
+                None => break,
             }
         }
         v
@@ -1057,7 +966,11 @@ fn hma_batch_inner(
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, t) = sweep.period;
-        return Err(HmaError::InvalidRange { start: s, end: e, step: t });
+        return Err(HmaError::InvalidRange {
+            start: s,
+            end: e,
+            step: t,
+        });
     }
     let first = data
         .iter()
@@ -1073,28 +986,24 @@ fn hma_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
             let p = c.period.unwrap();
             let s = (p as f64).sqrt().floor() as usize;
-            first + p + s - 2 
+            first + p + s - 2
         })
         .collect();
 
-    
     let _ = rows
         .checked_mul(cols)
         .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1108,7 +1017,6 @@ fn hma_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1129,7 +1037,6 @@ fn hma_batch_inner(
         }
     }
 
-    
     let rows = combos.len();
     let cols = data.len();
     let _ = rows
@@ -1164,7 +1071,11 @@ fn hma_batch_inner_into(
     let combos = expand_grid(sweep);
     if combos.is_empty() {
         let (s, e, t) = sweep.period;
-        return Err(HmaError::InvalidRange { start: s, end: e, step: t });
+        return Err(HmaError::InvalidRange {
+            start: s,
+            end: e,
+            step: t,
+        });
     }
     let first = data
         .iter()
@@ -1180,31 +1091,30 @@ fn hma_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let expected = rows
         .checked_mul(cols)
         .ok_or(HmaError::ArithmeticOverflow { what: "rows*cols" })?;
     if out.len() != expected {
-        return Err(HmaError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(HmaError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
             let p = c.period.unwrap();
             let s = (p as f64).sqrt().floor() as usize;
-            first + p + s - 2 
+            first + p + s - 2
         })
         .collect();
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     unsafe { init_matrix_prefixes(out_uninit, cols, &warm) };
 
-    
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
 
@@ -1218,7 +1128,6 @@ fn hma_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1241,8 +1150,6 @@ fn hma_batch_inner_into(
     Ok((combos, rows, cols))
 }
 
-
-
 #[inline(always)]
 pub unsafe fn hma_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     hma_scalar(data, period, first, out)
@@ -1264,7 +1171,6 @@ pub unsafe fn hma_row_avx512(data: &[f64], first: usize, period: usize, out: &mu
 fn expand_grid_hma(r: &HmaBatchRange) -> Vec<HmaParams> {
     expand_grid(r)
 }
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1394,14 +1300,17 @@ pub fn hma_cuda_batch_dev_py<'py>(
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
-    
+
     dict.set_item("cai_version", 3u64)?;
-    dict.set_item("cai_typestr", "<f4")?; 
+    dict.set_item("cai_typestr", "<f4")?;
     dict.set_item("cai_shape", (inner.rows as u64, inner.cols as u64))?;
     dict.set_item("cai_strides_bytes", ((inner.cols as u64) * 4u64, 4u64))?;
-    dict.set_item("stream", stream_u64)?; 
+    dict.set_item("stream", stream_u64)?;
 
-    Ok((DeviceArrayF32HmaPy::new(inner, ctx, dev_id, stream_u64), dict))
+    Ok((
+        DeviceArrayF32HmaPy::new(inner, ctx, dev_id, stream_u64),
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1464,7 +1373,6 @@ impl HmaStreamPy {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Hma", unsendable)]
 pub struct DeviceArrayF32HmaPy {
@@ -1485,23 +1393,32 @@ impl DeviceArrayF32HmaPy {
     }
 
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
         let itemsize = std::mem::size_of::<f32>();
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
-        // CAI v3 requires byte strides, even for contiguous arrays
+
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let size = self.inner.rows.saturating_mul(self.inner.cols);
-        let ptr_val: usize = if size == 0 { 0 } else { self.inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            self.inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
-        // Producer is async for CUDA paths; expose the actual stream handle (non-zero)
+
         d.set_item("stream", self._stream)?;
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1516,8 +1433,6 @@ impl DeviceArrayF32HmaPy {
         use pyo3::ffi as pyffi;
         use std::ffi::{c_void, CString};
 
-        // Shared helper path: validate device hint, sync producing stream,
-        // move the buffer out, and delegate to `export_f32_cuda_dlpack_2d`.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1543,11 +1458,15 @@ impl DeviceArrayF32HmaPy {
         }
         let _ = stream;
 
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            crate::cuda::moving_averages::DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            crate::cuda::moving_averages::DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
         let rows = inner.rows;
         let cols = inner.cols;
@@ -1557,9 +1476,7 @@ impl DeviceArrayF32HmaPy {
 
         return export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound);
 
-        if false {
-            // legacy per-indicator DLPack path removed; kept as placeholder
-        }; // end unreachable legacy DLPack path
+        if false {};
     }
 }
 
@@ -1571,29 +1488,35 @@ impl DeviceArrayF32HmaPy {
         device_id: u32,
         stream_u64: u64,
     ) -> Self {
-        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id, _stream: stream_u64 }
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+            _stream: stream_u64,
+        }
     }
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-// Core helper function for zero-copy operations
 #[inline]
 pub fn hma_into_slice(dst: &mut [f64], input: &HmaInput, kern: Kernel) -> Result<(), HmaError> {
     let data: &[f64] = input.as_ref();
 
     if dst.len() != data.len() {
-        return Err(HmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(HmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     hma_with_kernel_into(input, kern, dst)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = HmaParams {
@@ -1601,7 +1524,6 @@ pub fn hma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = HmaInput::from_slice(data, params);
 
-    // derive warmup cheaply
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1612,20 +1534,19 @@ pub fn hma_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     }
     let first_out = first + period + sqrt_len - 2;
 
-    // zero-copy style allocation
     let mut output = alloc_with_nan_prefix(data.len(), first_out);
     hma_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HmaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1634,7 +1555,7 @@ pub struct HmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = hma_batch)]
 pub fn hma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: HmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1644,7 +1565,6 @@ pub fn hma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         period: config.period_range,
     };
 
-    // Force scalar kernel for WASM since it doesn't support SIMD
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::ScalarBatch
     } else {
@@ -1665,8 +1585,7 @@ pub fn hma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_batch_js(
     data: &[f64],
@@ -1678,7 +1597,6 @@ pub fn hma_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::ScalarBatch
     } else {
@@ -1691,7 +1609,7 @@ pub fn hma_batch_js(
     Ok(output.values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_batch_metadata_js(
     period_start: usize,
@@ -1707,22 +1625,18 @@ pub fn hma_batch_metadata_js(
     periods.iter().map(|&p| p as f64).collect()
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1730,7 +1644,7 @@ pub fn hma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_into(
     in_ptr: *const f64,
@@ -1738,38 +1652,30 @@ pub fn hma_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to hma_into"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        
         let params = HmaParams {
             period: Some(period),
         };
         let input = HmaInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             hma_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             hma_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1779,7 +1685,7 @@ pub fn hma_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn hma_batch_into(
     in_ptr: *const f64,
@@ -1806,21 +1712,18 @@ pub fn hma_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         let kernel = if cfg!(target_arch = "wasm32") {
             Kernel::ScalarBatch
         } else {
             Kernel::Auto
         };
 
-        
         hma_batch_inner_into(data, &sweep, kernel, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(rows)
     }
 }
-
 
 #[cfg(feature = "python")]
 pub fn register_hma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
@@ -1836,8 +1739,6 @@ pub fn register_hma_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-// --- tests ---
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1845,25 +1746,20 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use proptest::prelude::*;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_hma_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare non-trivial input data (deterministic, finite values)
         let data: Vec<f64> = (0..512)
             .map(|i| ((i as f64).sin() * 123.456789) + (i as f64) * 0.25)
             .collect();
 
-        // Default params match existing tests (period defaults to 5)
         let input = HmaInput::from_slice(&data, HmaParams::default());
 
-        // Baseline via Vec-returning API
         let baseline = hma(&input)?.values;
 
-        // Preallocate output and call the new into API
         let mut out = vec![0.0; data.len()];
         hma_into(&input, &mut out)?;
 
-        // Parity check: exact equality for finite values; NaN == NaN
         assert_eq!(baseline.len(), out.len());
         for (a, b) in baseline.iter().zip(out.iter()) {
             let equal = (a.is_nan() && b.is_nan()) || (a == b);
@@ -2073,24 +1969,21 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Load real market data for realistic testing
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let close_data = &candles.close;
 
-        // Strategy: test various parameter combinations with real data slices
         let strat = (
-            2usize..=100,                                 // period (HMA requires >= 2)
-            0usize..close_data.len().saturating_sub(500), // starting index for data slice
-            200usize..=500,                               // length of data slice to use
+            2usize..=100,
+            0usize..close_data.len().saturating_sub(500),
+            200usize..=500,
         );
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(period, start_idx, slice_len)| {
-                // Ensure we have valid slice bounds
                 let end_idx = (start_idx + slice_len).min(close_data.len());
                 if end_idx <= start_idx || end_idx - start_idx < period + 10 {
-                    return Ok(()); // Skip invalid combinations
+                    return Ok(());
                 }
 
                 let data_slice = &close_data[start_idx..end_idx];
@@ -2099,27 +1992,20 @@ mod tests {
                 };
                 let input = HmaInput::from_slice(data_slice, params);
 
-                // Test the specified kernel
                 let result = hma_with_kernel(&input, kernel);
 
-                // Also compute with scalar kernel for reference
                 let scalar_result = hma_with_kernel(&input, Kernel::Scalar);
 
-                // Both should succeed or fail together
                 match (result, scalar_result) {
                     (Ok(HmaOutput { values: out }), Ok(HmaOutput { values: ref_out })) => {
-                        // Verify output length
                         prop_assert_eq!(out.len(), data_slice.len());
                         prop_assert_eq!(ref_out.len(), data_slice.len());
 
-                        // Calculate expected warmup period
                         let sqrt_period = (period as f64).sqrt().floor() as usize;
                         let expected_warmup = period + sqrt_period - 1;
 
-                        // Find first non-NaN value
                         let first_valid = out.iter().position(|x| !x.is_nan());
                         if let Some(first_idx) = first_valid {
-                            // Verify warmup period is correct
                             prop_assert!(
                                 first_idx >= expected_warmup - 1,
                                 "First valid at {} but expected warmup is {}",
@@ -2127,7 +2013,6 @@ mod tests {
                                 expected_warmup
                             );
 
-                            // Check NaN pattern - all values before first_valid should be NaN
                             for i in 0..first_idx {
                                 prop_assert!(
                                     out[i].is_nan(),
@@ -2138,12 +2023,10 @@ mod tests {
                             }
                         }
 
-                        // Verify kernel consistency
                         for i in 0..out.len() {
                             let y = out[i];
                             let r = ref_out[i];
 
-                            // Both should be NaN or both should be valid
                             if y.is_nan() {
                                 prop_assert!(
                                     r.is_nan(),
@@ -2155,16 +2038,12 @@ mod tests {
                                 continue;
                             }
 
-                            // Check finite values
                             prop_assert!(y.is_finite(), "Non-finite value at index {}: {}", i, y);
 
-                            // Compare with scalar reference (allowing for floating-point precision)
                             let y_bits = y.to_bits();
                             let r_bits = r.to_bits();
                             let ulp_diff = y_bits.abs_diff(r_bits);
 
-                            // AVX512 has higher ULP differences due to different FMA ordering
-                            // but the absolute error is still very small (< 1e-8)
                             let ulp_tolerance = if matches!(kernel, Kernel::Avx512) {
                                 20000
                             } else {
@@ -2180,18 +2059,14 @@ mod tests {
                             );
                         }
 
-                        // Test HMA-specific properties for valid outputs
                         for i in expected_warmup..out.len() {
                             let y = out[i];
                             if y.is_nan() {
                                 continue;
                             }
 
-                            // HMA can produce values outside the recent window due to linear extrapolation
-                            // This is intentional for lag reduction, so we only check it's finite
                             prop_assert!(y.is_finite(), "HMA output at {} is not finite: {}", i, y);
 
-                            
                             if i >= period * 2 {
                                 let window_start = i.saturating_sub(period);
                                 let window = &data_slice[window_start..=i];
@@ -2210,9 +2085,7 @@ mod tests {
                             }
                         }
 
-                        
                         if period == 2 {
-                            
                             let min_valid_idx = expected_warmup;
                             if out.len() > min_valid_idx {
                                 prop_assert!(
@@ -2226,7 +2099,6 @@ mod tests {
                         Ok(())
                     }
                     (Err(e1), Err(_e2)) => {
-                        
                         prop_assert!(
                             format!("{:?}", e1).contains("NotEnoughValidData")
                                 || format!("{:?}", e1).contains("InvalidPeriod"),
@@ -2236,7 +2108,6 @@ mod tests {
                         Ok(())
                     }
                     (Ok(_), Err(e)) | (Err(e), Ok(_)) => {
-                        
                         prop_assert!(
                             false,
                             "Kernel consistency failure: one succeeded, one failed with {:?}",
@@ -2248,15 +2119,10 @@ mod tests {
             })
             .unwrap();
 
-        
         let edge_cases = vec![
-            
             (vec![1.0, 2.0, 3.0, 4.0, 5.0], 2),
-            
             (vec![42.0; 100], 10),
-            
             ((0..100).map(|i| i as f64).collect::<Vec<_>>(), 15),
-            
             ((0..100).map(|i| 100.0 - i as f64).collect::<Vec<_>>(), 20),
         ];
 
@@ -2268,7 +2134,6 @@ mod tests {
 
             match hma_with_kernel(&input, kernel) {
                 Ok(out) => {
-                    
                     let has_valid = out.values.iter().any(|&x| x.is_finite() && !x.is_nan());
                     assert!(
                         has_valid || data.len() < period + 2,
@@ -2277,16 +2142,13 @@ mod tests {
                         case_idx
                     );
                 }
-                Err(_) => {
-                    
-                }
+                Err(_) => {}
             }
         }
 
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_hma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2294,26 +2156,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             HmaParams::default(),
-            
             HmaParams { period: Some(2) },
             HmaParams { period: Some(3) },
             HmaParams { period: Some(4) },
             HmaParams { period: Some(5) },
-            
             HmaParams { period: Some(7) },
             HmaParams { period: Some(10) },
             HmaParams { period: Some(14) },
             HmaParams { period: Some(20) },
-            
             HmaParams { period: Some(30) },
             HmaParams { period: Some(50) },
             HmaParams { period: Some(100) },
             HmaParams { period: Some(200) },
-            
             HmaParams { period: Some(1) },
             HmaParams { period: Some(250) },
         ];
@@ -2322,16 +2178,13 @@ mod tests {
             let input = HmaInput::from_candles(&candles, "close", params.clone());
             let output = hma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2344,7 +2197,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -2357,7 +2209,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -2375,7 +2226,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_hma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2447,7 +2297,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2455,24 +2304,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 5, 1), 
-            
-            (5, 25, 5), 
-            
-            (10, 50, 10), 
-            
-            (2, 4, 1), 
-            
-            (50, 150, 25), 
-            
-            (10, 30, 2), 
-            
-            (10, 30, 10), 
-            
-            (100, 300, 50), 
+            (2, 5, 1),
+            (5, 25, 5),
+            (10, 50, 10),
+            (2, 4, 1),
+            (50, 150, 25),
+            (10, 30, 2),
+            (10, 30, 10),
+            (100, 300, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2481,9 +2321,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2493,7 +2331,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2509,7 +2346,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Config {}: Found init_matrix_prefixes poison value {} (0x{:016X}) \
@@ -2525,7 +2361,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Config {}: Found make_uninit_matrix poison value {} (0x{:016X}) \
@@ -2546,7 +2381,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())

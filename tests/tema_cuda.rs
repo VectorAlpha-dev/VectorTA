@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::tema::{
     tema_batch_with_kernel, TemaBatchRange, TemaBuilder,
 };

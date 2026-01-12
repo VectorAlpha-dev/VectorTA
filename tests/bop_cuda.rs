@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::bop::{bop_with_kernel, BopInput, BopParams};
 use vector_ta::utilities::data_loader::{read_candles_from_csv, source_type};
 use vector_ta::utilities::enums::Kernel;
@@ -89,8 +87,8 @@ fn bop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut open_tm = vec![f64::NAN; cols * rows];
     let mut high_tm = vec![f64::NAN; cols * rows];
     let mut low_tm = vec![f64::NAN; cols * rows];
@@ -107,7 +105,6 @@ fn bop_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut o = vec![f64::NAN; rows];

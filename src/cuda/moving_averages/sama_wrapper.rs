@@ -1,16 +1,4 @@
-//! CUDA support for the Slope Adaptive Moving Average (SAMA).
-//!
-//! Mirrors the ALMA/CWMA CUDA API surface by exposing zero‑copy device entry
-//! points for both the one‑series × many‑parameter sweep and the time‑major
-//! many‑series × one‑parameter scenario. Kernels operate fully in FP32 and
-//! reuse host‑prepared alpha coefficients to keep GPU‑side work focused on the
-//! adaptive recurrence itself. Wrapper adds ALMA‑parity features: policy enums,
-//! JIT options (DetermineTargetFromContext + O2 with fallbacks), NON_BLOCKING
-//! stream, VRAM checks with ~64MB headroom, chunked launches, and BENCH_DEBUG
-//! logging of selected kernels.
-
 #![cfg(feature = "cuda")]
-
 
 use super::{BatchKernelPolicy, ManySeriesKernelPolicy};
 use crate::indicators::moving_averages::sama::{SamaBatchRange, SamaParams};
@@ -24,9 +12,9 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cu;
 use std::env;
 use std::ffi::c_void;
-use thiserror::Error;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaSamaError {
@@ -35,11 +23,22 @@ pub enum CudaSamaError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: gx={gx} gy={gy} gz={gz} bx={bx} by={by} bz={bz}")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("device mismatch: buf={buf} current={current}")]
@@ -53,7 +52,7 @@ pub struct CudaSama {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    
+
     policy: CudaSamaPolicy,
     last_batch: Option<SamaBatchKernelSelected>,
     last_many: Option<SamaManySeriesKernelSelected>,
@@ -61,7 +60,6 @@ pub struct CudaSama {
     debug_many_logged: bool,
 }
 
-/// VRAM-backed array handle for SAMA with context guard and device id
 pub struct DeviceArrayF32Sama {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -71,12 +69,14 @@ pub struct DeviceArrayF32Sama {
 }
 impl DeviceArrayF32Sama {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaSamaPolicy {
@@ -92,8 +92,6 @@ impl Default for CudaSamaPolicy {
         }
     }
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum SamaBatchKernelSelected {
@@ -129,7 +127,7 @@ impl CudaSama {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sama_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -153,7 +151,6 @@ impl CudaSama {
         })
     }
 
-    /// Create with an explicit policy (mirrors ALMA/CWMA convenience).
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaSamaPolicy,
@@ -188,7 +185,6 @@ impl CudaSama {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        
         let prices_bytes = prepared
             .series_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -205,10 +201,14 @@ impl CudaSama {
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSamaError::InvalidInput("size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
-            return Err(CudaSamaError::OutOfMemory { required, free, headroom });
+            return Err(CudaSamaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
@@ -216,13 +216,12 @@ impl CudaSama {
         let d_min = DeviceBuffer::from_slice(&prepared.min_alphas)?;
         let d_maj = DeviceBuffer::from_slice(&prepared.maj_alphas)?;
 
-        
         let mut d_first: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n_combos)? };
         memset_i32_async(&self.stream, &mut d_first, prepared.first_valid as i32)?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos)? };
 
-        
         let max_window_total: i32 = *prepared.lengths_i32.iter().max().unwrap_or(&0);
 
         self.launch_batch_kernel_sliced_opt(
@@ -238,7 +237,6 @@ impl CudaSama {
             &mut d_out,
         )?;
 
-        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Sama {
@@ -263,10 +261,14 @@ impl CudaSama {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSamaError> {
         if series_len == 0 {
-            return Err(CudaSamaError::InvalidInput("series_len must be positive".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "series_len must be positive".into(),
+            ));
         }
         if n_combos == 0 {
-            return Err(CudaSamaError::InvalidInput("n_combos must be positive".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "n_combos must be positive".into(),
+            ));
         }
         if d_lengths.len() != n_combos
             || d_min_alphas.len() != n_combos
@@ -288,7 +290,6 @@ impl CudaSama {
             ));
         }
 
-        
         let mut h_lengths = vec![0i32; n_combos];
         d_lengths.copy_to(&mut h_lengths)?;
         let max_window_total: i32 = *h_lengths.iter().max().unwrap_or(&0);
@@ -315,7 +316,9 @@ impl CudaSama {
     ) -> Result<(), CudaSamaError> {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         if out_flat.len() != prepared.series_len * prepared.combos.len() {
-            return Err(CudaSamaError::InvalidInput("output slice length mismatch".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "output slice length mismatch".into(),
+            ));
         }
         let handle = self.sama_batch_dev(data_f32, sweep)?;
         handle.buf.copy_to(out_flat).map_err(Into::into)
@@ -328,9 +331,9 @@ impl CudaSama {
         series_len: usize,
         params: &SamaParams,
     ) -> Result<DeviceArrayF32Sama, CudaSamaError> {
-        let prepared = Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
+        let prepared =
+            Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        
         let prices_bytes = num_series
             .checked_mul(series_len)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -349,12 +352,17 @@ impl CudaSama {
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let (free, _) = Self::device_mem_info().unwrap_or((0, 0));
-            return Err(CudaSamaError::OutOfMemory { required, free, headroom });
+            return Err(CudaSamaError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&prepared.first_valids)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -367,7 +375,6 @@ impl CudaSama {
             &mut d_out,
         )?;
 
-        
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Sama {
@@ -392,17 +399,25 @@ impl CudaSama {
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaSamaError> {
         if num_series <= 0 || series_len <= 0 {
-            return Err(CudaSamaError::InvalidInput("num_series and series_len must be positive".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "num_series and series_len must be positive".into(),
+            ));
         }
         if length <= 0 {
-            return Err(CudaSamaError::InvalidInput("length must be positive".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "length must be positive".into(),
+            ));
         }
         if d_first_valids.len() != num_series as usize {
-            return Err(CudaSamaError::InvalidInput("first_valids buffer length mismatch".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "first_valids buffer length mismatch".into(),
+            ));
         }
         let total = num_series as usize * series_len as usize;
         if d_prices_tm.len() != total || d_out_tm.len() != total {
-            return Err(CudaSamaError::InvalidInput("time-major buffer length mismatch".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "time-major buffer length mismatch".into(),
+            ));
         }
 
         self.launch_many_series_kernel(
@@ -426,7 +441,9 @@ impl CudaSama {
         out_tm: &mut [f32],
     ) -> Result<(), CudaSamaError> {
         if out_tm.len() != num_series * series_len {
-            return Err(CudaSamaError::InvalidInput("output slice length mismatch".into()));
+            return Err(CudaSamaError::InvalidInput(
+                "output slice length mismatch".into(),
+            ));
         }
         let handle = self.sama_many_series_one_param_time_major_dev(
             data_tm_f32,
@@ -437,8 +454,6 @@ impl CudaSama {
         handle.buf.copy_to(out_tm).map_err(CudaSamaError::from)
     }
 
-    
-    
     fn launch_batch_kernel_sliced_opt(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -462,17 +477,17 @@ impl CudaSama {
         let func = self
             .module
             .get_function("sama_batch_f32_opt")
-            .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_batch_f32_opt" })?;
+            .map_err(|_| CudaSamaError::MissingKernelSymbol {
+                name: "sama_batch_f32_opt",
+            })?;
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaSama)).last_batch =
                 Some(SamaBatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        
-        const MAX_SLICE: usize = 2_147_483_647; 
+        const MAX_SLICE: usize = 2_147_483_647;
         let mut start = 0usize;
         while start < n_combos {
             let len = (n_combos - start).min(MAX_SLICE);
@@ -484,7 +499,7 @@ impl CudaSama {
                 let mut first_ptr = d_first_valids.as_device_ptr().add(start).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
-                
+
                 let slice_max_window: i32 = if let Some(host_lengths) = host_lengths_opt {
                     *host_lengths[start..start + len].iter().max().unwrap_or(&0)
                 } else {
@@ -504,7 +519,7 @@ impl CudaSama {
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
                 let grid: GridSize = (len as u32, 1, 1).into();
-                
+
                 let shmem_bytes: u32 =
                     (2 * ((slice_max_window as usize) + 1) * std::mem::size_of::<i32>()) as u32;
                 self.stream
@@ -539,16 +554,16 @@ impl CudaSama {
         let func = self
             .module
             .get_function("sama_many_series_one_param_f32_opt")
-            .map_err(|_| CudaSamaError::MissingKernelSymbol { name: "sama_many_series_one_param_f32_opt" })?;
+            .map_err(|_| CudaSamaError::MissingKernelSymbol {
+                name: "sama_many_series_one_param_f32_opt",
+            })?;
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaSama)).last_many =
                 Some(SamaManySeriesKernelSelected::OneD { block_x });
         }
         self.maybe_log_many_debug();
 
-        
         let max_window = length.max(0);
         let shmem_bytes: u32 =
             (2 * ((max_window as usize) + 1) * std::mem::size_of::<i32>()) as u32;
@@ -782,7 +797,6 @@ impl CudaSama {
     }
 }
 
-
 #[inline]
 fn memset_i32_async(
     stream: &Stream,
@@ -796,12 +810,13 @@ fn memset_i32_async(
         let res = cu::cuMemsetD32Async(ptr, value as u32, n, st);
         match res {
             cu::CUresult::CUDA_SUCCESS => Ok(()),
-            e => Err(CudaSamaError::InvalidInput(format!("cuMemsetD32Async failed: {:?}", e))),
+            e => Err(CudaSamaError::InvalidInput(format!(
+                "cuMemsetD32Async failed: {:?}",
+                e
+            ))),
         }
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -878,8 +893,8 @@ pub mod benches {
         let d_maj_alphas = DeviceBuffer::from_slice(&prepared.maj_alphas).expect("d_maj_alphas");
         let d_first_valids =
             DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos) }
-            .expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos) }.expect("d_out");
 
         cuda.stream.synchronize().expect("sync after prep");
         Box::new(SamaBatchDevState {
@@ -940,8 +955,10 @@ pub mod benches {
             CudaSama::prepare_many_series_inputs(&data_tm, cols, rows, &params).expect("sama prep");
 
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
-        let d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
 
         cuda.stream.synchronize().expect("sync after prep");
         Box::new(SamaManyDevState {
@@ -996,27 +1013,31 @@ fn expand_grid(range: &SamaBatchRange) -> Result<Vec<SamaParams>, CudaSamaError>
                     .ok_or_else(|| CudaSamaError::InvalidInput("range overflow".into()))?;
             }
             if v.is_empty() {
-                return Err(CudaSamaError::InvalidInput(
-                    format!("invalid range: start={} end={} step={}", start, end, step),
-                ));
+                return Err(CudaSamaError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}",
+                    start, end, step
+                )));
             }
             Ok(v)
         } else {
-            
             let mut v = Vec::new();
             let mut x = start;
             loop {
                 v.push(x);
-                if x <= end { break; }
-                
+                if x <= end {
+                    break;
+                }
+
                 x = x.saturating_sub(step);
-                if x <= end { break; }
-                
+                if x <= end {
+                    break;
+                }
             }
             if v.is_empty() {
-                return Err(CudaSamaError::InvalidInput(
-                    format!("invalid range: start={} end={} step={}", start, end, step),
-                ));
+                return Err(CudaSamaError::InvalidInput(format!(
+                    "invalid range: start={} end={} step={}",
+                    start, end, step
+                )));
             }
             Ok(v)
         }
@@ -1027,7 +1048,9 @@ fn expand_grid(range: &SamaBatchRange) -> Result<Vec<SamaParams>, CudaSamaError>
     let min_lengths = axis(range.min_length)?;
 
     if lengths.is_empty() || maj_lengths.is_empty() || min_lengths.is_empty() {
-        return Err(CudaSamaError::InvalidInput("no parameter combinations provided".into()));
+        return Err(CudaSamaError::InvalidInput(
+            "no parameter combinations provided".into(),
+        ));
     }
 
     let cap = lengths

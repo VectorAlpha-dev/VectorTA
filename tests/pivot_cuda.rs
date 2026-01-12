@@ -1,5 +1,3 @@
-
-
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -15,7 +13,6 @@ fn pivot_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    
     let len = 16384usize;
     let mut h = vec![f64::NAN; len];
     let mut l = vec![f64::NAN; len];
@@ -105,7 +102,6 @@ fn pivot_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    
     let mode = 3usize;
     let mut expected = vec![f64::NAN; 9 * cols * rows];
     for s in 0..cols {

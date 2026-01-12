@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::nvi::{nvi_with_kernel, NviInput, NviParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -36,7 +34,7 @@ fn nvi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 4096usize;
     let mut close = vec![f64::NAN; len];
     let mut volume = vec![f64::NAN; len];
-    
+
     for i in 3..len {
         let x = i as f64;
         close[i] = (x * 0.00123).sin() + 100.0 + 0.00017 * x;
@@ -91,7 +89,6 @@ fn nvi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut c = vec![f64::NAN; rows];

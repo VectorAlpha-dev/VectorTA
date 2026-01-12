@@ -1,17 +1,9 @@
-//! CUDA scaffolding for VPWMA (Variable Power Weighted Moving Average).
-//!
-//! Mirrors the ALMA/CWMA GPU integration pattern: parameter sweeps are expanded
-//! on the host, weights are precomputed in FP32 (category-appropriate), and the
-//! kernel evaluates each row independently while sharing the flattened weight
-//! buffer. Warmup/NaN semantics match the scalar path: write NaN up to
-//! `first_valid + (period - 1)` per row/series.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::moving_averages::vpwma::{expand_grid_vpwma, VpwmaBatchRange, VpwmaParams};
-use cust::error::CudaError;
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
@@ -32,10 +24,6 @@ fn vpwma_tile_t() -> usize {
         .max(DEFAULT_TILE_T)
 }
 
-/// VRAM-backed array handle owned by VPWMA CUDA wrapper.
-///
-/// Keeps the CUDA context alive via `Arc<Context>` so that the device buffer
-/// remains valid as long as this handle is live.
 pub struct DeviceArrayF32 {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -63,9 +51,20 @@ pub enum CudaVpwmaError {
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("launch configuration too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("device mismatch: buffer on device {buf}, current device {current}")]
@@ -73,8 +72,6 @@ pub enum CudaVpwmaError {
     #[error("not implemented")]
     NotImplemented,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -132,7 +129,7 @@ impl CudaVpwma {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/vpwma_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -140,7 +137,8 @@ impl CudaVpwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -209,7 +207,11 @@ impl CudaVpwma {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaVpwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaVpwmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -406,10 +408,13 @@ impl CudaVpwma {
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVpwmaError> {
         use cust::context::CacheConfig;
-        let mut func = self.module.get_function("vpwma_batch_f32").map_err(|_| CudaVpwmaError::MissingKernelSymbol { name: "vpwma_batch_f32" })?;
+        let mut func = self.module.get_function("vpwma_batch_f32").map_err(|_| {
+            CudaVpwmaError::MissingKernelSymbol {
+                name: "vpwma_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
@@ -417,8 +422,6 @@ impl CudaVpwma {
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        
-        
         let t_tile = vpwma_tile_t();
         let smem_floats = t_tile
             .checked_add(2usize.saturating_mul(stride))
@@ -435,7 +438,14 @@ impl CudaVpwma {
 
         if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
             if (smem_bytes_u32 as usize) > avail {
-                return Err(CudaVpwmaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
+                return Err(CudaVpwmaError::LaunchConfigTooLarge {
+                    gx: grid.x,
+                    gy: grid.y,
+                    gz: grid.z,
+                    bx: block.x,
+                    by: block.y,
+                    bz: block.z,
+                });
             }
         }
 
@@ -464,9 +474,10 @@ impl CudaVpwma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream.launch(&func, grid, block, smem_bytes_u32, args)?;
+            self.stream
+                .launch(&func, grid, block, smem_bytes_u32, args)?;
         }
-        
+
         unsafe {
             (*(self as *const _ as *mut CudaVpwma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -487,7 +498,12 @@ impl CudaVpwma {
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaVpwmaError> {
         use cust::context::CacheConfig;
-        let mut func = self.module.get_function("vpwma_many_series_one_param_f32").map_err(|_| CudaVpwmaError::MissingKernelSymbol { name: "vpwma_many_series_one_param_f32" })?;
+        let mut func = self
+            .module
+            .get_function("vpwma_many_series_one_param_f32")
+            .map_err(|_| CudaVpwmaError::MissingKernelSymbol {
+                name: "vpwma_many_series_one_param_f32",
+            })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
         let block_x: u32 = match self.policy.many_series {
@@ -498,7 +514,6 @@ impl CudaVpwma {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        
         let win_len = period.saturating_sub(1);
         let smem_bytes_u32: u32 = win_len
             .checked_mul(std::mem::size_of::<f32>())
@@ -509,7 +524,14 @@ impl CudaVpwma {
 
         if let Ok(avail) = func.available_dynamic_shared_memory_per_block(grid, block) {
             if (smem_bytes_u32 as usize) > avail {
-                return Err(CudaVpwmaError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
+                return Err(CudaVpwmaError::LaunchConfigTooLarge {
+                    gx: grid.x,
+                    gy: grid.y,
+                    gz: grid.z,
+                    bx: block.x,
+                    by: block.y,
+                    bz: block.z,
+                });
             }
         }
 
@@ -534,9 +556,10 @@ impl CudaVpwma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream.launch(&func, grid, block, smem_bytes_u32, args)?;
+            self.stream
+                .launch(&func, grid, block, smem_bytes_u32, args)?;
         }
-        
+
         unsafe {
             (*(self as *const _ as *mut CudaVpwma)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
@@ -563,7 +586,6 @@ impl CudaVpwma {
             .max()
             .unwrap_or(1);
 
-        
         let prices_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaVpwmaError::InvalidInput("byte-size overflow".into()))?;
@@ -684,7 +706,7 @@ impl CudaVpwma {
             rows,
             &mut d_out_tm,
         )?;
-        
+
         self.stream.synchronize()?;
         Ok(DeviceArrayF32 {
             buf: d_out_tm,
@@ -785,8 +807,6 @@ impl CudaVpwma {
         Ok(())
     }
 }
-
-
 
 pub mod benches {
     use super::*;

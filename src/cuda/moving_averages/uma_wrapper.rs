@@ -1,20 +1,3 @@
-//! CUDA scaffolding for the Ultimate Moving Average (UMA).
-//!
-//! API parity with ALMA/CWMA wrappers:
-//! - Policy enums for batch and many-series selection (kept simple; UMA kernels
-//!   are single-variant and do not currently tile).
-//! - PTX load with `DetermineTargetFromContext` and `OptLevel::O2` JIT options
-//!   with fallbacks for driver stability.
-//! - VRAM checks via `mem_get_info()` with ~64MB headroom.
-//! - NON_BLOCKING stream and optional one-time BENCH_DEBUG logging of selected
-//!   kernel policy.
-//!
-//! UMA math pattern is adaptive/recurrent (non dot-product). We do not try to
-//! precompute weights; instead the kernel mirrors the scalar path: fixed
-//! max-length mean/std window, dynamic length update, power-weights scan, and
-//! optional trailing WMA smoothing. Warmup/NaN semantics match the scalar
-//! implementation.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -42,11 +25,22 @@ pub enum CudaUmaError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("arithmetic overflow when computing {what}")]
     ArithmeticOverflow { what: &'static str },
     #[error("device mismatch for buffer (buf={buf}, current={current})")]
@@ -54,8 +48,6 @@ pub enum CudaUmaError {
     #[error("not implemented")]
     NotImplemented,
 }
-
-// -------- Kernel selection policy (parity with ALMA/CWMA style) --------
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -114,7 +106,7 @@ impl CudaUma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/uma_kernel.ptx"));
-        // Prefer context-targeted JIT with moderate opt level; fallback progressively
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -141,7 +133,6 @@ impl CudaUma {
         })
     }
 
-    /// Create using an explicit policy.
     pub fn new_with_policy(device_id: usize, policy: CudaUmaPolicy) -> Result<Self, CudaUmaError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
@@ -186,13 +177,20 @@ impl CudaUma {
             Some(v) => v,
             None => return Ok(()),
         };
-        let need = required_bytes
-            .checked_add(headroom_bytes)
-            .ok_or(CudaUmaError::ArithmeticOverflow { what: "required_bytes + headroom_bytes" })?;
+        let need =
+            required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or(CudaUmaError::ArithmeticOverflow {
+                    what: "required_bytes + headroom_bytes",
+                })?;
         if need <= free {
             Ok(())
         } else {
-            Err(CudaUmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            Err(CudaUmaError::OutOfMemory {
+                required: required_bytes,
+                free,
+                headroom: headroom_bytes,
+            })
         }
     }
 
@@ -310,10 +308,6 @@ impl CudaUma {
         self.stream.synchronize().map_err(CudaUmaError::from)
     }
 
-    /// Device-resident batch entry point that reuses a caller-provided scratch buffer.
-    ///
-    /// This avoids allocating `series_len * n_combos` intermediates per iteration and is
-    /// intended for benchmarks and repeated calls in performance-sensitive code.
     #[allow(clippy::too_many_arguments)]
     pub fn uma_batch_device_with_raw(
         &self,
@@ -390,7 +384,6 @@ impl CudaUma {
             ));
         }
 
-        // Alias raw==out when smoothing is disabled
         if smooth_length <= 1 {
             let raw_ptr = d_out_tm.as_device_ptr().as_raw();
             let out_ptr = raw_ptr;
@@ -474,23 +467,63 @@ impl CudaUma {
         let series_len = inputs.series_len;
 
         let sz_f32 = std::mem::size_of::<f32>();
-        let price_bytes = prices.len().checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "len(prices) * sizeof(f32)" })?;
+        let price_bytes =
+            prices
+                .len()
+                .checked_mul(sz_f32)
+                .ok_or(CudaUmaError::ArithmeticOverflow {
+                    what: "len(prices) * sizeof(f32)",
+                })?;
         let volume_bytes = if inputs.has_volume {
-            series_len.checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "series_len * sizeof(f32)" })?
-        } else { 0 };
-        let accel_bytes = n_combos.checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "n_combos * sizeof(f32)" })?;
-        let len_bytes_each = n_combos.checked_mul(std::mem::size_of::<i32>()).ok_or(CudaUmaError::ArithmeticOverflow { what: "n_combos * sizeof(i32)" })?;
-        let len_bytes = len_bytes_each.checked_mul(3).ok_or(CudaUmaError::ArithmeticOverflow { what: "(n_combos * sizeof(i32)) * 3" })?;
-        let out_elems = n_combos.checked_mul(series_len).ok_or(CudaUmaError::ArithmeticOverflow { what: "n_combos * series_len" })?;
-        let out_bytes = out_elems.checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
+            series_len
+                .checked_mul(sz_f32)
+                .ok_or(CudaUmaError::ArithmeticOverflow {
+                    what: "series_len * sizeof(f32)",
+                })?
+        } else {
+            0
+        };
+        let accel_bytes = n_combos
+            .checked_mul(sz_f32)
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "n_combos * sizeof(f32)",
+            })?;
+        let len_bytes_each = n_combos.checked_mul(std::mem::size_of::<i32>()).ok_or(
+            CudaUmaError::ArithmeticOverflow {
+                what: "n_combos * sizeof(i32)",
+            },
+        )?;
+        let len_bytes = len_bytes_each
+            .checked_mul(3)
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "(n_combos * sizeof(i32)) * 3",
+            })?;
+        let out_elems =
+            n_combos
+                .checked_mul(series_len)
+                .ok_or(CudaUmaError::ArithmeticOverflow {
+                    what: "n_combos * series_len",
+                })?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "out_elems * sizeof(f32)",
+            })?;
         let alias_raw_final = Self::all_smooth_leq_one(&inputs.smooth_lengths);
         let raw_bytes = if alias_raw_final { 0 } else { out_bytes };
         let required = price_bytes
-            .checked_add(volume_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "price+volume" })?
-            .checked_add(accel_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+accel" })?
-            .checked_add(len_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+lens" })?
-            .checked_add(out_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+out" })?
-            .checked_add(raw_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+raw" })?;
+            .checked_add(volume_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "price+volume",
+            })?
+            .checked_add(accel_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+accel" })?
+            .checked_add(len_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+lens" })?
+            .checked_add(out_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+out" })?
+            .checked_add(raw_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+raw" })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
@@ -557,19 +590,52 @@ impl CudaUma {
         inputs: &ManySeriesInputs,
     ) -> Result<DeviceArrayF32, CudaUmaError> {
         let sz_f32 = std::mem::size_of::<f32>();
-        let prices_bytes = prices_tm_f32.len().checked_mul(sz_f32).ok_or(CudaUmaError::ArithmeticOverflow { what: "len(prices_tm) * sizeof(f32)" })?;
+        let prices_bytes =
+            prices_tm_f32
+                .len()
+                .checked_mul(sz_f32)
+                .ok_or(CudaUmaError::ArithmeticOverflow {
+                    what: "len(prices_tm) * sizeof(f32)",
+                })?;
         let volume_bytes = if inputs.has_volume {
-            inputs.num_series.checked_mul(inputs.series_len).and_then(|x| x.checked_mul(sz_f32)).ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * series_len * sizeof(f32)" })?
-        } else { 0 };
-        let first_valid_bytes = inputs.num_series.checked_mul(std::mem::size_of::<i32>()).ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * sizeof(i32)" })?;
-        let out_bytes = inputs.num_series.checked_mul(inputs.series_len).and_then(|x| x.checked_mul(sz_f32)).ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * series_len * sizeof(f32) (out)" })?;
+            inputs
+                .num_series
+                .checked_mul(inputs.series_len)
+                .and_then(|x| x.checked_mul(sz_f32))
+                .ok_or(CudaUmaError::ArithmeticOverflow {
+                    what: "num_series * series_len * sizeof(f32)",
+                })?
+        } else {
+            0
+        };
+        let first_valid_bytes = inputs
+            .num_series
+            .checked_mul(std::mem::size_of::<i32>())
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "num_series * sizeof(i32)",
+            })?;
+        let out_bytes = inputs
+            .num_series
+            .checked_mul(inputs.series_len)
+            .and_then(|x| x.checked_mul(sz_f32))
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "num_series * series_len * sizeof(f32) (out)",
+            })?;
         let alias_raw_final = inputs.smooth_length <= 1;
         let raw_bytes = if alias_raw_final { 0 } else { out_bytes };
         let required = prices_bytes
-            .checked_add(volume_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prices+volume" })?
-            .checked_add(first_valid_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+first_valid" })?
-            .checked_add(out_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+out" })?
-            .checked_add(raw_bytes).ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+raw" })?;
+            .checked_add(volume_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "prices+volume",
+            })?
+            .checked_add(first_valid_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow {
+                what: "prev+first_valid",
+            })?
+            .checked_add(out_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+out" })?
+            .checked_add(raw_bytes)
+            .ok_or(CudaUmaError::ArithmeticOverflow { what: "prev+raw" })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
@@ -583,8 +649,11 @@ impl CudaUma {
             None
         };
         let d_first_valids = DeviceBuffer::from_slice(&inputs.first_valids)?;
-        let out_elems = inputs.num_series.checked_mul(inputs.series_len)
-            .ok_or(CudaUmaError::ArithmeticOverflow { what: "num_series * series_len" })?;
+        let out_elems = inputs.num_series.checked_mul(inputs.series_len).ok_or(
+            CudaUmaError::ArithmeticOverflow {
+                what: "num_series * series_len",
+            },
+        )?;
         let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
         if alias_raw_final {
             let raw_ptr = d_out_tm.as_device_ptr().as_raw();
@@ -604,7 +673,8 @@ impl CudaUma {
                 out_ptr,
             )?;
         } else {
-            let mut d_raw_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+            let mut d_raw_tm: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(out_elems) }?;
             self.launch_many_series_kernel(
                 &d_prices_tm,
                 d_volumes_tm.as_ref(),
@@ -656,12 +726,12 @@ impl CudaUma {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("uma_batch_f32")
-            .map_err(|_| CudaUmaError::MissingKernelSymbol { name: "uma_batch_f32" })?;
+        let func = self.module.get_function("uma_batch_f32").map_err(|_| {
+            CudaUmaError::MissingKernelSymbol {
+                name: "uma_batch_f32",
+            }
+        })?;
 
-        // Warp-cooperative kernels expect one warp per block by default
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 32u32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
@@ -708,7 +778,6 @@ impl CudaUma {
         Ok(())
     }
 
-    // Pointer-based variant to avoid borrow conflicts when raw==out
     fn launch_batch_kernel_ptrs(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -735,10 +804,11 @@ impl CudaUma {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("uma_batch_f32")
-            .map_err(|_| CudaUmaError::MissingKernelSymbol { name: "uma_batch_f32" })?;
+        let func = self.module.get_function("uma_batch_f32").map_err(|_| {
+            CudaUmaError::MissingKernelSymbol {
+                name: "uma_batch_f32",
+            }
+        })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 32u32,
@@ -810,7 +880,9 @@ impl CudaUma {
         let func = self
             .module
             .get_function("uma_many_series_one_param_f32")
-            .map_err(|_| CudaUmaError::MissingKernelSymbol { name: "uma_many_series_one_param_f32" })?;
+            .map_err(|_| CudaUmaError::MissingKernelSymbol {
+                name: "uma_many_series_one_param_f32",
+            })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 32u32,
@@ -858,7 +930,6 @@ impl CudaUma {
         Ok(())
     }
 
-    // Pointer-based variant to avoid borrow conflicts when raw==out
     fn launch_many_series_kernel_ptrs(
         &self,
         d_prices_tm: &DeviceBuffer<f32>,
@@ -1143,8 +1214,6 @@ impl CudaUma {
     }
 }
 
-// ---------- Bench profiles (custom; UMA needs volume option) ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -1157,24 +1226,21 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        // One output + one scratch buffer
+
         let raw_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
-        // accelerator[f32] + min/max/smooth[i32]
-        let param_bytes = PARAM_SWEEP * (std::mem::size_of::<f32>() + 3 * std::mem::size_of::<i32>());
+
+        let param_bytes =
+            PARAM_SWEEP * (std::mem::size_of::<f32>() + 3 * std::mem::size_of::<i32>());
         in_bytes + raw_bytes + out_bytes + param_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_LEN;
         let in_bytes = elems * std::mem::size_of::<f32>();
-        let out_bytes = 2 * elems * std::mem::size_of::<f32>(); // raw + out
-        in_bytes
-            + out_bytes
-            + MANY_SERIES_COLS * std::mem::size_of::<i32>()
-            + 64 * 1024 * 1024
+        let out_bytes = 2 * elems * std::mem::size_of::<f32>();
+        in_bytes + out_bytes + MANY_SERIES_COLS * std::mem::size_of::<i32>() + 64 * 1024 * 1024
     }
 
-    // Preallocated, device-resident batch state to avoid per-iteration allocs/copies.
     struct UmaBatchDeviceState {
         cuda: CudaUma,
         d_prices: DeviceBuffer<f32>,
@@ -1217,7 +1283,6 @@ pub mod benches {
         let out_elems = series_len * n_combos;
         let first_valid = price.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-        // Parameters: vary max_length only (250 combos), keep others fixed.
         let accelerators = vec![1.0f32; n_combos];
         let min_lengths = vec![5i32; n_combos];
         let mut max_lengths = Vec::with_capacity(n_combos);
@@ -1232,10 +1297,10 @@ pub mod benches {
         let d_max_lengths = DeviceBuffer::from_slice(&max_lengths).expect("upload max_lengths");
         let d_smooth_lengths =
             DeviceBuffer::from_slice(&smooth_lengths).expect("upload smooth_lengths");
-        let d_raw: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
-            .expect("alloc raw");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
-            .expect("alloc out");
+        let d_raw: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("alloc raw");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("alloc out");
 
         Box::new(UmaBatchDeviceState {
             cuda,
@@ -1284,7 +1349,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("launch uma many-series");
-            self.cuda.stream.synchronize().expect("uma many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("uma many-series sync");
         }
     }
     fn prep_uma_many_series_one_param() -> Box<dyn CudaBenchState> {

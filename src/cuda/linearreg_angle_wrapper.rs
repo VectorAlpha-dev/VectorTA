@@ -1,13 +1,3 @@
-//! CUDA scaffolding for Linear Regression Angle (LRA).
-//!
-//! Parity with ALMA wrapper conventions:
-//! - PTX loaded via include_str!(concat!(env!("OUT_DIR"), "/linearreg_angle_kernel.ptx"))
-//! - Stream NON_BLOCKING
-//! - Simple policies for 1D kernels (batch + many-series)
-//! - VRAM checks with ~64MB headroom and grid.y chunking for batch
-//! - Warmup/NaN semantics identical to scalar (prefix NaN handling on batch;
-//!   O(1) slide + O(period) rebuild on many-series)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -25,25 +15,32 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-
 type Float2 = [f32; 2];
 
-#[inline] fn f2(x: f32, y: f32) -> Float2 { [x, y] }
+#[inline]
+fn f2(x: f32, y: f32) -> Float2 {
+    [x, y]
+}
 
-#[inline] fn two_sum(a: f32, b: f32) -> (f32, f32) {
+#[inline]
+fn two_sum(a: f32, b: f32) -> (f32, f32) {
     let s = a + b;
     let bb = s - a;
     let e = (a - (s - bb)) + (b - bb);
     (s, e)
 }
-#[inline] fn df_add_f(mut acc: Float2, x: f32) -> Float2 {
+#[inline]
+fn df_add_f(mut acc: Float2, x: f32) -> Float2 {
     let (s, mut e) = two_sum(acc[0], x);
     e += acc[1];
     let (s2, e2) = two_sum(s, e);
-    acc[0] = s2; acc[1] = e2; acc
+    acc[0] = s2;
+    acc[1] = e2;
+    acc
 }
-#[inline] fn df_add_prod(acc: Float2, a: f32, b: f32) -> Float2 {
-    let p   = a * b;
+#[inline]
+fn df_add_prod(acc: Float2, a: f32, b: f32) -> Float2 {
+    let p = a * b;
     let err = a.mul_add(b, -p);
     df_add_f(df_add_f(acc, p), err)
 }
@@ -52,8 +49,6 @@ type Float2 = [f32; 2];
 struct Combo {
     period: usize,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -97,7 +92,11 @@ pub enum CudaLinearregAngleError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -105,7 +104,14 @@ pub enum CudaLinearregAngleError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -146,8 +152,7 @@ impl CudaLinearregAngle {
         ) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -184,24 +189,35 @@ impl CudaLinearregAngle {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
-    pub fn set_policy(&mut self, policy: CudaLinearregAnglePolicy) { self.policy = policy; }
+    pub fn set_policy(&mut self, policy: CudaLinearregAnglePolicy) {
+        self.policy = policy;
+    }
     #[inline]
-    pub fn policy(&self) -> &CudaLinearregAnglePolicy { &self.policy }
+    pub fn policy(&self) -> &CudaLinearregAnglePolicy {
+        &self.policy
+    }
     #[inline]
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
     #[inline]
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaLinearregAngleError> {
         self.stream.synchronize()?;
         Ok(())
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -214,7 +230,10 @@ impl CudaLinearregAngle {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaLinearregAngleError> {
+    fn will_fit(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaLinearregAngleError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -240,17 +259,9 @@ impl CudaLinearregAngle {
         block: (u32, u32, u32),
     ) -> Result<(), CudaLinearregAngleError> {
         let dev = Device::get_device(self.device_id)?;
-        let max_bx = dev
-            .get_attribute(DeviceAttribute::MaxBlockDimX)?
-            as u32;
-        let max_gx = dev
-            .get_attribute(DeviceAttribute::MaxGridDimX)?
-            as u32;
-        if block.0 == 0
-            || block.0 > max_bx
-            || grid.0 == 0
-            || grid.0 > max_gx
-        {
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if block.0 == 0 || block.0 > max_bx || grid.0 == 0 || grid.0 > max_gx {
             return Err(CudaLinearregAngleError::LaunchConfigTooLarge {
                 gx: grid.0,
                 gy: grid.1,
@@ -263,9 +274,9 @@ impl CudaLinearregAngle {
         Ok(())
     }
 
-    
-
-    fn expand_combos(range: &Linearreg_angleBatchRange) -> Result<Vec<Combo>, CudaLinearregAngleError> {
+    fn expand_combos(
+        range: &Linearreg_angleBatchRange,
+    ) -> Result<Vec<Combo>, CudaLinearregAngleError> {
         fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
             if step == 0 || start == end {
                 return vec![start];
@@ -309,23 +320,25 @@ impl CudaLinearregAngle {
 
     fn build_prefixes_lra_f2(data: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
         let n = data.len();
-        let mut ps = vec![f2(0.0, 0.0); n + 1]; 
-        let mut pk = vec![f2(0.0, 0.0); n + 1]; 
-        let mut pn = vec![0i32; n + 1];               
+        let mut ps = vec![f2(0.0, 0.0); n + 1];
+        let mut pk = vec![f2(0.0, 0.0); n + 1];
+        let mut pn = vec![0i32; n + 1];
 
-        let mut s  = f2(0.0, 0.0);
+        let mut s = f2(0.0, 0.0);
         let mut kd = f2(0.0, 0.0);
         let mut cn = 0i32;
 
         for i in 0..n {
             let v = data[i];
             if v.is_nan() {
-                cn += 1; 
+                cn += 1;
             } else {
-                s  = df_add_f(s, v);
+                s = df_add_f(s, v);
                 kd = df_add_prod(kd, i as f32, v);
             }
-            ps[i + 1] = s; pk[i + 1] = kd; pn[i + 1] = cn;
+            ps[i + 1] = s;
+            pk[i + 1] = kd;
+            pn[i + 1] = cn;
         }
         (ps, pk, pn)
     }
@@ -334,9 +347,20 @@ impl CudaLinearregAngle {
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &Linearreg_angleBatchRange,
-    ) -> Result<(
-        Vec<Combo>, usize, usize, Vec<i32>, Vec<f32>, Vec<f32>, Vec<Float2>, Vec<Float2>, Vec<i32>
-    ), CudaLinearregAngleError> {
+    ) -> Result<
+        (
+            Vec<Combo>,
+            usize,
+            usize,
+            Vec<i32>,
+            Vec<f32>,
+            Vec<f32>,
+            Vec<Float2>,
+            Vec<Float2>,
+            Vec<i32>,
+        ),
+        CudaLinearregAngleError,
+    > {
         if data_f32.is_empty() {
             return Err(CudaLinearregAngleError::InvalidInput("empty data".into()));
         }
@@ -352,12 +376,9 @@ impl CudaLinearregAngle {
             ));
         }
         let max_p = combos.iter().map(|c| c.period).max().unwrap();
-        let _ = combos
-            .len()
-            .checked_mul(max_p)
-            .ok_or_else(|| {
-                CudaLinearregAngleError::InvalidInput("n_combos * max_period overflow".into())
-            })?;
+        let _ = combos.len().checked_mul(max_p).ok_or_else(|| {
+            CudaLinearregAngleError::InvalidInput("n_combos * max_period overflow".into())
+        })?;
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut sum_x = Vec::with_capacity(combos.len());
         let mut inv_div = Vec::with_capacity(combos.len());
@@ -372,16 +393,33 @@ impl CudaLinearregAngle {
             if len - first_valid < p {
                 return Err(CudaLinearregAngleError::InvalidInput(format!(
                     "not enough valid data for period {} (tail after first {} is {})",
-                    p, first_valid, len - first_valid
+                    p,
+                    first_valid,
+                    len - first_valid
                 )));
             }
-            
-            let pf = p as f64; let sx = (p * (p - 1)) as f64 * 0.5; let sx2 = (p * (p - 1) * (2 * p - 1)) as f64 / 6.0;
-            let denom = sx * sx - pf * sx2; let invd = 1.0 / denom;
-            periods_i32.push(p as i32); sum_x.push(sx as f32); inv_div.push(invd as f32);
+
+            let pf = p as f64;
+            let sx = (p * (p - 1)) as f64 * 0.5;
+            let sx2 = (p * (p - 1) * (2 * p - 1)) as f64 / 6.0;
+            let denom = sx * sx - pf * sx2;
+            let invd = 1.0 / denom;
+            periods_i32.push(p as i32);
+            sum_x.push(sx as f32);
+            inv_div.push(invd as f32);
         }
         let (ps2, pk2, pn) = Self::build_prefixes_lra_f2(data_f32);
-        Ok((combos, first_valid, len, periods_i32, sum_x, inv_div, ps2, pk2, pn))
+        Ok((
+            combos,
+            first_valid,
+            len,
+            periods_i32,
+            sum_x,
+            inv_div,
+            ps2,
+            pk2,
+            pn,
+        ))
     }
 
     fn launch_batch_kernel(
@@ -408,10 +446,10 @@ impl CudaLinearregAngle {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
-        
+
         let blocks_needed = ((len as u32) + block_x - 1) / block_x;
-        let max_blocks_x  = self.sm_count.saturating_mul(8).max(1);
-        let grid_x        = blocks_needed.min(max_blocks_x).max(1);
+        let max_blocks_x = self.sm_count.saturating_mul(8).max(1);
+        let grid_x = blocks_needed.min(max_blocks_x).max(1);
         let block: BlockSize = (block_x, 1, 1).into();
 
         unsafe {
@@ -432,17 +470,16 @@ impl CudaLinearregAngle {
             self.validate_launch(grid_tuple, (block_x, 1, 1))?;
             let grid: GridSize = grid_tuple.into();
             unsafe {
-                
                 let mut p_prices: u64 = 0;
                 let mut p_ps = d_ps2.as_device_ptr().as_raw();
                 let mut p_pk = d_pk2.as_device_ptr().as_raw();
                 let mut p_pn = d_pn.as_device_ptr().as_raw();
-                let mut len_i: i32 = len
-                    .try_into()
-                    .map_err(|_| CudaLinearregAngleError::InvalidInput("length exceeds i32".into()))?;
-                let mut first_i: i32 = first_valid
-                    .try_into()
-                    .map_err(|_| CudaLinearregAngleError::InvalidInput("first_valid exceeds i32".into()))?;
+                let mut len_i: i32 = len.try_into().map_err(|_| {
+                    CudaLinearregAngleError::InvalidInput("length exceeds i32".into())
+                })?;
+                let mut first_i: i32 = first_valid.try_into().map_err(|_| {
+                    CudaLinearregAngleError::InvalidInput("first_valid exceeds i32".into())
+                })?;
                 let mut p_per = d_periods
                     .as_device_ptr()
                     .as_raw()
@@ -456,9 +493,9 @@ impl CudaLinearregAngle {
                     .as_raw()
                     .wrapping_add((start * std::mem::size_of::<f32>()) as u64);
                 let mut out_ptr = d_out.as_device_ptr().as_raw();
-                let mut n_cmb: i32 = chunk
-                    .try_into()
-                    .map_err(|_| CudaLinearregAngleError::InvalidInput("combo count exceeds i32".into()))?;
+                let mut n_cmb: i32 = chunk.try_into().map_err(|_| {
+                    CudaLinearregAngleError::InvalidInput("combo count exceeds i32".into())
+                })?;
                 let args: &mut [*mut c_void] = &mut [
                     &mut p_prices as *mut _ as *mut c_void,
                     &mut p_ps as *mut _ as *mut c_void,
@@ -488,7 +525,6 @@ impl CudaLinearregAngle {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let rows = combos.len();
 
-        
         let len_p1 = len
             .checked_add(1)
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("len+1 overflow".into()))?;
@@ -512,7 +548,6 @@ impl CudaLinearregAngle {
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(req, 64 * 1024 * 1024)?;
 
-        
         let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
         let d_pk2 = DeviceBuffer::from_slice(&pk2)?;
         let d_pn = DeviceBuffer::from_slice(&pn)?;
@@ -522,11 +557,24 @@ impl CudaLinearregAngle {
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(rows * len) }?;
 
         self.launch_batch_kernel(
-            &d_ps2, &d_pk2, &d_pn, &d_periods, &d_sumx, &d_invd, len, first_valid, rows, &mut d_out,
+            &d_ps2,
+            &d_pk2,
+            &d_pn,
+            &d_periods,
+            &d_sumx,
+            &d_invd,
+            len,
+            first_valid,
+            rows,
+            &mut d_out,
         )?;
 
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: len,
+        })
     }
 
     fn prepare_many_series_inputs(
@@ -555,7 +603,7 @@ impl CudaLinearregAngle {
                 "invalid period".into(),
             ));
         }
-        
+
         let mut first = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -607,7 +655,7 @@ impl CudaLinearregAngle {
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
         };
         let blocks_needed = ((cols as u32) + block_x - 1) / block_x;
-        let max_blocks_x  = self.sm_count.saturating_mul(8).max(1);
+        let max_blocks_x = self.sm_count.saturating_mul(8).max(1);
         let gx = blocks_needed.min(max_blocks_x).max(1);
         self.validate_launch((gx, 1, 1), (block_x, 1, 1))?;
         let grid: GridSize = (gx, 1, 1).into();
@@ -670,7 +718,9 @@ impl CudaLinearregAngle {
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("prices bytes overflow".into()))?;
         let first_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaLinearregAngleError::InvalidInput("first_valids bytes overflow".into()))?;
+            .ok_or_else(|| {
+                CudaLinearregAngleError::InvalidInput("first_valids bytes overflow".into())
+            })?;
         let out_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaLinearregAngleError::InvalidInput("output bytes overflow".into()))?;
@@ -688,10 +738,13 @@ impl CudaLinearregAngle {
             &d_prices, &d_first, cols, rows, period, sum_x, inv_div, &mut d_out,
         )?;
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -750,7 +803,10 @@ pub mod benches {
                     &mut self.d_out,
                 )
                 .expect("linearreg_angle batch kernel");
-            self.cuda.stream.synchronize().expect("linearreg_angle sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("linearreg_angle sync");
         }
     }
 
@@ -814,7 +870,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("linearreg_angle many-series kernel");
-            self.cuda.stream.synchronize().expect("linearreg_angle sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("linearreg_angle sync");
         }
     }
 

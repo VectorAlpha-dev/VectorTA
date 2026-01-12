@@ -1,11 +1,3 @@
-//! CUDA wrapper for Chande (Chandelier Exit) kernels.
-//!
-//! Parity targets:
-//! - ALMA-like API returning `DeviceArrayF32` VRAM handles.
-//! - Batch (one-series × many-params) and Many-series × one-param (time-major).
-//! - Warmup/NaN identical to scalar: warm = first_valid + period - 1.
-//! - Simple VRAM estimate + chunked launches (grid.x) to respect limits.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -27,17 +19,32 @@ pub enum CudaChandeError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: isize, end: isize, step: isize },
+    InvalidRange {
+        start: isize,
+        end: isize,
+        step: isize,
+    },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -77,7 +84,6 @@ pub struct CudaChande {
     device_id: u32,
     policy: CudaChandePolicy,
 
-    
     dq_idx: Option<DeviceBuffer<i32>>,
     dq_val: Option<DeviceBuffer<f32>>,
     dq_combo_cap: usize,
@@ -98,7 +104,8 @@ impl CudaChande {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -123,12 +130,18 @@ impl CudaChande {
     pub fn set_policy(&mut self, policy: CudaChandePolicy) {
         self.policy = policy;
     }
-    pub fn synchronize(&self) -> Result<(), CudaChandeError> { Ok(self.stream.synchronize()?) }
+    pub fn synchronize(&self) -> Result<(), CudaChandeError> {
+        Ok(self.stream.synchronize()?)
+    }
 
     #[inline]
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Result<usize, CudaChandeError> {
         if high.is_empty() || low.is_empty() || close.is_empty() {
@@ -186,9 +199,7 @@ impl CudaChande {
         Ok(vals)
     }
 
-    fn axis_f64_range(
-        (start, end, step): (f64, f64, f64),
-    ) -> Result<Vec<f32>, CudaChandeError> {
+    fn axis_f64_range((start, end, step): (f64, f64, f64)) -> Result<Vec<f32>, CudaChandeError> {
         if step.abs() < f64::EPSILON || (start - end).abs() < f64::EPSILON {
             return Ok(vec![start as f32]);
         }
@@ -230,7 +241,11 @@ impl CudaChande {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaChandeError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaChandeError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -238,7 +253,9 @@ impl CudaChande {
     }
 
     #[inline]
-    fn next_pow2_usize(x: usize) -> usize { (x.max(1)).next_power_of_two() }
+    fn next_pow2_usize(x: usize) -> usize {
+        (x.max(1)).next_power_of_two()
+    }
 
     fn ensure_workspace(&mut self, combos: usize, queue_cap: usize) -> Result<(), CudaChandeError> {
         if self.dq_idx.is_some() && self.dq_combo_cap >= combos && self.dq_cap >= queue_cap {
@@ -289,7 +306,6 @@ impl CudaChande {
     }
 
     fn chunk_size_for_batch(n_combos: usize, len: usize) -> usize {
-        
         let in_bytes = 3usize
             .checked_mul(len)
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
@@ -324,11 +340,13 @@ impl CudaChande {
         direction: &str,
     ) -> Result<DeviceArrayF32, CudaChandeError> {
         if high.len() != low.len() || low.len() != close.len() {
-            return Err(CudaChandeError::InvalidInput("input length mismatch".into()));
+            return Err(CudaChandeError::InvalidInput(
+                "input length mismatch".into(),
+            ));
         }
         let len = high.len();
         let first_valid = Self::first_valid_hlc(high, low, close)?;
-        
+
         let (ps, pe, pst) = sweep.period;
         let (ms, me, mst) = sweep.mult;
         if !(direction.eq_ignore_ascii_case("long") || direction.eq_ignore_ascii_case("short")) {
@@ -336,14 +354,18 @@ impl CudaChande {
                 "direction must be 'long' or 'short'".into(),
             ));
         }
-        let dir_flag = if direction.eq_ignore_ascii_case("long") { 1i32 } else { 0i32 };
+        let dir_flag = if direction.eq_ignore_ascii_case("long") {
+            1i32
+        } else {
+            0i32
+        };
         let periods = Self::axis_usize_range((ps, pe, pst))?;
         let mults_host = Self::axis_f64_range((ms, me, mst))?;
         let mut h_periods = Vec::<i32>::new();
         let mut h_alphas = Vec::<f32>::new();
         let mut h_warms = Vec::<i32>::new();
         let mut h_mults = Vec::<f32>::new();
-        let mut h_dirs  = Vec::<i32>::new();
+        let mut h_dirs = Vec::<i32>::new();
         let mut max_p = 0usize;
         for &p in &periods {
             if p == 0 || p > len || (len - first_valid) < p {
@@ -355,7 +377,9 @@ impl CudaChande {
                     len - first_valid
                 )));
             }
-            if p > max_p { max_p = p; }
+            if p > max_p {
+                max_p = p;
+            }
             for &m in &mults_host {
                 h_periods.push(p as i32);
                 h_alphas.push(1.0f32 / (p as f32));
@@ -366,27 +390,31 @@ impl CudaChande {
         }
         let n_combos = h_periods.len();
 
-        
-        let d_high  = DeviceBuffer::from_slice(high)?;
-        let d_low   = DeviceBuffer::from_slice(low)?;
+        let d_high = DeviceBuffer::from_slice(high)?;
+        let d_low = DeviceBuffer::from_slice(low)?;
         let d_close = DeviceBuffer::from_slice(close)?;
         let d_periods = DeviceBuffer::from_slice(&h_periods)?;
-        let d_mults   = DeviceBuffer::from_slice(&h_mults)?;
-        let d_dirs    = DeviceBuffer::from_slice(&h_dirs)?;
-        let d_alphas  = DeviceBuffer::from_slice(&h_alphas)?;
+        let d_mults = DeviceBuffer::from_slice(&h_mults)?;
+        let d_dirs = DeviceBuffer::from_slice(&h_dirs)?;
+        let d_alphas = DeviceBuffer::from_slice(&h_alphas)?;
 
-        
-        let have_oneseries = self.module.get_function("chande_one_series_many_params_f32").is_ok();
-        let have_oneseries_tr = self.module.get_function("chande_one_series_many_params_from_tr_f32").is_ok();
+        let have_oneseries = self
+            .module
+            .get_function("chande_one_series_many_params_f32")
+            .is_ok();
+        let have_oneseries_tr = self
+            .module
+            .get_function("chande_one_series_many_params_from_tr_f32")
+            .is_ok();
         let queue_cap = Self::next_pow2_usize(max_p + 1);
 
-        
         if have_oneseries || have_oneseries_tr {
             self.will_fit_full_output_one_series(n_combos, len, queue_cap)?;
             self.ensure_workspace(n_combos, queue_cap)?;
         } else {
             let in_bytes = 3usize
-                .checked_mul(len).and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+                .checked_mul(len)
+                .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
                 .ok_or_else(|| CudaChandeError::InvalidInput("size overflow (inputs)".into()))?;
             let params_bytes = n_combos
                 .checked_mul(3 * std::mem::size_of::<i32>() + 2 * std::mem::size_of::<f32>())
@@ -409,11 +437,12 @@ impl CudaChande {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
 
         if have_oneseries {
-            
             let func = self
                 .module
                 .get_function("chande_one_series_many_params_f32")
-                .map_err(|_| CudaChandeError::MissingKernelSymbol { name: "chande_one_series_many_params_f32" })?;
+                .map_err(|_| CudaChandeError::MissingKernelSymbol {
+                    name: "chande_one_series_many_params_f32",
+                })?;
             let warps_needed = ((n_combos + 31) / 32) as u32;
             let warps_per_block = match self.policy.batch {
                 BatchKernelPolicy::Plain { block_x } => (block_x.max(32) / 32),
@@ -422,27 +451,36 @@ impl CudaChande {
             .max(1);
             let block_x = warps_per_block * 32;
             let grid_x = ((warps_needed + warps_per_block - 1) / warps_per_block).max(1);
-            if block_x > 1024 { return Err(CudaChandeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 }); }
+            if block_x > 1024 {
+                return Err(CudaChandeError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
 
             unsafe {
-                let mut high_ptr   = d_high.as_device_ptr().as_raw();
-                let mut low_ptr    = d_low.as_device_ptr().as_raw();
-                let mut close_ptr  = d_close.as_device_ptr().as_raw();
-                let mut periods_ptr= d_periods.as_device_ptr().as_raw();
-                let mut mults_ptr  = d_mults.as_device_ptr().as_raw();
-                let mut dirs_ptr   = d_dirs.as_device_ptr().as_raw();
+                let mut high_ptr = d_high.as_device_ptr().as_raw();
+                let mut low_ptr = d_low.as_device_ptr().as_raw();
+                let mut close_ptr = d_close.as_device_ptr().as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                let mut mults_ptr = d_mults.as_device_ptr().as_raw();
+                let mut dirs_ptr = d_dirs.as_device_ptr().as_raw();
                 let mut alphas_ptr = d_alphas.as_device_ptr().as_raw();
-                let mut first_i    = first_valid as i32;
-                let mut len_i      = len as i32;
-                let mut combos_i   = n_combos as i32;
-                let mut qcap_i     = queue_cap as i32;
+                let mut first_i = first_valid as i32;
+                let mut len_i = len as i32;
+                let mut combos_i = n_combos as i32;
+                let mut qcap_i = queue_cap as i32;
                 let dq_idx_ref = self.dq_idx.as_ref().unwrap();
                 let dq_val_ref = self.dq_val.as_ref().unwrap();
                 let mut dq_idx_ptr = dq_idx_ref.as_device_ptr().as_raw();
                 let mut dq_val_ptr = dq_val_ref.as_device_ptr().as_raw();
-                let mut out_ptr   = d_out.as_device_ptr().as_raw();
+                let mut out_ptr = d_out.as_device_ptr().as_raw();
 
                 let args: &mut [*mut c_void] = &mut [
                     &mut high_ptr as *mut _ as *mut c_void,
@@ -463,14 +501,17 @@ impl CudaChande {
                 self.stream.launch(&func, grid, block, 0, args)?;
             }
         } else {
-            
             let use_tr = self.module.get_function("chande_batch_from_tr_f32").is_ok();
             let func = if use_tr {
-                self.module.get_function("chande_batch_from_tr_f32").unwrap()
-            } else {
                 self.module
-                    .get_function("chande_batch_f32")
-                    .map_err(|_| CudaChandeError::MissingKernelSymbol { name: "chande_batch_f32" })?
+                    .get_function("chande_batch_from_tr_f32")
+                    .unwrap()
+            } else {
+                self.module.get_function("chande_batch_f32").map_err(|_| {
+                    CudaChandeError::MissingKernelSymbol {
+                        name: "chande_batch_f32",
+                    }
+                })?
             };
 
             let d_tr: Option<DeviceBuffer<f32>> = if use_tr {
@@ -484,47 +525,65 @@ impl CudaChande {
                     } else {
                         let mut tri = hi - lo;
                         let hc = (hi - prev_c).abs();
-                        if hc > tri { tri = hc; }
+                        if hc > tri {
+                            tri = hc;
+                        }
                         let lc = (lo - prev_c).abs();
-                        if lc > tri { tri = lc; }
+                        if lc > tri {
+                            tri = lc;
+                        }
                         tr[t] = tri;
                     }
                     prev_c = close[t];
                 }
                 Some(DeviceBuffer::from_slice(&tr)?)
-            } else { None };
+            } else {
+                None
+            };
 
-            
-            let block_x = match self.policy.batch { BatchKernelPolicy::Plain { block_x } => block_x, BatchKernelPolicy::Auto => 256 };
+            let block_x = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x,
+                BatchKernelPolicy::Auto => 256,
+            };
             let chunk = n_combos.max(1);
             let mut launched = 0usize;
-            
+
             while launched < n_combos {
                 let cur = (n_combos - launched).min(chunk);
                 let grid: GridSize = (cur as u32, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 unsafe {
-                    let mut len_i   = len as i32;
+                    let mut len_i = len as i32;
                     let mut first_i = first_valid as i32;
-                    let mut cur_i   = cur as i32;
-                    let mut out_ptr = d_out.as_device_ptr().as_raw()
+                    let mut cur_i = cur as i32;
+                    let mut out_ptr = d_out
+                        .as_device_ptr()
+                        .as_raw()
                         .wrapping_add(((launched * len) * std::mem::size_of::<f32>()) as u64);
 
                     if use_tr {
                         let d_tr_ref = d_tr.as_ref().unwrap();
                         let mut high_ptr = d_high.as_device_ptr().as_raw();
-                        let mut low_ptr  = d_low.as_device_ptr().as_raw();
-                        let mut tr_ptr   = d_tr_ref.as_device_ptr().as_raw();
-                        let mut periods_ptr = d_periods.as_device_ptr().as_raw()
+                        let mut low_ptr = d_low.as_device_ptr().as_raw();
+                        let mut tr_ptr = d_tr_ref.as_device_ptr().as_raw();
+                        let mut periods_ptr = d_periods
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                        let mut mults_ptr   = d_mults.as_device_ptr().as_raw()
+                        let mut mults_ptr = d_mults
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
-                        let mut dirs_ptr    = d_dirs.as_device_ptr().as_raw()
+                        let mut dirs_ptr = d_dirs
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                        let mut alphas_ptr  = d_alphas.as_device_ptr().as_raw()
+                        let mut alphas_ptr = d_alphas
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
                         let warms_slice = &h_warms[launched..(launched + cur)];
-                        let d_warms   = DeviceBuffer::from_slice(warms_slice)?;
+                        let d_warms = DeviceBuffer::from_slice(warms_slice)?;
                         let mut warms_ptr = d_warms.as_device_ptr().as_raw();
 
                         let args: &mut [*mut c_void] = &mut [
@@ -544,18 +603,26 @@ impl CudaChande {
                         self.stream.launch(&func, grid, block, 0, args)?;
                     } else {
                         let mut high_ptr = d_high.as_device_ptr().as_raw();
-                        let mut low_ptr  = d_low.as_device_ptr().as_raw();
-                        let mut close_ptr= d_close.as_device_ptr().as_raw();
-                        let mut periods_ptr = d_periods.as_device_ptr().as_raw()
+                        let mut low_ptr = d_low.as_device_ptr().as_raw();
+                        let mut close_ptr = d_close.as_device_ptr().as_raw();
+                        let mut periods_ptr = d_periods
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                        let mut mults_ptr   = d_mults.as_device_ptr().as_raw()
+                        let mut mults_ptr = d_mults
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
-                        let mut dirs_ptr    = d_dirs.as_device_ptr().as_raw()
+                        let mut dirs_ptr = d_dirs
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
-                        let mut alphas_ptr  = d_alphas.as_device_ptr().as_raw()
+                        let mut alphas_ptr = d_alphas
+                            .as_device_ptr()
+                            .as_raw()
                             .wrapping_add((launched * std::mem::size_of::<f32>()) as u64);
                         let warms_slice = &h_warms[launched..(launched + cur)];
-                        let d_warms   = DeviceBuffer::from_slice(warms_slice)?;
+                        let d_warms = DeviceBuffer::from_slice(warms_slice)?;
                         let mut warms_ptr = d_warms.as_device_ptr().as_raw();
 
                         let args: &mut [*mut c_void] = &mut [
@@ -663,9 +730,9 @@ impl CudaChande {
         }
 
         let d_high = DeviceBuffer::from_slice(high_tm)?;
-        let d_low  = DeviceBuffer::from_slice(low_tm)?;
-        let d_close= DeviceBuffer::from_slice(close_tm)?;
-        let d_fv   = DeviceBuffer::from_slice(&first_valids)?;
+        let d_low = DeviceBuffer::from_slice(low_tm)?;
+        let d_close = DeviceBuffer::from_slice(close_tm)?;
+        let d_fv = DeviceBuffer::from_slice(&first_valids)?;
         let total = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaChandeError::InvalidInput("cols*rows overflow".into()))?;
@@ -674,29 +741,42 @@ impl CudaChande {
         let func = self
             .module
             .get_function("chande_many_series_one_param_f32")
-            .map_err(|_| CudaChandeError::MissingKernelSymbol { name: "chande_many_series_one_param_f32" })?;
+            .map_err(|_| CudaChandeError::MissingKernelSymbol {
+                name: "chande_many_series_one_param_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             ManySeriesKernelPolicy::Auto => 256,
         };
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         if block_x > 1024 {
-            return Err(CudaChandeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaChandeError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        let dir_flag: i32 = if direction.eq_ignore_ascii_case("long") { 1 } else { 0 };
+        let dir_flag: i32 = if direction.eq_ignore_ascii_case("long") {
+            1
+        } else {
+            0
+        };
         let alpha = 1.0f32 / (period as f32);
         unsafe {
             let mut high_ptr = d_high.as_device_ptr().as_raw();
-            let mut low_ptr  = d_low.as_device_ptr().as_raw();
-            let mut close_ptr= d_close.as_device_ptr().as_raw();
-            let mut fv_ptr   = d_fv.as_device_ptr().as_raw();
+            let mut low_ptr = d_low.as_device_ptr().as_raw();
+            let mut close_ptr = d_close.as_device_ptr().as_raw();
+            let mut fv_ptr = d_fv.as_device_ptr().as_raw();
             let mut period_i = period as i32;
-            let mut mult_f   = mult;
-            let mut dir_i    = dir_flag;
-            let mut alpha_f  = alpha;
+            let mut mult_f = mult;
+            let mut dir_i = dir_flag;
+            let mut alpha_f = alpha;
             let mut num_series_i = cols as i32;
             let mut series_len_i = rows as i32;
             let mut out_ptr = d_out.as_device_ptr().as_raw();
@@ -726,14 +806,13 @@ impl CudaChande {
     }
 }
 
-
 #[cfg(not(test))]
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 512_000; 
+    const ONE_SERIES_LEN: usize = 512_000;
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -835,7 +914,7 @@ pub mod benches {
         let mut cuda = CudaChande::new(0).expect("cuda chande");
 
         let first_valid = CudaChande::first_valid_hlc(&high, &low, &close).expect("first_valid");
-        let dir_flag = 1i32; 
+        let dir_flag = 1i32;
 
         let periods = CudaChande::axis_usize_range(sweep.period).expect("period axis");
         let mults_host = CudaChande::axis_f64_range(sweep.mult).expect("mult axis");
@@ -856,9 +935,9 @@ pub mod benches {
         }
         let n_combos = h_periods.len();
         let queue_cap = CudaChande::next_pow2_usize(max_p + 1);
-        cuda.ensure_workspace(n_combos, queue_cap).expect("workspace");
+        cuda.ensure_workspace(n_combos, queue_cap)
+            .expect("workspace");
 
-        
         let d_high = DeviceBuffer::from_slice(&high).expect("d_high");
         let d_low = DeviceBuffer::from_slice(&low).expect("d_low");
         let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
@@ -869,7 +948,6 @@ pub mod benches {
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_combos * len) }.expect("d_out");
 
-        
         let warps_needed = ((n_combos + 31) / 32) as u32;
         let warps_per_block = match cuda.policy.batch {
             BatchKernelPolicy::Plain { block_x } => (block_x.max(32) / 32),
@@ -981,8 +1059,9 @@ pub mod benches {
         }
 
         let cuda = CudaChande::new(0).expect("cuda chande");
-        let first_valids = CudaChande::first_valids_time_major(&high_tm, &low_tm, &close_tm, cols, rows)
-            .expect("first_valids");
+        let first_valids =
+            CudaChande::first_valids_time_major(&high_tm, &low_tm, &close_tm, cols, rows)
+                .expect("first_valids");
         let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
         let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");
         let d_close_tm = DeviceBuffer::from_slice(&close_tm).expect("d_close_tm");

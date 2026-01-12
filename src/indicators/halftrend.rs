@@ -1,38 +1,3 @@
-//! # HalfTrend
-//!
-//! HalfTrend is a trend-following indicator that identifies market trends using ATR-based channels
-//! and directional changes. It combines amplitude-based price detection with channel deviation
-//! to generate buy/sell signals.
-//!
-//! ## Parameters
-//! - **amplitude**: Period for finding highest/lowest prices (default: 2)
-//! - **channel_deviation**: Multiplier for ATR-based channel width (default: 2)
-//! - **atr_period**: Period for ATR calculation (default: 100)
-//!
-//! ## Inputs
-//! - **high**: High prices
-//! - **low**: Low prices
-//! - **close**: Close prices
-//!
-//! ## Returns
-//! - **`Ok(HalfTrendOutput)`** containing:
-//!   - `halftrend`: Main HalfTrend line values (Vec<f64>)
-//!   - `trend`: Trend direction - 0 for uptrend, 1 for downtrend (Vec<f64>)
-//!   - `atr_high`: Upper channel boundary (Vec<f64>)
-//!   - `atr_low`: Lower channel boundary (Vec<f64>)
-//!   - `buy_signal`: Buy signal triggers (Vec<f64>)
-//!   - `sell_signal`: Sell signal triggers (Vec<f64>)
-//! - Output lengths match input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - Scalar: optimized with monotonic deques for O(1) rolling extrema; classic fast-path (amplitude=2) uses direct two-point window.
-//! - SIMD: stubs delegate to scalar due to loop-carried deps; no measurable gains expected vs scalar.
-//! - Memory: uses `alloc_with_nan_prefix` for all six outputs (zero-copy warmup prefix).
-//! - Batch: precomputes ATR/SMA per unique period and rolling extrema per amplitude; rows reuse shared series.
-//! - Streaming: O(1) ring buffers with monotonic deques; correct flip gating aligned to scalar.
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaHalftrend};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -46,12 +11,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -62,18 +25,14 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-
 use crate::indicators::atr::{atr, AtrInput, AtrOutput, AtrParams};
 use crate::indicators::moving_averages::sma::{sma, SmaInput, SmaOutput, SmaParams};
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::AsRef;
@@ -81,11 +40,6 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-
-
-
-
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct HalfTrendOutput {
     pub halftrend: Vec<f64>,
@@ -96,9 +50,11 @@ pub struct HalfTrendOutput {
     pub sell_signal: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct HalfTrendParams {
     pub amplitude: Option<usize>,
     pub channel_deviation: Option<f64>,
@@ -115,7 +71,6 @@ impl Default for HalfTrendParams {
     }
 }
 
-/// Data source for HalfTrend - either Candles or direct slices
 #[derive(Debug, Clone)]
 pub enum HalfTrendData<'a> {
     Candles(&'a Candles),
@@ -126,7 +81,6 @@ pub enum HalfTrendData<'a> {
     },
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct HalfTrendInput<'a> {
     pub data: HalfTrendData<'a>,
@@ -183,8 +137,6 @@ impl<'a> HalfTrendInput<'a> {
     }
 }
 
-
-/// Builder for ergonomic API usage
 #[derive(Copy, Clone, Debug)]
 pub struct HalfTrendBuilder {
     amplitude: Option<usize>,
@@ -299,8 +251,6 @@ impl HalfTrendBuilder {
     }
 }
 
-
-/// Custom error type for HalfTrend operations
 #[derive(Debug, Error)]
 pub enum HalfTrendError {
     #[error("halftrend: Input data slice is empty.")]
@@ -328,15 +278,16 @@ pub enum HalfTrendError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("halftrend: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("halftrend: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-
-
-/// Helper to find first valid index in OHLC data
 #[inline(always)]
 fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     let fh = high.iter().position(|x| !x.is_nan()).unwrap_or(usize::MAX);
@@ -345,17 +296,14 @@ fn first_valid_ohlc(high: &[f64], low: &[f64], close: &[f64]) -> usize {
     fh.min(fl).min(fc)
 }
 
-/// Main public API function with automatic kernel selection
 pub fn halftrend(input: &HalfTrendInput) -> Result<HalfTrendOutput, HalfTrendError> {
     halftrend_with_kernel(input, Kernel::Auto)
 }
 
-/// Variant with explicit kernel selection
 pub fn halftrend_with_kernel(
     input: &HalfTrendInput,
     kernel: Kernel,
 ) -> Result<HalfTrendOutput, HalfTrendError> {
-    
     let mut chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -363,7 +311,6 @@ pub fn halftrend_with_kernel(
 
     let (high, low, close) = input.as_slices();
 
-    
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(HalfTrendError::EmptyInputData);
     }
@@ -398,8 +345,6 @@ pub fn halftrend_with_kernel(
         });
     }
 
-    
-    
     if matches!(kernel, Kernel::Auto)
         && amplitude == 2
         && channel_deviation == 2.0
@@ -408,13 +353,11 @@ pub fn halftrend_with_kernel(
         chosen = Kernel::Scalar;
     }
 
-    
     let first = first_valid_ohlc(high, low, close);
     if first == usize::MAX {
         return Err(HalfTrendError::AllValuesNaN);
     }
 
-    
     let warmup_span = amplitude.max(atr_period);
     if len - first < warmup_span {
         return Err(HalfTrendError::NotEnoughValidData {
@@ -424,9 +367,7 @@ pub fn halftrend_with_kernel(
     }
     let warm = first + warmup_span - 1;
 
-    
     if chosen == Kernel::Scalar && amplitude == 2 && channel_deviation == 2.0 && atr_period == 100 {
-        
         let mut halftrend = alloc_with_nan_prefix(len, warm);
         let mut trend = alloc_with_nan_prefix(len, warm);
         let mut atr_high = alloc_with_nan_prefix(len, warm);
@@ -463,7 +404,6 @@ pub fn halftrend_with_kernel(
         });
     }
 
-    
     let mut halftrend = alloc_with_nan_prefix(len, warm);
     let mut trend = alloc_with_nan_prefix(len, warm);
     let mut atr_high = alloc_with_nan_prefix(len, warm);
@@ -471,7 +411,6 @@ pub fn halftrend_with_kernel(
     let mut buy_signal = alloc_with_nan_prefix(len, warm);
     let mut sell_signal = alloc_with_nan_prefix(len, warm);
 
-    
     let atr_input = AtrInput::from_slices(
         high,
         low,
@@ -483,7 +422,6 @@ pub fn halftrend_with_kernel(
     let AtrOutput { values: atr_values } =
         atr(&atr_input).map_err(|e| HalfTrendError::AtrError(e.to_string()))?;
 
-    
     let sma_high_input = SmaInput::from_slice(
         high,
         SmaParams {
@@ -502,7 +440,6 @@ pub fn halftrend_with_kernel(
     let SmaOutput { values: lowma } =
         sma(&sma_low_input).map_err(|e| HalfTrendError::SmaError(e.to_string()))?;
 
-    
     halftrend_compute_into(
         high,
         low,
@@ -532,7 +469,6 @@ pub fn halftrend_with_kernel(
     })
 }
 
-/// Kernel-dispatched compute function
 #[inline(always)]
 fn halftrend_compute_into(
     high: &[f64],
@@ -613,11 +549,7 @@ fn halftrend_compute_into(
     }
 }
 
-/// Scalar implementation of HalfTrend computation
 #[inline]
-
-/// Optimized classic kernel for HalfTrend with default parameters
-/// Inlines ATR (with Wilder's smoothing) and SMA calculations for maximum performance
 #[inline(always)]
 pub unsafe fn halftrend_scalar_classic(
     high: &[f64],
@@ -638,7 +570,6 @@ pub unsafe fn halftrend_scalar_classic(
     let len = high.len();
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
 
-    // Inline ATR (Wilder RMA) and SMA computation without allocating O(len) temporaries.
     let alpha = 1.0 / atr_period as f64;
     let atr_warm = first + atr_period - 1;
     let sma_warm = first + amplitude - 1;
@@ -663,16 +594,13 @@ pub unsafe fn halftrend_scalar_classic(
         sum_high += high[i];
         sum_low += low[i];
     }
-    // Advance SMA state to the warm index so sum_* match the scalar SMA implementation’s
-    // rolling update order (avoids tiny last-bit drift vs direct 2-point sums).
+
     for i in (sma_warm + 1)..=warm.min(len - 1) {
         sum_high = sum_high - high[i - amplitude] + high[i];
         sum_low = sum_low - low[i - amplitude] + low[i];
     }
     let inv_amp = 1.0 / amplitude as f64;
 
-    // Step 3: Core HalfTrend calculation
-    // Classic fast path (amplitude == 2) — avoid deque overhead and use direct 2-point window
     let mut current_trend = 0i32;
     let mut next_trend = 0i32;
     let mut up = 0.0f64;
@@ -688,9 +616,16 @@ pub unsafe fn halftrend_scalar_classic(
         let highma_i = sum_high * inv_amp;
         let lowma_i = sum_low * inv_amp;
 
-        // Window [i-1, i] for amplitude == 2
-        let high_price = if high[i] > high[i - 1] { high[i] } else { high[i - 1] };
-        let low_price = if low[i] < low[i - 1] { low[i] } else { low[i - 1] };
+        let high_price = if high[i] > high[i - 1] {
+            high[i]
+        } else {
+            high[i - 1]
+        };
+        let low_price = if low[i] < low[i - 1] {
+            low[i]
+        } else {
+            low[i - 1]
+        };
 
         let prev_low = low[i - 1];
         let prev_high = high[i - 1];
@@ -755,14 +690,11 @@ pub unsafe fn halftrend_scalar_classic(
             trend[i] = 1.0;
         }
 
-        // Advance ATR and SMA to i+1.
         let ni = i + 1;
         if ni < len {
-            // SMA
             sum_high = sum_high - high[ni - amplitude] + high[ni];
             sum_low = sum_low - low[ni - amplitude] + low[ni];
 
-            // ATR (Wilder RMA)
             let hl = high[ni] - low[ni];
             let hc = (high[ni] - close[ni - 1]).abs();
             let lc = (low[ni] - close[ni - 1]).abs();
@@ -794,7 +726,6 @@ pub fn halftrend_scalar(
     let len = high.len();
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
 
-    // Monotonic deques for rolling max(high) and min(low)
     let cap = amplitude.max(1);
     let mut max_idx = vec![0usize; cap];
     let mut max_val = vec![0.0f64; cap];
@@ -857,7 +788,6 @@ pub fn halftrend_scalar(
         }
     }
 
-    // Initialize state variables
     let mut current_trend = 0i32;
     let mut next_trend = 0i32;
     let mut up = 0.0f64;
@@ -990,7 +920,6 @@ pub fn halftrend_scalar(
     }
 }
 
-/// AVX2 SIMD implementation of HalfTrend computation
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn halftrend_avx2(
@@ -1010,8 +939,6 @@ unsafe fn halftrend_avx2(
     buy_signal: &mut [f64],
     sell_signal: &mut [f64],
 ) {
-    // For now, fallback to scalar implementation
-    // Future optimization: implement SIMD-accelerated price comparisons
     halftrend_scalar(
         high,
         low,
@@ -1031,7 +958,6 @@ unsafe fn halftrend_avx2(
     )
 }
 
-/// AVX512 SIMD implementation of HalfTrend computation
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 unsafe fn halftrend_avx512(
@@ -1051,8 +977,6 @@ unsafe fn halftrend_avx512(
     buy_signal: &mut [f64],
     sell_signal: &mut [f64],
 ) {
-    // For now, fallback to scalar implementation
-    // Future optimization: implement SIMD-accelerated price comparisons
     halftrend_scalar(
         high,
         low,
@@ -1072,7 +996,6 @@ unsafe fn halftrend_avx512(
     )
 }
 
-/// Zero-copy version that writes directly into provided slices
 #[inline]
 pub fn halftrend_into_slices(
     out_halftrend: &mut [f64],
@@ -1097,7 +1020,10 @@ pub fn halftrend_into_slices(
         || out_buy_signal.len() != len
         || out_sell_signal.len() != len
     {
-        return Err(HalfTrendError::OutputLengthMismatch { expected: len, got: out_halftrend.len() });
+        return Err(HalfTrendError::OutputLengthMismatch {
+            expected: len,
+            got: out_halftrend.len(),
+        });
     }
 
     let amplitude = input.get_amplitude();
@@ -1118,7 +1044,6 @@ pub fn halftrend_into_slices(
     }
     let warm = first + warmup_span - 1;
 
-    // Prefix NaNs only once
     for v in [
         &mut *out_halftrend,
         out_trend,
@@ -1127,13 +1052,11 @@ pub fn halftrend_into_slices(
         out_buy_signal,
         out_sell_signal,
     ] {
-        // NaN prefix only
         for x in &mut v[..warm] {
             *x = f64::NAN;
         }
     }
 
-    // Calculate dependent series
     let atr_out = atr(&AtrInput::from_slices(
         high,
         low,
@@ -1161,7 +1084,6 @@ pub fn halftrend_into_slices(
     .map_err(|e| HalfTrendError::SmaError(e.to_string()))?
     .values;
 
-    // Use scalar kernel for the into_slices variant
     halftrend_scalar(
         high,
         low,
@@ -1183,7 +1105,6 @@ pub fn halftrend_into_slices(
     Ok(())
 }
 
-/// Provide an into variant with kernel selection (single run)
 #[inline]
 pub fn halftrend_into_slices_kernel(
     out_halftrend: &mut [f64],
@@ -1207,7 +1128,10 @@ pub fn halftrend_into_slices_kernel(
         || out_buy_signal.len() != len
         || out_sell_signal.len() != len
     {
-        return Err(HalfTrendError::OutputLengthMismatch { expected: len, got: out_halftrend.len() });
+        return Err(HalfTrendError::OutputLengthMismatch {
+            expected: len,
+            got: out_halftrend.len(),
+        });
     }
 
     let amplitude = input.get_amplitude();
@@ -1215,13 +1139,21 @@ pub fn halftrend_into_slices_kernel(
     let ch = input.get_channel_deviation();
 
     if amplitude == 0 || amplitude > len {
-        return Err(HalfTrendError::InvalidPeriod { period: amplitude, data_len: len });
+        return Err(HalfTrendError::InvalidPeriod {
+            period: amplitude,
+            data_len: len,
+        });
     }
     if atr_period == 0 || atr_period > len {
-        return Err(HalfTrendError::InvalidPeriod { period: atr_period, data_len: len });
+        return Err(HalfTrendError::InvalidPeriod {
+            period: atr_period,
+            data_len: len,
+        });
     }
     if !(ch.is_finite()) || ch <= 0.0 {
-        return Err(HalfTrendError::InvalidChannelDeviation { channel_deviation: ch });
+        return Err(HalfTrendError::InvalidChannelDeviation {
+            channel_deviation: ch,
+        });
     }
 
     let first = first_valid_ohlc(high, low, close);
@@ -1230,11 +1162,13 @@ pub fn halftrend_into_slices_kernel(
     }
     let warmup_span = amplitude.max(atr_period);
     if len - first < warmup_span {
-        return Err(HalfTrendError::NotEnoughValidData { needed: warmup_span, valid: len - first });
+        return Err(HalfTrendError::NotEnoughValidData {
+            needed: warmup_span,
+            valid: len - first,
+        });
     }
     let warm = first + warmup_span - 1;
 
-    // prefix only
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for x in &mut out_halftrend[..warm] {
         *x = qnan;
@@ -1332,7 +1266,6 @@ pub fn halftrend_into_slices_kernel(
     Ok(())
 }
 
-/// Convenience wrapper for halftrend_into_slices_kernel with Kernel::Auto
 #[inline]
 pub fn halftrend_into_slice(
     out_halftrend: &mut [f64],
@@ -1355,12 +1288,7 @@ pub fn halftrend_into_slice(
     )
 }
 
-/// Write HalfTrend outputs into caller-provided slices without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - All output slice lengths must equal the input length.
-/// - Uses `Kernel::Auto` runtime selection for the compute path.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn halftrend_into(
     input: &HalfTrendInput,
@@ -1383,7 +1311,6 @@ pub fn halftrend_into(
     )
 }
 
-// ==================== TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,10 +1318,9 @@ mod tests {
     use crate::utilities::data_loader::read_candles_from_csv;
     use std::error::Error;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_halftrend_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a small but non-trivial synthetic OHLC slice.
         let len = 256usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -1409,10 +1335,8 @@ mod tests {
 
         let input = HalfTrendInput::from_slices(&high, &low, &close, HalfTrendParams::default());
 
-        // Baseline via existing Vec-returning API (Kernel::Auto).
         let base = halftrend(&input)?;
 
-        // Preallocate outputs and call the new no-allocation API.
         let mut ht = vec![0.0; len];
         let mut tr = vec![0.0; len];
         let mut ah = vec![0.0; len];
@@ -1422,7 +1346,6 @@ mod tests {
 
         halftrend_into(&input, &mut ht, &mut tr, &mut ah, &mut al, &mut bs, &mut ss)?;
 
-        // Helper: NaN == NaN, otherwise exact or tight epsilon.
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }
@@ -1435,12 +1358,36 @@ mod tests {
         assert_eq!(base.sell_signal.len(), ss.len());
 
         for i in 0..len {
-            assert!(eq_or_both_nan(base.halftrend[i], ht[i]), "halftrend mismatch at {}", i);
-            assert!(eq_or_both_nan(base.trend[i], tr[i]), "trend mismatch at {}", i);
-            assert!(eq_or_both_nan(base.atr_high[i], ah[i]), "atr_high mismatch at {}", i);
-            assert!(eq_or_both_nan(base.atr_low[i], al[i]), "atr_low mismatch at {}", i);
-            assert!(eq_or_both_nan(base.buy_signal[i], bs[i]), "buy_signal mismatch at {}", i);
-            assert!(eq_or_both_nan(base.sell_signal[i], ss[i]), "sell_signal mismatch at {}", i);
+            assert!(
+                eq_or_both_nan(base.halftrend[i], ht[i]),
+                "halftrend mismatch at {}",
+                i
+            );
+            assert!(
+                eq_or_both_nan(base.trend[i], tr[i]),
+                "trend mismatch at {}",
+                i
+            );
+            assert!(
+                eq_or_both_nan(base.atr_high[i], ah[i]),
+                "atr_high mismatch at {}",
+                i
+            );
+            assert!(
+                eq_or_both_nan(base.atr_low[i], al[i]),
+                "atr_low mismatch at {}",
+                i
+            );
+            assert!(
+                eq_or_both_nan(base.buy_signal[i], bs[i]),
+                "buy_signal mismatch at {}",
+                i
+            );
+            assert!(
+                eq_or_both_nan(base.sell_signal[i], ss[i]),
+                "sell_signal mismatch at {}",
+                i
+            );
         }
 
         Ok(())
@@ -1455,8 +1402,6 @@ mod tests {
         let input = HalfTrendInput::from_candles(&candles, HalfTrendParams::default());
         let output = halftrend_with_kernel(&input, kernel)?;
 
-        // Test against reference values from PineScript
-        // Values are from indices 15570-15576 in the dataset
         let test_indices = vec![15570, 15571, 15574, 15575, 15576];
         let expected_halftrend = vec![59763.0, 59763.0, 59763.0, 59310.0, 59310.0];
         let expected_trend = vec![0.0, 0.0, 1.0, 1.0, 1.0];
@@ -1589,7 +1534,6 @@ mod tests {
         Ok(())
     }
 
-    // Test generation macro
     macro_rules! generate_all_halftrend_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -1684,8 +1628,7 @@ mod tests {
             }
         }
         assert_eq!(batch.halftrend.len(), ht.len());
-        // Note: Streaming and batch may differ slightly due to different computation methods
-        // We'll check that they produce reasonable results rather than exact matches
+
         Ok(())
     }
 
@@ -1817,7 +1760,6 @@ mod tests {
         check_halftrend_invalid_chdev
     );
 
-    
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -1848,7 +1790,7 @@ mod tests {
             .atr_period_range(50, 150, 50)
             .apply_candles(&c)?;
 
-        let expected_combos = 3 * 3 * 3; 
+        let expected_combos = 3 * 3 * 3;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -1881,21 +1823,15 @@ mod tests {
     gen_batch_tests!(check_batch_sweep);
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct HalfTrendStream {
-    
     amplitude: usize,
     atr_period: usize,
-    ch_half: f64, 
-    inv_amp: f64, 
+    ch_half: f64,
+    inv_amp: f64,
 
-    
     atr_stream: crate::indicators::atr::AtrStream,
 
-    
-    
     max_idx: Vec<usize>,
     max_val: Vec<f64>,
     min_idx: Vec<usize>,
@@ -1907,28 +1843,24 @@ pub struct HalfTrendStream {
     min_tail: usize,
     min_cnt: usize,
 
-    
     ring_high: Vec<f64>,
     ring_low: Vec<f64>,
-    ring_pos: usize, 
-    filled: usize,   
-    high_sum: f64,   
-    low_sum: f64,    
+    ring_pos: usize,
+    filled: usize,
+    high_sum: f64,
+    low_sum: f64,
 
-    
-    i: usize,           
-    warmup_need: usize, 
+    i: usize,
+    warmup_need: usize,
 
-    
-    current_trend: i32, 
-    next_trend: i32,    
-    last_trend: i8,     
+    current_trend: i32,
+    next_trend: i32,
+    last_trend: i8,
     max_low_price: f64,
     min_high_price: f64,
     up: f64,
     down: f64,
 
-    
     prev_high: f64,
     prev_low: f64,
     have_prev: bool,
@@ -2064,7 +1996,6 @@ impl HalfTrendStream {
 
     #[inline(always)]
     fn q_evict(&mut self, idx: usize) {
-        
         let cap = self.amplitude;
         let limit = idx.saturating_sub(self.amplitude - 1);
         while self.max_cnt > 0 && self.max_idx[self.max_head] < limit {
@@ -2077,21 +2008,17 @@ impl HalfTrendStream {
         }
     }
 
-    /// O(1) amortized update. Returns `None` during warmup (needs max(amplitude, atr_period) bars).
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<HalfTrendStreamOutput> {
-        
         if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             return None;
         }
 
         let idx = self.i;
 
-        
         self.q_evict(idx);
         self.q_push_max(idx, high);
         self.q_push_min(idx, low);
 
-        
         if self.filled == self.amplitude {
             let old_h = self.ring_high[self.ring_pos];
             let old_l = self.ring_low[self.ring_pos];
@@ -2106,15 +2033,12 @@ impl HalfTrendStream {
         self.low_sum += low;
         self.ring_pos = Self::inc(self.ring_pos, self.amplitude);
 
-        
         let atr_opt = self.atr_stream.update(high, low, close);
 
-        
         let warmed =
             self.filled == self.amplitude && (idx + 1) >= self.warmup_need && atr_opt.is_some();
 
         if !warmed {
-            
             self.prev_high = high;
             self.prev_low = low;
             self.have_prev = true;
@@ -2122,7 +2046,6 @@ impl HalfTrendStream {
             return None;
         }
 
-        
         debug_assert!(self.max_cnt > 0 && self.min_cnt > 0);
         let high_price = self.max_val[self.max_head];
         let low_price = self.min_val[self.min_head];
@@ -2130,7 +2053,6 @@ impl HalfTrendStream {
         let atr2 = 0.5 * atr;
         let dev = atr * self.ch_half;
 
-        
         let prev_low = if self.have_prev { self.prev_low } else { low };
         let prev_high = if self.have_prev { self.prev_high } else { high };
         if self.max_low_price.is_nan() {
@@ -2140,13 +2062,10 @@ impl HalfTrendStream {
             self.min_high_price = prev_high;
         }
 
-        
         let highma = self.high_sum * self.inv_amp;
         let lowma = self.low_sum * self.inv_amp;
 
-        
         if self.next_trend == 1 {
-            
             if low_price > self.max_low_price {
                 self.max_low_price = low_price;
             }
@@ -2156,7 +2075,6 @@ impl HalfTrendStream {
                 self.min_high_price = high_price;
             }
         } else {
-            
             if high_price < self.min_high_price {
                 self.min_high_price = high_price;
             }
@@ -2167,19 +2085,15 @@ impl HalfTrendStream {
             }
         }
 
-        
-        let prev_trend = self.last_trend; 
+        let prev_trend = self.last_trend;
         let mut buy_sig: Option<f64> = None;
         let mut sell_sig: Option<f64> = None;
 
         let (ht, atr_hi, atr_lo, tr_val) = if self.current_trend == 0 {
-            
             if prev_trend == 1 {
-                
                 self.up = self.down;
                 buy_sig = Some(self.up - atr2);
             } else {
-                
                 self.up = if self.up == 0.0 {
                     self.max_low_price
                 } else if self.max_low_price > self.up {
@@ -2191,13 +2105,10 @@ impl HalfTrendStream {
             let h = self.up;
             (h, h + dev, h - dev, 0.0)
         } else {
-            
             if prev_trend == 0 {
-                
                 self.down = self.up;
                 sell_sig = Some(self.down + atr2);
             } else {
-                
                 self.down = if self.down == 0.0 {
                     self.min_high_price
                 } else if self.min_high_price < self.down {
@@ -2210,7 +2121,6 @@ impl HalfTrendStream {
             (d, d + dev, d - dev, 1.0)
         };
 
-        
         self.last_trend = self.current_trend as i8;
         self.prev_high = high;
         self.prev_low = low;
@@ -2237,7 +2147,6 @@ pub struct HalfTrendStreamOutput {
     pub buy_signal: Option<f64>,
     pub sell_signal: Option<f64>,
 }
-
 
 #[derive(Clone, Debug)]
 pub struct HalfTrendBatchRange {
@@ -2397,7 +2306,6 @@ impl HalfTrendBatchOutput {
     }
 }
 
-
 fn halftrend_batch_with_kernel(
     candles: &Candles,
     sweep: &HalfTrendBatchRange,
@@ -2430,15 +2338,17 @@ fn halftrend_batch_with_kernel_slices(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, 
+        _ => Kernel::Scalar,
     };
 
-    
     let _cap = rows
         .checked_mul(cols)
-        .ok_or_else(|| HalfTrendError::InvalidRange { start: "rows".into(), end: "cols".into(), step: "mul".into() })?;
+        .ok_or_else(|| HalfTrendError::InvalidRange {
+            start: "rows".into(),
+            end: "cols".into(),
+            step: "mul".into(),
+        })?;
 
-    
     let mut mu_ht = make_uninit_matrix(rows, cols);
     let mut mu_tr = make_uninit_matrix(rows, cols);
     let mut mu_ah = make_uninit_matrix(rows, cols);
@@ -2446,7 +2356,6 @@ fn halftrend_batch_with_kernel_slices(
     let mut mu_bs = make_uninit_matrix(rows, cols);
     let mut mu_ss = make_uninit_matrix(rows, cols);
 
-    
     let first = first_valid_ohlc(high, low, close);
     if first == usize::MAX {
         return Err(HalfTrendError::AllValuesNaN);
@@ -2463,7 +2372,6 @@ fn halftrend_batch_with_kernel_slices(
     init_matrix_prefixes(&mut mu_bs, cols, &warms);
     init_matrix_prefixes(&mut mu_ss, cols, &warms);
 
-    
     let dst_ht =
         unsafe { core::slice::from_raw_parts_mut(mu_ht.as_mut_ptr() as *mut f64, mu_ht.len()) };
     let dst_tr =
@@ -2477,12 +2385,10 @@ fn halftrend_batch_with_kernel_slices(
     let dst_ss =
         unsafe { core::slice::from_raw_parts_mut(mu_ss.as_mut_ptr() as *mut f64, mu_ss.len()) };
 
-    
     halftrend_batch_rows_into(
         high, low, close, sweep, simd, dst_ht, dst_tr, dst_ah, dst_al, dst_bs, dst_ss,
     )?;
 
-    
     let take = |v: Vec<MaybeUninit<f64>>| unsafe {
         let ptr = v.as_ptr() as *mut f64;
         let len = v.len();
@@ -2506,36 +2412,65 @@ fn halftrend_batch_with_kernel_slices(
 
 fn expand_grid_halftrend(r: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>, HalfTrendError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, HalfTrendError> {
-        if step == 0 || start == end { return Ok(vec![start]); }
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
         if start < end {
             return Ok((start..=end).step_by(step.max(1)).collect());
         }
-        
+
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
         let st = (step as isize).max(1);
-        while x >= end_i { v.push(x as usize); x -= st; }
+        while x >= end_i {
+            v.push(x as usize);
+            x -= st;
+        }
         if v.is_empty() {
-            return Err(HalfTrendError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() });
+            return Err(HalfTrendError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
         }
         Ok(v)
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, HalfTrendError> {
-        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return Ok(vec![start]); }
+        if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+            return Ok(vec![start]);
+        }
         if start < end {
             let mut v = Vec::new();
             let mut x = start;
             let st = step.abs();
-            while x <= end + 1e-12 { v.push(x); x += st; }
-            if v.is_empty() { return Err(HalfTrendError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() }); }
+            while x <= end + 1e-12 {
+                v.push(x);
+                x += st;
+            }
+            if v.is_empty() {
+                return Err(HalfTrendError::InvalidRange {
+                    start: start.to_string(),
+                    end: end.to_string(),
+                    step: step.to_string(),
+                });
+            }
             return Ok(v);
         }
         let mut v = Vec::new();
         let mut x = start;
         let st = step.abs();
-        while x + 1e-12 >= end { v.push(x); x -= st; }
-        if v.is_empty() { return Err(HalfTrendError::InvalidRange { start: start.to_string(), end: end.to_string(), step: step.to_string() }); }
+        while x + 1e-12 >= end {
+            v.push(x);
+            x -= st;
+        }
+        if v.is_empty() {
+            return Err(HalfTrendError::InvalidRange {
+                start: start.to_string(),
+                end: end.to_string(),
+                step: step.to_string(),
+            });
+        }
         Ok(v)
     }
 
@@ -2543,22 +2478,30 @@ fn expand_grid_halftrend(r: &HalfTrendBatchRange) -> Result<Vec<HalfTrendParams>
     let channel_deviations = axis_f64(r.channel_deviation)?;
     let atr_periods = axis_usize(r.atr_period)?;
 
-    let cap = amplitudes.len()
+    let cap = amplitudes
+        .len()
         .checked_mul(channel_deviations.len())
         .and_then(|x| x.checked_mul(atr_periods.len()))
-        .ok_or_else(|| HalfTrendError::InvalidRange { start: "cap".into(), end: "overflow".into(), step: "mul".into() })?;
+        .ok_or_else(|| HalfTrendError::InvalidRange {
+            start: "cap".into(),
+            end: "overflow".into(),
+            step: "mul".into(),
+        })?;
 
     let mut out = Vec::with_capacity(cap);
     for &a in &amplitudes {
         for &c in &channel_deviations {
             for &p in &atr_periods {
-                out.push(HalfTrendParams { amplitude: Some(a), channel_deviation: Some(c), atr_period: Some(p) });
+                out.push(HalfTrendParams {
+                    amplitude: Some(a),
+                    channel_deviation: Some(c),
+                    atr_period: Some(p),
+                });
             }
         }
     }
     Ok(out)
 }
-
 
 #[inline(always)]
 fn warmup_from(first: usize, amplitude: usize, atr_period: usize) -> usize {
@@ -2808,7 +2751,7 @@ fn halftrend_row_into_precomputed(
         }
     }
 }
-/// Batch inner that assumes warm prefixes are already set
+
 #[inline(always)]
 pub fn halftrend_batch_rows_into(
     high: &[f64],
@@ -2834,7 +2777,6 @@ pub fn halftrend_batch_rows_into(
     let rows = combos.len();
     let cols = len;
 
-    
     use std::collections::BTreeSet;
     let uniq_amp: BTreeSet<usize> = combos.iter().map(|p| p.amplitude.unwrap()).collect();
     let uniq_atr: BTreeSet<usize> = combos.iter().map(|p| p.atr_period.unwrap()).collect();
@@ -2856,7 +2798,7 @@ pub fn halftrend_batch_rows_into(
                 .values,
         );
     }
-    
+
     let mut roll_high_map: HashMap<usize, Vec<f64>> = HashMap::new();
     let mut roll_low_map: HashMap<usize, Vec<f64>> = HashMap::new();
     for &a in &uniq_amp {
@@ -2878,7 +2820,6 @@ pub fn halftrend_batch_rows_into(
         );
     }
 
-    
     for row in 0..rows {
         let prm = &combos[row];
         let amp = prm.amplitude.unwrap();
@@ -2909,7 +2850,6 @@ pub fn halftrend_batch_rows_into(
 
     Ok(combos)
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -2947,7 +2887,6 @@ pub fn halftrend_py<'py>(
         .allow_threads(|| halftrend_with_kernel(&input, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("halftrend", out.halftrend.into_pyarray(py))?;
     dict.set_item("trend", out.trend.into_pyarray(py))?;
@@ -2958,7 +2897,6 @@ pub fn halftrend_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction]
@@ -3073,15 +3011,13 @@ pub fn halftrend_batch_py<'py>(
         range.atr_period = (v, v, 0);
     }
 
-    let combos = expand_grid_halftrend(&range)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_halftrend(&range).map_err(|e| PyValueError::new_err(e.to_string()))?;
     if combos.is_empty() {
         return Err(PyValueError::new_err("empty sweep"));
     }
     let rows = combos.len();
     let cols = h.len();
 
-    // Allocate NumPy outputs (uninitialized)
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("halftrend_batch: rows*cols overflow"))?;
@@ -3099,7 +3035,6 @@ pub fn halftrend_batch_py<'py>(
     let dst_bs = unsafe { arr_bs.as_slice_mut()? };
     let dst_ss = unsafe { arr_ss.as_slice_mut()? };
 
-    // Warm prefixes per row (NaN only for prefix; rest left for compute)
     let first = first_valid_ohlc(h, l, c);
     let warms: Vec<usize> = combos
         .iter()
@@ -3146,7 +3081,6 @@ pub fn halftrend_batch_py<'py>(
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Stack all 6 series vertically to match ALMA format
     let total_rows = rows
         .checked_mul(6)
         .ok_or_else(|| PyValueError::new_err("halftrend_batch: rows*6 overflow"))?;
@@ -3156,7 +3090,6 @@ pub fn halftrend_batch_py<'py>(
     let stacked = unsafe { PyArray1::<f64>::new(py, [total_stacked], false) };
     let dst_stacked = unsafe { stacked.as_slice_mut()? };
 
-    // Copy each series into the stacked buffer
     let block = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("halftrend_batch: block size overflow"))?;
@@ -3169,7 +3102,7 @@ pub fn halftrend_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", stacked.reshape((total_rows, cols))?)?;
-    // Create a Python list for series names instead of numpy array
+
     use pyo3::types::PyList;
     let series = PyList::new(
         py,
@@ -3205,7 +3138,6 @@ pub fn halftrend_batch_py<'py>(
     Ok(dict.into())
 }
 
-// ==================== PYTHON CUDA BINDINGS ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "halftrend_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, amplitude_range, channel_deviation_range=(2.0,2.0,0.0), atr_period_range=(14,14,0), device_id=0))]
@@ -3231,8 +3163,10 @@ pub fn halftrend_cuda_batch_dev_py<'py>(
         atr_period: atr_period_range,
     };
     let (batch, ctx_arc, dev_id) = py.allow_threads(|| {
-        let cuda = CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda.halftrend_batch_dev(h, l, c, &sweep)
+        let cuda =
+            CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda
+            .halftrend_batch_dev(h, l, c, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
@@ -3249,19 +3183,10 @@ pub fn halftrend_cuda_batch_dev_py<'py>(
     let mut sell_dev = make_device_array_py(dev_id as usize, batch.sell)?;
     sell_dev._ctx = Some(ctx_arc.clone());
     let dict = PyDict::new(py);
-    dict.set_item(
-        "halftrend",
-        Py::new(py, halftrend_dev)?,
-    )?;
+    dict.set_item("halftrend", Py::new(py, halftrend_dev)?)?;
     dict.set_item("trend", Py::new(py, trend_dev)?)?;
-    dict.set_item(
-        "atr_high",
-        Py::new(py, atr_high_dev)?,
-    )?;
-    dict.set_item(
-        "atr_low",
-        Py::new(py, atr_low_dev)?,
-    )?;
+    dict.set_item("atr_high", Py::new(py, atr_high_dev)?)?;
+    dict.set_item("atr_low", Py::new(py, atr_low_dev)?)?;
     dict.set_item("buy_signal", Py::new(py, buy_dev)?)?;
     dict.set_item("sell_signal", Py::new(py, sell_dev)?)?;
     use numpy::IntoPyArray;
@@ -3317,10 +3242,20 @@ pub fn halftrend_cuda_many_series_one_param_dev_py<'py>(
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
     let (out, ctx_arc, dev_id) = py.allow_threads(|| {
-        let cuda = CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let out = cuda.halftrend_many_series_one_param_time_major_dev(
-            h, l, c, cols, rows, amplitude, channel_deviation, atr_period,
-        ).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaHalftrend::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let out = cuda
+            .halftrend_many_series_one_param_time_major_dev(
+                h,
+                l,
+                c,
+                cols,
+                rows,
+                amplitude,
+                channel_deviation,
+                atr_period,
+            )
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
     let mut halftrend_dev = make_device_array_py(dev_id as usize, out.halftrend)?;
@@ -3336,15 +3271,9 @@ pub fn halftrend_cuda_many_series_one_param_dev_py<'py>(
     let mut sell_dev = make_device_array_py(dev_id as usize, out.sell)?;
     sell_dev._ctx = Some(ctx_arc.clone());
     let dict = PyDict::new(py);
-    dict.set_item(
-        "halftrend",
-        Py::new(py, halftrend_dev)?,
-    )?;
+    dict.set_item("halftrend", Py::new(py, halftrend_dev)?)?;
     dict.set_item("trend", Py::new(py, trend_dev)?)?;
-    dict.set_item(
-        "atr_high",
-        Py::new(py, atr_high_dev)?,
-    )?;
+    dict.set_item("atr_high", Py::new(py, atr_high_dev)?)?;
     dict.set_item("atr_low", Py::new(py, atr_low_dev)?)?;
     dict.set_item("buy_signal", Py::new(py, buy_dev)?)?;
     dict.set_item("sell_signal", Py::new(py, sell_dev)?)?;
@@ -3393,16 +3322,15 @@ impl HalfTrendStreamPy {
     }
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HalfTrendJsResult {
-    pub values: Vec<f64>, // order: [halftrend..., trend..., atr_high..., atr_low..., buy..., sell...]
-    pub rows: usize,      // = 6
-    pub cols: usize,      // = len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "halftrend")]
 pub fn halftrend_js(
     high: &[f64],
@@ -3412,7 +3340,6 @@ pub fn halftrend_js(
     channel_deviation: f64,
     atr_period: usize,
 ) -> Result<JsValue, JsValue> {
-    // Validate input arrays
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(JsValue::from_str("halftrend: Input data slice is empty."));
     }
@@ -3427,7 +3354,6 @@ pub fn halftrend_js(
         )));
     }
 
-    // Validate channel deviation first (before period checks)
     if channel_deviation <= 0.0 {
         return Err(JsValue::from_str(&format!(
             "halftrend: Invalid channel_deviation: {}",
@@ -3435,7 +3361,6 @@ pub fn halftrend_js(
         )));
     }
 
-    // Validate amplitude
     if amplitude == 0 {
         return Err(JsValue::from_str(&format!(
             "halftrend: Invalid period: period = {}, data length = {}",
@@ -3443,7 +3368,6 @@ pub fn halftrend_js(
         )));
     }
 
-    // Validate ATR period
     if atr_period == 0 {
         return Err(JsValue::from_str(&format!(
             "halftrend: Invalid period: period = {}, data length = {}",
@@ -3458,7 +3382,6 @@ pub fn halftrend_js(
         )));
     }
 
-    // Check for sufficient valid data
     let mut valid_count = 0;
     for i in 0..len {
         if !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan() {
@@ -3492,22 +3415,20 @@ pub fn halftrend_js(
         .ok_or_else(|| JsValue::from_str("halftrend: rows*cols overflow"))?;
     let mut values = vec![0.0; total];
 
-    // Split flattened buffer into 6 row views
     let (ht, rest) = values.split_at_mut(cols);
     let (tr, rest) = rest.split_at_mut(cols);
     let (ah, rest) = rest.split_at_mut(cols);
     let (al, rest) = rest.split_at_mut(cols);
     let (bs, ss) = rest.split_at_mut(cols);
 
-halftrend_into_slices_kernel(ht, tr, ah, al, bs, ss, &input, Kernel::Auto)
+    halftrend_into_slices_kernel(ht, tr, ah, al, bs, ss, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     serde_wasm_bindgen::to_value(&HalfTrendJsResult { values, rows, cols })
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
 
-// Keep the old function for backward compatibility
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn halftrend_wasm(
     high: &[f64],
@@ -3554,10 +3475,8 @@ pub fn halftrend_wasm(
     let input = HalfTrendInput::from_candles(&candles, params);
     let output = halftrend(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Create result object
     let result = js_sys::Object::new();
 
-    // Convert vectors to JavaScript arrays
     let halftrend_array = js_sys::Float64Array::from(&output.halftrend[..]);
     let trend_array = js_sys::Float64Array::from(&output.trend[..]);
     let atr_high_array = js_sys::Float64Array::from(&output.atr_high[..]);
@@ -3575,7 +3494,7 @@ pub fn halftrend_wasm(
     Ok(result.into())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn halftrend_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -3584,7 +3503,7 @@ pub fn halftrend_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn halftrend_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -3592,8 +3511,7 @@ pub fn halftrend_free(ptr: *mut f64, len: usize) {
     }
 }
 
-/// Write into flattened buffer of length 6*len (row-major as above)
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "halftrend_into")]
 pub fn halftrend_into(
     high_ptr: *const f64,
@@ -3609,12 +3527,10 @@ pub fn halftrend_into(
         return Err(JsValue::from_str("null pointer"));
     }
 
-    // Validate parameters before using unsafe
     if len == 0 {
         return Err(JsValue::from_str("halftrend: Input data slice is empty."));
     }
 
-    // Validate channel deviation first (before period checks)
     if channel_deviation <= 0.0 {
         return Err(JsValue::from_str(&format!(
             "halftrend: Invalid channel_deviation: {}",
@@ -3672,7 +3588,7 @@ pub fn halftrend_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HalfTrendBatchConfig {
     pub amplitude_range: (usize, usize, usize),
@@ -3680,16 +3596,16 @@ pub struct HalfTrendBatchConfig {
     pub atr_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct HalfTrendBatchJsOutput {
-    pub values: Vec<f64>, // rows = 6 * combos, cols = len
+    pub values: Vec<f64>,
     pub combos: Vec<HalfTrendParams>,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "halftrend_batch")]
 pub fn halftrend_batch_unified_js(
     high: &[f64],
@@ -3706,9 +3622,7 @@ pub fn halftrend_batch_unified_js(
         atr_period: cfg.atr_period_range,
     };
 
-    // Compute using zero-copy inner into six separate buffers, then pack
-    let combos = expand_grid_halftrend(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_grid_halftrend(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows_ind = combos.len();
     let cols = high.len();
 
@@ -3734,7 +3648,6 @@ pub fn halftrend_batch_unified_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Flatten into 6*rows_ind × cols
     let mut values = Vec::with_capacity(6 * rows_ind * cols);
     values.extend_from_slice(&ht);
     values.extend_from_slice(&tr);
@@ -3752,7 +3665,7 @@ pub fn halftrend_batch_unified_js(
     serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn halftrend_batch_into(
     high_ptr: *const f64,
@@ -3785,14 +3698,13 @@ pub fn halftrend_batch_into(
             channel_deviation: (ch_start, ch_end, ch_step),
             atr_period: (atr_start, atr_end, atr_step),
         };
-        let combos = expand_grid_halftrend(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let rows_ind = combos.len(); // indicator rows
+        let combos =
+            expand_grid_halftrend(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows_ind = combos.len();
         let cols = len;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, 6 * rows_ind * cols);
 
-        // split into 6 planes
         let block = rows_ind * cols;
         let (ht, rest) = out.split_at_mut(block);
         let (tr, rest) = rest.split_at_mut(block);
@@ -3800,20 +3712,8 @@ pub fn halftrend_batch_into(
         let (al, rest) = rest.split_at_mut(block);
         let (bs, ss) = rest.split_at_mut(block);
 
-        halftrend_batch_rows_into(
-            h,
-            l,
-            c,
-            &sweep,
-            Kernel::Auto,
-            ht,
-            tr,
-            ah,
-            al,
-            bs,
-            ss,
-        )
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        halftrend_batch_rows_into(h, l, c, &sweep, Kernel::Auto, ht, tr, ah, al, bs, ss)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         Ok(rows_ind)
     }

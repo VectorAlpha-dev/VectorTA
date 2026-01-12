@@ -4,17 +4,17 @@ fn main() {
     println!("TA-LIB Integration Test");
     println!("========================\n");
 
-    
+
     match env::var("TALIB_PATH") {
         Ok(path) => {
             println!("✓ TALIB_PATH is set to: {}", path);
 
-            
+
             let lib_path = std::path::Path::new(&path);
             if lib_path.exists() {
                 println!("✓ TA-LIB directory exists");
 
-                
+
                 let include_path = lib_path.join("include");
                 let lib_dir_path = lib_path.join("lib");
 
@@ -27,7 +27,7 @@ fn main() {
                 if lib_dir_path.exists() {
                     println!("✓ Library directory found: {}", lib_dir_path.display());
 
-                    
+
                     if let Ok(entries) = std::fs::read_dir(&lib_dir_path) {
                         println!("\nLibrary files found:");
                         for entry in entries.flatten() {
@@ -58,7 +58,7 @@ fn main() {
         }
     }
 
-    
+
     #[cfg(feature = "talib")]
     {
         println!("\n✓ Compiled with TA-LIB support");
@@ -74,16 +74,16 @@ fn main() {
 
 #[cfg(feature = "talib")]
 fn test_talib_function() {
-    
+
     println!("Testing TA-LIB function calls...");
 
-    
+
     let test_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
     println!("Test data: {:?}", test_data);
 
-    
-    
-    
+
+
+
 
     println!("TA-LIB function test would run here once bindings are generated.");
 }

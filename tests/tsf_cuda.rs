@@ -113,7 +113,6 @@ fn tsf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for col in 0..cols {
         let mut series = vec![f64::NAN; rows];

@@ -1,27 +1,3 @@
-//! # Ease of Movement (EMV)
-//!
-//! Measures how easily price moves given volume. Calculates the ratio of price movement to volume.
-//!
-//! ## Parameters
-//! - None (requires high, low, close, and volume data)
-//!
-//! ## Returns
-//! - **`Ok(EmvOutput)`** on success (`values: Vec<f64>` of length matching input)
-//! - **`Err(EmvError)`** on failure
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 present as stubs delegating to scalar. EMV has a strict
-//!   loop-carried dependency on the prior valid midpoint and NaN/zero-range semantics, making
-//!   wide SIMD non-viable without complex masked prefix-scan logic and risking parity. Runtime
-//!   selection keeps kernels for parity but they currently short-circuit to the scalar path.
-//! - **Row-specific batch**: Not applicable — EMV has no parameters; batch is a single row.
-//! - **Streaming**: O(1) performance with exact parity vs batch. An optional
-//!   fast update helper is provided (multiply-by-reciprocal + Newton refine),
-//!   but default streaming keeps exact arithmetic order for test parity.
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-//! - **CUDA**: FP32 batch + many-series kernels with VRAM handles wired to
-//!   Python (CAI v3 + DLPack v1.x); kernels synchronize before returning so
-//!   consumers always see fully-materialized outputs.
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -41,17 +17,15 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::CudaEmv;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::CudaEmv;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -60,10 +34,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -85,7 +61,10 @@ pub struct EmvOutput {
 }
 
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct EmvParams;
 
 #[derive(Debug, Clone)]
@@ -177,7 +156,11 @@ pub enum EmvError {
     #[error("emv: output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("emv: invalid range expansion: start={start} end={end} step={step}")]
-    InvalidRange { start: isize, end: isize, step: isize },
+    InvalidRange {
+        start: isize,
+        end: isize,
+        step: isize,
+    },
     #[error("emv: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("emv: invalid input: {0}")]
@@ -220,9 +203,6 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
         None => return Err(EmvError::AllValuesNaN),
     };
 
-    // We need at least 2 valid points (one warmup midpoint + one computed EMV).
-    // Avoid a full scan by searching only for a second valid point; in the common case
-    // (no NaNs), this is O(1) and keeps error semantics intact.
     let has_second = (first + 1..len)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .is_some();
@@ -252,11 +232,7 @@ pub fn emv_with_kernel(input: &EmvInput, kernel: Kernel) -> Result<EmvOutput, Em
     Ok(EmvOutput { values: out })
 }
 
-/// Write EMV values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like `emv()` (quiet-NaN prefix).
-/// - `out.len()` must equal the effective input length; otherwise an error is returned.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn emv_into(input: &EmvInput, out: &mut [f64]) -> Result<(), EmvError> {
     emv_into_slice(out, input, Kernel::Auto)
@@ -311,7 +287,6 @@ pub fn emv_into_slice(dst: &mut [f64], input: &EmvInput, kern: Kernel) -> Result
         });
     }
 
-    // Fill warmup period with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let warm = first + 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warm] {
@@ -341,7 +316,6 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
     let len = high.len().min(low.len()).min(volume.len());
     let mut last_mid = 0.5 * (high[first] + low[first]);
 
-    // Unsafe pointer-walk to remove bounds checks in the hot loop (scalar path parity with AVX2 stub).
     unsafe {
         let h_ptr = high.as_ptr();
         let l_ptr = low.as_ptr();
@@ -360,12 +334,11 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
                 continue;
             }
 
-            // Keep arithmetic order identical to streaming path
             let current_mid = 0.5 * (h + l);
             let range = h - l;
             if range == 0.0 {
                 *o_ptr.add(i) = f64::NAN;
-                last_mid = current_mid; // advance last_mid on zero-range
+                last_mid = current_mid;
                 i += 1;
                 continue;
             }
@@ -383,17 +356,12 @@ pub fn emv_scalar(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn emv_avx512(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    // Delegate to AVX2 stub which uses an unsafe pointer-walk scalar kernel.
-    // Rationale: EMV is dependency-bound; SIMD is not beneficial without complex
-    // masked scans. Keep parity by reusing the same kernel.
     emv_avx2(high, low, volume, first, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn emv_avx2(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &mut [f64]) {
-    // Unsafe pointer-walk variant of the scalar kernel to minimize bound checks.
-    // Keeps arithmetic order identical to streaming for parity.
     let len = high.len().min(low.len()).min(volume.len());
     let mut last_mid = 0.5 * (high[first] + low[first]);
     unsafe {
@@ -422,7 +390,6 @@ pub fn emv_avx2(high: &[f64], low: &[f64], volume: &[f64], first: usize, out: &m
                     last_mid = current_mid;
                 }
             } else {
-                // Any NaN in inputs -> NaN output; do not advance last_mid.
                 *o_ptr.add(i) = f64::NAN;
             }
 
@@ -440,7 +407,6 @@ pub unsafe fn emv_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    // Route to the AVX2 stub to keep a single parity-preserving kernel.
     emv_avx2(high, low, volume, first, out);
 }
 
@@ -453,7 +419,6 @@ pub unsafe fn emv_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    // Route to the AVX2 stub to keep a single parity-preserving kernel.
     emv_avx2(high, low, volume, first, out);
 }
 
@@ -489,8 +454,6 @@ impl EmvStream {
         Some(out)
     }
 
-    /// Optional faster update using reciprocal + Newton refinement.
-    /// Not bit-for-bit identical to batch (re-association); keep `update` as default.
     #[inline(always)]
     pub fn update_fast(&mut self, high: f64, low: f64, volume: f64) -> Option<f64> {
         if high.is_nan() || low.is_nan() || volume.is_nan() {
@@ -507,7 +470,7 @@ impl EmvStream {
             self.last_mid = Some(current_mid);
             return None;
         }
-        // Re-associated form with fast reciprocal: (Δmid * range * 10000) * (1/volume)
+
         let inv_v = fast_recip_f64(volume);
         let out = (current_mid - last_mid) * range * 10_000.0 * inv_v;
         self.last_mid = Some(current_mid);
@@ -515,10 +478,8 @@ impl EmvStream {
     }
 }
 
-// --- fast math helpers -------------------------------------------------------
 #[inline(always)]
 fn newton_refine_recip(y0: f64, x: f64) -> f64 {
-    // One Newton-Raphson step for 1/x: y_{n+1} = y_n * (2 - x*y_n)
     let t = 2.0_f64 - x.mul_add(y0, 0.0);
     y0 * t
 }
@@ -620,7 +581,7 @@ pub fn emv_batch_with_kernel(
 #[derive(Clone, Debug)]
 pub struct EmvBatchOutput {
     pub values: Vec<f64>,
-    pub combos: Vec<EmvParams>, // parity with alma.rs
+    pub combos: Vec<EmvParams>,
     pub rows: usize,
     pub cols: usize,
 }
@@ -663,7 +624,7 @@ fn emv_batch_inner(
     low: &[f64],
     volume: &[f64],
     kern: Kernel,
-    _parallel: bool, // no-op for EMV
+    _parallel: bool,
 ) -> Result<EmvBatchOutput, EmvError> {
     let len = high.len().min(low.len()).min(volume.len());
     if len == 0 {
@@ -674,34 +635,26 @@ fn emv_batch_inner(
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .ok_or(EmvError::AllValuesNaN)?;
 
-    // Validate we have at least two valid points
     let valid = (first..len)
         .filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .count();
     if valid < 2 {
-        return Err(EmvError::NotEnoughValidData {
-            needed: 2,
-            valid,
-        });
+        return Err(EmvError::NotEnoughValidData { needed: 2, valid });
     }
 
-    // 1 row x len cols
     let rows = 1usize;
     let cols = len;
     let _ = rows
         .checked_mul(cols)
         .ok_or(EmvError::InvalidInput("rows*cols overflow"))?;
 
-    // Uninitialized matrix + warmup NaNs only for the needed prefix
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &[first + 1]);
 
-    // Safely reinterpret to &mut [f64] without extra allocs or copies
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Compute into output
     unsafe {
         match kern {
             Kernel::Scalar | Kernel::ScalarBatch => emv_scalar(high, low, volume, first, out),
@@ -713,7 +666,6 @@ fn emv_batch_inner(
         }
     }
 
-    // Move buffer out as Vec<f64> with zero copy
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -724,7 +676,7 @@ fn emv_batch_inner(
 
     Ok(EmvBatchOutput {
         values,
-        combos: vec![EmvParams], // single combination
+        combos: vec![EmvParams],
         rows,
         cols,
     })
@@ -859,7 +811,6 @@ fn emv_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -868,21 +819,15 @@ fn emv_batch_inner_into(
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .ok_or(EmvError::AllValuesNaN)?;
 
-    
     let valid = (first..len)
         .filter(|&i| !(high[i].is_nan() || low[i].is_nan() || volume[i].is_nan()))
         .count();
     if valid < 2 {
-        return Err(EmvError::NotEnoughValidData {
-            needed: 2,
-            valid,
-        });
+        return Err(EmvError::NotEnoughValidData { needed: 2, valid });
     }
 
-    
     init_matrix_prefixes(out_mu, len, &[first + 1]);
 
-    
     let out_f: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
 
@@ -921,13 +866,12 @@ pub fn emv_batch_py<'py>(
 
     let sweep = EmvBatchRange {};
     let combos = expand_grid(&sweep);
-    let rows = combos.len(); // Always 1 for EMV
+    let rows = combos.len();
     let cols = high_slice
         .len()
         .min(low_slice.len())
         .min(volume_slice.len());
 
-    // Pre-allocate output array
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -952,12 +896,11 @@ pub fn emv_batch_py<'py>(
 
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
-    // No parameter arrays for EMV since it has no parameters
 
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emv_js(
     high: &[f64],
@@ -975,7 +918,7 @@ pub fn emv_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emv_into(
     high_ptr: *const f64,
@@ -1002,20 +945,17 @@ pub fn emv_into(
 
         let input = EmvInput::from_slices(high, low, close, volume);
 
-        // Check if output pointer aliases with any input pointer
         if out_ptr == high_ptr as *mut f64
             || out_ptr == low_ptr as *mut f64
             || out_ptr == close_ptr as *mut f64
             || out_ptr == volume_ptr as *mut f64
         {
-            // Use temp buffer for aliased operation
             let mut temp = vec![0.0; len];
             emv_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct write to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             emv_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1025,7 +965,7 @@ pub fn emv_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emv_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1034,7 +974,7 @@ pub fn emv_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emv_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1044,22 +984,20 @@ pub fn emv_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
-pub struct EmvBatchConfig {
-    // EMV has no parameters to sweep
-}
+pub struct EmvBatchConfig {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EmvBatchJsOutput {
     pub values: Vec<f64>,
-    pub combos: Vec<EmvParams>, // add combos for parity
+    pub combos: Vec<EmvParams>,
     pub rows: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = emv_batch)]
 pub fn emv_batch_js(
     high: &[f64],
@@ -1079,7 +1017,7 @@ pub fn emv_batch_js(
 
     let js_output = EmvBatchJsOutput {
         values: output,
-        combos: vec![EmvParams], // single combo, EMV has no params
+        combos: vec![EmvParams],
         rows: 1,
         cols: len,
     };
@@ -1088,7 +1026,7 @@ pub fn emv_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn emv_batch_into(
     high_ptr: *const f64,
@@ -1120,7 +1058,7 @@ pub fn emv_batch_into(
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
         emv_into_slice(out, &input, kernel).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(1) // Always 1 row for EMV (no parameter sweep)
+        Ok(1)
     }
 }
 
@@ -1267,12 +1205,9 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Since EMV has no parameters, we test different ways of calling it
-        // Test 1: From candles
         let input1 = EmvInput::from_candles(&candles);
         let output1 = emv_with_kernel(&input1, kernel)?;
 
-        // Test 2: From slices
         let high = source_type(&candles, "high");
         let low = source_type(&candles, "low");
         let close = source_type(&candles, "close");
@@ -1280,11 +1215,9 @@ mod tests {
         let input2 = EmvInput::from_slices(high, low, close, volume);
         let output2 = emv_with_kernel(&input2, kernel)?;
 
-        // Test 3: With default candles
         let input3 = EmvInput::with_default_candles(&candles);
         let output3 = emv_with_kernel(&input3, kernel)?;
 
-        // Check all outputs for poison values
         let outputs = [
             ("from_candles", &output1.values),
             ("from_slices", &output2.values),
@@ -1294,12 +1227,11 @@ mod tests {
         for (method_name, values) in &outputs {
             for (i, &val) in values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1334,7 +1266,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1346,20 +1278,11 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate realistic market data
         let strat = prop::collection::vec(
-            (
-                // High price (10 to 100000)
-                10.0f64..100000.0f64,
-                // Low as percentage of high (50% to 99.9% of high)
-                0.5f64..0.999f64,
-                // Volume (1000 to 1e9)
-                1000.0f64..1e9f64,
-            ),
-            2..400, // Need at least 2 points for EMV
+            (10.0f64..100000.0f64, 0.5f64..0.999f64, 1000.0f64..1e9f64),
+            2..400,
         )
         .prop_map(|data| {
-            // Convert percentages to actual low values
             let high: Vec<f64> = data.iter().map(|(h, _, _)| *h).collect();
             let low: Vec<f64> = data
                 .iter()
@@ -1367,7 +1290,7 @@ mod tests {
                 .map(|((_, l_pct, _), h)| h * l_pct)
                 .collect();
             let volume: Vec<f64> = data.iter().map(|(_, _, v)| *v).collect();
-            // Close values are not used in EMV calculation, but needed for API
+
             let close = high.clone();
             (high, low, close, volume)
         });
@@ -1376,20 +1299,16 @@ mod tests {
             .run(&strat, |(high, low, close, volume)| {
                 let input = EmvInput::from_slices(&high, &low, &close, &volume);
 
-                // Test with specified kernel
                 let EmvOutput { values: out } = emv_with_kernel(&input, kernel).unwrap();
 
-                // Test with scalar reference
                 let EmvOutput { values: ref_out } =
                     emv_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                // Property 1: Warmup period - first value should always be NaN
                 prop_assert!(
                     out[0].is_nan(),
                     "First EMV value should always be NaN (warmup period)"
                 );
 
-                // Property 2: Output finiteness - when inputs are finite, outputs should be finite (except warmup and zero range)
                 for i in 1..out.len() {
                     if high[i].is_finite() && low[i].is_finite() && volume[i].is_finite() {
                         let range = high[i] - low[i];
@@ -1403,13 +1322,11 @@ mod tests {
                     }
                 }
 
-                // Property 3: Kernel consistency - different kernels should produce nearly identical results
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
                     if !y.is_finite() || !r.is_finite() {
-                        // Both should be NaN or infinite in the same way
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
                             "Non-finite mismatch at index {}: {} vs {}",
@@ -1418,7 +1335,6 @@ mod tests {
                             r
                         );
                     } else {
-                        // Check ULP difference for finite values
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
@@ -1434,15 +1350,12 @@ mod tests {
                     }
                 }
 
-                // Property 4: EMV formula verification
-                // EMV = (current_mid - last_mid) / (volume / 10000 / range)
                 let mut last_mid = 0.5 * (high[0] + low[0]);
                 for i in 1..out.len() {
                     let current_mid = 0.5 * (high[i] + low[i]);
                     let range = high[i] - low[i];
 
                     if range == 0.0 {
-                        // Property 5: Zero range handling - output should be NaN
                         prop_assert!(
                             out[i].is_nan(),
                             "EMV at index {} should be NaN when range is zero",
@@ -1451,7 +1364,6 @@ mod tests {
                     } else {
                         let expected_emv = (current_mid - last_mid) / (volume[i] / 10000.0 / range);
 
-                        // Allow for small numerical errors
                         if out[i].is_finite() && expected_emv.is_finite() {
                             let diff = (out[i] - expected_emv).abs();
                             let tolerance = 1e-9;
@@ -1469,12 +1381,11 @@ mod tests {
                     last_mid = current_mid;
                 }
 
-                // Property 6: Bounded output - EMV should be reasonable relative to price movement
                 for i in 1..out.len() {
                     if out[i].is_finite() {
                         let price_change =
                             (high[i] + low[i]) / 2.0 - (high[i - 1] + low[i - 1]) / 2.0;
-                        let max_reasonable = price_change.abs() * 1e8; // Very generous bound
+                        let max_reasonable = price_change.abs() * 1e8;
 
                         prop_assert!(
                             out[i].abs() <= max_reasonable,
@@ -1486,7 +1397,6 @@ mod tests {
                     }
                 }
 
-                // Property 7: Constant data with non-zero range produces zero EMV
                 if high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10)
                     && high.iter().zip(&low).all(|(h, l)| h > l)
@@ -1503,7 +1413,6 @@ mod tests {
                     }
                 }
 
-                // Property 8: No poison values
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         let bits = val.to_bits();
@@ -1603,10 +1512,8 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // EMV batch has no parameters to sweep, so we just test the default case
         let output = EmvBatchBuilder::new().kernel(kernel).apply_candles(&c)?;
 
-        // Check values for poison patterns
         for (idx, &val) in output.values.iter().enumerate() {
             if val.is_nan() {
                 continue;
@@ -1616,7 +1523,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            // Check all three poison patterns with detailed context
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1650,12 +1556,11 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[test]
     fn test_emv_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Construct a small but non-trivial synthetic dataset
         let n = 256usize;
         let mut high = Vec::with_capacity(n);
         let mut low = Vec::with_capacity(n);
@@ -1663,12 +1568,12 @@ mod tests {
         let mut volume = Vec::with_capacity(n);
         for i in 0..n {
             let base = 100.0 + (i as f64) * 0.1;
-            let spread = 1.0 + ((i % 5) as f64) * 0.2; // vary the range
+            let spread = 1.0 + ((i % 5) as f64) * 0.2;
             let h = base + spread * 0.6;
             let l = base - spread * 0.4;
             high.push(h);
             low.push(l);
-            close.push(0.5 * (h + l)); // not used by EMV but part of API
+            close.push(0.5 * (h + l));
             volume.push(10_000.0 + ((i * 37) % 1000) as f64 * 100.0);
         }
 
@@ -1676,14 +1581,13 @@ mod tests {
         let baseline = emv(&input)?.values;
 
         let mut into_out = vec![0.0; baseline.len()];
-        // Use the native no-allocation API
-        #[cfg(not(feature = "wasm"))]
+
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             emv_into(&input, &mut into_out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            // In wasm builds the native emv_into is not available; fall back to slice API for parity
             emv_into_slice(&mut into_out, &input, Kernel::Auto)?;
         }
 
@@ -1704,7 +1608,6 @@ mod tests {
     }
 }
 
-// ---------------- Python CUDA bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "EmvDeviceArrayF32", unsendable)]
 pub struct EmvDeviceArrayF32Py {
@@ -1726,7 +1629,7 @@ impl EmvDeviceArrayF32Py {
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         let ptr_val = inner.buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr_val, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1744,7 +1647,6 @@ impl EmvDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1765,9 +1667,8 @@ impl EmvDeviceArrayF32Py {
         }
         let _ = stream;
 
-        
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {

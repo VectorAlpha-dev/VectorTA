@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::uma::{
     uma_batch_with_kernel, UmaBatchRange, UmaBuilder, UmaParams,
 };
@@ -45,16 +43,16 @@ fn uma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::erro
         smooth_length: (2, 4, 1),
     };
 
-    
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let volumes_f32: Vec<f32> = volumes.iter().map(|&v| v as f32).collect();
     let prices_cpu: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
     let volumes_cpu: Vec<f64> = volumes_f32.iter().map(|&v| v as f64).collect();
 
-    let cpu = match uma_batch_with_kernel(&prices_cpu, Some(&volumes_cpu), &sweep, Kernel::ScalarBatch) {
-        Ok(v) => v,
-        Err(e) => return Err(Box::new(e)),
-    };
+    let cpu =
+        match uma_batch_with_kernel(&prices_cpu, Some(&volumes_cpu), &sweep, Kernel::ScalarBatch) {
+            Ok(v) => v,
+            Err(e) => return Err(Box::new(e)),
+        };
 
     let cuda = CudaUma::new(0).expect("CudaUma::new");
     let gpu_handle = cuda
@@ -69,7 +67,6 @@ fn uma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_host)
         .expect("copy cuda uma batch result to host");
 
-    
     let (atol, rtol) = (1.5e-2f64, 5.0e-6f64);
     let mut max_ratio = 0.0f64;
     let mut worst_idx = 0usize;
@@ -130,7 +127,6 @@ fn uma_cuda_one_series_no_volume_matches_cpu() -> Result<(), Box<dyn std::error:
         smooth_length: (3, 3, 0),
     };
 
-    
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let prices_cpu: Vec<f64> = prices_f32.iter().map(|&v| v as f64).collect();
 
@@ -152,7 +148,6 @@ fn uma_cuda_one_series_no_volume_matches_cpu() -> Result<(), Box<dyn std::error:
         .copy_to(&mut gpu_host)
         .expect("copy cuda uma batch result");
 
-    
     let (atol, rtol) = (1.5e-2f64, 5.0e-6f64);
     let mut max_ratio = 0.0f64;
     let mut worst_idx = 0usize;
@@ -213,7 +208,6 @@ fn uma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let volumes_tm_f32: Vec<f32> = volumes_tm.iter().map(|&v| v as f32).collect();
     let prices_tm_cpu: Vec<f64> = prices_tm_f32.iter().map(|&v| v as f64).collect();
@@ -326,7 +320,6 @@ fn uma_cuda_many_series_one_param_no_volume_matches_cpu() -> Result<(), Box<dyn 
         }
     }
 
-    
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let prices_tm_cpu: Vec<f64> = prices_tm_f32.iter().map(|&v| v as f64).collect();
 

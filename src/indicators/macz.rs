@@ -1,32 +1,3 @@
-//! # MAC-Z VWAP Indicator
-//!
-//! The MAC-Z VWAP indicator combines ZVWAP (Z-score of VWAP) with MACD (Moving Average Convergence Divergence)
-//! to create a normalized momentum oscillator with optional Laguerre smoothing.
-//!
-//! ## Parameters
-//! - **fast_length**: Period for fast moving average (default: 12)
-//! - **slow_length**: Period for slow moving average (default: 25)
-//! - **signal_length**: Period for signal line (default: 9)
-//! - **lengthz**: Period for ZVWAP calculation (default: 20)
-//! - **length_stdev**: Period for standard deviation (default: 25)
-//! - **a**: Constant A for ZVWAP weighting (default: 1.0, range: -2.0 to 2.0)
-//! - **b**: Constant B for MACD weighting (default: 1.0, range: -2.0 to 2.0)
-//! - **use_lag**: Apply Laguerre smoothing (default: false)
-//! - **gamma**: Laguerre gamma parameter (default: 0.02)
-//!
-//! ## Returns
-//! - **`Ok(MaczOutput)`** on success, containing histogram values.
-//! - **`Err(MaczError)`** on failure
-//!
-//! ## Developer Notes
-//! - SIMD status: Sliding-window maintenance dominates; AVX2/AVX512 stubs delegate to scalar for correctness and speed.
-//! - Batch status: Row-specific kernels not implemented; revisit when sweeps share lz/lsd to exploit shared precompute.
-//! - Streaming: O(1) with modulo-free ring and strict signal SMA (no per-tick scans); matches batch warmup and NaN rules.
-//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes).
-//! - CUDA: FP32 kernels with FP64 accumulators; wrapper returns VRAM handles with CAI v3 + DLPack interop; numerical outputs match scalar MAC-Z.
-
-
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -36,14 +7,12 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use js_sys;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -55,24 +24,19 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-
 use crate::indicators::moving_averages::sma::{sma_with_kernel, SmaInput, SmaParams};
 use crate::indicators::stddev::{stddev_with_kernel, StdDevInput, StdDevParams};
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
 
 impl<'a> AsRef<[f64]> for MaczInput<'a> {
     #[inline(always)]
@@ -87,8 +51,6 @@ impl<'a> AsRef<[f64]> for MaczInput<'a> {
     }
 }
 
-
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum MaczData<'a> {
     Candles {
@@ -103,15 +65,16 @@ pub enum MaczData<'a> {
     },
 }
 
-/// Output structure containing calculated histogram values
 #[derive(Debug, Clone)]
 pub struct MaczOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MaczParams {
     pub fast_length: Option<usize>,
     pub slow_length: Option<usize>,
@@ -140,7 +103,6 @@ impl Default for MaczParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct MaczInput<'a> {
     pub data: MaczData<'a>,
@@ -183,7 +145,6 @@ impl<'a> MaczInput<'a> {
         Self::from_candles(c, "close", MaczParams::default())
     }
 
-    
     #[inline]
     pub fn with_default_candles_auto_volume(c: &'a Candles) -> Self {
         Self::with_default_candles(c)
@@ -220,7 +181,6 @@ impl<'a> MaczInput<'a> {
         self.params.signal_length.unwrap_or(9)
     }
 }
-
 
 #[derive(Debug, Clone)]
 pub struct MaczBuilder {
@@ -377,7 +337,7 @@ impl MaczBuilder {
             self.kernel
         };
         let p = self.build_params();
-        
+
         let input = MaczInput::from_candles(c, "close", p);
         macz_with_kernel(&input, k)
     }
@@ -387,7 +347,6 @@ impl MaczBuilder {
         MaczStream::try_new(self.build_params())
     }
 }
-
 
 #[derive(Debug, Error)]
 pub enum MaczError {
@@ -422,15 +381,16 @@ pub enum MaczError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("macz: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("macz: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-
-
-/// Workspace for MAC-Z computation to minimize allocations
 pub struct MaczWorkspace {
     vwap: Vec<f64>,
     zvwap: Vec<f64>,
@@ -471,7 +431,6 @@ impl MaczWorkspace {
     }
 }
 
-/// Calculate VWAP (Volume Weighted Average Price) - writes only from warm index
 #[inline]
 fn calculate_vwap_into(
     close: &[f64],
@@ -523,14 +482,12 @@ fn calculate_vwap_into(
         let sma = sma_with_kernel(&sma_input, kernel).map_err(|e| MaczError::InvalidParameter {
             msg: format!("VWAP=SMA error: {e}"),
         })?;
-        
+
         out[start..].copy_from_slice(&sma.values[start..]);
     }
     Ok(())
 }
 
-/// Calculate Z-score of VWAP - writes only from warm index
-/// Pine-compatible: uses population variance with fixed mean over period
 #[inline]
 fn calculate_zvwap_into(
     close: &[f64],
@@ -571,7 +528,7 @@ fn calculate_zvwap_into(
             continue;
         }
 
-        let var = sum / period as f64; 
+        let var = sum / period as f64;
         let sd = var.sqrt();
         out[i] = if sd > 0.0 {
             (close[i] - mean) / sd
@@ -582,8 +539,6 @@ fn calculate_zvwap_into(
     Ok(())
 }
 
-/// Calculate population standard deviation exactly as Pine's ta.stdev
-/// Pine formula: sqrt(sma((x - sma(x, n))^2, n))
 #[inline]
 fn stdev_source_population_into(
     data: &[f64],
@@ -601,7 +556,6 @@ fn stdev_source_population_into(
         });
     }
 
-    // mean = sma(data, period)
     let mean = sma_with_kernel(
         &SmaInput::from_slice(
             data,
@@ -639,12 +593,11 @@ fn stdev_source_population_into(
             out[i] = f64::NAN;
             continue;
         }
-        out[i] = (sum / period as f64).sqrt(); // population stdev
+        out[i] = (sum / period as f64).sqrt();
     }
     Ok(())
 }
 
-/// Apply Laguerre filter
 fn apply_laguerre(input: &[f64], gamma: f64, output: &mut [f64]) {
     let len = input.len();
     let mut l0 = 0.0;
@@ -672,13 +625,11 @@ fn apply_laguerre(input: &[f64], gamma: f64, output: &mut [f64]) {
     }
 }
 
-/// Calculate MAC-Z warmup length
 #[inline(always)]
 fn macz_warm_len(first: usize, slow: usize, lz: usize, lsd: usize, sig: usize) -> usize {
     first + slow.max(lz).max(lsd) + sig - 2
 }
 
-/// Prepare MAC-Z calculation parameters
 #[inline(always)]
 fn macz_prepare<'a>(
     input: &'a MaczInput,
@@ -754,7 +705,7 @@ fn macz_prepare<'a>(
     };
 
     let warm_hist = macz_warm_len(first, slow, lz, lsd, sig);
-    // SIMD underperforms for MAC-Z (sliding-window bound); short-circuit Auto to Scalar.
+
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -764,7 +715,6 @@ fn macz_prepare<'a>(
     ))
 }
 
-/// Compute MAC-Z directly into output buffer (writes only tail, preserves prefix)
 #[inline(always)]
 fn macz_compute_into_tail_only(
     data: &[f64],
@@ -788,8 +738,6 @@ fn macz_compute_into_tail_only(
         .position(|x| !x.is_nan())
         .ok_or(MaczError::AllValuesNaN)?;
 
-    // Dispatch to classic kernel for scalar
-    // Classic kernel provides optimized loop-jammed implementation
     if kernel == Kernel::Scalar {
         unsafe {
             return macz_scalar_classic(
@@ -798,20 +746,14 @@ fn macz_compute_into_tail_only(
         }
     }
 
-    // Separate warmup periods:
-    // warm_m: first valid MACZ sample (after MACD/Z-score components are ready)
-    // warm_hist: first valid histogram (after signal MA is ready)
     let warm_m = first + slow.max(lz).max(lsd) - 1;
-    // warm_hist is already passed in and equals warm_m + sig - 1
 
-    // vwap, zvwap
     let mut vwap = alloc_with_nan_prefix(len, first + lz - 1);
     calculate_vwap_into(data, vol, lz, first, kernel, &mut vwap)?;
 
     let mut zvwap = alloc_with_nan_prefix(len, first + lz - 1);
     calculate_zvwap_into(data, &vwap, lz, first, &mut zvwap)?;
 
-    // fast/slow MA via SMA outputs (move, no extra copy)
     let fast_ma = sma_with_kernel(
         &SmaInput::from_slice(data, SmaParams { period: Some(fast) }),
         kernel,
@@ -829,7 +771,6 @@ fn macz_compute_into_tail_only(
     })?
     .values;
 
-    // MACD
     let mut macd = alloc_with_nan_prefix(len, first + slow - 1);
     for i in (first + slow - 1)..len {
         let f = fast_ma[i];
@@ -841,11 +782,9 @@ fn macz_compute_into_tail_only(
         };
     }
 
-    // StdDev on source - use Pine-compatible population stdev
     let mut stdev = alloc_with_nan_prefix(len, first + lsd - 1);
     stdev_source_population_into(data, lsd, first, kernel, &mut stdev)?;
 
-    // MAC-Z raw - start from warm_m, not warm_hist
     let mut macz_t = alloc_with_nan_prefix(len, warm_m);
     for i in warm_m..len {
         let z = zvwap[i];
@@ -858,7 +797,6 @@ fn macz_compute_into_tail_only(
         };
     }
 
-    // Smoothing - also from warm_m
     let mut macz = alloc_with_nan_prefix(len, warm_m);
     if use_lag {
         apply_laguerre(&macz_t, gamma, &mut macz);
@@ -866,7 +804,6 @@ fn macz_compute_into_tail_only(
         macz[warm_m..].copy_from_slice(&macz_t[warm_m..]);
     }
 
-    // Signal
     let signal = sma_with_kernel(
         &SmaInput::from_slice(&macz, SmaParams { period: Some(sig) }),
         kernel,
@@ -876,7 +813,6 @@ fn macz_compute_into_tail_only(
     })?
     .values;
 
-    // Histogram -> out (tail only, prefix already set)
     for i in warm_hist..len {
         let s = signal[i];
         let m = macz[i];
@@ -889,8 +825,6 @@ fn macz_compute_into_tail_only(
     Ok(())
 }
 
-// ==================== MAIN CALCULATION ====================
-/// Core calculation with kernel support
 pub fn macz_with_kernel(input: &MaczInput, kernel: Kernel) -> Result<MaczOutput, MaczError> {
     let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen) =
         macz_prepare(input, kernel)?;
@@ -901,37 +835,15 @@ pub fn macz_with_kernel(input: &MaczInput, kernel: Kernel) -> Result<MaczOutput,
     Ok(MaczOutput { values: out })
 }
 
-/// Calculates MAC-Z VWAP indicator with automatic kernel selection.
-///
-/// # Arguments
-/// * `input` - The input configuration containing data and parameters
-///
-/// # Returns
-/// * `Ok(MaczOutput)` - The calculated MAC-Z histogram values
-/// * `Err(MaczError)` - If calculation fails
-///
-/// # Example
-/// ```ignore
-/// let data = vec![50.0, 51.0, 52.0, /* ... */];
-/// let params = MaczParams::default();
-/// let input = MaczInput::from_slice(&data, params);
-/// let result = macz(&input)?;
-/// ```
 pub fn macz(input: &MaczInput) -> Result<MaczOutput, MaczError> {
     macz_with_kernel(input, Kernel::Auto)
 }
 
-/// Writes MAC-Z values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - The output slice length must equal the input length.
-/// - Uses `Kernel::Auto` for runtime selection (short-circuits to scalar here).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn macz_into(input: &MaczInput, out: &mut [f64]) -> Result<(), MaczError> {
     macz_into_slice(out, input, Kernel::Auto)
 }
 
-/// Write MAC-Z values directly to a pre-allocated slice
 pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Result<(), MaczError> {
     let (data, vol, fast, slow, sig, lz, lsd, a, b, use_lag, gamma, warm_hist, chosen) =
         macz_prepare(input, kern)?;
@@ -941,7 +853,7 @@ pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Resu
             got: dst.len(),
         });
     }
-    // set NaN warmup like alma.rs
+
     for v in &mut dst[..warm_hist] {
         *v = f64::NAN;
     }
@@ -951,21 +863,11 @@ pub fn macz_into_slice(dst: &mut [f64], input: &MaczInput, kern: Kernel) -> Resu
     )
 }
 
-/// Scalar implementation (baseline)
 pub fn macz_scalar(data: &[f64], params: &MaczParams, out: &mut [f64]) -> Result<(), MaczError> {
     let input = MaczInput::from_slice(data, params.clone());
     macz_into_slice(out, &input, Kernel::Scalar)
 }
 
-/// Classic kernel optimization for MACZ with tight, single-pass loop-jamming.
-/// This version avoids allocating full-length temporaries and computes everything
-/// with rolling sums/counters in one pass. It strictly matches Pine-style behavior:
-/// - SMA windows (fast/slow/signal) return NaN if any NaN is in the window
-/// - Population stdev (ddof=0) via E[x^2] - (E[x])^2
-/// - ZVWAP variance is computed against the fixed VWAP mean for the window
-/// - Laguerre smoothing only updates state on finite inputs (NaN input => NaN output)
-///
-/// Safety: caller guarantees `out` is prefilled with NaNs up to `warm_hist`.
 #[inline(always)]
 pub unsafe fn macz_scalar_classic(
     data: &[f64],
@@ -980,7 +882,7 @@ pub unsafe fn macz_scalar_classic(
     use_lag: bool,
     gamma: f64,
     first_valid_idx: usize,
-    warm_hist: usize, // == (first_valid_idx + max(slow,lz,lsd) - 1) + sig - 1
+    warm_hist: usize,
     out: &mut [f64],
 ) -> Result<(), MaczError> {
     let len = data.len();
@@ -988,14 +890,12 @@ pub unsafe fn macz_scalar_classic(
         return Err(MaczError::EmptyInputData);
     }
 
-    // Window start indices for validity checks
     let fast_start = first_valid_idx + fast - 1;
     let slow_start = first_valid_idx + slow - 1;
     let lz_start = first_valid_idx + lz - 1;
     let lsd_start = first_valid_idx + lsd - 1;
     let warm_m = first_valid_idx + slow.max(lz).max(lsd) - 1;
 
-    // Rolling sums + NaN counters
     let mut sum_fast = 0.0_f64;
     let mut n_fast_nan = 0usize;
     let mut sum_slow = 0.0_f64;
@@ -1003,43 +903,38 @@ pub unsafe fn macz_scalar_classic(
 
     let mut sum_lz = 0.0_f64;
     let mut sum2_lz = 0.0_f64;
-    let mut n_lz_nan = 0usize; // for Z + VWAP(no-volume)
+    let mut n_lz_nan = 0usize;
     let mut sum_lsd = 0.0_f64;
     let mut sum2_lsd = 0.0_f64;
-    let mut n_lsd_nan = 0usize; // for src stdev
+    let mut n_lsd_nan = 0usize;
 
     let has_volume = vol.is_some();
     let vols = if has_volume { vol.unwrap() } else { &[][..] };
-    let mut sum_pv = 0.0_f64; // ∑ (price*volume) over lz
-    let mut sum_v = 0.0_f64; // ∑ volume over lz
-    let mut n_vwap_nan = 0usize; // count of (x or v) NaN bars inside lz
+    let mut sum_pv = 0.0_f64;
+    let mut sum_v = 0.0_f64;
+    let mut n_vwap_nan = 0usize;
 
-    // Laguerre state
     let mut l0 = 0.0_f64;
     let mut l1 = 0.0_f64;
     let mut l2 = 0.0_f64;
     let mut l3 = 0.0_f64;
 
-    // Signal SMA state over MAC-Z (strict SMA: any NaN in window => signal = NaN)
     let mut sig_ring: Vec<f64> = vec![f64::NAN; sig];
     let mut sig_sum = 0.0_f64;
-    let mut sig_count = 0usize; // number of samples currently in the ring (<= sig)
-    let mut sig_nan = 0usize; // NaNs in the current ring window
-    let mut sig_head = 0usize; // modulo-free ring index
+    let mut sig_count = 0usize;
+    let mut sig_nan = 0usize;
+    let mut sig_head = 0usize;
 
-    // Precompute reciprocals to reduce divisions in hot loop
     let inv_fast = 1.0 / (fast as f64);
     let inv_slow = 1.0 / (slow as f64);
     let inv_lz = 1.0 / (lz as f64);
     let inv_lsd = 1.0 / (lsd as f64);
     let inv_sig = 1.0 / (sig as f64);
 
-    // Main loop (single pass; tight loop-jamming)
     for i in first_valid_idx..len {
         let x = *data.get_unchecked(i);
         let x_is_nan = x.is_nan();
 
-        // --- Add current sample to all rolling windows ---
         if x_is_nan {
             n_fast_nan += 1;
             n_slow_nan += 1;
@@ -1059,13 +954,11 @@ pub unsafe fn macz_scalar_classic(
             if x_is_nan || v.is_nan() {
                 n_vwap_nan += 1;
             } else {
-                // fused multiply-add for pv accumulation
                 sum_pv = x.mul_add(v, sum_pv);
                 sum_v = sum_v + v;
             }
         }
 
-        // --- Remove exiting samples when windows overflow ---
         if i >= first_valid_idx + fast {
             let xo = *data.get_unchecked(i - fast);
             if xo.is_nan() {
@@ -1110,7 +1003,6 @@ pub unsafe fn macz_scalar_classic(
             }
         }
 
-        // --- Fast/Slow SMA & MACD ---
         let have_fast = i >= fast_start && n_fast_nan == 0;
         let have_slow = i >= slow_start && n_slow_nan == 0;
 
@@ -1131,7 +1023,6 @@ pub unsafe fn macz_scalar_classic(
             fast_ma - slow_ma
         };
 
-        // --- VWAP (over lz) ---
         let vwap_i = if i >= lz_start {
             if has_volume {
                 if n_vwap_nan == 0 && sum_v > 0.0 {
@@ -1148,9 +1039,7 @@ pub unsafe fn macz_scalar_classic(
             f64::NAN
         };
 
-        // --- ZVWAP (population variance around fixed VWAP mean) ---
         let zvwap = if i >= lz_start && n_lz_nan == 0 && !vwap_i.is_nan() && x.is_finite() {
-            // var = E[x^2] - 2*mu*E[x] + mu^2
             let e = sum_lz * inv_lz;
             let e2 = sum2_lz * inv_lz;
             let var = (-2.0 * vwap_i).mul_add(e, e2) + vwap_i * vwap_i;
@@ -1164,7 +1053,6 @@ pub unsafe fn macz_scalar_classic(
             f64::NAN
         };
 
-        // --- Population stdev on source over lsd: sqrt(E[x^2] - E[x]^2) ---
         let sd_src = if i >= lsd_start && n_lsd_nan == 0 {
             let e = sum_lsd * inv_lsd;
             let e2 = sum2_lsd * inv_lsd;
@@ -1173,7 +1061,6 @@ pub unsafe fn macz_scalar_classic(
             f64::NAN
         };
 
-        // --- MAC-Z raw at warm_m: z*a + (macd/sd_src)*b ---
         let macz_raw = if i >= warm_m
             && sd_src.is_finite()
             && sd_src > 0.0
@@ -1185,7 +1072,6 @@ pub unsafe fn macz_scalar_classic(
             f64::NAN
         };
 
-        // --- Optional Laguerre smoothing (only updates on finite input) ---
         let macz_val = if use_lag {
             if macz_raw.is_finite() {
                 let one_minus_g = 1.0 - gamma;
@@ -1205,7 +1091,6 @@ pub unsafe fn macz_scalar_classic(
             macz_raw
         };
 
-        // --- Signal SMA over MAC-Z (strict). Start accumulating from warm_m. ---
         if i >= warm_m {
             if sig_count == sig {
                 let leaving = *sig_ring.get_unchecked(sig_head);
@@ -1230,7 +1115,6 @@ pub unsafe fn macz_scalar_classic(
                 sig_head = 0;
             }
 
-            // --- Histogram -> out (only tail; prefix already NaN) ---
             if i >= warm_hist {
                 let signal = if sig_count == sig && sig_nan == 0 {
                     sig_sum * inv_sig
@@ -1249,7 +1133,6 @@ pub unsafe fn macz_scalar_classic(
     Ok(())
 }
 
-/// AVX2 implementation (currently delegates to scalar)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn macz_avx2(
@@ -1257,18 +1140,9 @@ pub unsafe fn macz_avx2(
     params: &MaczParams,
     out: &mut [f64],
 ) -> Result<(), MaczError> {
-    // For MAC-Z, the main optimization opportunity is in the SMA calculations
-    // Since MAC-Z uses multiple SMAs (for VWAP, signal, etc.), we delegate to
-    // the optimized SMA implementations which already have AVX2 support
-    // The rest of the MAC-Z logic (MACD, Z-score) operates element-wise
-    // and doesn't benefit as much from SIMD
-
-    
-    
     macz_scalar(data, params, out)
 }
 
-/// AVX512 implementation (currently delegates to scalar)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,fma")]
 pub unsafe fn macz_avx512(
@@ -1276,15 +1150,8 @@ pub unsafe fn macz_avx512(
     params: &MaczParams,
     out: &mut [f64],
 ) -> Result<(), MaczError> {
-    
-    
-    
-
-    
-    
     macz_scalar(data, params, out)
 }
-
 
 #[derive(Debug, Clone)]
 pub struct MaczBatchRange {
@@ -1407,7 +1274,6 @@ impl MaczBatchBuilder {
         self
     }
 
-    
     pub fn fast_static(mut self, f: usize) -> Self {
         self.range.fast_length = (f, f, 0);
         self
@@ -1595,9 +1461,6 @@ pub fn macz_batch_with_kernel_vol(
     k: Kernel,
 ) -> Result<MaczBatchOutput, MaczError> {
     let kernel = match k {
-        
-        
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -1622,7 +1485,6 @@ pub fn macz_batch_par_slice(
 ) -> Result<MaczBatchOutput, MaczError> {
     macz_batch_inner_vol(data, None, sweep, kern, true)
 }
-
 
 pub fn macz_batch_slice_vol(
     data: &[f64],
@@ -1664,17 +1526,16 @@ fn macz_batch_inner_vol(
         }
     }
 
-    
-    let _ = rows.checked_mul(cols).ok_or_else(|| MaczError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| MaczError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1691,20 +1552,17 @@ fn macz_batch_inner_vol(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let row_kernel = match kern {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => kern, 
+        _ => kern,
     };
 
-    
     let fill_row = |row: usize, dst_row: &mut [f64]| -> Result<(), MaczError> {
         let params = combos[row].clone();
         let input = if let Some(v) = volume {
@@ -1712,7 +1570,7 @@ fn macz_batch_inner_vol(
         } else {
             MaczInput::from_slice(data, params)
         };
-        
+
         macz_into_slice(dst_row, &input, row_kernel)
     };
 
@@ -1756,7 +1614,6 @@ fn macz_batch_inner_vol(
     })
 }
 
-/// Adapter function for batch processing directly into output buffer
 fn macz_batch_inner_into(
     data: &[f64],
     sweep: &MaczBatchRange,
@@ -1767,7 +1624,6 @@ fn macz_batch_inner_into(
     macz_batch_inner_into_vol(data, None, sweep, kern, parallel, out_flat)
 }
 
-/// Adapter function for batch processing with volume directly into output buffer
 fn macz_batch_inner_into_vol(
     data: &[f64],
     volume: Option<&[f64]>,
@@ -1800,7 +1656,6 @@ fn macz_batch_inner_into_vol(
         }
     }
 
-    
     let row_kernel = match kern {
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
@@ -1847,55 +1702,41 @@ fn macz_batch_inner_into_vol(
     Ok(combos)
 }
 
-
-/// Streaming calculator for real-time updates (O(1) per tick)
 #[derive(Debug, Clone)]
 pub struct MaczStream {
     params: MaczParams,
 
-    
     price_buffer: Vec<f64>,
     volume_buffer: Vec<f64>,
     buffer_size: usize,
 
-    
     index: usize,
 
-    
     head: usize,
 
-    
     filled: bool,
 
-    
     fast_sum: f64,
     slow_sum: f64,
 
-    
     sum_lz: f64,
     sum2_lz: f64,
 
-    
     vwap_pv_sum: f64,
     vwap_v_sum: f64,
 
-    
     vwap_bad: usize,
 
-    
     stdev_sum: f64,
     stdev_sum2: f64,
 
-    
     signal_sum: f64,
     signal_buffer: Vec<f64>,
 
-    
     sig_head: usize,
     sig_count: usize,
     sig_nan: usize,
 
-    
     l0: f64,
     l1: f64,
     l2: f64,
@@ -1903,7 +1744,6 @@ pub struct MaczStream {
     use_lag: bool,
     gamma: f64,
 
-    
     current_vwap: f64,
     current_zvwap: f64,
     current_fast_ma: f64,
@@ -1913,30 +1753,24 @@ pub struct MaczStream {
     current_macz: f64,
     current_signal: f64,
 
-    
-    
     fast: usize,
     slow: usize,
     lz: usize,
     lsd: usize,
     sig: usize,
 
-    
     a: f64,
     b: f64,
 
-    
     inv_fast: f64,
     inv_slow: f64,
     inv_lz: f64,
     inv_lsd: f64,
     inv_sig: f64,
 
-    
     warm_m: usize,
     warm_hist: usize,
 
-    
     off_fast: usize,
     off_slow: usize,
     off_lz: usize,
@@ -1970,14 +1804,11 @@ impl MaczStream {
             return Err(MaczError::InvalidB { b });
         }
 
-        
         let buffer_size = fast.max(slow).max(lz).max(lsd);
 
-        
         let warm_m = slow.max(lz).max(lsd);
         let warm_hist = warm_m + sig - 1;
 
-        
         let inv_fast = 1.0 / (fast as f64);
         let inv_slow = 1.0 / (slow as f64);
         let inv_lz = 1.0 / (lz as f64);
@@ -2052,7 +1883,6 @@ impl MaczStream {
         })
     }
 
-    
     pub fn new(params: MaczParams) -> Result<Self, MaczError> {
         Self::try_new(params)
     }
@@ -2060,7 +1890,7 @@ impl MaczStream {
     #[inline(always)]
     pub fn update(&mut self, value: f64, volume: Option<f64>) -> Option<f64> {
         if !value.is_finite() {
-            return None; 
+            return None;
         }
         let vol = volume.unwrap_or(1.0);
         let vol_ok = vol.is_finite() && vol > 0.0;
@@ -2068,7 +1898,6 @@ impl MaczStream {
         let bsz = self.buffer_size;
         let idx = self.head;
 
-        
         #[inline(always)]
         fn add_off(i: usize, off: usize, n: usize) -> usize {
             let j = i + off;
@@ -2079,7 +1908,6 @@ impl MaczStream {
             }
         }
 
-        
         let leaving_fast_idx = add_off(idx, self.off_fast, bsz);
         let leaving_slow_idx = add_off(idx, self.off_slow, bsz);
         let leaving_lz_idx = add_off(idx, self.off_lz, bsz);
@@ -2114,11 +1942,9 @@ impl MaczStream {
         };
         let leaving_vol_ok = exiting_vwap_vol.is_finite() && exiting_vwap_vol > 0.0;
 
-        
         self.price_buffer[idx] = value;
         self.volume_buffer[idx] = vol;
 
-        
         self.fast_sum += value - exiting_fast;
         self.slow_sum += value - exiting_slow;
 
@@ -2138,10 +1964,8 @@ impl MaczStream {
         self.stdev_sum += value - exiting_lsd;
         self.stdev_sum2 += value.mul_add(value, -exiting_lsd * exiting_lsd);
 
-        
         let i_next = self.index + 1;
 
-        
         if i_next < self.warm_m {
             self.index = i_next;
             self.head = if idx + 1 == bsz { 0 } else { idx + 1 };
@@ -2149,16 +1973,13 @@ impl MaczStream {
             return None;
         }
 
-        
         self.current_fast_ma = self.fast_sum * self.inv_fast;
         self.current_slow_ma = self.slow_sum * self.inv_slow;
         self.current_macd = self.current_fast_ma - self.current_slow_ma;
 
-        
         if self.vwap_bad == 0 && self.vwap_v_sum > 0.0 {
             self.current_vwap = self.vwap_pv_sum / self.vwap_v_sum;
 
-            
             let e = self.sum_lz * self.inv_lz;
             let e2 = self.sum2_lz * self.inv_lz;
             let var =
@@ -2174,12 +1995,10 @@ impl MaczStream {
             self.current_zvwap = f64::NAN;
         }
 
-        
         let mean_lsd = self.stdev_sum * self.inv_lsd;
         let var_lsd = self.stdev_sum2 * self.inv_lsd - mean_lsd * mean_lsd;
         self.current_stdev = var_lsd.max(0.0).sqrt();
 
-        
         let macz_raw = if self.current_stdev.is_finite()
             && self.current_stdev > 0.0
             && self.current_zvwap.is_finite()
@@ -2191,7 +2010,6 @@ impl MaczStream {
             f64::NAN
         };
 
-        
         let macz_val = if self.use_lag && macz_raw.is_finite() {
             let one_minus_g = 1.0 - self.gamma;
             let new_l0 = macz_raw.mul_add(one_minus_g, self.gamma * self.l0);
@@ -2207,7 +2025,6 @@ impl MaczStream {
             macz_raw
         };
 
-        
         if i_next >= self.warm_m {
             if self.sig_count == self.sig {
                 let leaving = self.signal_buffer[self.sig_head];
@@ -2233,17 +2050,14 @@ impl MaczStream {
             }
         }
 
-        
         self.index = i_next;
         self.head = if idx + 1 == bsz { 0 } else { idx + 1 };
         self.filled |= self.index >= bsz;
 
-        
         if self.index <= self.warm_hist {
             return None;
         }
 
-        
         if self.sig_count == self.sig && self.sig_nan == 0 && macz_val.is_finite() {
             self.current_macz = macz_val;
             self.current_signal = self.signal_sum * self.inv_sig;
@@ -2253,7 +2067,6 @@ impl MaczStream {
         }
     }
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "macz")]
@@ -2302,7 +2115,6 @@ pub fn macz_py<'py>(
     Ok(result_vec.into_pyarray(py))
 }
 
-// ---------------- CUDA Python Bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::CudaMacz;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2408,7 +2220,14 @@ pub fn macz_cuda_batch_dev_py<'py>(
             .into_pyarray(py),
     )?;
 
-    Ok((DeviceArrayF32Py { inner, _ctx: Some(inner_ctx), device_id: Some(inner_dev_id) }, dict))
+    Ok((
+        DeviceArrayF32Py {
+            inner,
+            _ctx: Some(inner_ctx),
+            device_id: Some(inner_dev_id),
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2456,7 +2275,11 @@ pub fn macz_cuda_many_series_one_param_dev_py<'py>(
             .map(|inner| (inner, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DeviceArrayF32Py { inner, _ctx: Some(inner_ctx), device_id: Some(inner_dev_id) })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(inner_ctx),
+        device_id: Some(inner_dev_id),
+    })
 }
 
 #[cfg(feature = "python")]
@@ -2531,8 +2354,7 @@ pub fn macz_batch_py<'py>(
         b: b_range,
     };
     let kern = validate_kernel(kernel, true)?;
-    let combos = expand_grid_macz(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_macz(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2613,8 +2435,7 @@ pub fn macz_batch_py<'py>(
     Ok(dict)
 }
 
-// ==================== WASM BINDINGS ====================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_js(
     data: &[f64],
@@ -2647,7 +2468,7 @@ pub fn macz_js(
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_batch_into(
     in_ptr: *const f64,
@@ -2689,8 +2510,7 @@ pub fn macz_batch_into(
             a: (a_start, a_end, a_step),
             b: (b_start, b_end, b_step),
         };
-        let combos = expand_grid_macz(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_macz(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -2704,7 +2524,7 @@ pub fn macz_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_batch_into_with_volume(
     in_ptr: *const f64,
@@ -2750,13 +2570,12 @@ pub fn macz_batch_into_with_volume(
             a: (a_start, a_end, a_step),
             b: (b_start, b_end, b_step),
         };
-        let combos = expand_grid_macz(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_macz(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let total = rows
-            .checked_mul(cols)
-            .ok_or_else(|| JsValue::from_str("rows*cols overflow in macz_batch_into_with_volume"))?;
+        let total = rows.checked_mul(cols).ok_or_else(|| {
+            JsValue::from_str("rows*cols overflow in macz_batch_into_with_volume")
+        })?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
         macz_batch_inner_into_vol(data, Some(volume), &sweep, detect_best_kernel(), false, out)
@@ -2765,8 +2584,7 @@ pub fn macz_batch_into_with_volume(
     }
 }
 
-// Additional WASM functions for memory management and batch operations
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2775,7 +2593,7 @@ pub fn macz_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2783,7 +2601,7 @@ pub fn macz_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_into(
     in_ptr: *const f64,
@@ -2817,13 +2635,11 @@ pub fn macz_into(
         };
         let input = MaczInput::from_slice(data, params);
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
-        macz_into_slice(out, &input, Kernel::Auto)
-            .map_err(|e| JsValue::from_str(&e.to_string()))
+        macz_into_slice(out, &input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
-// macz zero-copy function for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "macz")]
 pub fn macz_wasm_zero_copy(
     data: &[f64],
@@ -2862,8 +2678,7 @@ pub fn macz_wasm_zero_copy(
     }
 }
 
-// macz_batch function for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_batch(
     data: &[f64],
@@ -2878,7 +2693,6 @@ pub fn macz_batch(
     use_lag_range: JsValue,
     gamma_range: Vec<f64>,
 ) -> Result<JsValue, JsValue> {
-    // Parse ranges
     if fast_length_range.len() != 3
         || slow_length_range.len() != 3
         || signal_length_range.len() != 3
@@ -2893,7 +2707,6 @@ pub fn macz_batch(
         ));
     }
 
-    // Parse use_lag from JsValue
     let use_lag_arr = js_sys::Array::from(&use_lag_range);
     if use_lag_arr.length() != 3 {
         return Err(JsValue::from_str(
@@ -2936,7 +2749,6 @@ pub fn macz_batch(
     }
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Convert to JS-friendly structure
     let result = MaczBatchJsOutput {
         values: vec![output.values.clone()],
         fast_lengths: output
@@ -2959,8 +2771,7 @@ pub fn macz_batch(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-// macz_batch_zero_copy function for WASM
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn macz_batch_zero_copy(
     data: &[f64],
@@ -2980,7 +2791,6 @@ pub fn macz_batch_zero_copy(
         return Err(JsValue::from_str("Output pointer is null"));
     }
 
-    // Parse ranges
     if fast_length_range.len() != 3
         || slow_length_range.len() != 3
         || signal_length_range.len() != 3
@@ -2995,7 +2805,6 @@ pub fn macz_batch_zero_copy(
         ));
     }
 
-    // Parse use_lag from JsValue
     let use_lag_arr = js_sys::Array::from(&use_lag_range);
     if use_lag_arr.length() != 3 {
         return Err(JsValue::from_str(
@@ -3030,14 +2839,12 @@ pub fn macz_batch_zero_copy(
         b: (b_range[0], b_range[1], b_range[2]),
     };
 
-    // Calculate number of combinations (assuming only one for simplicity)
-    let num_combinations = 1; // For default params test
+    let num_combinations = 1;
 
     unsafe {
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, num_combinations * data.len());
         let volume_ref = volume.as_deref();
 
-        // For now, just compute with the start values of each range
         let params = MaczParams {
             fast_length: Some(fast_length_range[0]),
             slow_length: Some(slow_length_range[0]),
@@ -3066,8 +2873,7 @@ pub fn macz_batch_zero_copy(
     }
 }
 
-// WASM batch output structure
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MaczBatchJsOutput {
     pub values: Vec<Vec<f64>>,
@@ -3076,7 +2882,7 @@ pub struct MaczBatchJsOutput {
     pub signal_lengths: Vec<usize>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MaczBatchConfig {
     pub fast_length_min: usize,
@@ -3096,7 +2902,6 @@ pub struct MaczBatchConfig {
     pub gamma: f64,
 }
 
-// ==================== UNIT TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3106,12 +2911,9 @@ mod tests {
     use proptest::prelude::*;
     use std::error::Error;
 
-    // ==================== TEST HELPER FUNCTIONS ====================
-
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_macz_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Small but non-trivial synthetic input
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
@@ -3121,19 +2923,15 @@ mod tests {
 
         let input = MaczInput::from_slice(&data, MaczParams::default());
 
-        // Baseline via Vec-returning API
         let baseline = macz(&input)?.values;
 
-        // Preallocated output; function will write NaN warmups
         let mut out = vec![0.0; data.len()];
         macz_into(&input, &mut out)?;
 
         assert_eq!(out.len(), baseline.len());
 
-        // Equality with NaN==NaN and tight epsilon for finite values
-        let eq = |a: f64, b: f64| {
-            (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
-        };
+        let eq =
+            |a: f64, b: f64| (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12);
         for i in 0..out.len() {
             assert!(
                 eq(out[i], baseline[i]),
@@ -3151,7 +2949,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with partial params (using defaults)
         let params = MaczParams {
             fast_length: None,
             slow_length: None,
@@ -3164,7 +2961,6 @@ mod tests {
             gamma: None,
         };
 
-        // Use uniform volume for simplicity
         let volume = vec![1.0; candles.close.len()];
         let input = MaczInput::from_candles_with_volume(&candles, "close", &volume, params);
         let output = macz_with_kernel(&input, kernel)?;
@@ -3178,27 +2974,23 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Use actual volume from candles
         let params = MaczParams::default();
         let input = MaczInput::from_candles(&candles, "close", params);
         let result = macz_with_kernel(&input, kernel)?;
 
-        // Expected reference values from Pine Script
         let expected = vec![0.51988421, 0.23019592, 0.08030845, 0.12276454, -0.56402159];
         let actual = &result.values[result.values.len() - 5..];
 
         println!("Last 5 MACZ values: {:?}", actual);
         println!("Expected values: {:?}", expected);
 
-        // TODO: Fix calculation to match Pine Script exactly
-        // Current values are close but not exact match
         for (i, (&exp, &act)) in expected.iter().zip(actual.iter()).enumerate() {
             let diff = (act - exp).abs();
             println!(
                 "Value {}: expected={}, actual={}, diff={}",
                 i, exp, act, diff
             );
-            // Using relaxed tolerance temporarily
+
             assert!(
                 diff < 0.2,
                 "Value {} mismatch: expected {}, got {}, diff {}",
@@ -3222,7 +3014,7 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let input_data = [10.0, 20.0, 30.0];
         let params = MaczParams {
-            fast_length: Some(0), // Invalid
+            fast_length: Some(0),
             slow_length: Some(25),
             signal_length: Some(9),
             lengthz: Some(20),
@@ -3250,7 +3042,7 @@ mod tests {
         let data_small = [10.0, 20.0, 30.0];
         let params = MaczParams {
             fast_length: Some(12),
-            slow_length: Some(100), // Exceeds data length
+            slow_length: Some(100),
             signal_length: Some(9),
             lengthz: Some(20),
             length_stdev: Some(25),
@@ -3321,7 +3113,7 @@ mod tests {
             signal_length: Some(2),
             lengthz: Some(2),
             length_stdev: Some(2),
-            a: Some(3.0), // Out of range
+            a: Some(3.0),
             b: Some(1.0),
             use_lag: Some(false),
             gamma: Some(0.02),
@@ -3349,7 +3141,7 @@ mod tests {
             lengthz: Some(2),
             length_stdev: Some(2),
             a: Some(1.0),
-            b: Some(-3.0), // Out of range
+            b: Some(-3.0),
             use_lag: Some(false),
             gamma: Some(0.02),
         };
@@ -3375,7 +3167,7 @@ mod tests {
             a: Some(1.0),
             b: Some(1.0),
             use_lag: Some(true),
-            gamma: Some(1.5), // Out of range
+            gamma: Some(1.5),
         };
         let input = MaczInput::from_slice(&data, params);
         let res = macz_with_kernel(&input, kernel);
@@ -3390,7 +3182,6 @@ mod tests {
     fn check_macz_nan_handling(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Data with NaN values
         let data_with_nan = vec![
             1.0,
             2.0,
@@ -3454,7 +3245,6 @@ mod tests {
         let input = MaczInput::from_slice(&data_with_nan, params);
         let res = macz_with_kernel(&input, kernel)?;
 
-        // Check that NaN is propagated correctly
         assert!(
             res.values[2].is_nan(),
             "[{}] NaN should be propagated",
@@ -3467,10 +3257,8 @@ mod tests {
     fn check_macz_streaming(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Generate test data
         let test_data: Vec<f64> = (0..100).map(|i| 50.0 + (i as f64).sin() * 10.0).collect();
 
-        // Batch calculation
         let params = MaczParams {
             fast_length: Some(5),
             slow_length: Some(10),
@@ -3486,7 +3274,6 @@ mod tests {
         let batch_input = MaczInput::from_slice(&test_data, params.clone());
         let batch_result = macz_with_kernel(&batch_input, kernel)?;
 
-        // Streaming calculation
         let mut stream = MaczStream::new(params)?;
         let mut stream_results = Vec::new();
 
@@ -3495,7 +3282,6 @@ mod tests {
             stream_results.push(result.unwrap_or(f64::NAN));
         }
 
-        // Compare last valid values (streaming may have different warmup)
         let batch_valid: Vec<f64> = batch_result
             .values
             .iter()
@@ -3514,7 +3300,6 @@ mod tests {
             .collect();
 
         if !batch_valid.is_empty() && !stream_valid.is_empty() {
-            // Just check that both produce some valid values
             assert!(
                 batch_valid.len() > 0 && stream_valid.len() > 0,
                 "[{}] Both batch and stream should produce valid values",
@@ -3535,7 +3320,6 @@ mod tests {
         let input_with_vol = MaczInput::from_slice_with_volume(&data, &volume, params);
         let result_vol = macz_with_kernel(&input_with_vol, kernel)?;
 
-        // Find actual warmup
         let mut actual_warmup = 0;
         for (i, &val) in result_vol.values.iter().enumerate() {
             if !val.is_nan() {
@@ -3555,7 +3339,6 @@ mod tests {
             test_name
         );
 
-        // Test into_slice doesn't poison output
         let mut dst = vec![123.456; data.len()];
         macz_into_slice(&mut dst, &input_with_vol, kernel)?;
 
@@ -3586,8 +3369,6 @@ mod tests {
 
         assert_eq!(row.len(), candles.close.len());
 
-        
-        
         let warmup = 33;
         let valid_count = row[warmup..].iter().filter(|v| !v.is_nan()).count();
         assert!(
@@ -3616,11 +3397,9 @@ mod tests {
 
         let batch = macz_batch_with_kernel(&data, &sweep, kernel)?;
 
-        
         assert_eq!(batch.cols, data.len());
         assert!(batch.rows > 0, "[{}] Batch should produce rows", test_name);
 
-        
         assert!(
             !batch.combos.is_empty(),
             "[{}] Should have parameter combinations",
@@ -3629,8 +3408,6 @@ mod tests {
 
         Ok(())
     }
-
-    
 
     macro_rules! generate_all_macz_tests {
         ($($test_fn:ident),*) => {
@@ -3812,46 +3589,38 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
     gen_batch_tests!(check_batch_with_volume);
 
-    
-
     #[cfg(feature = "proptest")]
     fn check_macz_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (
-            
             prop::collection::vec(
                 (-1e4f64..1e4f64).prop_filter("finite", |x| x.is_finite()),
                 50..200,
             ),
-            
             prop::collection::vec(
                 (100f64..10000f64).prop_filter("positive", |x| x.is_finite() && *x > 0.0),
                 50..200,
             ),
-            
-            5usize..15,      
-            15usize..30,     
-            3usize..10,      
-            10usize..25,     
-            15usize..30,     
-            -1.5f64..1.5f64, 
-            -1.5f64..1.5f64, 
-            prop::bool::ANY, 
-            0.01f64..0.1f64, 
+            5usize..15,
+            15usize..30,
+            3usize..10,
+            10usize..25,
+            15usize..30,
+            -1.5f64..1.5f64,
+            -1.5f64..1.5f64,
+            prop::bool::ANY,
+            0.01f64..0.1f64,
         );
 
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(data, volume, fast, slow, sig, lz, lsd, a, b, use_lag, gamma)| {
-                
                 let min_len = data.len().min(volume.len());
                 let data = &data[..min_len];
                 let volume = &volume[..min_len];
 
-                
                 if slow >= data.len() || lz >= data.len() || lsd >= data.len() {
                     return Ok(());
                 }
@@ -3870,7 +3639,6 @@ mod tests {
 
                 let input = MaczInput::from_slice_with_volume(data, volume, params);
 
-                
                 let result = macz_with_kernel(&input, kernel);
                 prop_assert!(
                     result.is_ok(),
@@ -3881,11 +3649,9 @@ mod tests {
                 let output = result.unwrap();
                 prop_assert_eq!(output.values.len(), data.len(), "Output length mismatch");
 
-                
                 if kernel != Kernel::Scalar {
                     let scalar_result = macz_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    
                     for (i, (&simd_val, &scalar_val)) in output
                         .values
                         .iter()
@@ -3918,8 +3684,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_macz_tests!(check_macz_property);
 
-    
-
     #[test]
     fn test_macz_basic() {
         let data = vec![
@@ -3936,16 +3700,13 @@ mod tests {
         let input = MaczInput::from_slice(&data, params);
         let result = macz(&input).unwrap();
 
-        
         let expected = vec![0.51988421, 0.23019592, 0.08030845, 0.12276454, -0.56402159];
         let actual = &result.values[result.values.len() - 5..];
 
-        
         println!("Last 5 actual values: {:?}", actual);
         println!("Expected values: {:?}", expected);
 
-        
-        let warmup = 33; 
+        let warmup = 33;
         assert!(
             result.values[warmup..].iter().any(|&v| !v.is_nan()),
             "Should have non-NaN values after warmup"
@@ -4004,7 +3765,6 @@ mod tests {
 
     #[test]
     fn test_macz_into_slice() {
-        
         let data: Vec<f64> = (0..50).map(|i| i as f64).collect();
         let mut dst = vec![0.0; 50];
         let params = MaczParams::default();
@@ -4028,7 +3788,6 @@ mod tests {
             b: (1.0, 1.0, 0.1),
         };
 
-        
         let result_seq = macz_batch_slice(&data, &sweep, Kernel::Scalar);
         assert!(result_seq.is_ok());
     }
@@ -4049,7 +3808,6 @@ mod tests {
 
         let mut stream = MaczStream::new(params).unwrap();
 
-        
         for i in 0..20 {
             let val = i as f64;
             let _ = stream.update(val, None);
@@ -4058,23 +3816,13 @@ mod tests {
 
     #[test]
     fn test_macz_no_poison_legacy() {
-        
-        
-        
-        
-        
-
         let data: Vec<f64> = (0..100).map(|i| 50.0 + (i as f64).sin() * 5.0).collect();
         let volume: Vec<f64> = (0..100).map(|i| 1000.0 + (i as f64) * 10.0).collect();
 
-        
         let params = MaczParams::default();
         let input_with_vol = MaczInput::from_slice_with_volume(&data, &volume, params);
         let result_vol = macz(&input_with_vol).unwrap();
 
-        
-        
-        
         let mut actual_warmup = 0;
         for (i, &val) in result_vol.values.iter().enumerate() {
             if !val.is_nan() {
@@ -4084,11 +3832,9 @@ mod tests {
         }
         println!("Actual warmup period: {}", actual_warmup);
 
-        
         assert!(actual_warmup >= 25, "Warmup should be at least slow period");
         assert!(actual_warmup < 50, "Warmup should be reasonable");
 
-        
         for i in 0..actual_warmup {
             assert!(
                 result_vol.values[i].is_nan(),
@@ -4105,11 +3851,9 @@ mod tests {
             );
         }
 
-        
-        let mut dst = vec![123.456; data.len()]; 
+        let mut dst = vec![123.456; data.len()];
         macz_into_slice(&mut dst, &input_with_vol, Kernel::Scalar).unwrap();
 
-        
         for i in 0..actual_warmup {
             assert!(
                 dst[i].is_nan(),
@@ -4117,7 +3861,7 @@ mod tests {
                 i
             );
         }
-        
+
         for i in actual_warmup..dst.len() {
             assert!(
                 (dst[i] - result_vol.values[i]).abs() < 1e-10,
@@ -4126,7 +3870,6 @@ mod tests {
             );
         }
 
-        
         let sweep = MaczBatchRange {
             fast_length: (12, 13, 1),
             slow_length: (25, 26, 1),
@@ -4138,11 +3881,10 @@ mod tests {
         };
 
         let batch_result = macz_batch_slice(&data, &sweep, Kernel::ScalarBatch).unwrap();
-        
+
         assert_eq!(batch_result.cols, data.len());
         assert!(batch_result.rows > 0);
 
-        
         let mut non_nan_count = 0;
         for val in &batch_result.values {
             if !val.is_nan() {

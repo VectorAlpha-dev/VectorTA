@@ -1,44 +1,16 @@
-//! # WaveTrend Oscillator (WTO)
-//!
-//! WTO is a momentum oscillator that smooths price data through multiple EMA layers to identify
-//! overbought/oversold conditions with reduced noise, producing two waves and their histogram.
-//!
-//! ## Parameters
-//! - **channel_length**: EMA period for channel calculation. Defaults to 10.
-//! - **average_length**: EMA period for final smoothing. Defaults to 21.
-//!
-//! ## Returns
-//! - **`Ok(WtoOutput)`** containing three `Vec<f64>`:
-//!   - `wavetrend1`: Primary oscillator line
-//!   - `wavetrend2`: Signal line (SMA of wavetrend1)
-//!   - `histogram`: Difference between wavetrend1 and wavetrend2
-//! - **`Err(WtoError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - **SIMD Status**: Single-series AVX2/AVX512 use pointer-iterating kernels that mirror the scalar warmup/main split to remove bounds checks and encourage FMA fusion. Because ESA→D→TCI is sequential, gains are modest and can underperform the optimized scalar; runtime Auto short-circuits to Scalar for single-series. Batch kernels use AVX2/AVX512 with grouped precompute for larger wins.
-//! - **Streaming Performance**: O(1) - maintains EMA states and small buffers
-//! - **Memory Optimization**: ✓ Uses make_uninit_matrix, init_matrix_prefixes for zero-copy
-//! - **Batch Support**: ✓ Full parallel batch parameter sweep implementation
-//! - **WebAssembly**: SIMD128 stub currently falls back to scalar
-//! - **Decision log**: Single-series SIMD compiled but Auto selects Scalar as fastest; CUDA wrapper enabled with typed errors and VRAM handles exported to Python via CAI v3 + DLPack v1.x, keeping numerical outputs identical to scalar.
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaWto, CudaWtoBatchResult, DeviceArrayF32Triplet};
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::{DeviceArrayF32Py, make_device_array_py};
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
@@ -50,21 +22,17 @@ use crate::utilities::helpers::{
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
 
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::collections::BTreeMap;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
 
 use crate::indicators::moving_averages::ema::{
     ema_into_slice, ema_with_kernel, EmaInput, EmaParams,
@@ -73,8 +41,6 @@ use crate::indicators::moving_averages::sma::{
     sma_into_slice, sma_with_kernel, SmaInput, SmaParams,
 };
 
-
-/// Input data enum supporting both raw slices and candle data
 #[derive(Debug, Clone)]
 pub enum WtoData<'a> {
     Candles {
@@ -84,7 +50,6 @@ pub enum WtoData<'a> {
     Slice(&'a [f64]),
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct WtoOutput {
     pub wavetrend1: Vec<f64>,
@@ -92,9 +57,11 @@ pub struct WtoOutput {
     pub histogram: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct WtoParams {
     pub channel_length: Option<usize>,
     pub average_length: Option<usize>,
@@ -109,7 +76,6 @@ impl Default for WtoParams {
     }
 }
 
-/// Main input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct WtoInput<'a> {
     pub data: WtoData<'a>,
@@ -158,7 +124,6 @@ impl<'a> AsRef<[f64]> for WtoInput<'a> {
         }
     }
 }
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct WtoBuilder {
@@ -231,7 +196,6 @@ impl WtoBuilder {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum WtoError {
     #[error("wto: Input data slice is empty.")]
@@ -247,13 +211,16 @@ pub enum WtoError {
     #[error("wto: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("wto: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("wto: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
     #[error("wto: Computation error: {0}")]
     ComputationError(String),
 }
-
 
 #[inline]
 pub fn wto(input: &WtoInput) -> Result<WtoOutput, WtoError> {
@@ -265,8 +232,6 @@ pub fn wto_with_kernel(input: &WtoInput, kernel: Kernel) -> Result<WtoOutput, Wt
     let (data, channel_length, average_length, first, chosen) = wto_prepare(input, kernel)?;
     let len = data.len();
 
-    
-    
     let ci_start = first + channel_length.saturating_sub(1);
     let warm_wt1 = ci_start;
     let warm_wt2_hist = ci_start.saturating_add(3);
@@ -292,7 +257,6 @@ pub fn wto_with_kernel(input: &WtoInput, kernel: Kernel) -> Result<WtoOutput, Wt
     })
 }
 
-/// Zero-allocation version
 #[inline]
 pub fn wto_into_slices(
     wt1: &mut [f64],
@@ -305,14 +269,10 @@ pub fn wto_into_slices(
 
     if wt1.len() != data.len() || wt2.len() != data.len() || hist.len() != data.len() {
         let expected = data.len();
-        let got = wt1
-            .len()
-            .max(wt2.len())
-            .max(hist.len());
+        let got = wt1.len().max(wt2.len()).max(hist.len());
         return Err(WtoError::OutputLengthMismatch { expected, got });
     }
 
-    
     let ci_start = first + channel_length.saturating_sub(1);
     let warm_wt1 = ci_start.min(wt1.len());
     let warm_wt2_hist = ci_start.saturating_add(3);
@@ -342,34 +302,21 @@ pub fn wto_into_slices(
     Ok(())
 }
 
-/// Compute WaveTrend Oscillator into caller-provided buffers (no allocations).
-///
-/// Preserves NaN warmups exactly like the Vec-returning API and writes results
-/// into the provided output slices. Each output slice length must match the
-/// input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn wto_into(
     input: &WtoInput,
     wt1_out: &mut [f64],
     wt2_out: &mut [f64],
     hist_out: &mut [f64],
 ) -> Result<(), WtoError> {
-    let (data, channel_length, average_length, first, chosen) =
-        wto_prepare(input, Kernel::Auto)?;
+    let (data, channel_length, average_length, first, chosen) = wto_prepare(input, Kernel::Auto)?;
 
-    if wt1_out.len() != data.len()
-        || wt2_out.len() != data.len()
-        || hist_out.len() != data.len()
-    {
+    if wt1_out.len() != data.len() || wt2_out.len() != data.len() || hist_out.len() != data.len() {
         let expected = data.len();
-        let got = wt1_out
-            .len()
-            .max(wt2_out.len())
-            .max(hist_out.len());
+        let got = wt1_out.len().max(wt2_out.len()).max(hist_out.len());
         return Err(WtoError::OutputLengthMismatch { expected, got });
     }
 
-    
     let ci_start = first + channel_length.saturating_sub(1);
     let warm_wt1 = ci_start;
     let warm_wt2_hist = ci_start.saturating_add(3);
@@ -387,7 +334,6 @@ pub fn wto_into(
         *v = qnan;
     }
 
-    
     wto_compute_into(
         data,
         channel_length,
@@ -400,7 +346,6 @@ pub fn wto_into(
     )
 }
 
-/// Prepare and validate input data
 #[inline(always)]
 fn wto_prepare<'a>(
     input: &'a WtoInput,
@@ -433,20 +378,14 @@ fn wto_prepare<'a>(
         });
     }
 
-    // Need enough valid samples for both the CI warmup and the final SMA(4) stage.
     let valid = len - first;
     let needed = channel_length
         .saturating_add(3)
         .max(average_length.saturating_add(3));
     if valid < needed {
-        return Err(WtoError::NotEnoughValidData {
-            needed,
-            valid,
-        });
+        return Err(WtoError::NotEnoughValidData { needed, valid });
     }
 
-    // WTO single-series: scalar path is fastest on typical CPUs due to sequential EMA chain.
-    // Short-circuit Auto to Scalar to avoid slower AVX2/AVX512 selections.
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -455,7 +394,6 @@ fn wto_prepare<'a>(
     Ok((data, channel_length, average_length, first, chosen))
 }
 
-/// Core computation dispatcher
 #[inline(always)]
 fn wto_compute_into(
     data: &[f64],
@@ -468,7 +406,6 @@ fn wto_compute_into(
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
     unsafe {
-        // WASM SIMD128 support
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -511,12 +448,6 @@ fn wto_compute_into(
     }
 }
 
-// ==================== PINESCRIPT EMA IMPLEMENTATION ====================
-/// PineScript-compatible EMA that matches the exact PineScript formula:
-/// pine_ema(src, length) =>
-///     alpha = 2 / (length + 1)
-///     sum = 0.0
-///     sum := na(sum[1]) ? src : alpha * src + (1 - alpha) * nz(sum[1])
 #[inline(always)]
 fn ema_pinescript_into(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
     let len = data.len();
@@ -527,24 +458,19 @@ fn ema_pinescript_into(data: &[f64], period: usize, first_val: usize, out: &mut 
     let alpha = 2.0 / (period as f64 + 1.0);
     let beta = 1.0 - alpha;
 
-    // PineScript initializes with the first non-NaN value
     let mut ema = data[first_val];
     out[first_val] = ema;
 
-    // Continue with EMA calculation from the next point
     for i in (first_val + 1)..len {
         if data[i].is_finite() {
-            // PineScript formula: alpha * src + (1 - alpha) * nz(sum[1])
             ema = alpha * data[i] + beta * ema;
             out[i] = ema;
         } else {
-            // On NaN input, carry forward the previous EMA value
             out[i] = ema;
         }
     }
 }
 
-// ==================== SCALAR IMPLEMENTATION ====================
 #[inline]
 pub fn wto_scalar(
     data: &[f64],
@@ -556,11 +482,6 @@ pub fn wto_scalar(
     wt2: &mut [f64],
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
-    // Optimized scalar implementation (safe) with split warmup/main phases:
-    // - Hoists ESA-only warmup to a dedicated loop (fewer hot-loop branches)
-    // - Single-pass CI/TCI update and WT2 4-sample SMA via tiny ring buffer
-    // - No O(N) temporaries; all outputs written in-place
-
     #[inline(always)]
     fn fast_abs(x: f64) -> f64 {
         f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
@@ -571,22 +492,18 @@ pub fn wto_scalar(
         return Ok(());
     }
 
-    // EMA coefficients
     let alpha_e = 2.0 / (channel_length as f64 + 1.0);
     let beta_e = 1.0 - alpha_e;
     let alpha_t = 2.0 / (average_length as f64 + 1.0);
     let beta_t = 1.0 - alpha_t;
 
-    // Index where CI becomes defined (after ESA warmup)
     let ci_start = first_val + channel_length.saturating_sub(1);
     if ci_start >= len {
         return Ok(());
     }
 
-    // ESA init from first valid sample (Pine-style)
     let mut esa = data[first_val];
 
-    // Phase 1: ESA-only warmup (first_val+1 .. ci_start-1)
     let mut i = first_val + 1;
     while i < ci_start {
         let x = data[i];
@@ -596,21 +513,17 @@ pub fn wto_scalar(
         i += 1;
     }
 
-    // Phase 2: main loop (ci_start .. len-1)
-    let mut d = 0.0_f64; // EMA(|x-esa|)
-    let mut tci = 0.0_f64; // EMA(ci)
+    let mut d = 0.0_f64;
+    let mut tci = 0.0_f64;
 
-    // Rolling SMA(4) state for WT2
     let mut ring = [0.0_f64; 4];
     let mut rsum = 0.0_f64;
     let mut rpos = 0usize;
     let mut rlen = 0usize;
 
-    // Constants
     let k015 = 0.015_f64;
     let inv4 = 0.25_f64;
 
-    // Handle the first main step at ci_start
     {
         let x = data[ci_start];
         if x.is_finite() {
@@ -635,29 +548,25 @@ pub fn wto_scalar(
         };
 
         tci = ci;
-        wt1[ci_start] = tci; // WT1 available at ci_start
+        wt1[ci_start] = tci;
 
-        // Seed ring buffer for WT2; WT2/HIST remain NaN until 4 samples collected
         ring[0] = tci;
         rsum = tci;
         rlen = 1;
         rpos = 1;
     }
 
-    // Steady-state loop
     i = ci_start + 1;
     while i < len {
         let x = data[i];
         let x_fin = x.is_finite();
 
-        // ESA and D updates (carry-forward semantics on NaN)
         if x_fin {
             esa = beta_e.mul_add(esa, alpha_e * x);
             let ad = fast_abs(x - esa);
             d = beta_e.mul_add(d, alpha_e * ad);
         }
 
-        // Compute CI with guarded denominator; NaN when src is NaN
         let mut ci = 0.0_f64;
         if x_fin {
             let denom = k015 * d;
@@ -668,15 +577,12 @@ pub fn wto_scalar(
             ci = f64::NAN;
         }
 
-        // TCI EMA update only for finite CI
         if ci.is_finite() {
             tci = beta_t.mul_add(tci, alpha_t * ci);
         }
 
-        // Write WT1
         wt1[i] = tci;
 
-        // WT2/HIST via rolling SMA(4)
         if rlen < 4 {
             ring[rlen] = tci;
             rsum += tci;
@@ -699,7 +605,6 @@ pub fn wto_scalar(
     Ok(())
 }
 
-// ==================== WASM SIMD128 IMPLEMENTATION ====================
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
 unsafe fn wto_simd128(
@@ -711,7 +616,6 @@ unsafe fn wto_simd128(
     wt2: &mut [f64],
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
-    // For now, fallback to scalar implementation
     wto_scalar(
         data,
         channel_length,
@@ -724,7 +628,6 @@ unsafe fn wto_simd128(
     )
 }
 
-// ==================== AVX2 IMPLEMENTATION ====================
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 unsafe fn wto_avx2(
@@ -736,9 +639,6 @@ unsafe fn wto_avx2(
     wt2: &mut [f64],
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
-    // Unsafe, pointer-based single-pass kernel (branch-minimized, FMA-friendly).
-    // Rationale: EMA chain is sequential; we focus on removing bounds checks and
-    // enabling mul_add on AVX2+FMA targets selected by runtime detection.
     #[inline(always)]
     fn fast_abs(x: f64) -> f64 {
         f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
@@ -749,7 +649,6 @@ unsafe fn wto_avx2(
         return Ok(());
     }
 
-    // EMA coefficients
     let alpha_e = 2.0 / (channel_length as f64 + 1.0);
     let beta_e = 1.0 - alpha_e;
     let alpha_t = 2.0 / (average_length as f64 + 1.0);
@@ -757,19 +656,16 @@ unsafe fn wto_avx2(
 
     let ci_start = first_val + channel_length.saturating_sub(1);
 
-    // Rolling SMA(4) state
     let mut ring = [0.0_f64; 4];
     let mut rsum = 0.0_f64;
     let mut rpos = 0usize;
     let mut rlen = 0usize;
 
-    // Raw pointers to avoid bounds checks in the hot loop
     let x_ptr = data.as_ptr();
     let wt1_ptr = wt1.as_mut_ptr();
     let wt2_ptr = wt2.as_mut_ptr();
     let hist_ptr = hist.as_mut_ptr();
 
-    // Prefix region before first valid index
     let mut i = 0usize;
     while i < first_val {
         *wt1_ptr.add(i) = f64::NAN;
@@ -778,28 +674,23 @@ unsafe fn wto_avx2(
         i += 1;
     }
 
-    // Initialize ESA from the first valid sample (Pine-style)
     let mut esa = *x_ptr.add(first_val);
 
-    // D and TCI states
     let mut d = f64::NAN;
     let mut d_inited = false;
     let mut tci = f64::NAN;
     let mut tci_inited = false;
 
-    // Main pass
     i = first_val;
     while i < len {
         let x = *x_ptr.add(i);
         let x_fin = x.is_finite();
 
-        // ESA update with FMA-friendly form: esa = beta_e*esa + alpha_e*x
         if i != first_val && x_fin {
             esa = beta_e.mul_add(esa, alpha_e * x);
         }
 
         if i >= ci_start {
-            // Abs diff for D's EMA (carry-forward semantics on NaN)
             let abs_diff = if x_fin { fast_abs(x - esa) } else { f64::NAN };
             if !d_inited {
                 if i == ci_start {
@@ -810,14 +701,12 @@ unsafe fn wto_avx2(
                 d = beta_e.mul_add(d, alpha_e * abs_diff);
             }
 
-            
             let denom = 0.015_f64 * d;
             let mut ci = 0.0_f64;
             if denom != 0.0 && denom.is_finite() {
                 ci = if x_fin { (x - esa) / denom } else { f64::NAN };
             }
 
-            
             if !tci_inited {
                 if i == ci_start {
                     tci = ci;
@@ -828,10 +717,8 @@ unsafe fn wto_avx2(
             }
 
             if tci_inited {
-                
                 *wt1_ptr.add(i) = tci;
 
-                
                 if rlen < 4 {
                     ring[rlen] = tci;
                     rsum += tci;
@@ -856,7 +743,6 @@ unsafe fn wto_avx2(
                 *hist_ptr.add(i) = f64::NAN;
             }
         } else {
-            
             *wt1_ptr.add(i) = f64::NAN;
             *wt2_ptr.add(i) = f64::NAN;
             *hist_ptr.add(i) = f64::NAN;
@@ -867,7 +753,6 @@ unsafe fn wto_avx2(
 
     Ok(())
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -880,10 +765,6 @@ unsafe fn wto_avx512(
     wt2: &mut [f64],
     hist: &mut [f64],
 ) -> Result<(), WtoError> {
-    
-    
-    
-
     #[inline(always)]
     fn fast_abs(x: f64) -> f64 {
         f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
@@ -909,7 +790,6 @@ unsafe fn wto_avx512(
     let wt2_ptr = wt2.as_mut_ptr();
     let hs_ptr = hist.as_mut_ptr();
 
-    
     let mut esa = *x_ptr.add(first_val);
     let mut i = first_val + 1;
     while i < ci_start {
@@ -920,11 +800,9 @@ unsafe fn wto_avx512(
         i += 1;
     }
 
-    
     let mut d = 0.0_f64;
     let mut tci = 0.0_f64;
 
-    
     let mut ring = [0.0_f64; 4];
     let mut rsum = 0.0_f64;
     let mut rpos = 0usize;
@@ -933,7 +811,6 @@ unsafe fn wto_avx512(
     let k015 = 0.015_f64;
     let inv4 = 0.25_f64;
 
-    
     {
         let x = *x_ptr.add(ci_start);
         if x.is_finite() {
@@ -965,7 +842,6 @@ unsafe fn wto_avx512(
         rpos = 1;
     }
 
-    
     i = ci_start + 1;
     while i < len {
         let x = *x_ptr.add(i);
@@ -1015,7 +891,6 @@ unsafe fn wto_avx512(
     Ok(())
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "wto")]
 #[pyo3(signature = (close, channel_length, average_length, kernel=None))]
@@ -1049,9 +924,7 @@ pub fn wto_py<'py>(
     ))
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "wto_js")]
 pub fn wto_js(
     close: &[f64],
@@ -1083,7 +956,7 @@ pub fn wto_js(
     Ok(result)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wto_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1092,7 +965,7 @@ pub fn wto_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wto_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1100,8 +973,7 @@ pub fn wto_free(ptr: *mut f64, len: usize) {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wto_into(
     in_ptr: *const f64,
@@ -1132,15 +1004,15 @@ pub fn wto_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WtoResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "wto_unified")]
 pub fn wto_unified_js(
     close: &[f64],
@@ -1172,14 +1044,14 @@ pub fn wto_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WtoBatchConfig {
     pub channel: (usize, usize, usize),
     pub average: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct WtoBatchJsOutput {
     pub wavetrend1: Vec<f64>,
@@ -1190,8 +1062,7 @@ pub struct WtoBatchJsOutput {
     pub cols: usize,
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn wto_batch_into(
     in_ptr: *const f64,
@@ -1211,7 +1082,9 @@ pub fn wto_batch_into(
         return Err(JsValue::from_str(&WtoError::EmptyInputData.to_string()));
     }
     if in_ptr == out_ptr {
-        return Err(JsValue::from_str("wto_batch_into: in_ptr and out_ptr must not alias"));
+        return Err(JsValue::from_str(
+            "wto_batch_into: in_ptr and out_ptr must not alias",
+        ));
     }
     unsafe {
         let data = core::slice::from_raw_parts(in_ptr, len);
@@ -1223,15 +1096,13 @@ pub fn wto_batch_into(
             channel: (ch_start, ch_end, ch_step),
             average: (av_start, av_end, av_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("rows * cols overflow in wto_batch_into"))?;
 
-        
         let out_mu = core::slice::from_raw_parts_mut(out_ptr as *mut MaybeUninit<f64>, total);
         let mut warms: Vec<usize> = Vec::with_capacity(rows);
         for p in combos.iter() {
@@ -1281,7 +1152,7 @@ pub fn wto_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "wto_batch")]
 pub fn wto_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: WtoBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1303,7 +1174,6 @@ pub fn wto_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
     serde_wasm_bindgen::to_value(&js)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
-
 
 #[derive(Debug, Clone)]
 pub struct WtoBatchRange {
@@ -1479,14 +1349,12 @@ fn apply_ci_to_members(
     out_ptr: ThreadSafePtr,
     parallel: bool,
 ) -> Result<(), WtoError> {
-    let _ = parallel; 
+    let _ = parallel;
     for member in members {
-        let offset = member
-            .row
-            .checked_mul(cols)
-            .ok_or_else(|| WtoError::InvalidInput("row * cols overflow in apply_ci_to_members".into()))?;
-        let dst =
-            unsafe { core::slice::from_raw_parts_mut(out_ptr.0.add(offset), cols) };
+        let offset = member.row.checked_mul(cols).ok_or_else(|| {
+            WtoError::InvalidInput("row * cols overflow in apply_ci_to_members".into())
+        })?;
+        let dst = unsafe { core::slice::from_raw_parts_mut(out_ptr.0.add(offset), cols) };
         ema_pinescript_into(ci, member.average_length, start_ci, dst);
     }
     Ok(())
@@ -1818,7 +1686,6 @@ unsafe fn wto_batch_fill_wt1_grouped_avx512(
     Ok(())
 }
 
-
 fn wto_fill_wt1_row(
     data: &[f64],
     p: WtoParams,
@@ -1830,12 +1697,8 @@ fn wto_fill_wt1_row(
     let channel_length = p.channel_length.unwrap_or(10);
     let average_length = p.average_length.unwrap_or(21);
 
-    
     let mut mu = make_uninit_matrix(2, cols);
-    let warms = [
-        first + channel_length - 1, 
-        first + channel_length - 1, 
-    ];
+    let warms = [first + channel_length - 1, first + channel_length - 1];
     init_matrix_prefixes(&mut mu, cols, &warms);
 
     let mut guard = core::mem::ManuallyDrop::new(mu);
@@ -1843,19 +1706,15 @@ fn wto_fill_wt1_row(
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
     let (d, ci) = flat.split_at_mut(cols);
 
-    
     ema_pinescript_into(data, channel_length, first, dst);
 
-    
     for i in 0..cols {
         ci[i] = (data[i] - dst[i]).abs();
     }
 
-    
     let d_first = first + channel_length - 1;
     ema_pinescript_into(ci, channel_length, d_first, d);
 
-    
     let start = first + channel_length - 1;
     for i in start..cols {
         let denom = 0.015 * d[i];
@@ -1866,8 +1725,7 @@ fn wto_fill_wt1_row(
         };
     }
 
-    
-    let ci_first = start; 
+    let ci_first = start;
     ema_pinescript_into(ci, average_length, ci_first, dst);
 
     Ok(())
@@ -1887,13 +1745,11 @@ fn expand_grid(r: &WtoBatchRange) -> Result<Vec<WtoParams>, WtoError> {
                     break;
                 }
                 out.push(v);
-                let next = v
-                    .checked_add(st)
-                    .ok_or_else(|| WtoError::InvalidRange {
-                        start: s.to_string(),
-                        end: e.to_string(),
-                        step: st.to_string(),
-                    })?;
+                let next = v.checked_add(st).ok_or_else(|| WtoError::InvalidRange {
+                    start: s.to_string(),
+                    end: e.to_string(),
+                    step: st.to_string(),
+                })?;
                 if next == v {
                     break;
                 }
@@ -1977,10 +1833,7 @@ fn wto_batch_inner(
 
     let cols = data.len();
     let rows = combos.len();
-    if rows
-        .checked_mul(cols)
-        .is_none()
-    {
+    if rows.checked_mul(cols).is_none() {
         return Err(WtoError::InvalidInput(
             "rows * cols overflow in wto_batch_inner".into(),
         ));
@@ -1991,10 +1844,8 @@ fn wto_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(WtoError::AllValuesNaN)?;
 
-    
     let mut mu = make_uninit_matrix(rows, cols);
     {
-        
         let mut warms: Vec<usize> = Vec::with_capacity(rows);
         for p in combos.iter() {
             let channel_length = p.channel_length.unwrap_or(10);
@@ -2072,17 +1923,15 @@ pub fn wto_batch_candles(
     wto_batch_slice(data, channel_range, average_range, kernel)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct WtoBatchAllOutput {
-    pub wt1: Vec<f64>,  
-    pub wt2: Vec<f64>,  
-    pub hist: Vec<f64>, 
+    pub wt1: Vec<f64>,
+    pub wt2: Vec<f64>,
+    pub hist: Vec<f64>,
     pub combos: Vec<WtoParams>,
     pub rows: usize,
     pub cols: usize,
 }
-
 
 pub fn wto_batch_all_outputs_with_kernel(
     data: &[f64],
@@ -2097,21 +1946,16 @@ pub fn wto_batch_all_outputs_with_kernel(
 
     let cols = data.len();
     let rows = combos.len();
-    if rows
-        .checked_mul(cols)
-        .is_none()
-    {
+    if rows.checked_mul(cols).is_none() {
         return Err(WtoError::InvalidInput(
             "rows * cols overflow in wto_batch_all_outputs_with_kernel".into(),
         ));
     }
 
-    
     let mut wt1_mu = make_uninit_matrix(rows, cols);
     let mut wt2_mu = make_uninit_matrix(rows, cols);
     let mut hist_mu = make_uninit_matrix(rows, cols);
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -2152,7 +1996,6 @@ pub fn wto_batch_all_outputs_with_kernel(
     init_matrix_prefixes(&mut wt2_mu, cols, &warm_wt2_hist);
     init_matrix_prefixes(&mut hist_mu, cols, &warm_wt2_hist);
 
-    
     let mut wt1_guard = core::mem::ManuallyDrop::new(wt1_mu);
     let mut wt2_guard = core::mem::ManuallyDrop::new(wt2_mu);
     let mut hist_guard = core::mem::ManuallyDrop::new(hist_mu);
@@ -2167,7 +2010,6 @@ pub fn wto_batch_all_outputs_with_kernel(
         core::slice::from_raw_parts_mut(hist_guard.as_mut_ptr() as *mut f64, hist_guard.len())
     };
 
-    
     let kern = match k {
         Kernel::Auto => Kernel::Scalar,
         x => x,
@@ -2176,9 +2018,11 @@ pub fn wto_batch_all_outputs_with_kernel(
     wto_fill_wt1_grouped(data, &combos, first, kern, true, wt1_out)?;
 
     for row in 0..rows {
-        let row_start = row
-            .checked_mul(cols)
-            .ok_or_else(|| WtoError::InvalidInput("row * cols overflow in wto_batch_all_outputs_with_kernel".into()))?;
+        let row_start = row.checked_mul(cols).ok_or_else(|| {
+            WtoError::InvalidInput(
+                "row * cols overflow in wto_batch_all_outputs_with_kernel".into(),
+            )
+        })?;
         let row_end = row_start + cols;
 
         let wt1_row = &wt1_out[row_start..row_end];
@@ -2196,7 +2040,6 @@ pub fn wto_batch_all_outputs_with_kernel(
         }
     }
 
-    
     let wt1 = unsafe {
         Vec::from_raw_parts(
             wt1_guard.as_mut_ptr() as *mut f64,
@@ -2233,38 +2076,31 @@ pub fn wto_batch_all_outputs_with_kernel(
     })
 }
 
-
-/// SIMD/streaming status: Streaming O(1) via ring SMA(4); Pine-style EMA seeding; matches scalar warmup.
 #[derive(Debug, Clone)]
 pub struct WtoStream {
-    
     channel_length: usize,
     average_length: usize,
 
-    
     esa_alpha: f64,
     esa_beta: f64,
     tci_alpha: f64,
     tci_beta: f64,
-    k015: f64, 
-    inv4: f64, 
+    k015: f64,
+    inv4: f64,
 
-    
-    samples: usize, 
-    ci_ready: bool, 
+    samples: usize,
+    ci_ready: bool,
 
-    esa: f64, 
-    d: f64,   
-    tci: f64, 
+    esa: f64,
+    d: f64,
+    tci: f64,
 
-    
     ring: [f64; 4],
     rsum: f64,
     rpos: usize,
     rlen: usize,
 }
 
-/// When true, WT2/HIST are NaN until 4 WT1 samples exist (strict to scalar).
 const STRICT_WT2_NANS: bool = true;
 
 impl WtoStream {
@@ -2314,25 +2150,19 @@ impl WtoStream {
 
     #[inline(always)]
     fn fast_abs(x: f64) -> f64 {
-        
         f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
     }
 
-    /// Update with the next value. Returns:
-    /// - None: until TCI (WT1) becomes defined (i.e., before `channel_length` finite samples).
-    /// - Some(wt1, wt2, hist): thereafter; WT2/HIST are NaN until 4 WT1 samples (strict mode).
     pub fn update(&mut self, value: f64) -> Option<(f64, f64, f64)> {
         if !value.is_finite() {
             return None;
         }
 
         if self.samples == 0 {
-            
             self.esa = value;
             self.samples = 1;
 
             if self.ci_ready {
-                
                 let ci = 0.0;
                 self.tci = ci;
                 self.push_wt2(ci);
@@ -2343,18 +2173,14 @@ impl WtoStream {
             return None;
         }
 
-        
         self.esa = self.esa_beta.mul_add(self.esa, self.esa_alpha * value);
 
-        
         if !self.ci_ready {
             self.samples += 1;
 
             if self.samples == self.channel_length {
-                
                 self.d = Self::fast_abs(value - self.esa);
 
-                
                 let denom = self.k015 * self.d;
                 let ci = if denom != 0.0 && denom.is_finite() {
                     (value - self.esa) / denom
@@ -2362,7 +2188,6 @@ impl WtoStream {
                     0.0
                 };
 
-                
                 self.tci = ci;
                 self.ci_ready = true;
 
@@ -2374,24 +2199,19 @@ impl WtoStream {
             }
         }
 
-        
         let ad = Self::fast_abs(value - self.esa);
         self.d = self.esa_beta.mul_add(self.d, self.esa_alpha * ad);
 
-        
         let mut ci = 0.0;
         let denom = self.k015 * self.d;
         if denom != 0.0 && denom.is_finite() {
             ci = (value - self.esa) * (1.0 / denom);
         }
 
-        
         self.tci = self.tci_beta.mul_add(self.tci, self.tci_alpha * ci);
 
-        
         let wt1 = self.tci;
 
-        
         self.push_wt2(wt1);
         let (wt2, hist) = self.emit_wt2(wt1);
         Some((wt1, wt2, hist))
@@ -2406,7 +2226,7 @@ impl WtoStream {
         } else {
             self.rsum += val - self.ring[self.rpos];
             self.ring[self.rpos] = val;
-            self.rpos = (self.rpos + 1) & 3; 
+            self.rpos = (self.rpos + 1) & 3;
         }
     }
 
@@ -2447,7 +2267,6 @@ impl WtoStream {
     }
 }
 
-
 #[cfg(feature = "python")]
 #[pyclass(name = "WtoStream")]
 pub struct WtoStreamPy {
@@ -2481,7 +2300,6 @@ impl WtoStreamPy {
     }
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "wto_batch")]
 #[pyo3(signature = (close, channel_range, average_range, kernel=None))]
@@ -2496,7 +2314,6 @@ pub fn wto_batch_py<'py>(
     let slice = close.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    
     let sweep = WtoBatchRange {
         channel: channel_range,
         average: average_range,
@@ -2507,7 +2324,6 @@ pub fn wto_batch_py<'py>(
 
     let dict = pyo3::types::PyDict::new(py);
 
-    
     let wt1_arr = unsafe { numpy::PyArray1::<f64>::new(py, [out.rows * out.cols], false) };
     unsafe { wt1_arr.as_slice_mut()? }.copy_from_slice(&out.wt1);
     dict.set_item("wt1", wt1_arr.reshape((out.rows, out.cols))?)?;
@@ -2641,7 +2457,6 @@ pub fn wto_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(feature = "python")]
 pub fn register_wto_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(wto_py, m)?)?;
@@ -2655,13 +2470,11 @@ pub fn register_wto_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-// ==================== TESTS ====================
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
 
-    // Helper macro to skip unsupported kernels
     macro_rules! skip_if_unsupported {
         ($kernel:expr, $test_name:expr) => {
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
@@ -2683,7 +2496,6 @@ mod tests {
         let input = WtoInput::from_candles(&candles, "close", WtoParams::default());
         let result = wto_with_kernel(&input, kernel)?;
 
-        // Reference values from PineScript
         let expected_wt1 = [
             -34.81423091,
             -33.92872278,
@@ -2710,14 +2522,11 @@ mod tests {
 
         let start = result.wavetrend1.len().saturating_sub(5);
 
-        // Check WaveTrend1
-        // Note: WTO uses EMA which may have slight implementation differences from PineScript
-        // Using a slightly relaxed tolerance of 1e-6 for cross-platform compatibility
         for (i, &val) in result.wavetrend1[start..].iter().enumerate() {
             let diff = (val - expected_wt1[i]).abs();
-            // For values that differ significantly from PineScript, check relative error
-            let rel_tolerance = expected_wt1[i].abs() * 0.1; // 10% relative tolerance for PineScript differences
-            let abs_tolerance = 1e-6; // Absolute tolerance for small values
+
+            let rel_tolerance = expected_wt1[i].abs() * 0.1;
+            let abs_tolerance = 1e-6;
             assert!(
                 diff < rel_tolerance.max(abs_tolerance),
                 "WaveTrend1 mismatch at idx {}: got {}, expected {}, diff {}",
@@ -2728,7 +2537,6 @@ mod tests {
             );
         }
 
-        // Check WaveTrend2 with same tolerance approach
         for (i, &val) in result.wavetrend2[start..].iter().enumerate() {
             let diff = (val - expected_wt2[i]).abs();
             let rel_tolerance = expected_wt2[i].abs() * 0.1;
@@ -2743,11 +2551,10 @@ mod tests {
             );
         }
 
-        // Check Histogram with same tolerance approach
         for (i, &val) in result.histogram[start..].iter().enumerate() {
             let diff = (val - expected_hist[i]).abs();
-            // Histogram can be close to zero, so use absolute tolerance primarily
-            let abs_tolerance = 2.0; // Larger absolute tolerance for histogram
+
+            let abs_tolerance = 2.0;
             assert!(
                 diff < abs_tolerance,
                 "Histogram mismatch at idx {}: got {}, expected {}, diff {}",
@@ -2767,7 +2574,7 @@ mod tests {
         let data = vec![1.0; 100];
         let params = WtoParams {
             channel_length: Some(12),
-            average_length: None, // Use default
+            average_length: None,
         };
         let input = WtoInput::from_slice(&data, params);
         let result = wto_with_kernel(&input, kernel)?;
@@ -2926,15 +2733,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Calculate batch WTO for comparison
         let params = WtoParams::default();
         let input = WtoInput::from_candles(&candles, "close", params.clone());
         let batch_result = wto_with_kernel(&input, kernel)?;
 
-        // Create streaming calculator
         let mut stream = WtoStream::try_new(params)?;
 
-        // Feed data to stream and collect results
         let mut stream_wt1 = Vec::new();
         let mut stream_wt2 = Vec::new();
         let mut stream_hist = Vec::new();
@@ -2947,7 +2751,6 @@ mod tests {
             }
         }
 
-        // Streaming will have fewer values due to warmup
         assert!(!stream_wt1.is_empty());
         Ok(())
     }
@@ -3004,7 +2807,6 @@ mod tests {
         Ok(())
     }
 
-    // Enhanced poison check for all three outputs
     #[cfg(debug_assertions)]
     fn check_wto_no_poison_all(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -3033,14 +2835,12 @@ mod tests {
         Ok(())
     }
 
-    // Batch poison check
     fn check_batch_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file)?;
 
-        // Test with WT1-only batch
         let output = WtoBatchBuilder::new()
             .channel_range(5, 15, 5)
             .average_range(10, 30, 10)
@@ -3060,7 +2860,6 @@ mod tests {
             );
         }
 
-        // Test with full 3-output batch
         let sweep = WtoBatchRange {
             channel: (5, 15, 5),
             average: (10, 30, 10),
@@ -3088,7 +2887,6 @@ mod tests {
         Ok(())
     }
 
-    // Macro to generate test variants for all kernels
     macro_rules! generate_all_wto_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3120,7 +2918,6 @@ mod tests {
         }
     }
 
-    // Generate all single kernel tests
     generate_all_wto_tests!(
         check_wto_accuracy,
         check_wto_partial_params,
@@ -3137,7 +2934,6 @@ mod tests {
         check_batch_poison
     );
 
-    // Additional poison check tests for debug mode
     #[cfg(debug_assertions)]
     #[test]
     fn test_wto_no_poison_all_scalar() {
@@ -3162,7 +2958,6 @@ mod tests {
         check_wto_no_poison_all("test_wto_no_poison_all_simd128", Kernel::Simd128).unwrap();
     }
 
-    // Batch testing functions
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
@@ -3192,7 +2987,7 @@ mod tests {
             .average_range(10, 30, 10)
             .apply_candles(&candles, "close")?;
 
-        let expected_combos = 3 * 3; // (5,10,15) * (10,20,30)
+        let expected_combos = 3 * 3;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, candles.close.len());
@@ -3200,7 +2995,6 @@ mod tests {
         Ok(())
     }
 
-    // Macro for batch tests
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
             paste::paste! {
@@ -3229,29 +3023,23 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_sweep);
 
-    // Parity test for the native into API (lengths must match and values must be identical)
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_wto_into_matches_api() {
-        // Use the existing CSV so parity is checked on real candle data
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path).expect("failed to load candles");
 
         let input = WtoInput::with_default_candles(&candles);
 
-        // Baseline via Vec-returning API
         let base = wto(&input).expect("wto baseline failed");
 
-        // Preallocate outputs (will be overwritten, including warmups)
         let n = candles.close.len();
         let mut wt1 = vec![0.0; n];
         let mut wt2 = vec![0.0; n];
         let mut hist = vec![0.0; n];
 
-        // Zero-allocation path
         wto_into(&input, &mut wt1, &mut wt2, &mut hist).expect("wto_into failed");
 
-        // Helper: NaN == NaN, otherwise exact or tight epsilon
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
         }

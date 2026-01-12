@@ -1,40 +1,3 @@
-//! # Stochastic Oscillator (Stoch)
-//!
-//! A momentum indicator comparing a particular closing price to a range of prices over a certain period.
-//! Calculates %K (fast stochastic) and %D (slow stochastic) lines using high/low range normalization.
-//!
-//! ## Parameters
-//! - **fastk_period**: Window for highest high/lowest low calculation (default: 14)
-//! - **slowk_period**: MA period for %K smoothing (default: 3)
-//! - **slowk_ma_type**: MA type for %K smoothing (default: "sma")
-//! - **slowd_period**: MA period for %D calculation (default: 3)
-//! - **slowd_ma_type**: MA type for %D calculation (default: "sma")
-//!
-//! ## Inputs
-//! - High, low, and close price series (or candles)
-//! - All series must have the same length
-//!
-//! ## Returns
-//! - **k**: %K line as `Vec<f64>` (length matches input, range 0-100)
-//! - **d**: %D line as `Vec<f64>` (length matches input, range 0-100)
-//!
-//! ## Decision log
-//! SIMD (AVX2/AVX512) implemented; `Auto` prefers scalar for stability; CUDA wrappers enabled with VRAM handles and Python CAI v3 + DLPack v1.x.
-//!
-//! ## Developer Notes
-//! - Decision: SIMD kernels are implemented (AVX2/AVX512) and exposed via explicit
-//!   kernel selection; however, `Kernel::Auto` short-circuits to the scalar path.
-//!   On some test machines, wide-vector divides downclock and can offset gains.
-//!   Explicit AVX2/AVX512 entry points remain for benchmarking and future revisits.
-//! - **Streaming update**: O(1) amortized via monotone deques for rolling HH/LL;
-//!   streaming SMA/EMA for %K and %D. Matches scalar outputs.
-//! - **Memory optimization**: Properly uses zero-copy helper functions (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-//! - **SIMD status**: Implemented and validated; Auto defaults to scalar for
-//!   stability across CPUs (batch Auto also defaults to ScalarBatch).
-//! - **Batch notes**: Rows are grouped by `fastk_period`; hh/ll and raw %K are
-//!   computed once per group and reused across rows to reduce total work.
-//! - **TODO**: Optimize streaming to maintain rolling min/max for O(1) updates
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -42,9 +5,9 @@ use pyo3::types::PyDict;
 #[cfg(feature = "python")]
 use pyo3::{exceptions::PyValueError, prelude::*};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -67,8 +30,6 @@ use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
 
-
-
 #[derive(Debug, Clone)]
 pub enum StochData<'a> {
     Candles {
@@ -88,7 +49,10 @@ pub struct StochOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct StochParams {
     pub fastk_period: Option<usize>,
     pub slowk_period: Option<usize>,
@@ -161,8 +125,6 @@ impl<'a> StochInput<'a> {
             .unwrap_or_else(|| "sma".to_string())
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct StochBuilder {
@@ -265,8 +227,6 @@ impl StochBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum StochError {
     #[error("stoch: Empty data provided.")]
@@ -282,14 +242,16 @@ pub enum StochError {
     #[error("stoch: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("stoch: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("stoch: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("stoch: {0}")]
     Other(String),
 }
-
-
 
 #[inline]
 pub fn stoch(input: &StochInput) -> Result<StochOutput, StochError> {
@@ -358,7 +320,6 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
         });
     }
 
-    
     let mut hh = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
     let mut ll = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
@@ -374,12 +335,8 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
         ll[i + first_valid_idx] = val;
     }
 
-    
     let mut k_raw = alloc_with_nan_prefix(data_len, first_valid_idx + fastk_period - 1);
 
-    
-    
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
@@ -425,8 +382,6 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
     let slowk_ma_type = input.get_slowk_ma_type();
     let slowd_ma_type = input.get_slowd_ma_type();
 
-    
-    
     let k_first_valid = first_valid_idx + fastk_period - 1;
     if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
         && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
@@ -438,14 +393,12 @@ pub fn stoch_with_kernel(input: &StochInput, kernel: Kernel) -> Result<StochOutp
         return stoch_classic_ema(&k_raw, slowk_period, slowd_period, k_first_valid);
     }
 
-    
     let k_vec = ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
     let d_vec = ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
     Ok(StochOutput { k: k_vec, d: d_vec })
 }
-
 
 pub fn stoch_into_slices(
     out_k: &mut [f64],
@@ -471,13 +424,10 @@ pub fn stoch_into_slices(
     Ok(())
 }
 
-
-
 #[inline]
 fn prefill_nan_prefix(dst: &mut [f64], warm: usize) {
     let warm = warm.min(dst.len());
     for v in &mut dst[..warm] {
-        
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 }
@@ -548,7 +498,6 @@ fn stoch_compute_into(
         });
     }
 
-    
     let first = high
         .iter()
         .zip(low.iter())
@@ -563,7 +512,6 @@ fn stoch_compute_into(
         });
     }
 
-    
     let slowk_ma_type = input.get_slowk_ma_type();
     let slowd_ma_type = input.get_slowd_ma_type();
     let chosen = match kernel {
@@ -571,9 +519,6 @@ fn stoch_compute_into(
         other => other,
     };
 
-    
-    
-    
     if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
         && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
         && matches!(chosen, Kernel::Scalar | Kernel::ScalarBatch)
@@ -591,13 +536,12 @@ fn stoch_compute_into(
         );
     }
 
-    
     let mut hh = alloc_with_nan_prefix(len, first + fastk_period - 1);
     let mut ll = alloc_with_nan_prefix(len, first + fastk_period - 1);
-    let highs = max_rolling(&high[first..], fastk_period)
-        .map_err(|e| StochError::Other(e.to_string()))?;
-    let lows = min_rolling(&low[first..], fastk_period)
-        .map_err(|e| StochError::Other(e.to_string()))?;
+    let highs =
+        max_rolling(&high[first..], fastk_period).map_err(|e| StochError::Other(e.to_string()))?;
+    let lows =
+        min_rolling(&low[first..], fastk_period).map_err(|e| StochError::Other(e.to_string()))?;
     for (i, &v) in highs.iter().enumerate() {
         hh[first + i] = v;
     }
@@ -607,20 +551,19 @@ fn stoch_compute_into(
 
     let mut k_raw = alloc_with_nan_prefix(len, first + fastk_period - 1);
 
-    
     unsafe {
         match chosen {
-            Kernel::Scalar | Kernel::ScalarBatch => stoch_scalar(
-                high, low, close, &hh, &ll, fastk_period, first, &mut k_raw,
-            ),
+            Kernel::Scalar | Kernel::ScalarBatch => {
+                stoch_scalar(high, low, close, &hh, &ll, fastk_period, first, &mut k_raw)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx2 | Kernel::Avx2Batch => stoch_avx2(
-                high, low, close, &hh, &ll, fastk_period, first, &mut k_raw,
-            ),
+            Kernel::Avx2 | Kernel::Avx2Batch => {
+                stoch_avx2(high, low, close, &hh, &ll, fastk_period, first, &mut k_raw)
+            }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-            Kernel::Avx512 | Kernel::Avx512Batch => stoch_avx512(
-                high, low, close, &hh, &ll, fastk_period, first, &mut k_raw,
-            ),
+            Kernel::Avx512 | Kernel::Avx512Batch => {
+                stoch_avx512(high, low, close, &hh, &ll, fastk_period, first, &mut k_raw)
+            }
             _ => unreachable!(),
         }
     }
@@ -630,11 +573,9 @@ fn stoch_compute_into(
     if (slowk_ma_type == "sma" || slowk_ma_type == "SMA")
         && (slowd_ma_type == "sma" || slowd_ma_type == "SMA")
     {
-        
         prefill_nan_prefix(out_k, k_first_valid + slowk_period - 1);
         prefill_nan_prefix(out_d, k_first_valid + slowk_period + slowd_period - 2);
 
-        
         let mut sum_k = 0.0;
         let k_start = k_first_valid;
         for i in k_start..(k_start + slowk_period).min(len) {
@@ -657,7 +598,6 @@ fn stoch_compute_into(
             out_k[i] = sum_k / slowk_period as f64;
         }
 
-        
         let mut sum_d = 0.0;
         let d_start = k_first_valid + slowk_period - 1;
         for i in d_start..(d_start + slowd_period).min(len) {
@@ -685,11 +625,9 @@ fn stoch_compute_into(
     if (slowk_ma_type == "ema" || slowk_ma_type == "EMA")
         && (slowd_ma_type == "ema" || slowd_ma_type == "EMA")
     {
-        
         prefill_nan_prefix(out_k, k_first_valid + slowk_period - 1);
         prefill_nan_prefix(out_d, k_first_valid + slowk_period + slowd_period - 2);
 
-        
         let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
         let one_minus_alpha_k = 1.0 - alpha_k;
         let k_warm = k_first_valid + slowk_period - 1;
@@ -716,7 +654,6 @@ fn stoch_compute_into(
             }
         }
 
-        
         let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
         let one_minus_alpha_d = 1.0 - alpha_d;
         let d_warm = k_first_valid + slowk_period + slowd_period - 2;
@@ -746,7 +683,6 @@ fn stoch_compute_into(
         return Ok(());
     }
 
-    
     let k_vec = ma(&slowk_ma_type, MaData::Slice(&k_raw), slowk_period)
         .map_err(|e| StochError::Other(e.to_string()))?;
     let d_vec = ma(&slowd_ma_type, MaData::Slice(&k_vec), slowd_period)
@@ -756,19 +692,12 @@ fn stoch_compute_into(
     Ok(())
 }
 
-/// Computes Stochastic Oscillator into caller-provided buffers without allocating outputs.
-///
-/// Preserves NaN warmups exactly like `stoch()` and writes results into `out_k` and `out_d`.
-/// Both output slices must have the same length as the input series.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn stoch_into(
     input: &StochInput,
     out_k: &mut [f64],
     out_d: &mut [f64],
 ) -> Result<(), StochError> {
-    
-    
-    
     #[cfg(test)]
     {
         stoch_into_slices(out_k, out_d, input, Kernel::Auto)
@@ -779,9 +708,6 @@ pub fn stoch_into(
     }
 }
 
-/// Single-pass classic SMA kernel used by `stoch_compute_into` for the common
-/// SMA/SMA smoothing case. This avoids additional O(N) temporaries (HH/LL,
-/// k_raw) and fuses %K, %K-SMA, and %D-SMA into one loop.
 fn stoch_classic_sma_into_single_pass(
     high: &[f64],
     low: &[f64],
@@ -802,16 +728,12 @@ fn stoch_classic_sma_into_single_pass(
     prefill_nan_prefix(out_k, k_warm);
     prefill_nan_prefix(out_d, d_warm);
 
-    
-    
-    
     let mut trail = first;
     let mut maxi = first;
     let mut mini = first;
     let mut max = high[first];
     let mut min = low[first];
 
-    
     let mut k_buf = vec![0.0f64; slowk_period];
     let mut k_pos: usize = 0;
     let mut k_sum = 0.0f64;
@@ -830,7 +752,6 @@ fn stoch_classic_sma_into_single_pass(
             trail += 1;
         }
 
-        
         let bar_h = high[i];
         if maxi < trail {
             maxi = trail;
@@ -849,7 +770,6 @@ fn stoch_classic_sma_into_single_pass(
             max = bar_h;
         }
 
-        
         let bar_l = low[i];
         if mini < trail {
             mini = trail;
@@ -880,7 +800,6 @@ fn stoch_classic_sma_into_single_pass(
             (c - min).mul_add(SCALE / denom, 0.0)
         };
 
-        
         if k_count >= slowk_period {
             k_sum -= k_buf[k_pos];
         }
@@ -896,7 +815,6 @@ fn stoch_classic_sma_into_single_pass(
             let k_sma = k_sum / slowk_period as f64;
             out_k[i] = k_sma;
 
-            
             if d_count >= slowd_period {
                 d_sum -= d_buf[d_pos];
             }
@@ -947,7 +865,6 @@ pub fn stoch_scalar(
     first_val: usize,
     out: &mut [f64],
 ) {
-    
     let start = first_val + fastk_period - 1;
     if start >= close.len() {
         return;
@@ -956,7 +873,6 @@ pub fn stoch_scalar(
     const SCALE: f64 = 100.0;
     const EPS: f64 = f64::EPSILON;
 
-    
     let c = &close[start..];
     let h = &hh[start..];
     let l = &ll[start..];
@@ -1018,10 +934,9 @@ unsafe fn stoch_avx2_impl(
     let scale = _mm256_set1_pd(100.0);
     let fifty = _mm256_set1_pd(50.0);
     let eps = _mm256_set1_pd(f64::EPSILON);
-    let sign_mask = _mm256_set1_pd(-0.0); 
+    let sign_mask = _mm256_set1_pd(-0.0);
 
     while i + STEP <= vec_end {
-        
         let c0 = _mm256_loadu_pd(c_ptr.add(i));
         let h0 = _mm256_loadu_pd(h_ptr.add(i));
         let l0 = _mm256_loadu_pd(l_ptr.add(i));
@@ -1033,7 +948,6 @@ unsafe fn stoch_avx2_impl(
         let v0 = _mm256_mul_pd(n0, inv0);
         let o0 = _mm256_blendv_pd(v0, fifty, m0);
 
-        
         if i + 2 * STEP <= vec_end {
             let c1 = _mm256_loadu_pd(c_ptr.add(i + STEP));
             let h1 = _mm256_loadu_pd(h_ptr.add(i + STEP));
@@ -1132,7 +1046,6 @@ unsafe fn stoch_avx512_impl(
 
     let mut i = 0usize;
     while i + STEP <= vec_end {
-        
         let c0 = _mm512_loadu_pd(c_ptr.add(i));
         let h0 = _mm512_loadu_pd(h_ptr.add(i));
         let l0 = _mm512_loadu_pd(l_ptr.add(i));
@@ -1144,7 +1057,6 @@ unsafe fn stoch_avx512_impl(
         let v0 = _mm512_mul_pd(n0, inv0);
         let o0 = _mm512_mask_blend_pd(m0, v0, fifty);
 
-        
         if i + 2 * STEP <= vec_end {
             let c1 = _mm512_loadu_pd(c_ptr.add(i + STEP));
             let h1 = _mm512_loadu_pd(h_ptr.add(i + STEP));
@@ -1179,15 +1091,13 @@ unsafe fn stoch_avx512_impl(
     }
 }
 
-
-
 #[derive(Clone, Debug)]
 pub struct StochBatchRange {
     pub fastk_period: (usize, usize, usize),
     pub slowk_period: (usize, usize, usize),
-    pub slowk_ma_type: (String, String, f64), 
+    pub slowk_ma_type: (String, String, f64),
     pub slowd_period: (usize, usize, usize),
-    pub slowd_ma_type: (String, String, f64), 
+    pub slowd_ma_type: (String, String, f64),
 }
 
 impl Default for StochBatchRange {
@@ -1272,7 +1182,6 @@ pub fn stoch_batch_with_kernel(
     sweep: &StochBatchRange,
     k: Kernel,
 ) -> Result<StochBatchOutput, StochError> {
-    
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -1452,7 +1361,6 @@ fn stoch_batch_inner(
         });
     }
 
-    
     let rows = combos.len();
     let cols = n;
 
@@ -1465,15 +1373,13 @@ fn stoch_batch_inner(
     let mut k_mu = make_uninit_matrix(rows, cols);
     let mut d_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm_k: Vec<usize> = combos
         .iter()
         .map(|c| first + c.fastk_period.unwrap() - 1)
         .collect();
     init_matrix_prefixes(&mut k_mu, cols, &warm_k);
-    init_matrix_prefixes(&mut d_mu, cols, &warm_k); 
+    init_matrix_prefixes(&mut d_mu, cols, &warm_k);
 
-    
     let mut k_guard = core::mem::ManuallyDrop::new(k_mu);
     let mut d_guard = core::mem::ManuallyDrop::new(d_mu);
     let k_mat: &mut [f64] =
@@ -1481,7 +1387,6 @@ fn stoch_batch_inner(
     let d_mat: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(d_guard.as_mut_ptr() as *mut f64, d_guard.len()) };
 
-    
     use std::collections::HashMap;
     let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
     for (row, prm) in combos.iter().enumerate() {
@@ -1491,9 +1396,7 @@ fn stoch_batch_inner(
             .push(row);
     }
 
-    
     let mut compute_k_raw = |fkp: usize| -> Vec<f64> {
-        
         let mut hh = alloc_with_nan_prefix(cols, first + fkp - 1);
         let mut ll = alloc_with_nan_prefix(cols, first + fkp - 1);
         let highs = max_rolling(&high[first..], fkp).unwrap();
@@ -1523,7 +1426,6 @@ fn stoch_batch_inner(
         k_raw
     };
 
-    
     for (fkp, rows_in_group) in groups {
         let k_raw = compute_k_raw(fkp);
         for &row in &rows_in_group {
@@ -1585,7 +1487,6 @@ unsafe fn stoch_row_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    
     let start = first + fastk_period - 1;
     if start >= close.len() {
         return;
@@ -1825,11 +1726,6 @@ unsafe fn stoch_row_avx512_impl(
     }
 }
 
-
-
-
-
-
 #[derive(Debug, Clone)]
 struct DeqEntry {
     val: f64,
@@ -1838,44 +1734,37 @@ struct DeqEntry {
 
 #[derive(Debug, Clone)]
 pub struct StochStream {
-    
     fastk_period: usize,
     slowk_period: usize,
     slowk_ma_type: String,
     slowd_period: usize,
     slowd_ma_type: String,
 
-    
-    maxq: VecDeque<DeqEntry>, 
-    minq: VecDeque<DeqEntry>, 
-    t: usize,                 
-    have_window: bool,        
+    maxq: VecDeque<DeqEntry>,
+    minq: VecDeque<DeqEntry>,
+    t: usize,
+    have_window: bool,
 
-    
     k_sma_buf: Vec<f64>,
     k_sma_sum: f64,
     k_sma_head: usize,
     k_sma_count: usize,
 
-    
     k_ema: Option<f64>,
     k_ema_seed_sum: f64,
     k_ema_seed_count: usize,
-    alpha_k: f64, 
+    alpha_k: f64,
 
-    
     d_sma_buf: Vec<f64>,
     d_sma_sum: f64,
     d_sma_head: usize,
     d_sma_count: usize,
 
-    
     d_ema: Option<f64>,
     d_ema_seed_sum: f64,
     d_ema_seed_count: usize,
-    alpha_d: f64, 
+    alpha_d: f64,
 
-    
     k_stream: Option<Vec<f64>>,
     d_stream: Option<Vec<f64>>,
 }
@@ -1895,7 +1784,6 @@ impl StochStream {
         let slowk_ma_type = params.slowk_ma_type.unwrap_or_else(|| "sma".to_string());
         let slowd_ma_type = params.slowd_ma_type.unwrap_or_else(|| "sma".to_string());
 
-        
         let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
         let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
 
@@ -1911,31 +1799,26 @@ impl StochStream {
             t: 0,
             have_window: false,
 
-            
             k_sma_buf: vec![f64::NAN; slowk_period.max(1)],
             k_sma_sum: 0.0,
             k_sma_head: 0,
             k_sma_count: 0,
 
-            
             k_ema: None,
             k_ema_seed_sum: 0.0,
             k_ema_seed_count: 0,
             alpha_k,
 
-            
             d_sma_buf: vec![f64::NAN; slowd_period.max(1)],
             d_sma_sum: 0.0,
             d_sma_head: 0,
             d_sma_count: 0,
 
-            
             d_ema: None,
             d_ema_seed_sum: 0.0,
             d_ema_seed_count: 0,
             alpha_d,
 
-            
             k_stream: None,
             d_stream: None,
         })
@@ -1976,22 +1859,17 @@ impl StochStream {
         self.minq.push_back(DeqEntry { val, idx });
     }
 
-    /// Update with a single bar and return (slow %K, %D) when available.
-    /// Returns None until at least `fastk_period` points have been seen.
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        
         if !high.is_finite() || !low.is_finite() || !close.is_finite() {
             return None;
         }
 
         let idx = self.t;
-        self.t = self.t.wrapping_add(1); 
+        self.t = self.t.wrapping_add(1);
 
-        
         self.push_maxq(high, idx);
         self.push_minq(low, idx);
 
-        
         let seen = idx + 1;
         if seen >= self.fastk_period {
             let window_start = seen - self.fastk_period;
@@ -2001,10 +1879,9 @@ impl StochStream {
         }
 
         if !self.have_window {
-            return None; 
+            return None;
         }
 
-        
         debug_assert!(!self.maxq.is_empty() && !self.minq.is_empty());
         let hh = self.maxq.front().unwrap().val;
         let ll = self.minq.front().unwrap().val;
@@ -2016,16 +1893,13 @@ impl StochStream {
         let k_raw = if denom.abs() < EPS {
             50.0
         } else {
-            
             (close - ll).mul_add(SCALE / denom, 0.0)
         };
 
-        
         let k_last = if self.slowk_ma_type.eq_ignore_ascii_case("sma") {
             if self.slowk_period == 1 {
                 k_raw
             } else if self.k_sma_count < self.slowk_period {
-                
                 self.k_sma_sum += k_raw;
                 self.k_sma_buf[self.k_sma_head] = k_raw;
                 self.k_sma_head = (self.k_sma_head + 1) % self.slowk_period;
@@ -2036,7 +1910,6 @@ impl StochStream {
                     f64::NAN
                 }
             } else {
-                
                 let old = self.k_sma_buf[self.k_sma_head];
                 self.k_sma_sum += k_raw - old;
                 self.k_sma_buf[self.k_sma_head] = k_raw;
@@ -2048,7 +1921,6 @@ impl StochStream {
                 self.k_ema = Some(k_raw);
                 k_raw
             } else if self.k_ema.is_none() {
-                
                 self.k_ema_seed_sum += k_raw;
                 self.k_ema_seed_count += 1;
                 if self.k_ema_seed_count == self.slowk_period {
@@ -2059,14 +1931,12 @@ impl StochStream {
                     f64::NAN
                 }
             } else {
-                
                 let prev = self.k_ema.unwrap();
                 let ema = prev + self.alpha_k * (k_raw - prev);
                 self.k_ema = Some(ema);
                 ema
             }
         } else {
-            
             let mut k_vec = self
                 .k_stream
                 .take()
@@ -2085,14 +1955,12 @@ impl StochStream {
             }
         };
 
-        
         let d_last = if self.slowd_ma_type.eq_ignore_ascii_case("sma") {
             if self.slowd_period == 1 {
                 k_last
             } else if !k_last.is_finite() {
                 f64::NAN
             } else if self.d_sma_count < self.slowd_period {
-                
                 self.d_sma_sum += k_last;
                 self.d_sma_buf[self.d_sma_head] = k_last;
                 self.d_sma_head = (self.d_sma_head + 1) % self.slowd_period;
@@ -2132,7 +2000,6 @@ impl StochStream {
                 ema
             }
         } else {
-            
             let mut d_vec = self
                 .d_stream
                 .take()
@@ -2155,18 +2022,21 @@ impl StochStream {
     }
 }
 
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "StochDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "StochDeviceArrayF32",
+    unsendable
+)]
 pub struct StochDeviceArrayF32Py {
     pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
@@ -2213,8 +2083,7 @@ impl StochDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2236,7 +2105,6 @@ impl StochDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // copy=True is not yet supported (no cross-device copy path here).
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract(py)?;
             if do_copy {
@@ -2246,7 +2114,6 @@ impl StochDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let buf = self
             .buf
             .take()
@@ -2382,8 +2249,6 @@ pub fn stoch_cuda_many_series_one_param_dev_py(
     ))
 }
 
-// === Python Bindings ===
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "stoch")]
 #[pyo3(signature = (high, low, close, fastk_period=14, slowk_period=3, slowk_ma_type="sma", slowd_period=3, slowd_ma_type="sma", kernel=None))]
@@ -2427,9 +2292,9 @@ pub fn stoch_batch_py<'py>(
     close: PyReadonlyArray1<'py, f64>,
     fastk_range: (usize, usize, usize),
     slowk_range: (usize, usize, usize),
-    slowk_ma_type: &str, // static in sweep
+    slowk_ma_type: &str,
     slowd_range: (usize, usize, usize),
-    slowd_ma_type: &str, // static in sweep
+    slowd_ma_type: &str,
     kernel: Option<&str>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let hi = high.as_slice()?;
@@ -2457,7 +2322,6 @@ pub fn stoch_batch_py<'py>(
 
     let dict = PyDict::new(py);
 
-    
     let k_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let d_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     unsafe { k_arr.as_slice_mut()? }.copy_from_slice(&out.k);
@@ -2507,7 +2371,6 @@ pub fn stoch_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(feature = "python")]
 #[pyclass(name = "StochStream")]
 pub struct StochStreamPy {
@@ -2542,17 +2405,15 @@ impl StochStreamPy {
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StochResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = stoch)]
 pub fn stoch_js(
     high: &[f64],
@@ -2584,16 +2445,16 @@ pub fn stoch_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct StochBatchJsOutput {
-    pub values: Vec<f64>, 
+    pub values: Vec<f64>,
     pub combos: Vec<StochParams>,
-    pub rows_per_combo: usize, 
+    pub rows_per_combo: usize,
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = stoch_batch)]
 pub fn stoch_batch_unified_js(
     high: &[f64],
@@ -2632,8 +2493,7 @@ pub fn stoch_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stoch_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2642,7 +2502,7 @@ pub fn stoch_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn stoch_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2650,7 +2510,7 @@ pub fn stoch_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = stoch_into)]
 pub fn stoch_into_js(
     high_ptr: *const f64,
@@ -2689,8 +2549,6 @@ pub fn stoch_into_js(
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -2807,11 +2665,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             StochParams::default(),
-            
             StochParams {
                 fastk_period: Some(2),
                 slowk_period: Some(1),
@@ -2819,7 +2674,6 @@ mod tests {
                 slowk_ma_type: Some("sma".to_string()),
                 slowd_ma_type: Some("sma".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(5),
                 slowk_period: Some(2),
@@ -2827,7 +2681,6 @@ mod tests {
                 slowk_ma_type: Some("sma".to_string()),
                 slowd_ma_type: Some("sma".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(10),
                 slowk_period: Some(5),
@@ -2835,7 +2688,6 @@ mod tests {
                 slowk_ma_type: Some("ema".to_string()),
                 slowd_ma_type: Some("ema".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(14),
                 slowk_period: Some(5),
@@ -2843,7 +2695,6 @@ mod tests {
                 slowk_ma_type: Some("sma".to_string()),
                 slowd_ma_type: Some("ema".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(20),
                 slowk_period: Some(3),
@@ -2851,7 +2702,6 @@ mod tests {
                 slowk_ma_type: Some("sma".to_string()),
                 slowd_ma_type: Some("sma".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(50),
                 slowk_period: Some(10),
@@ -2859,7 +2709,6 @@ mod tests {
                 slowk_ma_type: Some("ema".to_string()),
                 slowd_ma_type: Some("sma".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(100),
                 slowk_period: Some(20),
@@ -2867,7 +2716,6 @@ mod tests {
                 slowk_ma_type: Some("sma".to_string()),
                 slowd_ma_type: Some("sma".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(7),
                 slowk_period: Some(1),
@@ -2875,7 +2723,6 @@ mod tests {
                 slowk_ma_type: Some("sma".to_string()),
                 slowd_ma_type: Some("ema".to_string()),
             },
-            
             StochParams {
                 fastk_period: Some(3),
                 slowk_period: Some(3),
@@ -2889,15 +2736,13 @@ mod tests {
             let input = StochInput::from_candles(&candles, params.clone());
             let output = stoch_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in K values \
@@ -2944,15 +2789,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in D values \
@@ -3005,7 +2848,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_stoch_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -3017,21 +2860,19 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50)
             .prop_flat_map(|fastk_period| {
                 (
-                    
                     prop::collection::vec(
-                        (1.0f64..1000.0f64, 0.001f64..0.1f64), 
+                        (1.0f64..1000.0f64, 0.001f64..0.1f64),
                         fastk_period.max(10)..400,
                     ),
                     Just(fastk_period),
-                    1usize..=10,       
-                    1usize..=10,       
-                    prop::bool::ANY,   
-                    -0.01f64..0.01f64, 
-                    prop::bool::ANY,   
+                    1usize..=10,
+                    1usize..=10,
+                    prop::bool::ANY,
+                    -0.01f64..0.01f64,
+                    prop::bool::ANY,
                 )
             })
             .prop_flat_map(
@@ -3044,7 +2885,6 @@ mod tests {
                     trend,
                     is_flat,
                 )| {
-                    
                     let len = price_vol_pairs.len();
                     (
                         Just((
@@ -3056,8 +2896,8 @@ mod tests {
                             trend,
                             is_flat,
                         )),
-                        prop::collection::vec(-1.0f64..1.0f64, len), 
-                        prop::collection::vec(0.0f64..1.0f64, len), 
+                        prop::collection::vec(-1.0f64..1.0f64, len),
+                        prop::collection::vec(0.0f64..1.0f64, len),
                     )
                 },
             )
@@ -3075,7 +2915,6 @@ mod tests {
                     close_factors,
                     beta_params,
                 )| {
-                    
                     let mut high = Vec::with_capacity(price_vol_pairs.len());
                     let mut low = Vec::with_capacity(price_vol_pairs.len());
                     let mut close = Vec::with_capacity(price_vol_pairs.len());
@@ -3087,12 +2926,10 @@ mod tests {
                         .zip(close_factors.into_iter().zip(beta_params))
                         .enumerate()
                     {
-                        
                         cumulative_trend *= 1.0 + trend;
                         let trended_price = base_price * cumulative_trend;
 
                         if is_flat {
-                            
                             let flat_price = if i == 0 { base_price } else { high[0] };
                             high.push(flat_price);
                             low.push(flat_price);
@@ -3102,12 +2939,10 @@ mod tests {
                             let h = trended_price + spread;
                             let l = (trended_price - spread).max(0.01);
 
-                            
-                            
                             let beta_factor = if beta < 0.5 {
-                                2.0 * beta * beta 
+                                2.0 * beta * beta
                             } else {
-                                1.0 - 2.0 * (1.0 - beta) * (1.0 - beta) 
+                                1.0 - 2.0 * (1.0 - beta) * (1.0 - beta)
                             };
 
                             let close_position = close_factor * 0.5 + beta_factor * 0.5;
@@ -3147,34 +2982,28 @@ mod tests {
 
                 let input = StochInput::from_slices(&high, &low, &close, params.clone());
 
-                
                 let result = stoch_with_kernel(&input, kernel)?;
 
-                
                 let ref_result = stoch_with_kernel(&input, Kernel::Scalar)?;
 
-                
                 prop_assert_eq!(result.k.len(), high.len());
                 prop_assert_eq!(result.d.len(), high.len());
 
-                
-                
-                let warmup_k = fastk_period - 1; 
+                let warmup_k = fastk_period - 1;
                 let warmup_slowk = if ma_type == "ema" {
                     0
                 } else {
                     slowk_period - 1
-                }; 
+                };
                 let warmup_slowd = if ma_type == "ema" {
                     0
                 } else {
                     slowd_period - 1
-                }; 
+                };
                 let expected_warmup = warmup_k
                     .max(warmup_k + warmup_slowk)
                     .max(warmup_k + warmup_slowk + warmup_slowd);
 
-                
                 for i in 0..warmup_k.min(high.len()) {
                     prop_assert!(
                         result.k[i].is_nan(),
@@ -3190,14 +3019,12 @@ mod tests {
                     );
                 }
 
-                
                 for i in expected_warmup..high.len() {
                     let k_val = result.k[i];
                     let d_val = result.d[i];
                     let ref_k = ref_result.k[i];
                     let ref_d = ref_result.d[i];
 
-                    
                     if !k_val.is_nan() {
                         prop_assert!(
                             k_val >= -1e-9 && k_val <= 100.0 + 1e-9,
@@ -3216,7 +3043,6 @@ mod tests {
                         );
                     }
 
-                    
                     if k_val.is_finite() && ref_k.is_finite() {
                         let k_diff = (k_val - ref_k).abs();
                         let k_ulp_diff = k_val.to_bits().abs_diff(ref_k.to_bits());
@@ -3245,7 +3071,6 @@ mod tests {
                         );
                     }
 
-                    
                     if i >= fastk_period - 1 && !k_val.is_nan() {
                         let window_start = i + 1 - fastk_period;
                         let window_high = &high[window_start..=i];
@@ -3257,9 +3082,7 @@ mod tests {
                             .fold(f64::NEG_INFINITY, f64::max);
                         let min_l = window_low.iter().cloned().fold(f64::INFINITY, f64::min);
 
-                        
                         if is_flat || (max_h - min_l).abs() < f64::EPSILON {
-                            
                             prop_assert!(
                                 (k_val - 50.0).abs() < 1e-6,
                                 "K[{}] = {} should be 50 in flat market",
@@ -3267,13 +3090,7 @@ mod tests {
                                 k_val
                             );
                         } else {
-                            
-                            
-
-                            
                             if (close[i] - max_h).abs() < 1e-10 {
-                                
-                                
                                 let expected_min = if slowk_period == 1 { 99.0 } else { 85.0 };
                                 prop_assert!(
 									k_val >= expected_min,
@@ -3282,10 +3099,7 @@ mod tests {
 								);
                             }
 
-                            
                             if (close[i] - min_l).abs() < 1e-10 {
-                                
-                                
                                 let expected_max = if slowk_period == 1 { 1.0 } else { 15.0 };
                                 prop_assert!(
 									k_val <= expected_max,
@@ -3297,15 +3111,12 @@ mod tests {
                     }
                 }
 
-                
-                
                 let k_valid: Vec<f64> =
                     result.k.iter().filter(|x| x.is_finite()).copied().collect();
                 let d_valid: Vec<f64> =
                     result.d.iter().filter(|x| x.is_finite()).copied().collect();
 
                 if k_valid.len() > 10 && d_valid.len() > 10 && !is_flat {
-                    
                     let k_mean = k_valid.iter().sum::<f64>() / k_valid.len() as f64;
                     let d_mean = d_valid.iter().sum::<f64>() / d_valid.len() as f64;
 
@@ -3314,18 +3125,14 @@ mod tests {
                     let d_var = d_valid.iter().map(|x| (x - d_mean).powi(2)).sum::<f64>()
                         / d_valid.len() as f64;
 
-                    
-                    
                     if slowd_period > 1 && k_var > 1e-6 {
-                        
                         prop_assert!(
-							d_var <= k_var * 1.01,  
+							d_var <= k_var * 1.01,
 							"D variance {} should be <= K variance {} (smoothing effect with slowd_period={})",
 							d_var, k_var, slowd_period
 						);
                     }
 
-                    
                     if slowd_period == 1 {
                         for i in expected_warmup..result.k.len() {
                             if result.k[i].is_finite() && result.d[i].is_finite() {
@@ -3342,8 +3149,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if !is_flat && high.len() > fastk_period + 10 {
                     let opposite_ma_type = if ma_type == "sma" { "ema" } else { "sma" };
                     let opposite_params = StochParams {
@@ -3358,7 +3163,6 @@ mod tests {
                         StochInput::from_slices(&high, &low, &close, opposite_params);
                     let opposite_result = stoch_with_kernel(&opposite_input, kernel)?;
 
-                    
                     let mut diff_count = 0;
                     let mut total_valid = 0;
                     for i in expected_warmup..result.k.len() {
@@ -3370,8 +3174,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     if total_valid > 10 && slowk_period > 1 {
                         let diff_ratio = diff_count as f64 / total_valid as f64;
                         prop_assert!(
@@ -3463,17 +3265,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 1, 5, 1, 1, 5, 1), 
-            (5, 25, 5, 2, 10, 2, 2, 10, 2), 
-            (10, 30, 10, 3, 9, 3, 3, 9, 3), 
-            (14, 14, 0, 1, 5, 1, 1, 5, 1), 
-            (2, 5, 1, 3, 3, 0, 3, 3, 0),  
-            (20, 50, 15, 5, 15, 5, 5, 15, 5), 
-            (7, 21, 7, 2, 6, 2, 2, 6, 2), 
-            (3, 12, 3, 1, 3, 1, 1, 3, 1), 
+            (2, 10, 2, 1, 5, 1, 1, 5, 1),
+            (5, 25, 5, 2, 10, 2, 2, 10, 2),
+            (10, 30, 10, 3, 9, 3, 3, 9, 3),
+            (14, 14, 0, 1, 5, 1, 1, 5, 1),
+            (2, 5, 1, 3, 3, 0, 3, 3, 0),
+            (20, 50, 15, 5, 15, 5, 5, 15, 5),
+            (7, 21, 7, 2, 6, 2, 2, 6, 2),
+            (3, 12, 3, 1, 3, 1, 1, 3, 1),
         ];
 
         for (
@@ -3490,7 +3290,6 @@ mod tests {
                 .slowd_ma_type_static("sma")
                 .apply_candles(&c)?;
 
-            
             for (idx, &val) in output.k.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3501,7 +3300,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3566,7 +3364,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.d.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3577,7 +3374,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -3675,7 +3471,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    
     fn eq_or_both_nan(a: f64, b: f64) -> bool {
         (a.is_nan() && b.is_nan()) || (a == b)
     }
@@ -3691,13 +3486,12 @@ mod tests {
         let mut out_k = vec![0.0; baseline.k.len()];
         let mut out_d = vec![0.0; baseline.d.len()];
 
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             stoch_into(&input, &mut out_k, &mut out_d)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             stoch_into_slices(&mut out_k, &mut out_d, &input, detect_best_kernel())?;
         }
 
@@ -3756,9 +3550,6 @@ mod tests {
     }
 }
 
-
-
-/// Classic kernel with inline SMA calculations for both K and D smoothing
 #[inline]
 fn stoch_classic_sma(
     k_raw: &[f64],
@@ -3770,11 +3561,9 @@ fn stoch_classic_sma(
     let mut k_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period - 1);
     let mut d_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period + slowd_period - 2);
 
-    
     let mut sum_k = 0.0;
     let k_start = first_valid_idx;
 
-    
     for i in k_start..(k_start + slowk_period).min(len) {
         if !k_raw[i].is_nan() {
             sum_k += k_raw[i];
@@ -3784,7 +3573,6 @@ fn stoch_classic_sma(
         k_vec[k_start + slowk_period - 1] = sum_k / slowk_period as f64;
     }
 
-    
     for i in (k_start + slowk_period)..len {
         let old_val = k_raw[i - slowk_period];
         let new_val = k_raw[i];
@@ -3797,11 +3585,9 @@ fn stoch_classic_sma(
         k_vec[i] = sum_k / slowk_period as f64;
     }
 
-    
     let mut sum_d = 0.0;
     let d_start = first_valid_idx + slowk_period - 1;
 
-    
     for i in d_start..(d_start + slowd_period).min(len) {
         if !k_vec[i].is_nan() {
             sum_d += k_vec[i];
@@ -3811,7 +3597,6 @@ fn stoch_classic_sma(
         d_vec[d_start + slowd_period - 1] = sum_d / slowd_period as f64;
     }
 
-    
     for i in (d_start + slowd_period)..len {
         let old_val = k_vec[i - slowd_period];
         let new_val = k_vec[i];
@@ -3827,7 +3612,6 @@ fn stoch_classic_sma(
     Ok(StochOutput { k: k_vec, d: d_vec })
 }
 
-/// Classic kernel with inline EMA calculations for both K and D smoothing
 #[inline]
 fn stoch_classic_ema(
     k_raw: &[f64],
@@ -3839,11 +3623,9 @@ fn stoch_classic_ema(
     let mut k_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period - 1);
     let mut d_vec = alloc_with_nan_prefix(len, first_valid_idx + slowk_period + slowd_period - 2);
 
-    
     let alpha_k = 2.0 / (slowk_period as f64 + 1.0);
     let one_minus_alpha_k = 1.0 - alpha_k;
 
-    
     let k_warmup = first_valid_idx + slowk_period - 1;
     let mut sum_k = 0.0;
     let mut count_k = 0;
@@ -3858,7 +3640,6 @@ fn stoch_classic_ema(
         let mut ema_k = sum_k / count_k as f64;
         k_vec[k_warmup] = ema_k;
 
-        
         for i in (k_warmup + 1)..len {
             if !k_raw[i].is_nan() {
                 ema_k = alpha_k * k_raw[i] + one_minus_alpha_k * ema_k;
@@ -3866,17 +3647,14 @@ fn stoch_classic_ema(
             k_vec[i] = ema_k;
         }
     } else {
-        
         for i in k_warmup..len {
             k_vec[i] = f64::NAN;
         }
     }
 
-    
     let alpha_d = 2.0 / (slowd_period as f64 + 1.0);
     let one_minus_alpha_d = 1.0 - alpha_d;
 
-    
     let d_warmup = first_valid_idx + slowk_period + slowd_period - 2;
     let d_start = first_valid_idx + slowk_period - 1;
     let mut sum_d = 0.0;
@@ -3892,7 +3670,6 @@ fn stoch_classic_ema(
         let mut ema_d = sum_d / count_d as f64;
         d_vec[d_warmup] = ema_d;
 
-        
         for i in (d_warmup + 1)..len {
             if !k_vec[i].is_nan() {
                 ema_d = alpha_d * k_vec[i] + one_minus_alpha_d * ema_d;
@@ -3900,7 +3677,6 @@ fn stoch_classic_ema(
             d_vec[i] = ema_d;
         }
     } else {
-        
         for i in d_warmup..len {
             d_vec[i] = f64::NAN;
         }

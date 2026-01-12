@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::mean_ad::{
     mean_ad_batch_with_kernel, mean_ad_with_kernel, MeanAdBatchRange, MeanAdData, MeanAdInput,
     MeanAdParams,
@@ -77,8 +75,8 @@ fn mean_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
         eprintln!("[mean_ad_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -89,7 +87,6 @@ fn mean_ad_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::e
 
     let period = 15usize;
 
-    
     let mut ref_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

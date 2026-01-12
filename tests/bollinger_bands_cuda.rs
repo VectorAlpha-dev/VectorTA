@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::bollinger_bands::{
     bollinger_bands_batch_with_kernel, BollingerBandsBatchRange,
 };
@@ -129,7 +127,6 @@ fn bollinger_bands_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dy
         }
     }
 
-    
     let mut cpu_up_tm = vec![f64::NAN; cols * rows];
     let mut cpu_mid_tm = vec![f64::NAN; cols * rows];
     let mut cpu_lo_tm = vec![f64::NAN; cols * rows];

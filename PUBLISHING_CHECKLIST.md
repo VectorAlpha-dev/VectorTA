@@ -107,6 +107,7 @@ This crate currently builds as `crate-type = ["cdylib", "rlib"]`.
 
 Run these before any publish attempt:
 
+- [ ] WSL note: if your repo lives on `/mnt/c/**` (Windows drive), `cargo package`/`cargo publish` can fail with a bogus “could not learn metadata for ... .crate (os error 2)”. Workaround: run with a Linux-filesystem target dir, e.g. `CARGO_TARGET_DIR=/tmp/vector_ta_target cargo package` (or clone the repo under your WSL home dir).
 - [ ] `cargo check` (default features)
 - [ ] `cargo test` (default features)
 - [ ] `cargo clippy --all-targets -D warnings` (as applicable)

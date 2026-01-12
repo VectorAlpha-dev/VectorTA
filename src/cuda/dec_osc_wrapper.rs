@@ -1,12 +1,3 @@
-//! CUDA wrapper for Decycler Oscillator (DEC_OSC).
-//!
-//! Parity goals with ALMA wrapper style:
-//! - PTX load from OUT_DIR, DetermineTargetFromContext, OptLevel O2 fallback
-//! - NON_BLOCKING stream
-//! - Batch (one-series × many-params) and many-series × one-param (time-major)
-//! - Warmup/NaN identical to scalar: write NaN for indices < first_valid+2
-//! - VRAM estimation + 64MB headroom guard; chunk grid to <= 65_535 rows
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -27,8 +18,14 @@ use thiserror::Error;
 pub enum CudaDecOscError {
     #[error("CUDA: {0}")]
     Cuda(#[from] cust::error::CudaError),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -36,7 +33,14 @@ pub enum CudaDecOscError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
@@ -120,37 +124,57 @@ impl CudaDecOsc {
         })
     }
 
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
-    pub fn set_policy(&mut self, policy: CudaDecOscPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaDecOscPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaDecOscPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaDecOscPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[DEBUG] dec_osc batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDecOsc)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDecOsc)).debug_batch_logged = true;
+                }
             }
         }
     }
     #[inline]
     fn maybe_log_many_debug(&self) {
         static ONCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     eprintln!("[DEBUG] dec_osc many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaDecOsc)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaDecOsc)).debug_many_logged = true;
+                }
             }
         }
     }
@@ -170,7 +194,11 @@ impl CudaDecOsc {
         match mem_get_info() {
             Ok((free, _total)) => {
                 if required.saturating_add(headroom) > free {
-                    Err(CudaDecOscError::OutOfMemory { required, free, headroom })
+                    Err(CudaDecOscError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    })
                 } else {
                     Ok(())
                 }
@@ -180,50 +208,87 @@ impl CudaDecOsc {
     }
 
     #[inline]
-    fn ceil_div_u32(n: u32, d: u32) -> u32 { (n + d - 1) / d }
+    fn ceil_div_u32(n: u32, d: u32) -> u32 {
+        (n + d - 1) / d
+    }
     #[inline]
-    fn ceil_div_usize(n: usize, d: usize) -> usize { (n + d - 1) / d }
+    fn ceil_div_usize(n: usize, d: usize) -> usize {
+        (n + d - 1) / d
+    }
 
     fn expand_grid_checked(range: &DecOscBatchRange) -> Result<Vec<DecOscParams>, CudaDecOscError> {
         fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, CudaDecOscError> {
             let (s, e, st) = a;
-            if st == 0 || s == e { return Ok(vec![s]); }
+            if st == 0 || s == e {
+                return Ok(vec![s]);
+            }
             let mut out = Vec::new();
             if s < e {
                 let mut v = s;
                 while v <= e {
                     out.push(v);
-                    v = match v.checked_add(st) { Some(n) if n != v => n, _ => break };
+                    v = match v.checked_add(st) {
+                        Some(n) if n != v => n,
+                        _ => break,
+                    };
                 }
             } else {
                 let mut v = s;
                 while v >= e {
                     out.push(v);
-                    if v < e + st { break; }
+                    if v < e + st {
+                        break;
+                    }
                     v -= st;
-                    if v == 0 { break; }
+                    if v == 0 {
+                        break;
+                    }
                 }
             }
             if out.is_empty() {
                 return Err(CudaDecOscError::InvalidInput(format!(
-                    "invalid range: start={}, end={}, step={}", s, e, st
+                    "invalid range: start={}, end={}, step={}",
+                    s, e, st
                 )));
             }
             Ok(out)
         }
         fn axis_f64(a: (f64, f64, f64)) -> Vec<f64> {
             let (s, e, st) = a;
-            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return vec![s]; }
+            if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+                return vec![s];
+            }
             let mut v = Vec::new();
-            if s <= e { let mut x = s; while x <= e + 1e-12 { v.push(x); x += st; } }
-            else { let mut x = s; while x >= e - 1e-12 { v.push(x); x -= st.abs(); } }
+            if s <= e {
+                let mut x = s;
+                while x <= e + 1e-12 {
+                    v.push(x);
+                    x += st;
+                }
+            } else {
+                let mut x = s;
+                while x >= e - 1e-12 {
+                    v.push(x);
+                    x -= st.abs();
+                }
+            }
             v
         }
         let periods = axis_usize(range.hp_period)?;
         let ks = axis_f64(range.k);
-        let cap = periods.len().checked_mul(ks.len()).ok_or_else(|| CudaDecOscError::InvalidInput("rows*cols overflow".into()))?;
+        let cap = periods
+            .len()
+            .checked_mul(ks.len())
+            .ok_or_else(|| CudaDecOscError::InvalidInput("rows*cols overflow".into()))?;
         let mut out = Vec::with_capacity(cap);
-        for &p in &periods { for &k in &ks { out.push(DecOscParams { hp_period: Some(p), k: Some(k) }); } }
+        for &p in &periods {
+            for &k in &ks {
+                out.push(DecOscParams {
+                    hp_period: Some(p),
+                    k: Some(k),
+                });
+            }
+        }
         Ok(out)
     }
 
@@ -274,23 +339,30 @@ impl CudaDecOsc {
         periods_off: usize,
         out_off_elems: usize,
     ) -> Result<(), CudaDecOscError> {
-        let mut func: Function = self
-            .module
-            .get_function("dec_osc_batch_f32")
-            .map_err(|_| CudaDecOscError::MissingKernelSymbol { name: "dec_osc_batch_f32" })?;
+        let mut func: Function = self.module.get_function("dec_osc_batch_f32").map_err(|_| {
+            CudaDecOscError::MissingKernelSymbol {
+                name: "dec_osc_batch_f32",
+            }
+        })?;
 
-        
-        let (suggested_block_x, min_grid) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+        let (suggested_block_x, min_grid) =
+            func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => suggested_block_x.max(128),
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
-        
+
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)? as u32;
         if block_x > max_bx {
-            return Err(CudaDecOscError::LaunchConfigTooLarge { gx: 1, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaDecOscError::LaunchConfigTooLarge {
+                gx: 1,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         unsafe {
             (*(self as *const _ as *mut CudaDecOsc)).last_batch =
@@ -301,7 +373,7 @@ impl CudaDecOsc {
                 Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
-        
+
         let combos_u32 = n_combos as u32;
         let mut grid_x = Self::ceil_div_u32(combos_u32, block_x);
         grid_x = grid_x.max(min_grid);
@@ -365,17 +437,14 @@ impl CudaDecOsc {
         let periods: Vec<i32> = combos.iter().map(|c| c.hp_period.unwrap() as i32).collect();
         let ks: Vec<f32> = combos.iter().map(|c| c.k.unwrap() as f32).collect();
 
-        
         let h_prices = LockedBuffer::from_slice(data_f32)?;
         let h_periods = LockedBuffer::from_slice(&periods)?;
         let h_ks = LockedBuffer::from_slice(&ks)?;
 
-        let mut d_prices =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+        let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
         let mut d_periods =
             unsafe { DeviceBuffer::<i32>::uninitialized_async(rows, &self.stream) }?;
-        let mut d_ks =
-            unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
+        let mut d_ks = unsafe { DeviceBuffer::<f32>::uninitialized_async(rows, &self.stream) }?;
         let mut d_out =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
         unsafe {
@@ -384,19 +453,19 @@ impl CudaDecOsc {
             d_ks.async_copy_from(&h_ks, &self.stream)?;
         }
 
-        
-        let func = self
-            .module
-            .get_function("dec_osc_batch_f32")
-            .map_err(|_| CudaDecOscError::MissingKernelSymbol { name: "dec_osc_batch_f32" })?;
-        let (suggested_block_x, _min_grid) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+        let func = self.module.get_function("dec_osc_batch_f32").map_err(|_| {
+            CudaDecOscError::MissingKernelSymbol {
+                name: "dec_osc_batch_f32",
+            }
+        })?;
+        let (suggested_block_x, _min_grid) =
+            func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => suggested_block_x.max(128),
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         } as usize;
 
-        const MAX_GRID_X: usize = 65_535; 
+        const MAX_GRID_X: usize = 65_535;
         let max_combos_per_launch = MAX_GRID_X.saturating_mul(block_x);
 
         let mut launched = 0usize;
@@ -418,7 +487,11 @@ impl CudaDecOsc {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols: len,
+        })
     }
 
     fn prepare_many_series(
@@ -483,16 +556,17 @@ impl CudaDecOsc {
         let func: Function = self
             .module
             .get_function("dec_osc_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaDecOscError::MissingKernelSymbol { name: "dec_osc_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaDecOscError::MissingKernelSymbol {
+                name: "dec_osc_many_series_one_param_time_major_f32",
+            })?;
 
-        
-        let (suggested_block_x, _min_grid) = func
-            .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+        let (suggested_block_x, _min_grid) =
+            func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => suggested_block_x.max(128),
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(64),
         };
-        
+
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev.get_attribute(cust::device::DeviceAttribute::MaxBlockDimX)? as u32;
         if block_x > max_bx {
@@ -546,7 +620,6 @@ impl CudaDecOsc {
         let (first_valids, period, k_f32) =
             Self::prepare_many_series(data_tm_f32, cols, rows, params)?;
 
-        
         let prices_bytes = data_tm_f32
             .len()
             .checked_mul(std::mem::size_of::<f32>())
@@ -565,37 +638,34 @@ impl CudaDecOsc {
             .checked_add(first_bytes)
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaDecOscError::InvalidInput("bytes overflow".into()))?;
-        let headroom     = 64 * 1024 * 1024;
+        let headroom = 64 * 1024 * 1024;
         self.will_fit(need, headroom)?;
 
-        
         let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
         let h_first = LockedBuffer::from_slice(&first_valids)?;
 
         let mut d_prices =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
-        let mut d_first =
-            unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
+        let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
         let mut d_out =
             unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream) }?;
 
         unsafe {
-            d_prices
-                .async_copy_from(&h_prices, &self.stream)
-                ?;
-            d_first
-                .async_copy_from(&h_first, &self.stream)
-                ?;
+            d_prices.async_copy_from(&h_prices, &self.stream)?;
+            d_first.async_copy_from(&h_first, &self.stream)?;
         }
 
         self.launch_many_series_kernel(&d_prices, &d_first, cols, rows, period, k_f32, &mut d_out)?;
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -669,7 +739,8 @@ pub mod benches {
         let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
         let d_ks = DeviceBuffer::from_slice(&ks_f32).expect("d_ks");
         let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }.expect("d_out");
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * len, &cuda.stream) }
+                .expect("d_out");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(BatchDeviceState {
@@ -722,7 +793,8 @@ pub mod benches {
         };
 
         let (first_valids, period, k_f32) =
-            CudaDecOsc::prepare_many_series(&data_tm, cols, rows, &params).expect("prepare_many_series");
+            CudaDecOsc::prepare_many_series(&data_tm, cols, rows, &params)
+                .expect("prepare_many_series");
 
         let d_prices_tm =
             unsafe { DeviceBuffer::from_slice_async(&data_tm, &cuda.stream) }.expect("d_prices_tm");

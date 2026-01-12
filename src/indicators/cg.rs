@@ -1,29 +1,3 @@
-//! # Center of Gravity (CG)
-//!
-//! Decision log:
-//! - SIMD paths intentionally delegate to the scalar kernel to preserve strict streaming parity (<= 1e-9) because vectorization reorders FP ops.
-//! - Scalar kernel optimized (pointer-based, unrolled) for ~18–20% faster at 100k on native CPU.
-//! - Streaming kernel updated to O(1) per tick using running sums; parity with batch/scalar maintained within 1e-9.
-//! - Row-specific batch kernels not implemented; revisit if tolerances relax or shared precompute is allowed.
-//! - CUDA batch and many-series kernels enabled (FP32, warmup aligned with scalar CG) via `cuda::oscillators::cg_wrapper`; Python exposes VRAM handles with CAI v3 + DLPack v1.x interop.
-//!
-//! The Center of Gravity (CG) indicator attempts to measure the "center" of prices
-//! over a given window, sometimes used for smoothing or cycle analysis.
-//!
-//! ## Parameters
-//! - **period**: The window size. Defaults to 10.
-//!
-//! ## Errors
-//! - **EmptyData**: cg: Input data slice is empty.
-//! - **InvalidPeriod**: cg: `period` is zero or exceeds the data length.
-//! - **AllValuesNaN**: cg: All input data values are `NaN`.
-//! - **NotEnoughValidData**: cg: Fewer than `period` valid (non-`NaN`) data points remain after the first valid index.
-//!
-//! ## Returns
-//! - **`Ok(CgOutput)`** on success, containing a `Vec<f64>` matching input length,
-//!   with leading `NaN` until the warm-up period is reached.
-//! - **`Err(CgError)`** otherwise.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -33,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -94,7 +68,10 @@ impl std::ops::DerefMut for CgOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CgParams {
     pub period: Option<usize>,
 }
@@ -207,7 +184,11 @@ pub enum CgError {
     #[error("CG: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("CG: invalid range expansion: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("CG: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
@@ -240,7 +221,6 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
         });
     }
 
-    
     if (len - first) < (period + 1) {
         return Err(CgError::NotEnoughValidData {
             needed: period + 1,
@@ -248,7 +228,6 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
         });
     }
 
-    
     let mut out = alloc_with_nan_prefix(len, first + period);
 
     let chosen = match kernel {
@@ -270,17 +249,12 @@ pub fn cg_with_kernel(input: &CgInput, kernel: Kernel) -> Result<CgOutput, CgErr
     Ok(CgOutput { values: out })
 }
 
-
 const CG_WEIGHTS: [f64; 64] = [
     1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
     18.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 31.0, 32.0, 33.0,
     34.0, 35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 41.0, 42.0, 43.0, 44.0, 45.0, 46.0, 47.0, 48.0, 49.0,
     50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0, 57.0, 58.0, 59.0, 60.0, 61.0, 62.0, 63.0, 64.0,
 ];
-
-
-
-
 
 #[inline(always)]
 pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
@@ -290,55 +264,52 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    let n_items = period - 1; 
+    let n_items = period - 1;
 
-    
     if period <= 65 {
-        
         #[inline(always)]
         unsafe fn dot_sum_precomputed(base_ptr: *const f64, n_items: usize) -> (f64, f64) {
             let mut num = 0.0;
             let mut den = 0.0;
             let mut k = 0usize;
-            let blocks = n_items & !7usize; 
+            let blocks = n_items & !7usize;
 
             while k < blocks {
-                
                 let p0 = *base_ptr.sub(k);
                 let w0 = *CG_WEIGHTS.get_unchecked(k);
                 num += w0 * p0;
                 den += p0;
-                
+
                 let p1 = *base_ptr.sub(k + 1);
                 let w1 = *CG_WEIGHTS.get_unchecked(k + 1);
                 num += w1 * p1;
                 den += p1;
-                
+
                 let p2 = *base_ptr.sub(k + 2);
                 let w2 = *CG_WEIGHTS.get_unchecked(k + 2);
                 num += w2 * p2;
                 den += p2;
-                
+
                 let p3 = *base_ptr.sub(k + 3);
                 let w3 = *CG_WEIGHTS.get_unchecked(k + 3);
                 num += w3 * p3;
                 den += p3;
-                
+
                 let p4 = *base_ptr.sub(k + 4);
                 let w4 = *CG_WEIGHTS.get_unchecked(k + 4);
                 num += w4 * p4;
                 den += p4;
-                
+
                 let p5 = *base_ptr.sub(k + 5);
                 let w5 = *CG_WEIGHTS.get_unchecked(k + 5);
                 num += w5 * p5;
                 den += p5;
-                
+
                 let p6 = *base_ptr.sub(k + 6);
                 let w6 = *CG_WEIGHTS.get_unchecked(k + 6);
                 num += w6 * p6;
                 den += p6;
-                
+
                 let p7 = *base_ptr.sub(k + 7);
                 let w7 = *CG_WEIGHTS.get_unchecked(k + 7);
                 num += w7 * p7;
@@ -358,7 +329,6 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
 
         for i in start..len {
-            
             let base_ptr = unsafe { data.as_ptr().add(i) };
             let (num, den) = unsafe { dot_sum_precomputed(base_ptr, n_items) };
             out[i] = if den.abs() > f64::EPSILON {
@@ -370,7 +340,6 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         return;
     }
 
-    
     for i in start..len {
         unsafe {
             let base_ptr = data.as_ptr().add(i);
@@ -378,29 +347,25 @@ pub fn cg_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             let mut den = 0.0;
 
             let mut k = 0usize;
-            let blocks = n_items & !3usize; 
+            let blocks = n_items & !3usize;
             let mut w = 1.0f64;
 
             while k < blocks {
-                
                 let p0 = *base_ptr.sub(k);
                 num += w * p0;
                 den += p0;
                 w += 1.0;
 
-                
                 let p1 = *base_ptr.sub(k + 1);
                 num += w * p1;
                 den += p1;
                 w += 1.0;
 
-                
                 let p2 = *base_ptr.sub(k + 2);
                 num += w * p2;
                 den += p2;
                 w += 1.0;
 
-                
                 let p3 = *base_ptr.sub(k + 3);
                 num += w * p3;
                 den += p3;
@@ -466,7 +431,6 @@ pub unsafe fn cg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
         let blocks = n_items & !(VL - 1);
         let mut k = 0usize;
 
-        
         let step_r = _mm256_setr_pd(3.0, 2.0, 1.0, 0.0);
         while k < blocks {
             let p = _mm256_loadu_pd(base_ptr.sub(k + (VL - 1)));
@@ -502,7 +466,6 @@ pub unsafe fn cg_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
 #[inline]
 #[target_feature(enable = "fma")]
 pub unsafe fn cg_avx512_short(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     const VL: usize = 8;
     let start = first + period;
     let len = data.len();
@@ -532,7 +495,6 @@ pub unsafe fn cg_avx512_short(data: &[f64], period: usize, first: usize, out: &m
         let blocks = n_items & !(VL - 1);
         let mut k = 0usize;
 
-        
         let step_r = _mm512_setr_pd(7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.0);
         while k < blocks {
             let p = _mm512_loadu_pd(base_ptr.sub(k + (VL - 1)));
@@ -594,7 +556,6 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
         });
     }
 
-    
     if (len - first) < (period + 1) {
         return Err(CgError::NotEnoughValidData {
             needed: period + 1,
@@ -603,7 +564,10 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
     }
 
     if dst.len() != data.len() {
-        return Err(CgError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(CgError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     let chosen = match kern {
@@ -622,21 +586,15 @@ pub fn cg_into_slice(dst: &mut [f64], input: &CgInput, kern: Kernel) -> Result<(
         }
     }
 
-    
     for v in &mut dst[..first + period] {
         *v = f64::NAN;
     }
     Ok(())
 }
 
-/// Writes CG results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmup semantics (prefix length = `first_valid + period`).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cg_into(input: &CgInput, out: &mut [f64]) -> Result<(), CgError> {
-    
     cg_into_slice(out, input, Kernel::Auto)
 }
 
@@ -646,8 +604,8 @@ pub struct CgStream {
     buffer: Vec<f64>,
     head: usize,
     filled: bool,
-    weighted_sum: f64, 
-    price_sum: f64,    
+    weighted_sum: f64,
+    price_sum: f64,
 }
 
 impl CgStream {
@@ -669,39 +627,22 @@ impl CgStream {
         })
     }
 
-    /// O(1) streaming update for CG.
-    ///
-    /// Maintains running sums over the last (period - 1) bars:
-    ///   - `price_sum`    = sum x_j
-    ///   - `weighted_sum` = sum (j+1)*x_j, newest j=0 .. oldest j=n-1
-    ///
-    /// Recurrence when a new price `value` arrives and `old` leaves:
-    ///   den_new = den_old - old + value
-    ///   num_new = num_old + den_old + value - (period as f64) * old
-    ///
-    /// Warm-up semantics: first `period` writes return None; the first Some arrives
-    /// on the (period+1)-th value, matching batch/scalar first valid index at `first + period`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         debug_assert!(self.period >= 2);
 
-        
         let pos = self.head;
         self.buffer[pos] = value;
         let next = if pos + 1 == self.period { 0 } else { pos + 1 };
 
-        
         if !self.filled {
             self.head = next;
 
-            
-            
             if self.head == 0 {
                 let mut num = 0.0;
                 let mut den = 0.0;
                 let mut idx = self.head;
-                
-                
+
                 for k in 0..(self.period - 1) {
                     idx = if idx == 0 { self.period - 1 } else { idx - 1 };
                     let p = self.buffer[idx];
@@ -715,22 +656,19 @@ impl CgStream {
             return None;
         }
 
-        
-        
         let last_old = self.buffer[next];
 
         let den_old = self.price_sum;
         let num_old = self.weighted_sum;
 
         let den_new = den_old - last_old + value;
-        
+
         let num_new = num_old + den_old + value - (self.period as f64) * last_old;
 
         self.price_sum = den_new;
         self.weighted_sum = num_new;
         self.head = next;
 
-        
         let out = if den_new.abs() > f64::EPSILON {
             -num_new / den_new
         } else {
@@ -739,7 +677,6 @@ impl CgStream {
         Some(out)
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32 as CudaDeviceArrayF32;
@@ -771,13 +708,12 @@ impl CgDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producer stream synchronized before return; omit stream key per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA; use allocation device id carried from wrapper.
         (2, self.device_id as i32)
     }
 
@@ -790,8 +726,7 @@ impl CgDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -811,12 +746,15 @@ impl CgDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            CudaDeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            CudaDeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -851,12 +789,15 @@ pub fn cg_cuda_batch_dev_py(
         let dev = cuda
             .cg_batch_dev(slice, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .synchronize()
+        cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
-    Ok(CgDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
+    Ok(CgDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -889,12 +830,15 @@ pub fn cg_cuda_many_series_one_param_dev_py(
         let dev = cuda
             .cg_many_series_one_param_time_major_dev(tm, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        cuda
-            .synchronize()
+        cuda.synchronize()
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok::<_, PyErr>((dev, cuda.context_arc_clone(), cuda.device_id()))
     })?;
-    Ok(CgDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
+    Ok(CgDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -999,7 +943,6 @@ fn expand_grid(r: &CgBatchRange) -> Result<Vec<CgParams>, CgError> {
             return Ok(vec![start]);
         }
         if step == 0 {
-            // handled above, but keep explicit for clarity
             return Ok(vec![start]);
         }
         let mut vals = Vec::new();
@@ -1013,16 +956,17 @@ fn expand_grid(r: &CgBatchRange) -> Result<Vec<CgParams>, CgError> {
                 }
             }
         } else {
-            // reversed bounds supported
             let mut v = start;
             while v >= end {
                 vals.push(v);
-                // checked sub to avoid underflow
+
                 match v.checked_sub(step) {
                     Some(next) if next < v => v = next,
                     _ => break,
                 }
-                if v == 0 { break; }
+                if v == 0 {
+                    break;
+                }
             }
         }
         if vals.is_empty() {
@@ -1065,7 +1009,11 @@ fn cg_batch_inner(
 ) -> Result<CgBatchOutput, CgError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(CgError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(CgError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
     let first = data
         .iter()
@@ -1081,21 +1029,18 @@ fn cg_batch_inner(
     let rows = combos.len();
     let cols = data.len();
 
-    // checked rows * cols to avoid overflow before allocation
-    let _ = rows
-        .checked_mul(cols)
-        .ok_or(CgError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let _ = rows.checked_mul(cols).ok_or(CgError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
-    // Use helper to allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Calculate warm-up prefixes for each row
     let warm_prefixes: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    // Initialize only the NaN prefixes
     init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
 
-    // Convert to mutable slice for computation
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1103,7 +1048,6 @@ fn cg_batch_inner(
 
     cg_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Reclaim as Vec<f64>
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1130,7 +1074,11 @@ fn cg_batch_inner_into(
 ) -> Result<Vec<CgParams>, CgError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(CgError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(CgError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     let first = data
@@ -1147,21 +1095,25 @@ fn cg_batch_inner_into(
 
     let cols = data.len();
 
-    // Verify caller-provided buffer length
-    let expected = combos.len().checked_mul(cols)
-        .ok_or(CgError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let expected = combos
+        .len()
+        .checked_mul(cols)
+        .ok_or(CgError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     if out.len() != expected {
-        return Err(CgError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(CgError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    // Treat caller buffer as MaybeUninit<f64>. Warm prefixes were already set by init_matrix_prefixes
-    // when called from Rust batch builder. In Python/WASM paths we intentionally avoid extra writes,
-    // matching alma.rs.
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    // Resolve to non-batch kernels if needed
     let actual = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -1174,7 +1126,7 @@ fn cg_batch_inner_into(
 
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
-        // Cast row to &mut [f64] for kernel writes
+
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
         match actual {
             Kernel::Scalar => cg_row_scalar(data, first, period, dst),
@@ -1409,7 +1361,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_cg_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1417,7 +1368,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase coverage
         let test_periods = vec![5, 10, 20, 50];
 
         for period in test_periods {
@@ -1427,16 +1377,13 @@ mod tests {
             let input = CgInput::from_candles(&candles, "close", params);
             let output = cg_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1444,7 +1391,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1452,7 +1398,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1465,7 +1410,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_cg_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1526,7 +1470,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1534,15 +1477,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CgBatchBuilder::new()
             .kernel(kernel)
-            .period_range(5, 50, 5) 
+            .period_range(5, 50, 5)
             .apply_candles(&c, "close")?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -1552,7 +1492,6 @@ mod tests {
             let col = idx % output.cols;
             let period = output.combos[row].period.unwrap_or(10);
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
@@ -1560,7 +1499,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
@@ -1568,7 +1506,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {}",
@@ -1580,7 +1517,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1618,18 +1554,16 @@ mod tests {
 
         skip_if_unsupported!(kernel, test_name);
 
-        
         let random_data_strat = (2usize..=30).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    period + 10..400, 
+                    period + 10..400,
                 ),
                 Just(period),
             )
         });
 
-        
         let constant_data_strat = (2usize..=20).prop_flat_map(|period| {
             (
                 (1f64..1000f64).prop_flat_map(move |value| Just(vec![value; period + 50])),
@@ -1637,7 +1571,6 @@ mod tests {
             )
         });
 
-        
         let trending_data_strat = (2usize..=25).prop_flat_map(|period| {
             (
                 (-100f64..100f64).prop_flat_map(move |start| {
@@ -1651,7 +1584,6 @@ mod tests {
             )
         });
 
-        
         let edge_case_strat = (2usize..=5).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1662,7 +1594,6 @@ mod tests {
             )
         });
 
-        
         let combined_strat = prop_oneof![
             random_data_strat.clone(),
             constant_data_strat,
@@ -1677,12 +1608,10 @@ mod tests {
                 };
                 let input = CgInput::from_slice(&data, params);
 
-                
                 let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
-                
+
                 let CgOutput { values: ref_out } = cg_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 0..period {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1692,12 +1621,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if !y.is_nan() {
                         prop_assert!(
                             y.is_finite(),
@@ -1707,9 +1634,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
-                    
                     if i >= period
                         && data[i - period + 1..=i]
                             .windows(2)
@@ -1717,8 +1641,6 @@ mod tests {
                     {
                         let constant_val = data[i];
                         if constant_val.abs() > f64::EPSILON {
-                            
-                            
                             let weight_sum = ((period - 1) * period) as f64 / 2.0;
                             let expected_cg = -weight_sum / (period - 1) as f64;
                             prop_assert!(
@@ -1731,13 +1653,9 @@ mod tests {
                         }
                     }
 
-                    
-                    
-                    
                     if period == 2 && i >= 2 {
-                        let p0 = data[i]; 
+                        let p0 = data[i];
                         if p0.abs() > f64::EPSILON {
-                            
                             prop_assert!(
                                 (y - (-1.0)).abs() < 1e-9,
                                 "Period=2 should always yield -1.0, got {} at index {}",
@@ -1745,7 +1663,6 @@ mod tests {
                                 i
                             );
                         } else {
-                            
                             prop_assert!(
                                 y.abs() < 1e-9,
                                 "Period=2 with zero price should yield 0, got {} at index {}",
@@ -1755,14 +1672,11 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     if period > 2 && i >= period + 2 {
                         let window = &data[i - period + 1..=i];
                         let all_nonzero = window.iter().all(|&x| x.abs() > f64::EPSILON);
 
                         if all_nonzero && !y.is_nan() {
-                            
                             prop_assert!(
 								y.abs() > f64::EPSILON,
 								"CG should be non-zero when all input values are non-zero at index {}, got {}", i, y
@@ -1770,7 +1684,6 @@ mod tests {
                         }
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1787,8 +1700,6 @@ mod tests {
 
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                     let tol = match kernel {
-                        
-                        
                         Kernel::Avx2 | Kernel::Avx512 => 1e-5,
                         _ => 1e-9,
                     };
@@ -1807,7 +1718,6 @@ mod tests {
             })
             .unwrap();
 
-        
         let math_test_strat = (2usize..=10, prop::collection::vec(1f64..100f64, 20..50));
 
         proptest::test_runner::TestRunner::default()
@@ -1818,13 +1728,11 @@ mod tests {
                 let input = CgInput::from_slice(&data, params);
                 let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
 
-                
                 for i in period..data.len() {
                     if out[i].is_nan() {
                         continue;
                     }
 
-                    
                     let mut num = 0.0;
                     let mut denom = 0.0;
                     for count in 0..(period - 1) {
@@ -1850,12 +1758,10 @@ mod tests {
             })
             .unwrap();
 
-        
         let volatility_test_strat = (3usize..=15).prop_flat_map(|period| {
             (
                 (10f64..100f64).prop_flat_map(move |base| {
                     (1f64..50f64).prop_map(move |amplitude| {
-                        
                         let mut data = Vec::with_capacity(period + 50);
                         for i in 0..(period + 50) {
                             if i % 2 == 0 {
@@ -1879,17 +1785,12 @@ mod tests {
                 let input = CgInput::from_slice(&data, params);
                 let CgOutput { values: out } = cg_with_kernel(&input, kernel).unwrap();
 
-                
                 for i in (period + 2)..data.len() {
                     if out[i].is_nan() {
                         continue;
                     }
 
-                    
-                    
                     if period % 2 == 0 {
-                        
-                        
                         if i >= period + 4 {
                             let variation = (out[i] - out[i - 1]).abs();
                             prop_assert!(
@@ -1899,11 +1800,10 @@ mod tests {
                         }
                     }
 
-                    
-                    let base = (data[i] + data[i - 1]) / 2.0; 
+                    let base = (data[i] + data[i - 1]) / 2.0;
                     let relative_cg = (out[i] / base).abs();
                     prop_assert!(
-                        relative_cg < 10.0, 
+                        relative_cg < 10.0,
                         "CG magnitude too large relative to data at index {}: CG={}, base={}",
                         i,
                         out[i],
@@ -1918,20 +1818,16 @@ mod tests {
         Ok(())
     }
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_cg_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = vec![f64::NAN; 3];
         data.extend((0..256).map(|i| (i as f64).sin() * 0.5 + (i as f64) * 0.01));
 
         let input = CgInput::from_slice(&data, CgParams::default());
 
-        
         let baseline = cg_with_kernel(&input, Kernel::Auto)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
         cg_into(&input, &mut out)?;
 
@@ -1972,12 +1868,10 @@ pub fn cg_py<'py>(
     let params = CgParams { period };
     let cg_in = CgInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| cg_with_kernel(&cg_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1999,8 +1893,6 @@ impl CgStreamPy {
         Ok(CgStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated CG value.
-    /// Returns `None` if the buffer is not yet full (needs period + 1 values).
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2024,14 +1916,12 @@ pub fn cg_batch_py<'py>(
         period: period_range,
     };
 
-    
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -2044,7 +1934,6 @@ pub fn cg_batch_py<'py>(
         }
     }
 
-    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
@@ -2061,7 +1950,6 @@ pub fn cg_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2076,7 +1964,7 @@ pub fn cg_batch_py<'py>(
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = CgParams {
@@ -2084,7 +1972,6 @@ pub fn cg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = CgInput::from_slice(data, params);
 
-    
     let mut output = Vec::with_capacity(data.len());
     unsafe {
         output.set_len(data.len());
@@ -2096,14 +1983,13 @@ pub fn cg_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CgBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CgBatchJsOutput {
     pub values: Vec<f64>,
@@ -2112,7 +1998,7 @@ pub struct CgBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = cg_batch)]
 pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: CgBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2122,7 +2008,6 @@ pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
         period: config.period_range,
     };
 
-    
     let output = cg_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -2137,7 +2022,7 @@ pub fn cg_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cg_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2146,7 +2031,7 @@ pub fn cg_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cg_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2156,7 +2041,7 @@ pub fn cg_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cg_into(
     in_ptr: *const f64,
@@ -2181,7 +2066,6 @@ pub fn cg_into(
         let input = CgInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = Vec::with_capacity(len);
             unsafe {
                 temp.set_len(len);
@@ -2191,7 +2075,6 @@ pub fn cg_into(
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             cg_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2201,7 +2084,7 @@ pub fn cg_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cg_batch_into(
     in_ptr: *const f64,
@@ -2228,7 +2111,6 @@ pub fn cg_batch_into(
             .ok_or_else(|| JsValue::from_str("cg_batch_into: rows*cols overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total_elems);
 
-        
         let first = data
             .iter()
             .position(|x| !x.is_nan())
@@ -2241,7 +2123,6 @@ pub fn cg_batch_into(
             }
         }
 
-        
         cg_batch_inner_into(data, &sweep, detect_best_kernel(), false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)

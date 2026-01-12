@@ -1,14 +1,3 @@
-//! CUDA wrapper for VOSS (Ehlers Voss Filter)
-//!
-//! Parity with ALMA/CWMA wrappers:
-//! - PTX load via DetermineTargetFromContext + OptLevel O2, with simple fallbacks
-//! - NON_BLOCKING stream
-//! - Policy enums for batch and many-series
-//! - VRAM checks + grid.y chunking (<= 65_535) for batch
-//! - Warmup/NaN semantics identical to scalar: warm = first_valid + max(period, 5, 3*predict);
-//!   filt[start-2..start) set to 0.0; rest of warmup are NaN.
-//! - f64 accumulators in kernels; f32 I/O
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -33,12 +22,25 @@ pub enum CudaVossError {
     InvalidInput(String),
     #[error("voss: invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error("voss: out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "voss: out of memory on device: required={required}B, free={free}B, headroom={headroom}B"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("voss: missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("voss: launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("voss: arithmetic overflow when computing {what}")]
     ArithmeticOverflow { what: &'static str },
     #[error("voss: device mismatch for buffer (buf={buf}, current={current})")]
@@ -101,7 +103,7 @@ impl CudaVoss {
         };
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-        // Prefer L1 cache for both kernels (no shared memory used by these).
+
         if let Ok(mut f) = module.get_function("voss_batch_f32") {
             let _ = f.set_cache_config(CacheConfig::PreferL1);
         }
@@ -118,7 +120,9 @@ impl CudaVoss {
         })
     }
 
-    pub fn set_policy(&mut self, p: CudaVossPolicy) { self.policy = p; }
+    pub fn set_policy(&mut self, p: CudaVossPolicy) {
+        self.policy = p;
+    }
     pub fn synchronize(&self) -> Result<(), CudaVossError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -160,11 +164,12 @@ impl CudaVoss {
             Some(v) => v,
             None => return Ok(()),
         };
-        let need = required_bytes
-            .checked_add(headroom)
-            .ok_or(CudaVossError::ArithmeticOverflow {
-                what: "required_bytes + headroom_bytes",
-            })?;
+        let need =
+            required_bytes
+                .checked_add(headroom)
+                .ok_or(CudaVossError::ArithmeticOverflow {
+                    what: "required_bytes + headroom_bytes",
+                })?;
         if need <= free {
             Ok(())
         } else {
@@ -176,7 +181,6 @@ impl CudaVoss {
         }
     }
 
-    // -------------------- Batch (one series × many params) --------------------
     pub fn voss_batch_dev(
         &self,
         data_f32: &[f32],
@@ -191,8 +195,8 @@ impl CudaVoss {
             .position(|x| !x.is_nan())
             .ok_or_else(|| CudaVossError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid_voss(sweep)
-            .map_err(|e| CudaVossError::InvalidInput(e.to_string()))?;
+        let combos =
+            expand_grid_voss(sweep).map_err(|e| CudaVossError::InvalidInput(e.to_string()))?;
         for prm in &combos {
             let p = prm.period.unwrap_or(0);
             let q = prm.predict.unwrap_or(0);
@@ -211,31 +215,41 @@ impl CudaVoss {
         }
 
         let rows = combos.len();
-        // VRAM estimate (inputs uploaded as f64) + params + outputs
+
         let in_bytes = len
             .checked_mul(8)
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "len * 8 (prices upload)" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "len * 8 (prices upload)",
+            })?;
         let params_per_row = std::mem::size_of::<i32>()
             .checked_mul(2)
             .and_then(|x| x.checked_add(std::mem::size_of::<f64>()))
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "param bytes per row" })?;
-        let params_bytes = rows
-            .checked_mul(params_per_row)
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "rows * param bytes" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "param bytes per row",
+            })?;
+        let params_bytes =
+            rows.checked_mul(params_per_row)
+                .ok_or(CudaVossError::ArithmeticOverflow {
+                    what: "rows * param bytes",
+                })?;
         let elems = rows
             .checked_mul(len)
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "rows * len (outputs)" })?;
-        let outs_bytes = elems
-            .checked_mul(4)
-            .and_then(|x| x.checked_mul(2))
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "2 * rows * len * 4 (outputs)" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "rows * len (outputs)",
+            })?;
+        let outs_bytes = elems.checked_mul(4).and_then(|x| x.checked_mul(2)).ok_or(
+            CudaVossError::ArithmeticOverflow {
+                what: "2 * rows * len * 4 (outputs)",
+            },
+        )?;
         let required_bytes = in_bytes
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(outs_bytes))
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "total batch bytes" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "total batch bytes",
+            })?;
         Self::will_fit(required_bytes, Self::headroom_bytes())?;
 
-        // H2D (prices): page-locked host buffer + async copy on our NON_BLOCKING stream
         let mut h_prices = unsafe { LockedBuffer::<f64>::uninitialized(len) }?;
         for (dst, &src) in h_prices.as_mut_slice().iter_mut().zip(data_f32.iter()) {
             *dst = src as f64;
@@ -243,8 +257,14 @@ impl CudaVoss {
         let mut d_prices: DeviceBuffer<f64> =
             unsafe { DeviceBuffer::uninitialized_async(len, &self.stream) }?;
         unsafe { d_prices.async_copy_from(h_prices.as_slice(), &self.stream) }?;
-        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(20) as i32).collect();
-        let predicts: Vec<i32> = combos.iter().map(|c| c.predict.unwrap_or(3) as i32).collect();
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(20) as i32)
+            .collect();
+        let predicts: Vec<i32> = combos
+            .iter()
+            .map(|c| c.predict.unwrap_or(3) as i32)
+            .collect();
         let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect();
         let d_p = DeviceBuffer::from_slice(&periods)?;
         let d_q = DeviceBuffer::from_slice(&predicts)?;
@@ -253,13 +273,16 @@ impl CudaVoss {
         let mut d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let mut d_filt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
-        // Launch with grid.y chunking
-        let func = self
-            .module
-            .get_function("voss_batch_f32")
-            .map_err(|_| CudaVossError::MissingKernelSymbol { name: "voss_batch_f32" })?;
-        // Only threadIdx.x==0 performs the scan; default block.x=1 avoids stranding lanes.
-        let block_x = match self.policy.batch { BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x, _ => 1 };
+        let func = self.module.get_function("voss_batch_f32").map_err(|_| {
+            CudaVossError::MissingKernelSymbol {
+                name: "voss_batch_f32",
+            }
+        })?;
+
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
+            _ => 1,
+        };
         const MAX_GRID_Y: usize = 65_535;
         let mut start_row = 0usize;
         while start_row < rows {
@@ -309,7 +332,6 @@ impl CudaVoss {
         ))
     }
 
-    // -------------------- Many-series × one-param (time-major) --------------------
     pub fn voss_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -322,7 +344,9 @@ impl CudaVoss {
         }
         let elems = cols
             .checked_mul(rows)
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "cols * rows" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "cols * rows",
+            })?;
         if data_tm_f32.len() != elems {
             return Err(CudaVossError::InvalidInput(
                 "data must be time-major cols*rows".into(),
@@ -336,37 +360,46 @@ impl CudaVoss {
             return Err(CudaVossError::InvalidInput("invalid params".into()));
         }
 
-        // Per-series first-valid indices (walk column with +cols stride)
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut idx = s;
             for t in 0..rows {
                 let v = data_tm_f32[idx];
-                if !v.is_nan() { first_valids[s] = t as i32; break; }
+                if !v.is_nan() {
+                    first_valids[s] = t as i32;
+                    break;
+                }
                 idx += cols;
             }
         }
 
-        // VRAM estimate (inputs uploaded as f64)
         let in_bytes = elems
             .checked_mul(8)
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "elems * 8 (many-series input)" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "elems * 8 (many-series input)",
+            })?;
         let first_valid_bytes = cols
             .checked_mul(4)
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "cols * 4 (first_valids)" })?;
-        let outs_bytes = elems
-            .checked_mul(4)
-            .and_then(|x| x.checked_mul(2))
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "2 * elems * 4 (many-series outputs)" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "cols * 4 (first_valids)",
+            })?;
+        let outs_bytes = elems.checked_mul(4).and_then(|x| x.checked_mul(2)).ok_or(
+            CudaVossError::ArithmeticOverflow {
+                what: "2 * elems * 4 (many-series outputs)",
+            },
+        )?;
         let required_bytes = in_bytes
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(outs_bytes))
-            .ok_or(CudaVossError::ArithmeticOverflow { what: "total many-series bytes" })?;
+            .ok_or(CudaVossError::ArithmeticOverflow {
+                what: "total many-series bytes",
+            })?;
         Self::will_fit(required_bytes, Self::headroom_bytes())?;
 
-        // H2D (large input): page-locked host buffer + async copy
         let mut h_data = unsafe { LockedBuffer::<f64>::uninitialized(elems) }?;
-        for (dst, &src) in h_data.as_mut_slice().iter_mut().zip(data_tm_f32.iter()) { *dst = src as f64; }
+        for (dst, &src) in h_data.as_mut_slice().iter_mut().zip(data_tm_f32.iter()) {
+            *dst = src as f64;
+        }
         let mut d_data: DeviceBuffer<f64> =
             unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
         unsafe { d_data.async_copy_from(h_data.as_slice(), &self.stream) }?;
@@ -382,7 +415,9 @@ impl CudaVoss {
             })?;
 
         let (block_x, block_y) = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x, block_y } if block_x > 0 && block_y > 0 => (block_x, block_y),
+            ManySeriesKernelPolicy::OneD { block_x, block_y } if block_x > 0 && block_y > 0 => {
+                (block_x, block_y)
+            }
             _ => (1, u32::min(64, cols as u32)),
         };
         let grid: GridSize = (1, ((cols as u32) + block_y - 1) / block_y, 1).into();
@@ -427,7 +462,6 @@ impl CudaVoss {
     }
 }
 
-// ---------------- Benches ----------------
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -438,17 +472,14 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 1_000_000;
 
     fn bytes_batch(rows: usize) -> usize {
-        let in_bytes = ONE_SERIES_LEN * 8;               // f64 upload
-        let params   = rows * (4 + 4 + 8);               // i32, i32, f64
-        let outs     = 2 * rows * ONE_SERIES_LEN * 4;    // two f32 outputs
+        let in_bytes = ONE_SERIES_LEN * 8;
+        let params = rows * (4 + 4 + 8);
+        let outs = 2 * rows * ONE_SERIES_LEN * 4;
         in_bytes + params + outs + 64 * 1024 * 1024
     }
     fn bytes_many_series() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_ROWS;
-        elems * 8                                    // f64 upload
-            + MANY_SERIES_COLS * 4                   // i32 first_valids
-            + 2 * elems * 4                          // two f32 outputs
-            + 64 * 1024 * 1024
+        elems * 8 + MANY_SERIES_COLS * 4 + 2 * elems * 4 + 64 * 1024 * 1024
     }
 
     struct VossBatchState {
@@ -528,23 +559,30 @@ pub mod benches {
         let combos = expand_grid_voss(&sweep).expect("expand_grid_voss");
         let rows = combos.len();
 
-        // Upload prices as f64 once.
         let mut prices_f64 = vec![0f64; len];
         for (dst, &src) in prices_f64.iter_mut().zip(data.iter()) {
             *dst = src as f64;
         }
         let d_prices = DeviceBuffer::from_slice(&prices_f64).expect("d_prices");
 
-        let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap_or(20) as i32).collect();
-        let predicts: Vec<i32> = combos.iter().map(|c| c.predict.unwrap_or(3) as i32).collect();
+        let periods: Vec<i32> = combos
+            .iter()
+            .map(|c| c.period.unwrap_or(20) as i32)
+            .collect();
+        let predicts: Vec<i32> = combos
+            .iter()
+            .map(|c| c.predict.unwrap_or(3) as i32)
+            .collect();
         let bws: Vec<f64> = combos.iter().map(|c| c.bandwidth.unwrap_or(0.25)).collect();
         let d_p = DeviceBuffer::from_slice(&periods).expect("d_p");
         let d_q = DeviceBuffer::from_slice(&predicts).expect("d_q");
         let d_bw = DeviceBuffer::from_slice(&bws).expect("d_bw");
 
         let elems = rows.checked_mul(len).expect("rows*len overflow");
-        let d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_voss");
-        let d_filt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_filt");
+        let d_voss: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_voss");
+        let d_filt: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_filt");
 
         let block_x = match cuda.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
@@ -614,14 +652,16 @@ pub mod benches {
                     .launch(&func, self.grid, self.block, 0, args)
                     .expect("voss many-series launch");
             }
-            self.cuda.stream.synchronize().expect("voss many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("voss many-series sync");
         }
     }
     fn prep_many() -> Box<dyn CudaBenchState> {
         let cuda = CudaVoss::new(0).expect("cuda voss");
         let mut tm = gen_time_major_prices(MANY_SERIES_COLS, MANY_SERIES_ROWS);
-        // ensure a few NaNs at start of each series
-        // data tm NaNs and params set above
+
         for s in 0..MANY_SERIES_COLS {
             tm[s] = f32::NAN;
             tm[s + MANY_SERIES_COLS] = f32::NAN;
@@ -635,7 +675,6 @@ pub mod benches {
         let rows = MANY_SERIES_ROWS;
         let elems = cols.checked_mul(rows).expect("cols*rows overflow");
 
-        // Per-series first_valid indices (time-major)
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut idx = s;
@@ -650,15 +689,16 @@ pub mod benches {
         }
         let d_fv = DeviceBuffer::from_slice(&first_valids).expect("d_fv");
 
-        // Upload as f64 once.
         let mut data_f64 = vec![0f64; elems];
         for (dst, &src) in data_f64.iter_mut().zip(tm.iter()) {
             *dst = src as f64;
         }
         let d_data = DeviceBuffer::from_slice(&data_f64).expect("d_data");
 
-        let d_voss: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_voss_tm");
-        let d_filt: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_filt_tm");
+        let d_voss: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_voss_tm");
+        let d_filt: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_filt_tm");
 
         let p = params.period.unwrap_or(20) as i32;
         let q = params.predict.unwrap_or(3) as i32;

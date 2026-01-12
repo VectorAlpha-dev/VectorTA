@@ -1,37 +1,3 @@
-//! # Balance of Power (BOP)
-//!
-//! (Close - Open) / (High - Low)
-//!
-//! If (High - Low) <= 0.0, output is 0.0.
-//!
-//! ## Parameters
-//! None currently required; see `BopParams` for future extensibility.
-//!
-//! ## Errors
-//! - **EmptyData**: bop: Input data is empty.
-//! - **InputLengthsMismatch**: bop: Input lengths mismatch with detailed lengths.
-//!
-//! ## Returns
-//! - **`Ok(BopOutput)`** on success, containing a `Vec<f64>` with the BOP values.
-//! - **`Err(BopError)`** otherwise.
-//!
-//! ## Example
-//! ```
-//! use vector_ta::indicators::bop::{bop, BopInput, BopParams};
-//! let open = [1.0, 2.0];
-//! let high = [2.0, 3.0];
-//! let low = [0.5, 1.0];
-//! let close = [1.5, 2.5];
-//! let input = BopInput::from_slices(&open, &high, &low, &close, BopParams::default());
-//! let out = bop(&input).unwrap();
-//! assert!((out.values[0] - 0.5).abs() < 1e-12);
-//! ```
-//!
-//! ## Decision Log
-//! - SIMD present but disabled by default (division throughput bound); scalar path is consistently faster.
-//! - CUDA wrapper present; Python interop provides CAI v3 + DLPack; results are synchronized before return.
-//! - Memory: uses zero-copy warmup allocation; batch path is 1×N and preserves scalar semantics.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -41,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyAny, PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -61,13 +27,13 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaBop;
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[derive(Debug, Clone)]
 pub enum BopData<'a> {
@@ -151,7 +117,11 @@ pub enum BopError {
     #[error("bop: not enough valid data (needed={needed}, valid={valid})")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("bop: invalid range (start={start}, end={end}, step={step})")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("bop: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -195,9 +165,7 @@ impl BopBuilder {
         let i = BopInput::from_slices(open, high, low, close, BopParams::default());
         bop_with_kernel(&i, self.kernel)
     }
-    /// Create a streaming BOP calculator.
-    ///
-    /// Note: BOP stream is kernel-agnostic; always uses scalar implementation.
+
     #[inline(always)]
     pub fn into_stream(self) -> Result<BopStream, BopError> {
         BopStream::try_new()
@@ -242,8 +210,6 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(len);
 
-    
-    
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -273,11 +239,7 @@ pub fn bop_with_kernel(input: &BopInput, kernel: Kernel) -> Result<BopOutput, Bo
     Ok(BopOutput { values: out })
 }
 
-/// Write BOP values into a caller-provided output buffer (no allocations).
-///
-/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns the module's length error on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn bop_into(input: &BopInput, out: &mut [f64]) -> Result<(), BopError> {
     let (open, high, low, close): (&[f64], &[f64], &[f64], &[f64]) = match &input.data {
         BopData::Candles { candles } => (
@@ -294,8 +256,6 @@ pub fn bop_into(input: &BopInput, out: &mut [f64]) -> Result<(), BopError> {
         } => (open, high, low, close),
     };
 
-    // Use the existing into-slice kernel with Kernel::Auto; it handles
-    // length validation and warmup NaN prefixing identically to the Vec API.
     bop_into_slice(out, open, high, low, close, Kernel::Auto)
 }
 
@@ -336,7 +296,6 @@ unsafe fn bop_scalar_from(
     }
 }
 
-// keep this thin wrapper only if other call sites need it
 pub unsafe fn bop_scalar(open: &[f64], high: &[f64], low: &[f64], close: &[f64], out: &mut [f64]) {
     let first = (0..open.len())
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
@@ -543,8 +502,6 @@ pub fn bop_row_avx512_long(
     unsafe { bop_avx512_long(open, high, low, close, out) }
 }
 
-// ---- Batch/Streaming structs and functions ----
-
 #[derive(Clone, Debug)]
 pub struct BopStream {
     pub last: Option<f64>,
@@ -556,26 +513,18 @@ impl BopStream {
         Ok(Self { last: None })
     }
 
-    /// Safe O(1) update, identical semantics to the vector path:
-    /// if (high - low) <= 0.0 => returns 0.0.
-    ///
-    /// Micro-opts:
-    /// - puts the rare `(den <= 0)` branch on a #[cold] function to
-    ///   improve code layout and prediction on hot loops.
     #[inline(always)]
     pub fn update(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
         let den = high - low;
         if den <= 0.0 {
             return self.cold_zero();
         }
-        // Only do the numerator work on the hot (valid) path.
+
         let val = (close - open) / den;
         self.last = Some(val);
         val
     }
 
-    /// Fast path when the data feed guarantees `high > low` and OHLC invariants hold.
-    /// Skips the branch and uses reciprocal multiply.
     #[inline(always)]
     pub fn update_unchecked(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
         debug_assert!(high > low, "BOP update_unchecked requires high > low");
@@ -585,13 +534,11 @@ impl BopStream {
         val
     }
 
-    /// Accessor for the last computed value.
     #[inline(always)]
     pub fn last_value(&self) -> Option<f64> {
         self.last
     }
 
-    // ---- cold helper(s) ----
     #[cold]
     #[inline(never)]
     fn cold_zero(&mut self) -> f64 {
@@ -604,10 +551,10 @@ impl BopStream {
 #[inline(always)]
 unsafe fn recip14_nr2(x: f64) -> f64 {
     use core::arch::x86_64::*;
-    // Initial ~14-bit reciprocal
+
     let r0 = _mm_rcp14_sd(_mm_setzero_pd(), _mm_set_sd(x));
     let mut r = _mm_cvtsd_f64(r0);
-    // Two Newton–Raphson steps: r = r * (2 - x*r)
+
     r = r * (2.0 - x * r);
     r = r * (2.0 - x * r);
     r
@@ -615,8 +562,6 @@ unsafe fn recip14_nr2(x: f64) -> f64 {
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 impl BopStream {
-    /// Optional: same semantics as `update`, but uses AVX-512 rcp14 + 2×NR refinement
-    /// to reduce division cost on supporting CPUs. Returns 0.0 if `high - low <= 0.0`.
     #[inline(always)]
     pub fn update_fast(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
         let den = high - low;
@@ -630,16 +575,8 @@ impl BopStream {
     }
 }
 
-// ---- Batch processing API ----
-
-/// Batch parameter range for BOP.
-///
-/// Note: BOP has no parameters, so this struct is intentionally empty.
-/// It exists to maintain API consistency with other indicators.
 #[derive(Clone, Debug)]
-pub struct BopBatchRange {
-    // Intentionally empty - BOP has no parameters to sweep
-}
+pub struct BopBatchRange {}
 
 impl Default for BopBatchRange {
     fn default() -> Self {
@@ -715,15 +652,12 @@ pub fn bop_batch_with_kernel(
 
     let rows = 1usize;
     let cols = len;
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(BopError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 1,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(BopError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 1,
+    })?;
 
-    // 1×N matrix, zero extra copies
     let mut buf_mu = make_uninit_matrix(rows, cols);
     init_matrix_prefixes(&mut buf_mu, cols, &[first]);
 
@@ -732,11 +666,13 @@ pub fn bop_batch_with_kernel(
     let out_f64: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Reject explicit non-batch kernels passed to batch path to surface clear errors
-    if !matches!(kernel, Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch) {
+    if !matches!(
+        kernel,
+        Kernel::Auto | Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch
+    ) {
         return Err(BopError::InvalidKernelForBatch(kernel));
     }
-    // SIMD underperforms for BOP; prefer scalar batch for Auto.
+
     let chosen = match kernel {
         Kernel::Auto => Kernel::ScalarBatch,
         k => k,
@@ -774,7 +710,6 @@ pub fn bop_batch_with_kernel(
     Ok(BopBatchOutput { values, rows, cols })
 }
 
-/// Internal function that writes directly into a provided output slice for zero-copy Python bindings
 #[inline(always)]
 fn bop_batch_inner_into(
     open: &[f64],
@@ -803,12 +738,10 @@ fn bop_batch_inner_into(
         });
     }
 
-    // Calculate the warmup period - first index where all arrays have valid values
     let warmup_period = (0..len)
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(len);
 
-    // Fill the warmup period with NaN
     out[..warmup_period].fill(f64::NAN);
 
     if !matches!(
@@ -817,7 +750,7 @@ fn bop_batch_inner_into(
     ) {
         return Err(BopError::InvalidKernelForBatch(kernel));
     }
-    // SIMD underperforms for BOP; prefer scalar batch for Auto to match scalar semantics.
+
     let chosen = match kernel {
         Kernel::Auto => Kernel::ScalarBatch,
         k => k,
@@ -855,7 +788,6 @@ pub fn bop_batch_par_slice(
     close: &[f64],
     kern: Kernel,
 ) -> Result<BopBatchOutput, BopError> {
-    // BOP is cheap, so just run the regular batch; use rayon for real batch ops if needed.
     bop_batch_with_kernel(open, high, low, close, kern)
 }
 
@@ -863,8 +795,6 @@ pub fn bop_batch_par_slice(
 fn expand_grid(_r: &BopBatchRange) -> Vec<BopParams> {
     vec![BopParams {}]
 }
-
-// ---- Unit tests ----
 
 #[cfg(test)]
 mod tests {
@@ -1049,7 +979,6 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // streaming BOP is trivial (no state), just check that update matches scalar formula
         let open = [10.0, 5.0, 6.0, 10.0, 11.0];
         let high = [15.0, 6.0, 9.0, 20.0, 13.0];
         let low = [10.0, 5.0, 4.0, 10.0, 11.0];
@@ -1068,7 +997,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_bop_no_poison(
         test_name: &str,
@@ -1079,20 +1007,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
         let input = BopInput::with_default_candles(&candles);
         let output = bop_with_kernel(&input, kernel)?;
 
-        // Check every value for poison patterns
         for (i, &val) in output.values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1100,7 +1024,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1108,7 +1031,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1120,7 +1042,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_bop_no_poison(
         _test_name: &str,
@@ -1155,18 +1076,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (50usize..400).prop_flat_map(|size| {
             (
-                
                 10.0f64..1000.0f64,
-                
                 0.0f64..0.1f64,
-                
                 -0.02f64..0.02f64,
-                
                 prop::collection::vec((0.0f64..1.0, 0.0f64..1.0, 0.0f64..1.0), size),
-                
                 0u8..5,
                 Just(size),
             )
@@ -1176,7 +1091,6 @@ mod tests {
             .run(
                 &strat,
                 |(base_price, volatility, trend, random_factors, market_type, size)| {
-                    
                     let mut open = Vec::with_capacity(size);
                     let mut high = Vec::with_capacity(size);
                     let mut low = Vec::with_capacity(size);
@@ -1188,10 +1102,8 @@ mod tests {
                         let range = base_price * volatility;
                         let (r1, r2, r3) = random_factors[i];
 
-                        
                         let (o, h, l, c) = match market_type {
                             0 => {
-                                
                                 let wave = (i as f64 * 0.2).sin();
                                 let o = current_price + wave * range;
                                 let movement = range * (r1 - 0.5);
@@ -1201,7 +1113,6 @@ mod tests {
                                 (o, h, l, c)
                             }
                             1 => {
-                                
                                 let o = current_price;
                                 current_price *= 1.0 + trend.abs();
                                 let c = current_price + range * r1;
@@ -1210,7 +1121,6 @@ mod tests {
                                 (o, h.max(c), l.min(o), c)
                             }
                             2 => {
-                                
                                 let o = current_price;
                                 current_price *= 1.0 - trend.abs();
                                 let c = current_price - range * r1;
@@ -1219,13 +1129,10 @@ mod tests {
                                 (o, h.max(o), l.min(c), c)
                             }
                             3 => {
-                                
                                 if r1 < 0.3 {
-                                    
                                     let price = current_price;
                                     (price, price, price, price)
                                 } else {
-                                    
                                     let tiny_move = range * 0.01 * (r2 - 0.5);
                                     let o = current_price;
                                     let c = current_price + tiny_move;
@@ -1235,18 +1142,16 @@ mod tests {
                                 }
                             }
                             _ => {
-                                
                                 let o = current_price;
                                 let big_move = range * 2.0 * (r1 - 0.5);
                                 let c = current_price + big_move;
                                 let h = o.max(c) + range * r2 * 2.0;
                                 let l = o.min(c) - range * r3 * 2.0;
                                 current_price = c;
-                                (o, h, l.max(0.1), c) 
+                                (o, h, l.max(0.1), c)
                             }
                         };
 
-                        
                         let h_final = h.max(o.max(c));
                         let l_final = l.min(o.min(c));
 
@@ -1256,20 +1161,16 @@ mod tests {
                         close.push(c);
                     }
 
-                    
                     let params = BopParams::default();
                     let input = BopInput::from_slices(&open, &high, &low, &close, params);
 
-                    
                     let output = bop_with_kernel(&input, kernel).unwrap();
                     let ref_output = bop_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    
                     for i in 0..size {
                         let y = output.values[i];
                         let r = ref_output.values[i];
 
-                        
                         if y.is_finite() {
                             prop_assert!(
                                 y >= -1.0 - 1e-9 && y <= 1.0 + 1e-9,
@@ -1280,7 +1181,6 @@ mod tests {
                             );
                         }
 
-                        
                         let denom = high[i] - low[i];
                         if denom <= 0.0 || denom.abs() < f64::EPSILON {
                             prop_assert!(
@@ -1292,7 +1192,6 @@ mod tests {
                             );
                         }
 
-                        
                         if (close[i] - open[i]).abs() < f64::EPSILON && denom > f64::EPSILON {
                             prop_assert!(
                                 y.abs() < 1e-9,
@@ -1303,7 +1202,6 @@ mod tests {
                             );
                         }
 
-                        
                         if denom > f64::EPSILON {
                             let expected = (close[i] - open[i]) / denom;
                             prop_assert!(
@@ -1316,7 +1214,6 @@ mod tests {
                             );
                         }
 
-                        
                         if !y.is_finite() || !r.is_finite() {
                             prop_assert!(
                                 y.to_bits() == r.to_bits(),
@@ -1339,7 +1236,6 @@ mod tests {
                             );
                         }
 
-                        
                         if (open[i] - high[i]).abs() < f64::EPSILON
                             && (open[i] - low[i]).abs() < f64::EPSILON
                             && (open[i] - close[i]).abs() < f64::EPSILON
@@ -1353,9 +1249,6 @@ mod tests {
                             );
                         }
 
-                        
-                        
-                        
                         if denom > f64::EPSILON {
                             let numerator = close[i] - open[i];
                             if numerator > f64::EPSILON {
@@ -1373,11 +1266,7 @@ mod tests {
                             }
                         }
 
-                        
-                        
-                        
                         if denom > f64::EPSILON {
-                            
                             if (close[i] - high[i]).abs() < 1e-9 && (open[i] - low[i]).abs() < 1e-9
                             {
                                 prop_assert!(
@@ -1386,7 +1275,7 @@ mod tests {
 								test_name, i, y
 							);
                             }
-                            
+
                             if (close[i] - low[i]).abs() < 1e-9 && (open[i] - high[i]).abs() < 1e-9
                             {
                                 prop_assert!(
@@ -1442,7 +1331,6 @@ mod tests {
         assert_eq!(batch_output.cols, c.close.len());
         assert_eq!(batch_output.rows, 1);
 
-        
         let input = BopInput::from_slices(open, high, low, close, BopParams::default());
         let scalar = bop_with_kernel(&input, kernel)?;
 
@@ -1477,7 +1365,6 @@ mod tests {
     }
     gen_batch_tests!(check_batch_default_row);
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1490,14 +1377,11 @@ mod tests {
         let low = source_type(&c, "low");
         let close = source_type(&c, "close");
 
-        
         let output = BopBatchBuilder::new()
             .kernel(kernel)
             .apply_slices(open, high, low, close)?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -1506,7 +1390,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1514,7 +1397,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1522,7 +1404,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1534,7 +1415,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(
         _test: &str,
@@ -1545,10 +1425,9 @@ mod tests {
 
     gen_batch_tests!(check_batch_no_poison);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_bop_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let n = 256usize;
         let mut ts = Vec::with_capacity(n);
         let mut open = Vec::with_capacity(n);
@@ -1572,7 +1451,6 @@ mod tests {
             vol.push(1_000.0 + i as f64);
         }
 
-        
         open[0] = f64::NAN;
         high[0] = f64::NAN;
         low[0] = f64::NAN;
@@ -1581,14 +1459,11 @@ mod tests {
         let candles = crate::utilities::data_loader::Candles::new(ts, open, high, low, close, vol);
         let input = BopInput::with_default_candles(&candles);
 
-        
         let baseline = bop(&input)?;
 
-        
         let mut out = vec![0.0f64; baseline.values.len()];
         bop_into(&input, &mut out)?;
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1621,25 +1496,20 @@ pub fn bop_py<'py>(
 ) -> PyResult<Bound<'py, numpy::PyArray1<f64>>> {
     use numpy::{IntoPyArray, PyArrayMethods};
 
-    // Zero-copy, read-only views
     let open_slice = open.as_slice()?;
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
 
-    // Validate kernel before allow_threads
     let kern = validate_kernel(kernel, false)?;
 
-    // Create input structure
     let params = BopParams::default();
     let input = BopInput::from_slices(open_slice, high_slice, low_slice, close_slice, params);
 
-    // Get Vec<f64> from Rust function and convert to NumPy with zero-copy
     let result_vec: Vec<f64> = py
         .allow_threads(|| bop_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1658,17 +1528,15 @@ impl BopStreamPy {
         Ok(BopStreamPy { stream })
     }
 
-    /// Updates the stream with new OHLC values and returns the calculated BOP value.
     fn update(&mut self, open: f64, high: f64, low: f64, close: f64) -> f64 {
         self.stream.update(open, high, low, close)
     }
 }
 
-// ---------------- CUDA Python VRAM handle ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct BopDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, // moved into DLPack once exported
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -1704,13 +1572,12 @@ impl BopDeviceArrayF32Py {
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let ptr = buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        
         (2, self.device_id as i32)
     }
 
@@ -1723,8 +1590,7 @@ impl BopDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1742,9 +1608,8 @@ impl BopDeviceArrayF32Py {
                 }
             }
         }
-        let _ = stream; 
+        let _ = stream;
 
-        
         let buf = self
             .buf
             .take()
@@ -1772,27 +1637,22 @@ pub fn bop_batch_py<'py>(
     use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
     use pyo3::types::{PyDict, PyList};
 
-    // Zero-copy, read-only views
     let open_slice = open.as_slice()?;
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
     let close_slice = close.as_slice()?;
 
-    // Validate kernel before allow_threads
     let kern = validate_kernel(kernel, true)?;
 
-    // For BOP batch, we have only 1 row since BOP has no parameters
     let rows = 1usize;
     let cols = open_slice.len();
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("bop_batch: rows*cols overflow"))?;
 
-    // Pre-allocate output array (OK for batch operations)
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Compute without GIL - write directly to pre-allocated array
     let result = py.allow_threads(|| {
         bop_batch_inner_into(
             open_slice,
@@ -1814,18 +1674,17 @@ pub fn bop_batch_py<'py>(
 
     let d = PyDict::new(py);
     d.set_item("values", out_arr.reshape((rows, cols))?)?;
-    // Include both old-style keys for backward compatibility and alma-style keys
+
     d.set_item("rows", rows)?;
     d.set_item("cols", cols)?;
     d.set_item("params", Vec::<f64>::new().into_pyarray(py))?;
-    // Also include alma-style metadata keys; empty because no params
+
     d.set_item("periods", Vec::<u64>::new().into_pyarray(py))?;
     d.set_item("offsets", Vec::<f64>::new().into_pyarray(py))?;
     d.set_item("sigmas", Vec::<f64>::new().into_pyarray(py))?;
     Ok(d)
 }
 
-/// Write directly to output slice - no allocations
 pub fn bop_into_slice(
     dst: &mut [f64],
     open: &[f64],
@@ -1857,7 +1716,6 @@ pub fn bop_into_slice(
         .find(|&i| !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
         .unwrap_or(len);
 
-    // SIMD underperforms; Auto short-circuits to scalar for BOP.
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
         k => k,
@@ -1888,10 +1746,9 @@ pub fn bop_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_js(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Result<Vec<f64>, JsValue> {
-    // Single allocation pattern
     let mut output = vec![0.0; open.len()];
 
     bop_into_slice(&mut output, open, high, low, close, Kernel::Auto)
@@ -1900,7 +1757,7 @@ pub fn bop_js(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> Result<
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_into(
     open_ptr: *const f64,
@@ -1925,28 +1782,20 @@ pub fn bop_into(
         let low = std::slice::from_raw_parts(low_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        // Check for aliasing with any input
         if open_ptr == out_ptr || high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr
         {
-            // For aliasing case, we need to be careful about which input is aliased
-            // BOP formula: (close - open) / (high - low)
-            // We can reuse the output buffer by reading values before overwriting
-
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
 
-            // Find warmup period
             let warmup_period = (0..len)
                 .find(|&i| {
                     !open[i].is_nan() && !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan()
                 })
                 .unwrap_or(len);
 
-            // Fill warmup with NaN first
             for v in &mut out[..warmup_period] {
                 *v = f64::NAN;
             }
 
-            // Compute BOP values starting from first valid index
             for i in warmup_period..len {
                 let denom = high[i] - low[i];
                 out[i] = if denom <= 0.0 {
@@ -1956,7 +1805,6 @@ pub fn bop_into(
                 };
             }
         } else {
-            // No aliasing, compute directly
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             bop_into_slice(out, open, high, low, close, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1966,7 +1814,7 @@ pub fn bop_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1975,7 +1823,7 @@ pub fn bop_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1985,7 +1833,7 @@ pub fn bop_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_batch_js(
     open: &[f64],
@@ -1993,8 +1841,6 @@ pub fn bop_batch_js(
     low: &[f64],
     close: &[f64],
 ) -> Result<Vec<f64>, JsValue> {
-    // BOP has no parameters, so batch processing is just the regular calculation
-    // Use single allocation pattern
     let mut output = vec![0.0; open.len()];
 
     bop_into_slice(&mut output, open, high, low, close, Kernel::Auto)
@@ -2003,7 +1849,6 @@ pub fn bop_batch_js(
     Ok(output)
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "bop_cuda_batch_dev")]
 #[pyo3(signature = (open, high, low, close, device_id=0))]
@@ -2108,7 +1953,7 @@ pub fn bop_cuda_many_series_one_param_dev_py(
     Ok(obj)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_batch_into(
     open_ptr: *const f64,
@@ -2134,30 +1979,24 @@ pub fn bop_batch_into(
         let close = std::slice::from_raw_parts(close_ptr, len);
         let out = std::slice::from_raw_parts_mut(out_ptr, len);
 
-        // BOP has no parameters, so batch is just single calculation
         bop_into_slice(out, open, high, low, close, Kernel::Auto)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        Ok(1) // Always 1 row for BOP (no parameters)
+        Ok(1)
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn bop_batch_metadata_js() -> Result<Vec<f64>, JsValue> {
-    // BOP has no parameters, return empty metadata array
-    // This maintains the same structure as ALMA for uniform treatment
     Ok(Vec::new())
 }
 
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
-pub struct BopBatchConfig {
-    // BOP has no parameters, but we keep this for API consistency
-}
+pub struct BopBatchConfig {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct BopBatchJsOutput {
     pub values: Vec<f64>,
@@ -2165,7 +2004,7 @@ pub struct BopBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = bop_batch)]
 pub fn bop_batch_unified_js(
     open: &[f64],

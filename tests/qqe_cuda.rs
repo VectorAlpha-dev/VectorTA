@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::qqe::{
     qqe_batch_with_kernel, qqe_with_kernel, QqeBatchRange, QqeData, QqeInput, QqeParams,
 };
@@ -62,9 +60,6 @@ fn qqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
 
-    
-    
-    
     let tol = 1.5e-1;
     let cols = cpu.cols;
     for row in 0..cpu.rows {
@@ -76,20 +71,50 @@ fn qqe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             let c_slow = cpu.slow_values[row * cols + t];
             let g_fast = out[g_row_fast * cols + t] as f64;
             let g_slow = out[g_row_slow * cols + t] as f64;
-            if row == 0 && ((1388..1400).contains(&t) || (6495..6505).contains(&t)) && printed < 24 {
-                eprintln!("dbg row0 t={} cpu_fast={} gpu_fast={} cpu_slow={} gpu_slow={}", t, c_fast, g_fast, c_slow, g_slow);
+            if row == 0 && ((1388..1400).contains(&t) || (6495..6505).contains(&t)) && printed < 24
+            {
+                eprintln!(
+                    "dbg row0 t={} cpu_fast={} gpu_fast={} cpu_slow={} gpu_slow={}",
+                    t, c_fast, g_fast, c_slow, g_slow
+                );
                 printed += 1;
             }
             if !approx_eq(c_fast, g_fast, tol) && printed < 3 {
-                eprintln!("batch diff fast row={}, t={} cpu={} gpu={} abs={} tol={}", row, t, c_fast, g_fast, (c_fast-g_fast).abs(), tol);
+                eprintln!(
+                    "batch diff fast row={}, t={} cpu={} gpu={} abs={} tol={}",
+                    row,
+                    t,
+                    c_fast,
+                    g_fast,
+                    (c_fast - g_fast).abs(),
+                    tol
+                );
                 printed += 1;
             }
             if !approx_eq(c_slow, g_slow, tol) && printed < 3 {
-                eprintln!("batch diff slow row={}, t={} cpu={} gpu={} abs={} tol={}", row, t, c_slow, g_slow, (c_slow-g_slow).abs(), tol);
+                eprintln!(
+                    "batch diff slow row={}, t={} cpu={} gpu={} abs={} tol={}",
+                    row,
+                    t,
+                    c_slow,
+                    g_slow,
+                    (c_slow - g_slow).abs(),
+                    tol
+                );
                 printed += 1;
             }
-            assert!(approx_eq(c_fast, g_fast, tol), "fast mismatch at (row={}, t={})", row, t);
-            assert!(approx_eq(c_slow, g_slow, tol), "slow mismatch at (row={}, t={})", row, t);
+            assert!(
+                approx_eq(c_fast, g_fast, tol),
+                "fast mismatch at (row={}, t={})",
+                row,
+                t
+            );
+            assert!(
+                approx_eq(c_slow, g_slow, tol),
+                "slow mismatch at (row={}, t={})",
+                row,
+                t
+            );
         }
     }
 
@@ -119,13 +144,11 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         fast_factor: Some(4.236),
     };
 
-
-    
     let mut cpu_fast_tm = vec![f64::NAN; cols * rows];
     let mut cpu_slow_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
-        
+
         for t in 0..rows {
             series[t] = tm[t * cols + s];
         }
@@ -150,7 +173,7 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let mut out = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut out)?;
-    
+
     let tol = 7.5e-3;
     for s in 0..cols {
         let mut printed = 0;
@@ -160,15 +183,41 @@ fn qqe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             let c_fast = cpu_fast_tm[t * cols + s];
             let c_slow = cpu_slow_tm[t * cols + s];
             if !approx_eq(c_fast, g_fast, tol) && printed < 3 {
-                eprintln!("many diff fast s={}, t={} cpu={} gpu={} abs={} tol={}", s, t, c_fast, g_fast, (c_fast-g_fast).abs(), tol);
+                eprintln!(
+                    "many diff fast s={}, t={} cpu={} gpu={} abs={} tol={}",
+                    s,
+                    t,
+                    c_fast,
+                    g_fast,
+                    (c_fast - g_fast).abs(),
+                    tol
+                );
                 printed += 1;
             }
             if !approx_eq(c_slow, g_slow, tol) && printed < 3 {
-                eprintln!("many diff slow s={}, t={} cpu={} gpu={} abs={} tol={}", s, t, c_slow, g_slow, (c_slow-g_slow).abs(), tol);
+                eprintln!(
+                    "many diff slow s={}, t={} cpu={} gpu={} abs={} tol={}",
+                    s,
+                    t,
+                    c_slow,
+                    g_slow,
+                    (c_slow - g_slow).abs(),
+                    tol
+                );
                 printed += 1;
             }
-            assert!(approx_eq(c_fast, g_fast, tol), "fast mismatch at (s={}, t={})", s, t);
-            assert!(approx_eq(c_slow, g_slow, tol), "slow mismatch at (s={}, t={})", s, t);
+            assert!(
+                approx_eq(c_fast, g_fast, tol),
+                "fast mismatch at (s={}, t={})",
+                s,
+                t
+            );
+            assert!(
+                approx_eq(c_slow, g_slow, tol),
+                "slow mismatch at (s={}, t={})",
+                s,
+                t
+            );
         }
     }
 

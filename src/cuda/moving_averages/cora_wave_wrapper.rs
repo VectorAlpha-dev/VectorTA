@@ -1,17 +1,3 @@
-//! CUDA support for the Compound Ratio Moving Average (CoRa Wave).
-//!
-//! API and behavior align with ALMA/CWMA wrappers:
-//! - Non-blocking stream; PTX JIT with DetermineTargetFromContext + O2 fallback.
-//! - Policy enums (reused from CWMA) and kernel selection introspection.
-//! - VRAM estimation with optional mem_get_info guard and grid.y chunking.
-//! - Warmup/NaN semantics match scalar CoraWave.
-//!
-//! Kernels provided by `kernels/cuda/moving_averages/cora_wave_kernel.cu`:
-//! - cora_wave_batch_f32
-//! - cora_wave_batch_wma_from_y_f32
-//! - cora_wave_multi_series_one_param_time_major_f32
-//! - cora_wave_ms1p_wma_time_major_f32
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -35,7 +21,11 @@ pub enum CudaCoraWaveError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -43,7 +33,14 @@ pub enum CudaCoraWaveError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -100,7 +97,8 @@ impl CudaCoraWave {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -143,9 +141,15 @@ impl CudaCoraWave {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn synchronize(&self) -> Result<(), CudaCoraWaveError> { self.stream.synchronize().map_err(Into::into) }
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn synchronize(&self) -> Result<(), CudaCoraWaveError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -216,19 +220,26 @@ impl CudaCoraWave {
     }
 
     fn expand_grid(range: &CoraWaveBatchRange) -> Result<Vec<CoraWaveParams>, CudaCoraWaveError> {
-        
         let (ps, pe, pt) = range.period;
         let periods: Vec<usize> = if pt == 0 || ps == pe {
             vec![ps]
-        } else if ps <= pe { (ps..=pe).step_by(pt).collect() } else {
+        } else if ps <= pe {
+            (ps..=pe).step_by(pt).collect()
+        } else {
             let mut v = Vec::new();
             let mut x = ps;
             loop {
                 v.push(x);
-                if x <= pe { break; }
-                if x < pt { break; }
+                if x <= pe {
+                    break;
+                }
+                if x < pt {
+                    break;
+                }
                 let next = x - pt;
-                if next < pe { break; }
+                if next < pe {
+                    break;
+                }
                 x = next;
             }
             v
@@ -240,13 +251,22 @@ impl CudaCoraWave {
         } else if ms <= me {
             let mut x = ms;
             let step = mt.abs();
-            while x <= me + 1e-12 { mults.push(x); x += step; }
+            while x <= me + 1e-12 {
+                mults.push(x);
+                x += step;
+            }
         } else {
-            let mut x = ms; let step = mt.abs();
-            while x >= me - 1e-12 { mults.push(x); x -= step; }
+            let mut x = ms;
+            let step = mt.abs();
+            while x >= me - 1e-12 {
+                mults.push(x);
+                x -= step;
+            }
         }
         if periods.is_empty() || mults.is_empty() {
-            return Err(CudaCoraWaveError::InvalidInput("empty parameter expansion".into()));
+            return Err(CudaCoraWaveError::InvalidInput(
+                "empty parameter expansion".into(),
+            ));
         }
         let mut out = Vec::with_capacity(periods.len().saturating_mul(mults.len()));
         for &p in &periods {
@@ -266,15 +286,15 @@ impl CudaCoraWave {
         sweep: &CoraWaveBatchRange,
     ) -> Result<
         (
-            Vec<CoraWaveParams>, 
-            usize,               
-            usize,               
-            usize,               
-            Vec<i32>,            
-            Vec<f32>,            
-            Vec<f32>,            
-            Vec<i32>,            
-            Vec<i32>,            
+            Vec<CoraWaveParams>,
+            usize,
+            usize,
+            usize,
+            Vec<i32>,
+            Vec<f32>,
+            Vec<f32>,
+            Vec<i32>,
+            Vec<i32>,
         ),
         CudaCoraWaveError,
     > {
@@ -289,7 +309,9 @@ impl CudaCoraWave {
 
         let combos = Self::expand_grid(sweep)?;
         if combos.is_empty() {
-            return Err(CudaCoraWaveError::InvalidInput("no parameter combinations".into()));
+            return Err(CudaCoraWaveError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
         }
         let mut max_period = 0usize;
         for prm in &combos {
@@ -315,15 +337,14 @@ impl CudaCoraWave {
         let mut inv_norms = vec![0f32; n];
         let mut smooth_periods = vec![1i32; n];
         let mut warm0s = vec![0i32; n];
-        let flat_len = n
-            .checked_mul(max_period)
-            .ok_or_else(|| CudaCoraWaveError::InvalidInput("n_combos*max_period overflow".into()))?;
+        let flat_len = n.checked_mul(max_period).ok_or_else(|| {
+            CudaCoraWaveError::InvalidInput("n_combos*max_period overflow".into())
+        })?;
         let mut weights_flat = vec![0f32; flat_len];
         for (row, prm) in combos.iter().enumerate() {
             let p = prm.period.unwrap();
             let r_multi = prm.r_multi.unwrap_or(2.0);
-            
-            
+
             let start_wt = 0.01f64;
             let end_wt = p as f64;
             let r = (end_wt / start_wt).powf(1.0 / ((p as f64) - 1.0)) - 1.0;
@@ -371,7 +392,6 @@ impl CudaCoraWave {
         }
     }
 
-    
     pub fn cora_wave_batch_dev(
         &self,
         data_f32: &[f32],
@@ -390,28 +410,48 @@ impl CudaCoraWave {
         ) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let prices_bytes = series_len.checked_mul(sz_f32).ok_or_else(|| CudaCoraWaveError::InvalidInput("series_len bytes overflow".into()))?;
-        let weights_bytes = n_combos.checked_mul(max_period).and_then(|x| x.checked_mul(sz_f32)).ok_or_else(|| CudaCoraWaveError::InvalidInput("weights bytes overflow".into()))?;
-        let periods_bytes = n_combos.checked_mul(sz_i32).ok_or_else(|| CudaCoraWaveError::InvalidInput("periods bytes overflow".into()))?;
-        let inv_bytes = n_combos.checked_mul(sz_f32).ok_or_else(|| CudaCoraWaveError::InvalidInput("inv bytes overflow".into()))?;
-        let smooth_bytes = n_combos.checked_mul(sz_i32).and_then(|x| x.checked_mul(2)).ok_or_else(|| CudaCoraWaveError::InvalidInput("smooth bytes overflow".into()))?;
-        let out_bytes = n_combos.checked_mul(series_len).and_then(|x| x.checked_mul(sz_f32)).ok_or_else(|| CudaCoraWaveError::InvalidInput("out bytes overflow".into()))?;
+        let prices_bytes = series_len
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("series_len bytes overflow".into()))?;
+        let weights_bytes = n_combos
+            .checked_mul(max_period)
+            .and_then(|x| x.checked_mul(sz_f32))
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("weights bytes overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("periods bytes overflow".into()))?;
+        let inv_bytes = n_combos
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("inv bytes overflow".into()))?;
+        let smooth_bytes = n_combos
+            .checked_mul(sz_i32)
+            .and_then(|x| x.checked_mul(2))
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("smooth bytes overflow".into()))?;
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|x| x.checked_mul(sz_f32))
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("out bytes overflow".into()))?;
         let tmp_bytes = if sweep.smooth { out_bytes } else { 0 };
         let required = prices_bytes
-            .checked_add(weights_bytes).and_then(|x| x.checked_add(periods_bytes))
-            .and_then(|x| x.checked_add(inv_bytes)).and_then(|x| x.checked_add(smooth_bytes))
-            .and_then(|x| x.checked_add(out_bytes)).and_then(|x| x.checked_add(tmp_bytes))
+            .checked_add(weights_bytes)
+            .and_then(|x| x.checked_add(periods_bytes))
+            .and_then(|x| x.checked_add(inv_bytes))
+            .and_then(|x| x.checked_add(smooth_bytes))
+            .and_then(|x| x.checked_add(out_bytes))
+            .and_then(|x| x.checked_add(tmp_bytes))
             .ok_or_else(|| CudaCoraWaveError::InvalidInput("total bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
-            return Err(CudaCoraWaveError::OutOfMemory { required, free, headroom });
+            return Err(CudaCoraWaveError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
-        
         let h_prices = LockedBuffer::from_slice(data_f32)?;
         let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
         unsafe {
@@ -421,14 +461,17 @@ impl CudaCoraWave {
         let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_inv = DeviceBuffer::from_slice(&inv_norms)?;
-        let n_tmp = n_combos.checked_mul(series_len).ok_or_else(|| CudaCoraWaveError::InvalidInput("n_combos*series_len overflow".into()))?;
+        let n_tmp = n_combos.checked_mul(series_len).ok_or_else(|| {
+            CudaCoraWaveError::InvalidInput("n_combos*series_len overflow".into())
+        })?;
         let mut d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }?;
 
-        
         let mut func = self
             .module
             .get_function("cora_wave_batch_f32")
-            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol { name: "cora_wave_batch_f32" })?;
+            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol {
+                name: "cora_wave_batch_f32",
+            })?;
         let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
         let block_x = self.pick_block_x(&func, shared_bytes as usize, 256);
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
@@ -475,7 +518,6 @@ impl CudaCoraWave {
             });
         }
 
-        
         let d_smooth = DeviceBuffer::from_slice(&smooth_periods)?;
         let d_warm0s = DeviceBuffer::from_slice(&warm0s)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }?;
@@ -483,7 +525,9 @@ impl CudaCoraWave {
         let mut func_wma = self
             .module
             .get_function("cora_wave_batch_wma_from_y_f32")
-            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol { name: "cora_wave_batch_wma_from_y_f32" })?;
+            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol {
+                name: "cora_wave_batch_wma_from_y_f32",
+            })?;
         let block_x2 = self.pick_block_x(&func_wma, 0, 256);
         let grid_x2 = ((series_len as u32) + block_x2 - 1) / block_x2;
         let block2: BlockSize = (block_x2, 1, 1).into();
@@ -515,14 +559,15 @@ impl CudaCoraWave {
         })
     }
 
-    
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,
         rows: usize,
         params: &CoraWaveParams,
     ) -> Result<(Vec<i32>, usize, Vec<f32>, f32, usize), CudaCoraWaveError> {
-        let expected = cols.checked_mul(rows).ok_or_else(|| CudaCoraWaveError::InvalidInput("cols*rows overflow".into()))?;
+        let expected = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("cols*rows overflow".into()))?;
         if cols == 0 || rows == 0 || data_tm_f32.len() != expected {
             return Err(CudaCoraWaveError::InvalidInput(
                 "invalid dims or data length".into(),
@@ -546,7 +591,7 @@ impl CudaCoraWave {
         if period == 0 || period > rows {
             return Err(CudaCoraWaveError::InvalidInput("invalid period".into()));
         }
-        
+
         let r_multi = params.r_multi.unwrap_or(2.0);
         let start_wt = 0.01f64;
         let end_wt = period as f64;
@@ -573,7 +618,6 @@ impl CudaCoraWave {
         let (first_valids, period, weights, inv_norm, _rows) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
         let prices_bytes = cols
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
@@ -598,21 +642,27 @@ impl CudaCoraWave {
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
-            return Err(CudaCoraWaveError::OutOfMemory { required, free, headroom });
+            return Err(CudaCoraWaveError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            });
         }
 
-        
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_weights = DeviceBuffer::from_slice(&weights)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let n_tmp = cols.checked_mul(rows).ok_or_else(|| CudaCoraWaveError::InvalidInput("cols*rows overflow".into()))?;
+        let n_tmp = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("cols*rows overflow".into()))?;
         let mut d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }?;
 
-        
         let mut func = self
             .module
             .get_function("cora_wave_multi_series_one_param_time_major_f32")
-            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol { name: "cora_wave_multi_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol {
+                name: "cora_wave_multi_series_one_param_time_major_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => func
@@ -661,7 +711,6 @@ impl CudaCoraWave {
             });
         }
 
-        
         let wma_m = ((period as f64).sqrt().round() as i32).max(1);
         let mut warm0s = vec![0i32; cols];
         for s in 0..cols {
@@ -673,7 +722,9 @@ impl CudaCoraWave {
         let mut func_wma = self
             .module
             .get_function("cora_wave_ms1p_wma_time_major_f32")
-            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol { name: "cora_wave_ms1p_wma_time_major_f32" })?;
+            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol {
+                name: "cora_wave_ms1p_wma_time_major_f32",
+            })?;
         let block_x2 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => func_wma
@@ -711,7 +762,6 @@ impl CudaCoraWave {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -874,8 +924,10 @@ pub mod benches {
         let d_smooth = DeviceBuffer::from_slice(&smooth_periods).expect("d_smooth");
         let d_warm0s = DeviceBuffer::from_slice(&warm0s).expect("d_warm0s");
         let n_tmp = n_combos * series_len;
-        let d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_tmp");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_out");
+        let d_tmp: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_tmp");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_out");
 
         let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
         let func = cuda
@@ -1024,11 +1076,11 @@ pub mod benches {
         let d_first_valids = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
         let d_warm0s = DeviceBuffer::from_slice(&warm0s).expect("d_warm0s");
         let n_tmp = cols * rows;
-        let d_tmp: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_tmp");
+        let d_tmp: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_tmp");
         let d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(n_tmp) }.expect("d_out_tm");
 
-        
         let func = cuda
             .module
             .get_function("cora_wave_multi_series_one_param_time_major_f32")
@@ -1044,7 +1096,6 @@ pub mod benches {
         };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
 
-        
         let func_wma = cuda
             .module
             .get_function("cora_wave_ms1p_wma_time_major_f32")

@@ -1,21 +1,10 @@
-//! CUDA scaffolding for the Fractal Adaptive Moving Average (FRAMA).
-//!
-//! Aligned with the ALMA integration:
-//! - Policy-based kernel selection with introspection (record last choice).
-//! - PTX JIT with DetermineTargetFromContext and stable O2 fallback.
-//! - VRAM-first checks and simple grid chunking to respect launch limits.
-//! - Warmup/NaN handling and semantics match the scalar reference.
-//!
-//! Kernels expected (recurrence/time-marching; one thread per combo/series):
-//! - "frama_batch_f32"                   
-//! - "frama_many_series_one_param_f32"   
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::frama::{FramaBatchRange, FramaParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{
     mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
@@ -25,28 +14,25 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
-use thiserror::Error;
-use cust::error::CudaError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use thiserror::Error;
 
 const FRAMA_MAX_WINDOW: usize = 1024;
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
     Auto,
-    
+
     Plain { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    
+
     OneD { block_x: u32 },
-    
+
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -64,8 +50,6 @@ impl Default for CudaFramaPolicy {
     }
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -81,7 +65,11 @@ pub enum CudaFramaError {
     #[error("CUDA error: {0}")]
     Cuda(#[from] CudaError),
     #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid input: {0}")]
@@ -89,7 +77,14 @@ pub enum CudaFramaError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Launch configuration too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buf on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Arithmetic overflow while computing {context}")]
@@ -102,7 +97,11 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
     if step == 0 || start == end {
         return vec![start];
     }
-    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
     let mut v = Vec::new();
     let mut x = lo;
     loop {
@@ -112,7 +111,9 @@ fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
             _ => break,
         }
     }
-    if start > end { v.reverse(); }
+    if start > end {
+        v.reverse();
+    }
     v
 }
 
@@ -171,7 +172,7 @@ impl CudaFrama {
         let context = Context::new(device)?;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/frama_kernel.ptx"));
-        // Keep original O4 perf default, but fall back progressively for driver/toolkit quirks.
+
         let module = Module::from_ptx(
             ptx,
             &[
@@ -227,10 +228,14 @@ impl CudaFrama {
     }
 
     #[inline]
-    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    pub fn ctx(&self) -> Arc<Context> {
+        Arc::clone(&self.ctx)
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -272,7 +277,6 @@ impl CudaFrama {
         }
     }
 
-    // ---------- VRAM helpers ----------
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -285,7 +289,10 @@ impl CudaFrama {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaFramaError> {
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaFramaError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -293,7 +300,11 @@ impl CudaFrama {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaFramaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaFramaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -394,12 +405,12 @@ impl CudaFrama {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaFramaError> {
-        let func = self
-            .module
-            .get_function("frama_batch_f32")
-            .map_err(|_| CudaFramaError::MissingKernelSymbol { name: "frama_batch_f32" })?;
+        let func = self.module.get_function("frama_batch_f32").map_err(|_| {
+            CudaFramaError::MissingKernelSymbol {
+                name: "frama_batch_f32",
+            }
+        })?;
 
-        // Auto policy picks occupancy-suggested block size; env override stays.
         let auto_block_x: u32 = match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
             Ok((_min_grid, suggested_block)) => suggested_block,
             Err(_) => 256,
@@ -412,16 +423,14 @@ impl CudaFrama {
                 .unwrap_or(auto_block_x),
         };
 
-        // Introspection
         unsafe {
             let this = self as *const _ as *mut CudaFrama;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Compute grid size; no artificial 65,535 cap for x-dimension.
         let total_blocks_u64 = ((n_combos as u64) + (block_x as u64) - 1) / (block_x as u64);
-        let max_grid_x = 2_147_483_647u64; // 2^31 - 1 per CUDA spec
+        let max_grid_x = 2_147_483_647u64;
 
         if total_blocks_u64 <= max_grid_x {
             let grid: GridSize = ((total_blocks_u64 as u32).max(1), 1, 1).into();
@@ -455,7 +464,6 @@ impl CudaFrama {
                 self.stream.launch(&func, grid, block, 0, args)?;
             }
         } else {
-            // Extremely rare: chunk only if grid.x would overflow the limit.
             let max_blocks_per_launch = max_grid_x as usize;
             let mut start = 0usize;
             while start < n_combos {
@@ -509,23 +517,31 @@ impl CudaFrama {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaFramaError> {
-        // VRAM estimate (inputs + params + outputs) + headroom
         let prices_bytes = len
             .checked_mul(3)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "prices bytes" })?;
-        let params_bytes = combos.len()
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "prices bytes",
+            })?;
+        let params_bytes = combos
+            .len()
             .checked_mul(3)
             .and_then(|x| x.checked_mul(std::mem::size_of::<i32>()))
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "params bytes" })?;
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "params bytes",
+            })?;
         let out_bytes = len
             .checked_mul(combos.len())
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "output bytes" })?;
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "output bytes",
+            })?;
         let required = prices_bytes
             .checked_add(params_bytes)
             .and_then(|x| x.checked_add(out_bytes))
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "total bytes" })?;
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "total bytes",
+            })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
@@ -575,7 +591,6 @@ impl CudaFrama {
         Ok((dev, combos))
     }
 
-    // Device-resident fast path (one series × many params): reuse device price buffers.
     pub fn frama_batch_dev_from_device(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -646,7 +661,6 @@ impl CudaFrama {
         Ok((dev.rows, dev.cols, combos))
     }
 
-    // Optional pinned/async fast path using the same stream; still synchronizes before return.
     pub fn frama_batch_into_host_f32_pinned(
         &self,
         high_locked: &LockedBuffer<f32>,
@@ -670,7 +684,6 @@ impl CudaFrama {
             )));
         }
 
-        // Device inputs
         let mut d_high = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
         let mut d_low = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
         let mut d_close = unsafe { DeviceBuffer::<f32>::uninitialized(len) }?;
@@ -819,22 +832,23 @@ impl CudaFrama {
         let func = self
             .module
             .get_function("frama_many_series_one_param_f32")
-            .map_err(|_| CudaFramaError::MissingKernelSymbol { name: "frama_many_series_one_param_f32" })?;
+            .map_err(|_| CudaFramaError::MissingKernelSymbol {
+                name: "frama_many_series_one_param_f32",
+            })?;
 
-        // Auto policy picks occupancy-suggested block size; env override stays.
         let auto_block_x: u32 = match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
             Ok((_min_grid, suggested_block)) => suggested_block,
             Err(_) => 128,
         };
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
-            ManySeriesKernelPolicy::Tiled2D { tx, .. } => tx, // fall back to OneD geometry
+            ManySeriesKernelPolicy::Tiled2D { tx, .. } => tx,
             ManySeriesKernelPolicy::Auto => std::env::var("FRAMA_MS1P_BLOCK_X")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(auto_block_x),
         };
-        // Introspection
+
         unsafe {
             let this = self as *const _ as *mut CudaFrama;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -842,9 +856,16 @@ impl CudaFrama {
         self.maybe_log_many_debug();
 
         let total_blocks_u64 = ((num_series as u64) + (block_x as u64) - 1) / (block_x as u64);
-        let max_grid_x = 2_147_483_647u64; // 2^31 - 1
+        let max_grid_x = 2_147_483_647u64;
         if total_blocks_u64 > max_grid_x {
-            return Err(CudaFramaError::LaunchConfigTooLarge { gx: max_grid_x as u32, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaFramaError::LaunchConfigTooLarge {
+                gx: max_grid_x as u32,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid: GridSize = ((total_blocks_u64 as u32).max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -877,7 +898,6 @@ impl CudaFrama {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        // Ensure completion for consistent timing in benches/tests
         self.stream.synchronize().map_err(Into::into)
     }
 
@@ -893,24 +913,33 @@ impl CudaFrama {
         sc: i32,
         fc: i32,
     ) -> Result<DeviceArrayF32, CudaFramaError> {
-        // VRAM estimate
         let elems = cols
             .checked_mul(rows)
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "cols*rows" })?;
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "cols*rows",
+            })?;
         let prices_bytes = elems
             .checked_mul(3)
             .and_then(|x| x.checked_mul(std::mem::size_of::<f32>()))
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "prices bytes" })?;
-        let out_bytes = elems
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "output bytes" })?;
-        let first_valids_bytes = cols
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "first_valids bytes" })?;
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "prices bytes",
+            })?;
+        let out_bytes = elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaFramaError::ArithmeticOverflow {
+                context: "output bytes",
+            },
+        )?;
+        let first_valids_bytes = cols.checked_mul(std::mem::size_of::<i32>()).ok_or(
+            CudaFramaError::ArithmeticOverflow {
+                context: "first_valids bytes",
+            },
+        )?;
         let required = prices_bytes
             .checked_add(out_bytes)
             .and_then(|x| x.checked_add(first_valids_bytes))
-            .ok_or(CudaFramaError::ArithmeticOverflow { context: "total bytes" })?;
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "total bytes",
+            })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
@@ -955,7 +984,6 @@ impl CudaFrama {
         )
     }
 
-    // Device-resident fast path: prices and first_valids already in VRAM; avoid host copies.
     pub fn frama_many_series_one_param_time_major_dev_from_device(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -1027,8 +1055,6 @@ impl CudaFrama {
     }
 }
 
-// ---------- Bench profiles ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -1040,7 +1066,7 @@ pub mod benches {
     const MANY_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let in_bytes = ONE_SERIES_LEN * 3 * std::mem::size_of::<f32>(); // high/low/close
+        let in_bytes = ONE_SERIES_LEN * 3 * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
@@ -1128,9 +1154,13 @@ pub mod benches {
             fc: (1, 1, 0),
         };
         let (combos, first_valid, series_len) =
-            CudaFrama::prepare_batch_inputs(&high, &low, &close, &sweep).expect("frama prepare batch");
+            CudaFrama::prepare_batch_inputs(&high, &low, &close, &sweep)
+                .expect("frama prepare batch");
         let n_combos = combos.len();
-        let windows_i32: Vec<i32> = combos.iter().map(|p| p.window.unwrap_or(0) as i32).collect();
+        let windows_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.window.unwrap_or(0) as i32)
+            .collect();
         let scs_i32: Vec<i32> = combos.iter().map(|p| p.sc.unwrap_or(0) as i32).collect();
         let fcs_i32: Vec<i32> = combos.iter().map(|p| p.fc.unwrap_or(0) as i32).collect();
 
@@ -1190,7 +1220,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("frama many-series kernel");
-            self.cuda.stream.synchronize().expect("frama many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("frama many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1204,9 +1237,10 @@ pub mod benches {
             sc: Some(300),
             fc: Some(1),
         };
-        let (first_valids, _even, window, sc, fc) =
-            CudaFrama::prepare_many_series_inputs(&high_tm, &low_tm, &close_tm, cols, rows, &params)
-                .expect("frama prepare many");
+        let (first_valids, _even, window, sc, fc) = CudaFrama::prepare_many_series_inputs(
+            &high_tm, &low_tm, &close_tm, cols, rows, &params,
+        )
+        .expect("frama prepare many");
 
         let d_high_tm = DeviceBuffer::from_slice(&high_tm).expect("d_high_tm");
         let d_low_tm = DeviceBuffer::from_slice(&low_tm).expect("d_low_tm");

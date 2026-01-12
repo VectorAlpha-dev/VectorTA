@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::pfe::{
     pfe_batch_with_kernel, pfe_with_kernel, PfeBatchRange, PfeData, PfeInput, PfeParams,
 };
@@ -45,10 +43,8 @@ fn pfe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         smoothing: (3, 9, 2),
     };
 
-    
     let cpu = pfe_batch_with_kernel(&price, &sweep, Kernel::ScalarBatch)?;
 
-    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaPfe::new(0).expect("CudaPfe::new");
     let dev = cuda
@@ -60,12 +56,12 @@ fn pfe_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut got = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut got)?;
 
-    let tol = 5e-2; 
+    let tol = 5e-2;
     for idx in 0..got.len() {
         if !approx_eq(cpu.values[idx], got[idx] as f64, tol) {
             if std::env::var("PFE_DEBUG").ok().as_deref() == Some("1") {
                 eprintln!("idx={} cpu={} gpu={}", idx, cpu.values[idx], got[idx]);
-                
+
                 let row0 = 0usize;
                 let cols = cpu.cols;
                 for k in 0..6 {
@@ -94,8 +90,8 @@ fn pfe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut tm = vec![0.0f64; cols * rows];
     for s in 0..cols {
         for t in 0..rows {
@@ -106,7 +102,6 @@ fn pfe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     let period = 10usize;
     let smoothing = 5usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -127,7 +122,6 @@ fn pfe_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let tm_f32: Vec<f32> = tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaPfe::new(0).expect("CudaPfe::new");
     let dev = cuda

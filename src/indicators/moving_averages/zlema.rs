@@ -1,21 +1,5 @@
-//! # Zero Lag Exponential Moving Average (ZLEMA)
-//!
-//! ZLEMA is a moving average designed to reduce lag by de-lagging the input before EMA calculation.
-//! Supports kernel (SIMD) selection and batch/grid computation with streaming support.
-//!
-//! ## Parameters
-//! - **period**: Lookback window (>= 1, defaults to 14).
-//!
-//! ## Returns
-//! - **`Ok(ZlemaOutput)`** on success, containing a `Vec<f64>`.
-//! - **`Err(ZlemaError)`** otherwise.
-//!
-//! ## Developer Status
-//! - SIMD (AVX2/AVX512): Implemented but disabled by default — EMA is sequential; de-lag vectorization yields <5% on typical sizes.
-//! - Scalar: optimized two-phase loop with unrolled core and unchecked indexing; no change to numerical behavior.
-//! - Streaming: O(1), ring = lag+1 with absolute-index warmup/de‑lag gating; no FMA to match scalar/batch.
-//! - Batch rows: no shared precompute to exploit; row kernels delegate to single-series variants.
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::{alma_wrapper::DeviceArrayF32, CudaZlema};
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -24,8 +8,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::{alma_wrapper::DeviceArrayF32, CudaZlema};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
@@ -36,17 +18,16 @@ use pyo3::types::PyDictMethods;
 use pyo3::{pyclass, pyfunction, pymethods, Bound, PyResult, Python};
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::JsValue;
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
@@ -54,7 +35,11 @@ use cust::context::Context;
 use std::sync::Arc;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "ZlemaDeviceArrayF32", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "ZlemaDeviceArrayF32",
+    unsendable
+)]
 pub struct DeviceArrayF32Py {
     pub(crate) inner: DeviceArrayF32,
     pub(crate) _ctx: Arc<Context>,
@@ -66,7 +51,10 @@ pub struct DeviceArrayF32Py {
 #[pymethods]
 impl DeviceArrayF32Py {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
@@ -78,7 +66,7 @@ impl DeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Kernels are launched on a non-default stream and not synchronized here; include stream per CAI v3.
+
         if self.stream != 0 {
             d.set_item("stream", self.stream)?;
         }
@@ -86,7 +74,9 @@ impl DeviceArrayF32Py {
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -99,7 +89,6 @@ impl DeviceArrayF32Py {
     ) -> PyResult<pyo3::PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -119,7 +108,6 @@ impl DeviceArrayF32Py {
             }
         }
 
-        // If a consumer stream pointer (>2) is provided, insert a dependency via event
         #[cfg(feature = "cuda")]
         if let Some(stream_obj) = stream.as_ref() {
             if let Ok(s) = stream_obj.extract::<usize>(py) {
@@ -138,12 +126,15 @@ impl DeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -181,7 +172,10 @@ pub struct ZlemaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ZlemaParams {
     pub period: Option<usize>,
 }
@@ -294,7 +288,11 @@ pub enum ZlemaError {
     #[error("zlema: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("zlema: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("zlema: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -345,9 +343,8 @@ pub fn zlema_with_kernel(input: &ZlemaInput, kernel: Kernel) -> Result<ZlemaOutp
 
     unsafe {
         match (kernel, chosen) {
-            // Keep Auto on scalar by policy
             (Kernel::Auto, _) => zlema_scalar(data, period, first, &mut out),
-            // Route all explicit kernels to scalar since it’s faster here
+
             (_, Kernel::Scalar | Kernel::ScalarBatch) => {
                 zlema_scalar(data, period, first, &mut out)
             }
@@ -372,19 +369,13 @@ pub fn zlema_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) 
 
     let warm = first + period - 1;
 
-    // Initialize EMA with first valid value
     let mut last_ema = data[first];
 
-    // Process all values starting from first
     for i in first..len {
         if i > first {
-            // For de-lagging, we need to ensure we're not accessing NaN values
-            
             let val = if i < first + lag {
-                
                 data[i]
             } else {
-                
                 2.0 * data[i] - data[i - lag]
             };
             last_ema = alpha * val + (1.0 - alpha) * last_ema;
@@ -412,7 +403,6 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         unsafe { *out.get_unchecked_mut(first) = last_ema };
     }
 
-    
     let mut i = first + 1;
     let phase_a_end = if lag > 0 {
         core::cmp::min(len, first + lag)
@@ -430,7 +420,6 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
         }
     }
 
-    
     let start_b = if lag > 0 {
         first + lag
     } else {
@@ -454,7 +443,7 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             {
                 let j = i;
                 let v = *tmp.get_unchecked(0);
-                
+
                 last_ema = (v - last_ema).mul_add(alpha, last_ema);
                 if j >= warm {
                     *out.get_unchecked_mut(j) = last_ema;
@@ -504,7 +493,6 @@ pub fn zlema_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub fn zlema_avx512(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     zlema_avx2(data, period, first, out)
 }
 
@@ -537,16 +525,11 @@ pub fn zlema_row_scalar(
 
     let mut last_ema = data[first];
 
-    
     for i in first..len {
         if i > first {
-            
-            
             let val = if i < first + lag {
-                
                 data[i]
             } else {
-                
                 2.0 * data[i] - data[i - lag]
             };
             last_ema = alpha * val + (1.0 - alpha) * last_ema;
@@ -615,19 +598,17 @@ pub fn zlema_row_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct ZlemaStream {
-    
     period: usize,
     lag: usize,
     alpha: f64,
-    decay: f64, 
+    decay: f64,
 
-    
-    last_ema: f64, 
+    last_ema: f64,
     ring: Vec<f64>,
-    head: usize,              
-    idx: usize,               
-    first_idx: Option<usize>, 
-    warm_idx: Option<usize>,  
+    head: usize,
+    idx: usize,
+    first_idx: Option<usize>,
+    warm_idx: Option<usize>,
 }
 
 impl ZlemaStream {
@@ -643,8 +624,6 @@ impl ZlemaStream {
         let lag = (period - 1) / 2;
         let alpha = 2.0 / (period as f64 + 1.0);
 
-        
-        
         let ring_len = (lag + 1).max(1);
         Ok(Self {
             period,
@@ -660,58 +639,44 @@ impl ZlemaStream {
         })
     }
 
-    /// O(1) update. Returns `Some(zlema)` once warmed; `None` before warmup.
-    /// Matches batch behavior exactly:
-    ///   - de-lag input starts at absolute index (first + lag)
-    ///   - first EMA sample is the first finite value (no recurrence step)
-    ///   - any NaN taints EMA forever (as in batch)
     #[inline(always)]
     pub fn update(&mut self, x: f64) -> Option<f64> {
-        
         let pos = self.head;
         self.ring[pos] = x;
-        
+
         self.head += 1;
         if self.head == self.ring.len() {
             self.head = 0;
         }
 
-        
         let i = self.idx;
-        
+
         self.idx = self.idx.wrapping_add(1);
 
-        
         if x.is_nan() {
-            
             self.last_ema = f64::NAN;
-            
+
             return match self.warm_idx {
                 Some(w) if i >= w => Some(self.last_ema),
                 _ => None,
             };
         }
 
-        
         if self.first_idx.is_none() {
             self.first_idx = Some(i);
-            
+
             let w = i + (self.period - 1);
             self.warm_idx = Some(w);
-            
+
             self.last_ema = x;
 
             return if i >= w { Some(self.last_ema) } else { None };
         }
 
-        
         let first = self.first_idx.unwrap();
         let val = if self.lag == 0 || i < first + self.lag {
             x
         } else {
-            
-            
-            
             let lag_pos = if pos >= self.lag {
                 pos - self.lag
             } else {
@@ -721,11 +686,8 @@ impl ZlemaStream {
             2.0 * x - x_lag
         };
 
-        
-        
         self.last_ema = self.alpha * val + self.decay * self.last_ema;
 
-        
         match self.warm_idx {
             Some(w) if i >= w => Some(self.last_ema),
             _ => None,
@@ -792,19 +754,15 @@ pub fn zlema_batch_with_kernel(
     sweep: &ZlemaBatchRange,
     k: Kernel,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
-    
     let kernel = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::Scalar => Kernel::ScalarBatch,
         Kernel::Avx2 => Kernel::Avx2Batch,
         Kernel::Avx512 => Kernel::Avx512Batch,
         other if other.is_batch() => other,
-        _ => Kernel::ScalarBatch, 
+        _ => Kernel::ScalarBatch,
     };
 
-    
-    
-    
     let kernel = match kernel {
         Kernel::Avx512Batch | Kernel::Avx2Batch => Kernel::ScalarBatch,
         other => other,
@@ -846,14 +804,17 @@ fn expand_grid(r: &ZlemaBatchRange) -> Vec<ZlemaParams> {
                 vals.push(v);
             }
         } else {
-            
             let mut v = start;
             loop {
                 vals.push(v);
-                if v <= end { break; }
+                if v <= end {
+                    break;
+                }
                 match v.checked_sub(step) {
                     Some(nx) => {
-                        if nx == v { break; }
+                        if nx == v {
+                            break;
+                        }
                         v = nx;
                     }
                     None => break,
@@ -895,7 +856,6 @@ fn zlema_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<ZlemaBatchOutput, ZlemaError> {
-    
     let simd = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -907,10 +867,13 @@ fn zlema_batch_inner(
         other => return Err(ZlemaError::InvalidKernelForBatch(other)),
     };
 
-    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(ZlemaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     if data.is_empty() {
@@ -930,12 +893,13 @@ fn zlema_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    
-    let _cap = rows
-        .checked_mul(cols)
-        .ok_or(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
 
-    
+    let _cap = rows.checked_mul(cols).ok_or(ZlemaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
+
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
@@ -943,12 +907,10 @@ fn zlema_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = combos[row].period.unwrap();
         match simd {
@@ -976,7 +938,6 @@ fn zlema_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -998,7 +959,6 @@ pub fn expand_grid_zlema(r: &ZlemaBatchRange) -> Vec<ZlemaParams> {
     expand_grid(r)
 }
 
-/// Direct buffer write version for Python bindings
 #[inline(always)]
 pub fn zlema_batch_inner_into(
     data: &[f64],
@@ -1007,7 +967,6 @@ pub fn zlema_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<ZlemaParams>, ZlemaError> {
-    
     let simd = match kern {
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -1021,7 +980,11 @@ pub fn zlema_batch_inner_into(
 
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(ZlemaError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
     if data.is_empty() {
         return Err(ZlemaError::EmptyInputData);
@@ -1041,14 +1004,18 @@ pub fn zlema_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(ZlemaError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let total = rows.checked_mul(cols).ok_or(ZlemaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != total {
-        return Err(ZlemaError::OutputLengthMismatch { expected: total, got: out.len() });
+        return Err(ZlemaError::OutputLengthMismatch {
+            expected: total,
+            got: out.len(),
+        });
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1058,7 +1025,6 @@ pub fn zlema_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| {
         let p = combos[row].period.unwrap();
         let dst = unsafe {
@@ -1192,9 +1158,7 @@ mod tests {
         let second_input = ZlemaInput::from_slice(&first_result.values, second_params);
         let second_result = zlema_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.values.len(), first_result.values.len());
-        
-        
-        
+
         for (idx, &val) in second_result.values.iter().enumerate().skip(34) {
             assert!(val.is_finite(), "NaN found at index {}", idx);
         }
@@ -1265,7 +1229,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_zlema_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1273,8 +1236,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
-        
         let test_periods = vec![1, 2, 3, 5, 7, 10, 14, 20, 21, 30, 50, 100, 200];
 
         for period in test_periods {
@@ -1283,23 +1244,19 @@ mod tests {
             };
             let input = ZlemaInput::from_candles(&candles, "close", params);
 
-            
             if period > candles.close.len() {
                 continue;
             }
 
             let output = zlema_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1307,7 +1264,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1315,7 +1271,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1328,7 +1283,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_zlema_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1343,8 +1297,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (1usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1366,16 +1318,11 @@ mod tests {
                 let ZlemaOutput { values: ref_out } =
                     zlema_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
-                
-                
                 let first_non_nan = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first_non_nan + period - 1;
 
-                
                 for i in 0..first_non_nan.min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1384,7 +1331,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup..data.len() {
                     prop_assert!(
                         !out[i].is_nan(),
@@ -1393,21 +1339,9 @@ mod tests {
                     );
                 }
 
-                
-                
-                
-
-                
-                
-                
                 let lag = (period - 1) / 2;
                 let alpha = 2.0 / (period as f64 + 1.0);
 
-                
-                
-                
-                
-                
                 let mut min_delag = f64::INFINITY;
                 let mut max_delag = f64::NEG_INFINITY;
                 for i in first_non_nan..data.len() {
@@ -1432,9 +1366,6 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if period == 1 && data.len() > 0 {
                     for i in 1..data.len() {
                         let expected = data[i];
@@ -1449,9 +1380,7 @@ mod tests {
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.len() > warmup {
-                    
                     let constant_val = data[first_non_nan];
                     for i in (warmup + period * 2)..data.len() {
                         prop_assert!(
@@ -1464,13 +1393,10 @@ mod tests {
                     }
                 }
 
-                
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -1482,12 +1408,10 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
 
-                    
                     let max_ulp = if matches!(kernel, Kernel::Avx512) {
                         10
                     } else {
@@ -1563,7 +1487,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1571,20 +1494,17 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
-        
         let batch_configs = vec![
-            (1, 10, 1),   
-            (3, 21, 3),   
-            (2, 20, 2),   
-            (10, 50, 10), 
-            (7, 7, 1),    
-            (8, 8, 1),    
-            (5, 100, 5),  
+            (1, 10, 1),
+            (3, 21, 3),
+            (2, 20, 2),
+            (10, 50, 10),
+            (7, 7, 1),
+            (8, 8, 1),
+            (5, 100, 5),
         ];
 
         for (start, end, step) in batch_configs {
-            
             if end > c.close.len() {
                 continue;
             }
@@ -1594,9 +1514,7 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1610,7 +1528,6 @@ mod tests {
                     0
                 };
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1618,7 +1535,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1626,7 +1542,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1639,7 +1554,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1669,7 +1583,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-/// Zero-copy version that writes directly into a provided buffer
 #[inline]
 pub fn zlema_compute_into(
     input: &ZlemaInput,
@@ -1678,11 +1591,12 @@ pub fn zlema_compute_into(
 ) -> Result<(), ZlemaError> {
     let (data, first, period, warm) = zlema_validate(input)?;
     if out.len() != data.len() {
-        return Err(ZlemaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
+        return Err(ZlemaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
     }
 
-    
-    
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warm] {
         *v = qnan;
@@ -1693,7 +1607,6 @@ pub fn zlema_compute_into(
         other => other,
     };
 
-    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1714,7 +1627,6 @@ pub fn zlema_compute_into(
     Ok(())
 }
 
-/// WASM-optimized helper function that writes directly to output slice - no allocations
 #[inline]
 pub fn zlema_into_slice(
     dst: &mut [f64],
@@ -1723,9 +1635,12 @@ pub fn zlema_into_slice(
 ) -> Result<(), ZlemaError> {
     let (data, first, period, warm) = zlema_validate(input)?;
     if dst.len() != data.len() {
-        return Err(ZlemaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(ZlemaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
-    
+
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut dst[..warm] {
         *v = qnan;
@@ -1748,28 +1663,21 @@ pub fn zlema_into_slice(
     Ok(())
 }
 
-/// Compute ZLEMA directly into the provided output buffer without any allocations.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
-/// - Requires `out.len() == input.len()`; returns `ZlemaError::InvalidPeriod` on mismatch.
-/// - Uses the same kernel-selection semantics as `zlema()` (Auto → Scalar for parity).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn zlema_into(input: &ZlemaInput, out: &mut [f64]) -> Result<(), ZlemaError> {
-    
     zlema_compute_into(input, Kernel::Scalar, out)
 }
 
 #[cfg(test)]
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 fn eq_or_both_nan(a: f64, b: f64) -> bool {
     (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
 }
 
 #[cfg(test)]
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[test]
 fn test_zlema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-    
     let n = 256usize;
     let mut data = Vec::with_capacity(n);
     for i in 0..n {
@@ -1779,10 +1687,8 @@ fn test_zlema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
 
     let input = ZlemaInput::from_slice(&data, ZlemaParams::default());
 
-    
     let baseline = zlema(&input)?.values;
 
-    
     let mut out = vec![0.0f64; n];
     zlema_into(&input, &mut out)?;
 
@@ -1803,29 +1709,7 @@ fn test_zlema_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(feature = "python")]
 #[pyfunction(name = "zlema")]
 #[pyo3(signature = (data, period, kernel=None))]
-/// Compute the Zero Lag Exponential Moving Average (ZLEMA) of the input data.
-///
-/// ZLEMA reduces lag by de-lagging the input before EMA calculation.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     Number of data points in the moving average window.
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of ZLEMA values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period is 0 or exceeds data length).
+
 pub fn zlema_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1842,12 +1726,10 @@ pub fn zlema_py<'py>(
     };
     let zlema_in = ZlemaInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| zlema_with_kernel(&zlema_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1870,7 +1752,6 @@ impl ZlemaStreamPy {
         Ok(ZlemaStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated ZLEMA value.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -1879,22 +1760,7 @@ impl ZlemaStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "zlema_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
-/// Compute ZLEMA for multiple period values in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'periods' arrays.
+
 pub fn zlema_batch_py<'py>(
     py: Python<'py>,
     data: numpy::PyReadonlyArray1<'py, f64>,
@@ -1910,21 +1776,17 @@ pub fn zlema_batch_py<'py>(
         period: period_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| zlema_batch_inner_into(slice_in, &sweep, kern, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
@@ -1963,18 +1825,34 @@ pub fn zlema_cuda_batch_dev_py<'py>(
     };
 
     let (inner, combos, ctx_arc, dev_id, stream_handle) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
-            let cuda = CudaZlema::new(device_id)?;
-            let (dev, combos) = cuda.zlema_batch_dev(slice_in, &sweep)?;
-            Ok((dev, combos, cuda.context_arc(), cuda.device_id(), cuda.stream_handle()))
-        })
+        .allow_threads(
+            || -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
+                let cuda = CudaZlema::new(device_id)?;
+                let (dev, combos) = cuda.zlema_batch_dev(slice_in, &sweep)?;
+                Ok((
+                    dev,
+                    combos,
+                    cuda.context_arc(),
+                    cuda.device_id(),
+                    cuda.stream_handle(),
+                ))
+            },
+        )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     let dict = PyDict::new(py);
     let periods: Vec<u64> = combos.iter().map(|c| c.period.unwrap() as u64).collect();
     dict.set_item("periods", periods.into_pyarray(py))?;
 
-    Ok((DeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle }, dict))
+    Ok((
+        DeviceArrayF32Py {
+            inner,
+            _ctx: ctx_arc,
+            device_id: dev_id,
+            stream: stream_handle,
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1998,18 +1876,33 @@ pub fn zlema_cuda_many_series_one_param_dev_py(
     let cols = data_tm_f32.shape()[1];
 
     let (inner, ctx_arc, dev_id, stream_handle) = py
-        .allow_threads(|| -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
-            let cuda = CudaZlema::new(device_id)?;
-            let params = ZlemaParams { period: Some(period) };
-            let dev = cuda.zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
-            Ok((dev, cuda.context_arc(), cuda.device_id(), cuda.stream_handle()))
-        })
+        .allow_threads(
+            || -> Result<_, crate::cuda::moving_averages::zlema_wrapper::CudaZlemaError> {
+                let cuda = CudaZlema::new(device_id)?;
+                let params = ZlemaParams {
+                    period: Some(period),
+                };
+                let dev =
+                    cuda.zlema_many_series_one_param_time_major_dev(flat_in, cols, rows, &params)?;
+                Ok((
+                    dev,
+                    cuda.context_arc(),
+                    cuda.device_id(),
+                    cuda.stream_handle(),
+                ))
+            },
+        )
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py { inner, _ctx: ctx_arc, device_id: dev_id, stream: stream_handle })
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: ctx_arc,
+        device_id: dev_id,
+        stream: stream_handle,
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = ZlemaParams {
@@ -2025,7 +1918,7 @@ pub fn zlema_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_batch_js(
     data: &[f64],
@@ -2037,13 +1930,12 @@ pub fn zlema_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    
     zlema_batch_inner(data, &sweep, Kernel::Auto, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_batch_metadata_js(
     period_start: usize,
@@ -2064,13 +1956,13 @@ pub fn zlema_batch_metadata_js(
     Ok(metadata)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ZlemaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ZlemaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2079,7 +1971,7 @@ pub struct ZlemaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = zlema_batch)]
 pub fn zlema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: ZlemaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2103,7 +1995,7 @@ pub fn zlema_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, 
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2112,7 +2004,7 @@ pub fn zlema_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2122,7 +2014,7 @@ pub fn zlema_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_into(
     in_ptr: *const f64,
@@ -2147,7 +2039,6 @@ pub fn zlema_into(
         let input = ZlemaInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             zlema_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2162,7 +2053,7 @@ pub fn zlema_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn zlema_batch_into(
     in_ptr: *const f64,

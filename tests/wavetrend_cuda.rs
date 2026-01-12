@@ -1,5 +1,3 @@
-
-
 use vector_ta::utilities::enums::Kernel;
 
 #[cfg(feature = "cuda")]
@@ -70,7 +68,6 @@ fn wavetrend_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> 
     dev.wt2.buf.copy_to(&mut wt2_g)?;
     dev.wt_diff.buf.copy_to(&mut diff_g)?;
 
-    
     let mut n1 = 0usize;
     let mut sse1 = 0.0f64;
     let mut n2 = 0usize;
@@ -118,12 +115,11 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         wavetrend_with_kernel, WavetrendData, WavetrendInput, WavetrendParams,
     };
 
-    let cols = 16usize; 
-    let rows = 4096usize; 
+    let cols = 16usize;
+    let rows = 4096usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (8 + s)..rows {
-            
             let x = t as f64 + (s as f64) * 0.13;
             tm[t * cols + s] = (x * 0.0023).cos() + 0.00037 * x;
         }
@@ -135,7 +131,6 @@ fn wavetrend_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
         factor: Some(0.015),
     };
 
-    
     let mut wt1_cpu_tm = vec![f64::NAN; cols * rows];
     let mut wt2_cpu_tm = vec![f64::NAN; cols * rows];
     let mut diff_cpu_tm = vec![f64::NAN; cols * rows];

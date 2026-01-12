@@ -1,37 +1,3 @@
-//! # Modified God Mode (Comprehensive Version)
-//!
-//! Decision log:
-//! - Fused scalar kernel enabled; SIMD (AVX2/AVX512) stubs delegate to scalar for consistent performance across sizes.
-//! - CUDA FP32 kernels enabled for one-series × many-params and many-series × one-param; Python returns VRAM handles (CAI v3 + DLPack v1.x).
-//! - Row-specific batch SIMD not implemented: heavy EMA/RSI recurrences limit lane parallelism and shared precompute.
-//!
-//! A composite momentum oscillator combining multiple technical indicators.
-//! This version includes Builder pattern, Streaming support, Batch processing,
-//! and comprehensive testing infrastructure matching ALMA.rs patterns.
-//!
-//! ## Parameters
-//! - **n1**: Channel Length (default: 17)
-//! - **n2**: Average Length (default: 6)
-//! - **n3**: Short Length (default: 4)
-//! - **mode**: Calculation mode (default: tradition_mg)
-//! - **use_volume**: Whether to use volume data (default: false)
-//!
-//! ## Modes
-//! - **godmode**: avg(tci, csi, mf, willy)
-//! - **tradition**: avg(tci, mf, rsi)
-//! - **godmode_mg**: avg(tci, csi_mg, mf, willy, cbci, lrsi)
-//! - **tradition_mg**: avg(tci, mf, rsi, cbci, lrsi)
-//!
-//! ## Returns
-//! - **`Ok(ModGodModeOutput)`** on success, containing wavetrend, signal, and histogram vectors
-//! - **`Err(ModGodModeError)`** on failure
-//!
-//! ## Developer Notes
-//! - **AVX2**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
-//! - **AVX512**: No dedicated SIMD implementation - uses component indicators' SIMD kernels
-//! - **Streaming**: O(1) updates implemented; matches fused scalar outputs after warmup.
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix, init_matrix_prefixes)
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -41,9 +7,9 @@ use pyo3::exceptions::PyValueError;
 #[cfg(feature = "python")]
 use pyo3::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::cci::{cci_with_kernel, CciInput, CciParams};
@@ -67,9 +33,11 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-/// Calculation mode for the Modified God Mode indicator
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub enum ModGodModeMode {
     Godmode,
     Tradition,
@@ -82,8 +50,6 @@ impl Default for ModGodModeMode {
         Self::TraditionMg
     }
 }
-
-    
 
 impl std::str::FromStr for ModGodModeMode {
     type Err = String;
@@ -99,7 +65,6 @@ impl std::str::FromStr for ModGodModeMode {
     }
 }
 
-/// Input data for Modified God Mode indicator
 #[derive(Debug, Clone)]
 pub enum ModGodModeData<'a> {
     Candles {
@@ -113,18 +78,22 @@ pub enum ModGodModeData<'a> {
     },
 }
 
-/// Output from Modified God Mode indicator
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ModGodModeOutput {
     pub wavetrend: Vec<f64>,
     pub signal: Vec<f64>,
     pub histogram: Vec<f64>,
 }
 
-/// Parameters for Modified God Mode indicator
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ModGodModeParams {
     pub n1: Option<usize>,
     pub n2: Option<usize>,
@@ -140,12 +109,11 @@ impl Default for ModGodModeParams {
             n2: Some(6),
             n3: Some(4),
             mode: Some(ModGodModeMode::TraditionMg),
-            use_volume: Some(true), 
+            use_volume: Some(true),
         }
     }
 }
 
-/// Input wrapper for Modified God Mode indicator
 #[derive(Debug, Clone)]
 pub struct ModGodModeInput<'a> {
     pub data: ModGodModeData<'a>,
@@ -211,7 +179,6 @@ impl<'a> ModGodModeInput<'a> {
     }
 }
 
-/// Error type for Modified God Mode indicator
 #[derive(Debug, Error)]
 pub enum ModGodModeError {
     #[error("mod_god_mode: Input data slice is empty.")]
@@ -235,7 +202,11 @@ pub enum ModGodModeError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("mod_god_mode: invalid range expansion: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("mod_god_mode: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -247,11 +218,6 @@ pub enum ModGodModeError {
     CalculationError(String),
 }
 
-
-
-
-
-/// TCI Component - Trend Channel Index
 fn calculate_tci(
     close: &[f64],
     n1: usize,
@@ -300,7 +266,6 @@ fn calculate_tci(
     Ok(tci)
 }
 
-/// CSI Component - Composite Strength Index
 fn calculate_csi(
     close: &[f64],
     n1: usize,
@@ -313,7 +278,6 @@ fn calculate_csi(
     let rsi = rsi_with_kernel(&rsi_input, kernel)
         .map_err(|e| ModGodModeError::CalculationError(format!("CSI RSI: {}", e)))?;
 
-    
     let tsi_params = TsiParams {
         short_period: Some(n1),
         long_period: Some(n2),
@@ -332,7 +296,6 @@ fn calculate_csi(
     Ok(csi)
 }
 
-/// CSI_MG Component - Modified Composite Strength Index
 fn calculate_csi_mg(
     close: &[f64],
     n1: usize,
@@ -345,7 +308,6 @@ fn calculate_csi_mg(
     let rsi = rsi_with_kernel(&rsi_input, kernel)
         .map_err(|e| ModGodModeError::CalculationError(format!("CSI_MG RSI: {}", e)))?;
 
-    
     let mut pc_norm = vec![f64::NAN; close.len()];
     for i in 1..close.len() {
         let a = close[i - 1];
@@ -370,7 +332,6 @@ fn calculate_csi_mg(
     )
     .map_err(|e| ModGodModeError::CalculationError(format!("CSI_MG EMA num2: {}", e)))?;
 
-    
     let mut apc = vec![f64::NAN; close.len()];
     for i in 1..close.len() {
         let a = close[i - 1];
@@ -397,7 +358,6 @@ fn calculate_csi_mg(
         let den = e_den2.values[i];
         let num = e_num2.values[i];
         if !num.is_nan() && !den.is_nan() && den != 0.0 {
-            
             ttsi[i] = 50.0 * (num / den) + 50.0;
         }
     }
@@ -412,7 +372,6 @@ fn calculate_csi_mg(
     Ok(out)
 }
 
-/// MF Component - Money Flow
 fn calculate_mf(
     high: &[f64],
     low: &[f64],
@@ -445,7 +404,6 @@ fn calculate_mf(
     }
 }
 
-/// Willy Component - Pine version using close-only with n2
 fn calculate_willy_pine(close: &[f64], n2: usize) -> Vec<f64> {
     let len = close.len();
     let mut out = vec![f64::NAN; len];
@@ -485,7 +443,6 @@ fn calculate_willy_pine(close: &[f64], n2: usize) -> Vec<f64> {
     out
 }
 
-/// CBCI Component - Pine version = momentum(RSI,n2) + EMA(RSI,n3)
 fn calculate_cbci_pine(
     close: &[f64],
     n2: usize,
@@ -498,7 +455,6 @@ fn calculate_cbci_pine(
     )
     .map_err(|e| ModGodModeError::CalculationError(format!("CBCI RSI: {}", e)))?;
 
-    
     let len = close.len();
     let mut mom = vec![f64::NAN; len];
     for i in 0..len {
@@ -528,7 +484,6 @@ fn calculate_cbci_pine(
     Ok(out)
 }
 
-/// Laguerre RSI Component - Pine version with fixed alpha=0.7 (FE off)
 fn calculate_lrsi_pine(close: &[f64]) -> Vec<f64> {
     let len = close.len();
     let mut out = vec![f64::NAN; len];
@@ -565,7 +520,6 @@ fn calculate_lrsi_pine(close: &[f64]) -> Vec<f64> {
     out
 }
 
-/// Signal line - SMA(wt1, 6) to match Pine default
 fn smooth_signal_sma6(wt1: &[f64], kernel: Kernel) -> Result<Vec<f64>, ModGodModeError> {
     let sig = sma_with_kernel(
         &SmaInput::from_slice(wt1, SmaParams { period: Some(6) }),
@@ -575,7 +529,6 @@ fn smooth_signal_sma6(wt1: &[f64], kernel: Kernel) -> Result<Vec<f64>, ModGodMod
     Ok(sig.values)
 }
 
-/// Histogram compatible with Pine's plotted component
 fn histogram_component_pine(
     wt1: &[f64],
     wt2: &[f64],
@@ -599,27 +552,19 @@ fn histogram_component_pine(
     Ok(out.values)
 }
 
-// ============================================================================
-// MAIN CALCULATION FUNCTIONS
-// ============================================================================
-
-/// Calculate Modified God Mode indicator with automatic kernel detection
 pub fn mod_god_mode(input: &ModGodModeInput) -> Result<ModGodModeOutput, ModGodModeError> {
     mod_god_mode_with_kernel(input, Kernel::Auto)
 }
 
-/// Public convenience wrapper with automatic kernel detection
 #[inline]
 pub fn mod_god_mode_auto(input: &ModGodModeInput) -> Result<ModGodModeOutput, ModGodModeError> {
     mod_god_mode_with_kernel(input, Kernel::Auto)
 }
 
-/// Calculate Modified God Mode indicator with specified kernel
 pub fn mod_god_mode_with_kernel(
     input: &ModGodModeInput,
     kernel: Kernel,
 ) -> Result<ModGodModeOutput, ModGodModeError> {
-    // Extract data references to determine length and warmup
     let (high, low, close, volume) = match &input.data {
         ModGodModeData::Candles { candles } => {
             let vol = if input.get_use_volume() {
@@ -666,19 +611,15 @@ pub fn mod_god_mode_with_kernel(
     }
     let warm = first + need - 1;
 
-    // Pre-allocate all three outputs with NaN prefixes
     let mut wt = alloc_with_nan_prefix(len, warm);
     let mut sig = alloc_with_nan_prefix(len, warm);
     let mut hist = alloc_with_nan_prefix(len, warm);
 
-    // Resolve kernel
     let kern = match kernel {
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
-    // Check for classic kernel optimization with default parameters
-    // DISABLED: Still has accuracy issues even with proper warmup
     if false
         && kern == Kernel::Scalar
         && input.get_n1() == 17
@@ -686,7 +627,6 @@ pub fn mod_god_mode_with_kernel(
         && input.get_n3() == 4
         && input.get_mode() == ModGodModeMode::TraditionMg
     {
-        // Use optimized classic kernel for default parameters
         unsafe {
             mod_god_mode_scalar_classic_tradition_mg(
                 high,
@@ -711,7 +651,6 @@ pub fn mod_god_mode_with_kernel(
         });
     }
 
-    // Delegate all calculation to the zero-copy into_slices function
     mod_god_mode_into_slices(&mut wt, &mut sig, &mut hist, input, kern)?;
 
     Ok(ModGodModeOutput {
@@ -720,9 +659,6 @@ pub fn mod_god_mode_with_kernel(
         histogram: hist,
     })
 }
-
-// Note: Old implementation has been removed. mod_god_mode_with_kernel is now just a thin wrapper
-// that pre-allocates outputs and delegates to mod_god_mode_into_slices for zero-copy operation
 
 /* Old implementation removed for cleaner code
 fn mod_god_mode_with_kernel_old(input: &ModGodModeInput, kernel: Kernel) -> Result<ModGodModeOutput, ModGodModeError> {
@@ -941,7 +877,6 @@ fn mod_god_mode_with_kernel_old(input: &ModGodModeInput, kernel: Kernel) -> Resu
 }
 */
 
-/// In-place calculation for zero-alloc API parity with alma_into_slice
 #[inline]
 pub fn mod_god_mode_into_slices(
     dst_wavetrend: &mut [f64],
@@ -950,7 +885,6 @@ pub fn mod_god_mode_into_slices(
     input: &ModGodModeInput,
     kern: Kernel,
 ) -> Result<(), ModGodModeError> {
-    // Resolve data references
     let (high, low, close, volume) = match &input.data {
         ModGodModeData::Candles { candles } => {
             let vol = if input.get_use_volume() {
@@ -1026,8 +960,6 @@ pub fn mod_god_mode_into_slices(
         k => k,
     };
 
-    // Fast path: fused scalar kernel computes all components in a single pass
-    // Mirrors alma.rs style: zero-copy into provided destinations, caller handles NaN prefix.
     if actual == Kernel::Scalar {
         let warm = first + need - 1;
         unsafe {
@@ -1048,7 +980,7 @@ pub fn mod_god_mode_into_slices(
                 warm,
             )?;
         }
-        // Ensure prefix contract matches alma.rs behavior
+
         for v in &mut dst_wavetrend[..warm] {
             *v = f64::NAN;
         }
@@ -1062,7 +994,6 @@ pub fn mod_god_mode_into_slices(
         return Ok(());
     }
 
-    // AVX2/AVX512: vectorize pointwise histogram transform, keep recurrences scalar
     #[cfg(all(
         feature = "nightly-avx",
         target_arch = "x86_64",
@@ -1139,13 +1070,9 @@ pub fn mod_god_mode_into_slices(
         return Ok(());
     }
 
-    // Classic inline kernel retained below for reference; superseded by fused scalar above
-
-    // Calculate components
     let tci = calculate_tci(close, n1, n2, actual)?;
     let mf = calculate_mf(high, low, close, volume, n3, actual)?;
 
-    // Compute wavetrend directly into dst_wavetrend
     match input.get_mode() {
         ModGodModeMode::Godmode => {
             let csi = calculate_csi(close, n1, n2, n3, actual)?;
@@ -1279,8 +1206,6 @@ pub fn mod_god_mode_into_slices(
         }
     }
 
-    // Build signal using SMA6 directly into dst_signal (zero-copy)
-    // Check if we have enough non-NaN values in wavetrend for SMA(6)
     let wt_valid = dst_wavetrend[warm..].len();
     if wt_valid >= 6 {
         sma_into_slice(
@@ -1290,14 +1215,11 @@ pub fn mod_god_mode_into_slices(
         )
         .map_err(|e| ModGodModeError::CalculationError(format!("Signal SMA(6): {}", e)))?;
     } else {
-        // Not enough valid wavetrend data for signal - fill with NaNs
         dst_signal.fill(f64::NAN);
     }
 
-    // Build histogram using temporary scratch buffer and EMA into dst_hist (zero-copy)
     let len = dst_wavetrend.len();
 
-    // Check if we have enough valid signal data to compute histogram
     let sig_valid_start = dst_signal.iter().position(|x| !x.is_nan()).unwrap_or(len);
     let sig_valid = if sig_valid_start < len {
         len - sig_valid_start
@@ -1306,17 +1228,14 @@ pub fn mod_god_mode_into_slices(
     };
 
     if sig_valid >= n3 {
-        // We have enough data, proceed with histogram calculation
         let mut tmp_mu = make_uninit_matrix(1, len);
         init_matrix_prefixes(&mut tmp_mu, len, &[sig_valid_start]);
         let tmp = unsafe { core::slice::from_raw_parts_mut(tmp_mu.as_mut_ptr() as *mut f64, len) };
 
-        // Calculate (wt - sig)*2 + 50 into temporary buffer
         for i in sig_valid_start..len {
             tmp[i] = (dst_wavetrend[i] - dst_signal[i]) * 2.0 + 50.0;
         }
 
-        // Apply EMA(n3) directly into dst_hist
         ema_into_slice(
             dst_hist,
             &EmaInput::from_slice(tmp, EmaParams { period: Some(n3) }),
@@ -1324,11 +1243,9 @@ pub fn mod_god_mode_into_slices(
         )
         .map_err(|e| ModGodModeError::CalculationError(format!("Hist EMA: {}", e)))?;
     } else {
-        // Not enough valid data for histogram - fill with NaNs
         dst_hist.fill(f64::NAN);
     }
 
-    // Finalize warmup prefix with NaNs
     for v in &mut dst_wavetrend[..warm] {
         *v = f64::NAN;
     }
@@ -1342,16 +1259,7 @@ pub fn mod_god_mode_into_slices(
     Ok(())
 }
 
-// ============================================================================
-// PUBLIC ZERO-ALLOC API
-// ============================================================================
-
-/// Write Modified God Mode outputs directly into caller-provided buffers (no allocation).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - All output slice lengths must equal the input length.
-/// - Uses kernel auto-detection by default (Kernel::Auto).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn mod_god_mode_into(
     input: &ModGodModeInput,
@@ -1359,7 +1267,6 @@ pub fn mod_god_mode_into(
     out_signal: &mut [f64],
     out_histogram: &mut [f64],
 ) -> Result<(), ModGodModeError> {
-    // Determine input length and obtain close for warmup computation
     let (high, low, close, volume) = match &input.data {
         ModGodModeData::Candles { candles } => {
             let vol = if input.get_use_volume() {
@@ -1380,7 +1287,11 @@ pub fn mod_god_mode_into(
             close,
             volume,
         } => {
-            let vol = if input.get_use_volume() { *volume } else { None };
+            let vol = if input.get_use_volume() {
+                *volume
+            } else {
+                None
+            };
             (*high, *low, *close, vol)
         }
     };
@@ -1391,7 +1302,10 @@ pub fn mod_god_mode_into(
             .len()
             .min(out_signal.len())
             .min(out_histogram.len());
-        return Err(ModGodModeError::OutputLengthMismatch { expected: len, got: dst_len });
+        return Err(ModGodModeError::OutputLengthMismatch {
+            expected: len,
+            got: dst_len,
+        });
     }
 
     if len == 0 {
@@ -1407,15 +1321,22 @@ pub fn mod_god_mode_into(
     let n2 = input.get_n2();
     let n3 = input.get_n3();
     if n1 == 0 || n2 == 0 || n3 == 0 {
-        return Err(ModGodModeError::InvalidPeriod { n1, n2, n3, data_len: len });
+        return Err(ModGodModeError::InvalidPeriod {
+            n1,
+            n2,
+            n3,
+            data_len: len,
+        });
     }
 
     let need = n1.max(n2).max(n3);
     if len - first < need {
-        return Err(ModGodModeError::NotEnoughValidData { needed: need, valid: len - first });
+        return Err(ModGodModeError::NotEnoughValidData {
+            needed: need,
+            valid: len - first,
+        });
     }
 
-    // Prefill NaN warmup prefixes to mirror Vec API behavior
     let warm = first + need - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out_wavetrend[..warm] {
@@ -1428,18 +1349,16 @@ pub fn mod_god_mode_into(
         *v = qnan;
     }
 
-    // Delegate core computation to zero-copy kernel dispatcher
-    let _ = (high, low, volume); // silence unused tuple fields in this wrapper
-    mod_god_mode_into_slices(out_wavetrend, out_signal, out_histogram, input, Kernel::Auto)
+    let _ = (high, low, volume);
+    mod_god_mode_into_slices(
+        out_wavetrend,
+        out_signal,
+        out_histogram,
+        input,
+        Kernel::Auto,
+    )
 }
 
-// ============================================================================
-// CLASSIC KERNEL - Optimized for default TraditionMg mode
-// ============================================================================
-
-/// Fused scalar kernel (all modes) — single-pass implementation.
-/// Computes wavetrend, signal, and histogram directly into destination slices.
-/// Safety: caller must ensure destination slices have the same length as inputs.
 #[inline]
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn mod_god_mode_scalar_fused_into_slices(
@@ -1497,7 +1416,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let alpha3 = 2.0 / (n3 as f64 + 1.0);
     let beta3 = 1.0 - alpha3;
 
-    // TCI
     let mut ema1_c = 0.0_f64;
     let mut ema2_abs = 0.0_f64;
     let mut ema3_ci = 0.0_f64;
@@ -1505,21 +1423,18 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut seed_ema2 = false;
     let mut seed_ema3 = false;
 
-    // RSI (Wilder)
     let mut rs_avg_gain = 0.0_f64;
     let mut rs_avg_loss = 0.0_f64;
     let mut rsi_seeded = false;
     let mut rs_init_cnt = 0usize;
     let mut prev_close = 0.0_f64;
 
-    // RSI momentum ring for CBCI
     let mut rsi_ring: Vec<f64> = vec![f64::NAN; n2.max(1)];
     let rsi_len = rsi_ring.len();
     let mut rsi_ring_head: usize = 0;
     let mut rsi_ema = 0.0_f64;
     let mut rsi_ema_seed = false;
 
-    // Laguerre RSI (Ehlers)
     let alpha_l = 0.7_f64;
     let one_m_l = 1.0_f64 - alpha_l;
     let mut l0 = 0.0_f64;
@@ -1527,7 +1442,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut l2 = 0.0_f64;
     let mut l3 = 0.0_f64;
 
-    // Close-only Willy (%R) over n2
     #[inline(always)]
     fn willr_close_only(c: &[f64], idx: usize, win: usize) -> f64 {
         if win == 0 || idx + 1 < win {
@@ -1556,7 +1470,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let has_vol = use_volume && volume.is_some();
     let vol = if has_vol { volume.unwrap() } else { &[][..] };
 
-    // MFI sliding state (window n3)
     let mut mf_pos_sum = 0.0_f64;
     let mut mf_neg_sum = 0.0_f64;
     let mut mf_ring_mf: Vec<f64> = vec![0.0; n3.max(1)];
@@ -1566,7 +1479,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut tp_prev: f64 = 0.0_f64;
     let mut tp_has_prev = false;
 
-    // CSI (TSI) states
     let mut tsi_ema_m_s = 0.0_f64;
     let mut tsi_ema_m_l = 0.0_f64;
     let mut tsi_ema_a_s = 0.0_f64;
@@ -1574,7 +1486,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut tsi_seed_s = false;
     let mut tsi_seed_l = false;
 
-    // CSI_MG states
     let mut csi_num_e1 = 0.0_f64;
     let mut csi_num_e2 = 0.0_f64;
     let mut csi_den_e1 = 0.0_f64;
@@ -1582,7 +1493,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let mut csi_seed_e1 = false;
     let mut csi_seed_e2 = false;
 
-    // signal SMA(6) ring
     const SIGP: usize = 6;
     let mut sig_ring = [0.0_f64; SIGP];
     let mut sig_head = 0usize;
@@ -1590,7 +1500,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     let sig_start = warm + SIGP - 1;
     let mut have_sig = false;
 
-    // histogram EMA seeding
     let mut hist_seeded = false;
 
     let need = n1.max(n2).max(n3);
@@ -1607,8 +1516,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     }
 
     for i in first..len {
-
-        // === TCI chain ===
         let c_i = close[i];
         if !seed_ema1 {
             ema1_c = c_i;
@@ -1635,7 +1542,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             tci_val = ema3_ci + 50.0;
         }
 
-        // === RSI / Wilder init + update ===
         let mut rsi_val = f64::NAN;
         if i == first {
             rs_avg_gain = 0.0;
@@ -1672,7 +1578,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             }
         }
 
-        // Laguerre RSI recursion
         {
             let prev_l0 = l0;
             l0 = alpha_l * c_i + one_m_l * prev_l0;
@@ -1691,7 +1596,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             f64::NAN
         };
 
-        // MFI or RSI-as-MF
         let mut mf_val = f64::NAN;
         if has_vol {
             let tp = (high[i] + low[i] + c_i) / 3.0;
@@ -1738,7 +1642,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             mf_val = rsi_val;
         }
 
-        // CBCI = RSI momentum over n2 + EMA(RSI, n3)
         let mut cbci_val = f64::NAN;
         if rsi_seeded {
             let old = rsi_ring[rsi_ring_head];
@@ -1763,7 +1666,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             }
         }
 
-        // CSI/CSI_MG
         let mut csi_val = f64::NAN;
         let mut csi_mg_val = f64::NAN;
         if matches!(mode, ModGodModeMode::Godmode) {
@@ -1823,7 +1725,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
             }
         }
 
-        // Combine components by mode into wavetrend
         if i >= warm {
             let mut sum = 0.0_f64;
             let mut cnt = 0i32;
@@ -1915,7 +1816,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
                 let wt = sum / (cnt as f64);
                 dst_wavetrend[i] = wt;
 
-                // Signal SMA(6)
                 if i >= sig_start {
                     if !have_sig {
                         let mut s = 0.0;
@@ -1938,7 +1838,7 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
                         sig_sum += wt - old;
                         dst_signal[i] = sig_sum / (SIGP as f64);
                     }
-                    // Histogram EMA over diff = (wt - sig)*2 + 50
+
                     let d = (dst_wavetrend[i] - dst_signal[i]) * 2.0 + 50.0;
                     if !hist_seeded {
                         dst_hist[i] = d;
@@ -1954,7 +1854,6 @@ pub unsafe fn mod_god_mode_scalar_fused_into_slices(
     Ok(())
 }
 
-// ====================== AVX2 ======================
 #[cfg(all(
     feature = "nightly-avx",
     target_arch = "x86_64",
@@ -1978,7 +1877,6 @@ pub unsafe fn mod_god_mode_avx2_fused_into_slices(
     first: usize,
     warm: usize,
 ) -> Result<(), ModGodModeError> {
-    // Stub: delegate entirely to scalar fused implementation for accuracy/perf consistency
     mod_god_mode_scalar_fused_into_slices(
         dst_wavetrend,
         dst_signal,
@@ -1997,7 +1895,6 @@ pub unsafe fn mod_god_mode_avx2_fused_into_slices(
     )
 }
 
-// ====================== AVX512 ======================
 #[cfg(all(
     feature = "nightly-avx",
     target_arch = "x86_64",
@@ -2021,7 +1918,6 @@ pub unsafe fn mod_god_mode_avx512_fused_into_slices(
     first: usize,
     warm: usize,
 ) -> Result<(), ModGodModeError> {
-    // Stub: delegate entirely to scalar fused implementation for accuracy/perf consistency
     mod_god_mode_scalar_fused_into_slices(
         dst_wavetrend,
         dst_signal,
@@ -2040,19 +1936,17 @@ pub unsafe fn mod_god_mode_avx512_fused_into_slices(
     )
 }
 
-/// Classic kernel for TraditionMg mode with inline calculations
-/// Eliminates ~8 function calls by inlining TCI, MF, RSI, CBCI, LRSI, and SMA calculations
 #[inline]
 pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
     high: &[f64],
     low: &[f64],
     close: &[f64],
     volume: Option<&[f64]>,
-    n1: usize, // 17
-    n2: usize, // 6
-    n3: usize, // 4
+    n1: usize,
+    n2: usize,
+    n3: usize,
     first: usize,
-    _simple_warmup: usize, // Ignored - we calculate proper compound warmup
+    _simple_warmup: usize,
     use_volume: bool,
     wavetrend: &mut [f64],
     signal: &mut [f64],
@@ -2063,21 +1957,16 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         return Err(ModGodModeError::EmptyInputData);
     }
 
-    // Calculate proper compound warmup periods for each component
-    // TCI needs: EMA1(n1) -> EMA2(n1) -> EMA3(n2) = n1 + n1 + n2 - 2
     let tci_warmup = first + n1 + n1 + n2 - 2;
-    // MF/RSI needs: n3 periods
+
     let mf_warmup = first + n3;
-    // CBCI needs: RSI(n3) + momentum(n2) or RSI(n3) + EMA(n3)
+
     let cbci_warmup = first + n3 + n2.max(n3);
-    // LRSI is same as RSI
+
     let lrsi_warmup = first + n3;
 
-    // The actual warmup where we can start producing valid wavetrend values
     let actual_warmup = tci_warmup.max(mf_warmup).max(cbci_warmup).max(lrsi_warmup);
 
-    // === TCI Calculation (inline 3 EMA passes) ===
-    // EMA1 of close
     let mut ema1 = vec![f64::NAN; len];
     let alpha1 = 2.0 / (n1 as f64 + 1.0);
     let beta1 = 1.0 - alpha1;
@@ -2092,7 +1981,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // Calculate absolute deviations from EMA1
     let mut abs_dev = vec![f64::NAN; len];
     for i in first..len {
         if ema1[i].is_finite() {
@@ -2100,7 +1988,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // EMA2 of absolute deviations (starts from first + n1 - 1)
     let mut ema2 = vec![f64::NAN; len];
     let ema2_start = (first + n1 - 1).min(len - 1);
     if ema2_start < len && abs_dev[ema2_start].is_finite() {
@@ -2114,37 +2001,32 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    // Normalize to get CI (starts from first + n1 + n1 - 2)
     let mut ci = vec![f64::NAN; len];
     let ci_start = (first + n1 + n1 - 2).min(len - 1);
     for i in ci_start..len {
         if ema2[i].is_finite() && ema2[i] != 0.0 {
-            ci[i] = (close[i] - ema1[i]) / (0.025 * ema2[i]); // Note: using 0.025 as in original
+            ci[i] = (close[i] - ema1[i]) / (0.025 * ema2[i]);
         }
     }
 
-    // EMA3 of CI to get TCI (starts from tci_warmup)
     let mut tci = vec![f64::NAN; len];
     let alpha2 = 2.0 / (n2 as f64 + 1.0);
     let beta2 = 1.0 - alpha2;
     if tci_warmup < len && ci[tci_warmup].is_finite() {
-        tci[tci_warmup] = ci[tci_warmup] + 50.0; // Add 50 offset for TCI
+        tci[tci_warmup] = ci[tci_warmup] + 50.0;
         for i in (tci_warmup + 1)..len {
             if ci[i].is_finite() {
-                tci[i] = alpha2 * ci[i] + beta2 * (tci[i - 1] - 50.0) + 50.0; // Maintain offset
+                tci[i] = alpha2 * ci[i] + beta2 * (tci[i - 1] - 50.0) + 50.0;
             } else {
                 tci[i] = tci[i - 1];
             }
         }
     }
 
-    // === MF Calculation (inline MFI with volume or RSI without) ===
     let mut mf = vec![f64::NAN; len];
     if use_volume && volume.is_some() {
-        // MFI calculation with volume
         let vol = volume.unwrap();
         if first + n3 <= len {
-            // Calculate typical price
             let mut typical_price = vec![0.0; len];
             for i in first..len {
                 typical_price[i] = (high[i] + low[i] + close[i]) / 3.0;
@@ -2153,7 +2035,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
             let mut pos_flow = 0.0;
             let mut neg_flow = 0.0;
 
-            // Initialize first n3 periods
             for i in (first + 1)..=(first + n3).min(len - 1) {
                 let mf_raw = typical_price[i] * vol[i];
                 if typical_price[i] > typical_price[i - 1] {
@@ -2163,10 +2044,8 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
                 }
             }
 
-            // Calculate MFI for remaining periods
             for i in (first + n3)..len {
                 if i > first + n3 {
-                    // Update sliding window
                     let old_idx = i - n3;
                     let old_mf = typical_price[old_idx] * vol[old_idx];
                     if old_idx > first && typical_price[old_idx] > typical_price[old_idx - 1] {
@@ -2192,12 +2071,10 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
             }
         }
     } else {
-        // RSI calculation without volume
         if first + n3 <= len {
             let mut avg_gain = 0.0;
             let mut avg_loss = 0.0;
 
-            // Calculate initial averages
             for i in (first + 1)..=(first + n3) {
                 let change = close[i] - close[i - 1];
                 if change > 0.0 {
@@ -2209,7 +2086,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
             avg_gain /= n3 as f64;
             avg_loss /= n3 as f64;
 
-            // Calculate RSI using Wilder's smoothing
             for i in (first + n3)..len {
                 let change = close[i] - close[i - 1];
                 let (gain, loss) = if change > 0.0 {
@@ -2230,15 +2106,12 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    
     let rsi = if use_volume && volume.is_some() {
-        
         let mut rsi_vals = vec![f64::NAN; len];
         if mf_warmup < len {
             let mut avg_gain = 0.0;
             let mut avg_loss = 0.0;
 
-            
             for i in (first + 1)..(first + n3 + 1).min(len) {
                 let change = close[i] - close[i - 1];
                 if change > 0.0 {
@@ -2250,7 +2123,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
             avg_gain /= n3 as f64;
             avg_loss /= n3 as f64;
 
-            
             for i in mf_warmup..len {
                 if i > mf_warmup {
                     let change = close[i] - close[i - 1];
@@ -2276,10 +2148,8 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         mf.clone()
     };
 
-    
     let mut cbci = vec![f64::NAN; len];
 
-    
     let rsi_mom_start = mf_warmup + n2;
     let mut rsi_mom = vec![f64::NAN; len];
     if rsi_mom_start < len {
@@ -2290,7 +2160,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    
     let alpha3 = 2.0 / (n3 as f64 + 1.0);
     let beta3 = 1.0 - alpha3;
     let mut rsi_ema = vec![f64::NAN; len];
@@ -2306,18 +2175,14 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    
     for i in cbci_warmup..len {
         if rsi_mom[i].is_finite() && rsi_ema[i].is_finite() {
             cbci[i] = rsi_mom[i] + rsi_ema[i];
         }
     }
 
-    
-    
     let lrsi = rsi.clone();
 
-    
     for i in actual_warmup..len {
         let mut sum = 0.0;
         let mut count = 0;
@@ -2348,10 +2213,8 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    
-    let signal_start = actual_warmup + 5; 
+    let signal_start = actual_warmup + 5;
     if signal_start < len {
-        
         let mut sum = 0.0;
         for i in actual_warmup..(actual_warmup + 6).min(len) {
             if wavetrend[i].is_finite() {
@@ -2360,7 +2223,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
         signal[signal_start] = sum / 6.0;
 
-        
         for i in (signal_start + 1)..len {
             if wavetrend[i].is_finite() && wavetrend[i - 6].is_finite() {
                 sum += wavetrend[i] - wavetrend[i - 6];
@@ -2371,17 +2233,14 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
         }
     }
 
-    
     let hist_start = signal_start;
     if hist_start < len && signal[hist_start].is_finite() {
         let alpha3 = 2.0 / (n3 as f64 + 1.0);
         let beta3 = 1.0 - alpha3;
 
-        
         let diff = (wavetrend[hist_start] - signal[hist_start]) * 2.0 + 50.0;
         histogram[hist_start] = diff;
 
-        
         for i in (hist_start + 1)..len {
             if signal[i].is_finite() && wavetrend[i].is_finite() {
                 let diff = (wavetrend[i] - signal[i]) * 2.0 + 50.0;
@@ -2395,11 +2254,6 @@ pub unsafe fn mod_god_mode_scalar_classic_tradition_mg(
     Ok(())
 }
 
-
-
-
-
-/// Builder for Modified God Mode indicator
 pub struct ModGodModeBuilder {
     n1: usize,
     n2: usize,
@@ -2416,7 +2270,7 @@ impl Default for ModGodModeBuilder {
             n2: 6,
             n3: 4,
             mode: ModGodModeMode::TraditionMg,
-            use_volume: true, 
+            use_volume: true,
             kernel: Kernel::Auto,
         }
     }
@@ -2524,10 +2378,6 @@ impl ModGodModeBuilder {
     }
 }
 
-// ============================================================================
-// STREAMING SUPPORT  —  O(1) per update
-// ============================================================================
-
 use std::collections::VecDeque;
 
 #[inline(always)]
@@ -2606,31 +2456,25 @@ impl MonoMin {
     }
 }
 
-/// Streaming calculator with O(1) updates.
-/// Keeps compact state for all recurrences; no buffer rebuilds.
 pub struct ModGodModeStream {
-    // params
     n1: usize,
     n2: usize,
     n3: usize,
     mode: ModGodModeMode,
     use_volume: bool,
 
-    // precomputed constants
     alpha1: f64,
     beta1: f64,
     alpha2: f64,
     beta2: f64,
     alpha3: f64,
     beta3: f64,
-    // warmup gates (match conservative compound warmups from classic kernel)
-    warm_wt: usize,  // when wavetrend can start
-    warm_sig: usize, // when signal (SMA6) can start
 
-    // time index (# of samples processed so far)
+    warm_wt: usize,
+    warm_sig: usize,
+
     idx: usize,
 
-    // ====== TCI (EMA chains) ======
     ema1_c: f64,
     seed_ema1: bool,
     ema2_abs: f64,
@@ -2638,7 +2482,6 @@ pub struct ModGodModeStream {
     ema3_ci: f64,
     seed_ema3: bool,
 
-    // ====== RSI (Wilder) ======
     rs_avg_gain: f64,
     rs_avg_loss: f64,
     rsi_seeded: bool,
@@ -2646,7 +2489,6 @@ pub struct ModGodModeStream {
     prev_close: f64,
     have_prev_close: bool,
 
-    // ====== LRSI (Ehlers) ======
     alpha_l: f64,
     one_m_l: f64,
     l0: f64,
@@ -2654,7 +2496,6 @@ pub struct ModGodModeStream {
     l2: f64,
     l3: f64,
 
-    // ====== MFI (ring over n3) ======
     has_vol: bool,
     mf_pos_sum: f64,
     mf_neg_sum: f64,
@@ -2664,7 +2505,6 @@ pub struct ModGodModeStream {
     tp_prev: f64,
     tp_has_prev: bool,
 
-    // ====== CSI / TSI (double EMA of momentum & abs(momentum)) ======
     tsi_ema_m_s: f64,
     tsi_ema_a_s: f64,
     tsi_seed_s: bool,
@@ -2672,7 +2512,6 @@ pub struct ModGodModeStream {
     tsi_ema_a_l: f64,
     tsi_seed_l: bool,
 
-    // ====== CSI_MG (double EMA of pc_norm and abs(pc)) ======
     csi_num_e1: f64,
     csi_num_e2: f64,
     csi_seed_e1: bool,
@@ -2680,17 +2519,14 @@ pub struct ModGodModeStream {
     csi_den_e1: f64,
     csi_den_e2: f64,
 
-    // ====== CBCI: RSI momentum over n2 + EMA(RSI,n3) ======
     rsi_ring: Vec<f64>,
     rsi_ring_head: usize,
     rsi_ema: f64,
     rsi_ema_seed: bool,
 
-    // ====== %R (Willy on close-only over n2) via monotonic deques ======
     w_max: MonoMax,
     w_min: MonoMin,
 
-    // ====== signal SMA(6) & histogram EMA(n3) ======
     sig_ring: [f64; 6],
     sig_head: usize,
     sig_sum: f64,
@@ -2720,7 +2556,6 @@ impl ModGodModeStream {
     }
 
     pub fn new(n1: usize, n2: usize, n3: usize, mode: ModGodModeMode, use_volume: bool) -> Self {
-        // precompute alphas for EMAs
         let alpha1 = 2.0 / (n1 as f64 + 1.0);
         let beta1 = 1.0 - alpha1;
         let alpha2 = 2.0 / (n2 as f64 + 1.0);
@@ -2728,9 +2563,8 @@ impl ModGodModeStream {
         let alpha3 = 2.0 / (n3 as f64 + 1.0);
         let beta3 = 1.0 - alpha3;
 
-        // Align warmups with fused scalar path: start wavetrend at max(n1,n2,n3)-1
         let warm_wt = n1.max(n2).max(n3) - 1;
-        let warm_sig = warm_wt + (6 - 1); // need 6 samples for SMA(6)
+        let warm_sig = warm_wt + (6 - 1);
 
         Self {
             n1,
@@ -2748,7 +2582,6 @@ impl ModGodModeStream {
             warm_sig,
             idx: 0,
 
-            // TCI
             ema1_c: 0.0,
             seed_ema1: false,
             ema2_abs: 0.0,
@@ -2756,7 +2589,6 @@ impl ModGodModeStream {
             ema3_ci: 0.0,
             seed_ema3: false,
 
-            // RSI
             rs_avg_gain: 0.0,
             rs_avg_loss: 0.0,
             rsi_seeded: false,
@@ -2764,7 +2596,6 @@ impl ModGodModeStream {
             prev_close: 0.0,
             have_prev_close: false,
 
-            // LRSI
             alpha_l: 0.7,
             one_m_l: 1.0 - 0.7,
             l0: 0.0,
@@ -2772,7 +2603,6 @@ impl ModGodModeStream {
             l2: 0.0,
             l3: 0.0,
 
-            // MFI
             has_vol: use_volume,
             mf_pos_sum: 0.0,
             mf_neg_sum: 0.0,
@@ -2782,7 +2612,6 @@ impl ModGodModeStream {
             tp_prev: 0.0,
             tp_has_prev: false,
 
-            // TSI
             tsi_ema_m_s: 0.0,
             tsi_ema_a_s: 0.0,
             tsi_seed_s: false,
@@ -2790,7 +2619,6 @@ impl ModGodModeStream {
             tsi_ema_a_l: 0.0,
             tsi_seed_l: false,
 
-            // CSI_MG
             csi_num_e1: 0.0,
             csi_num_e2: 0.0,
             csi_seed_e1: false,
@@ -2798,17 +2626,14 @@ impl ModGodModeStream {
             csi_den_e1: 0.0,
             csi_den_e2: 0.0,
 
-            // CBCI
             rsi_ring: vec![f64::NAN; n2.max(1)],
             rsi_ring_head: 0,
             rsi_ema: 0.0,
             rsi_ema_seed: false,
 
-            // Willy deques
             w_max: MonoMax::default(),
             w_min: MonoMin::default(),
 
-            // signal/hist
             sig_ring: [0.0; 6],
             sig_head: 0,
             sig_sum: 0.0,
@@ -2820,7 +2645,6 @@ impl ModGodModeStream {
         }
     }
 
-    /// Push one bar; returns (wt, sig, hist) when ready.
     #[inline]
     pub fn update(
         &mut self,
@@ -2829,14 +2653,12 @@ impl ModGodModeStream {
         close: f64,
         volume: Option<f64>,
     ) -> Option<(f64, f64, f64)> {
-        // reject NaNs
         if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             self.idx += 1;
             return None;
         }
         let i = self.idx;
 
-        // ====== TCI chain ======
         if !self.seed_ema1 {
             self.ema1_c = close;
             self.seed_ema1 = true;
@@ -2865,7 +2687,6 @@ impl ModGodModeStream {
             tci_val = self.ema3_ci + 50.0;
         }
 
-        // ====== RSI (Wilder) ======
         let mut rsi_val = f64::NAN;
         if !self.have_prev_close {
             self.prev_close = close;
@@ -2891,7 +2712,6 @@ impl ModGodModeStream {
                     rsi_val = 100.0 * (rs / (1.0 + rs));
                 }
             } else {
-                // Wilder smoothing
                 let n3m1 = (self.n3 - 1) as f64;
                 self.rs_avg_gain = (self.rs_avg_gain * n3m1 + gain) / self.n3 as f64;
                 self.rs_avg_loss = (self.rs_avg_loss * n3m1 + loss) / self.n3 as f64;
@@ -2904,7 +2724,6 @@ impl ModGodModeStream {
             }
         }
 
-        // ====== Laguerre RSI (alpha=0.7 per file) ======
         {
             let p_l0 = self.l0;
             self.l0 = self.alpha_l * close + self.one_m_l * p_l0;
@@ -2927,7 +2746,6 @@ impl ModGodModeStream {
             f64::NAN
         };
 
-        // ====== MFI (if volume used) else RSI substitute ======
         let mut mf_val = f64::NAN;
         if self.has_vol {
             let v = volume.unwrap_or(0.0);
@@ -2943,7 +2761,6 @@ impl ModGodModeStream {
                 let mf_raw = tp * v;
 
                 if self.rsi_seeded {
-                    // remove aged contrib
                     let old_mf = self.mf_ring_mf[self.mf_head];
                     let old_sg = self.mf_ring_sgn[self.mf_head];
                     if old_sg > 0 {
@@ -2952,7 +2769,6 @@ impl ModGodModeStream {
                         self.mf_neg_sum -= old_mf;
                     }
 
-                    // insert new
                     self.mf_ring_mf[self.mf_head] = mf_raw;
                     self.mf_ring_sgn[self.mf_head] = sign;
                     if sign > 0 {
@@ -2969,7 +2785,6 @@ impl ModGodModeStream {
                         mf_val = 100.0;
                     }
                 } else {
-                    // warmup rings, but do not produce a value yet
                     self.mf_ring_mf[self.mf_head] = mf_raw;
                     self.mf_ring_sgn[self.mf_head] = sign;
                     self.mf_head = (self.mf_head + 1) % self.n3.max(1);
@@ -2978,10 +2793,9 @@ impl ModGodModeStream {
             self.tp_prev = tp;
             self.tp_has_prev = true;
         } else {
-            mf_val = rsi_val; // RSI-as-MF when no volume, per fused scalar kernel
+            mf_val = rsi_val;
         }
 
-        // ====== CBCI (mom(RSI,n2) + EMA(RSI,n3)) ======
         let mut cbci_val = f64::NAN;
         if self.rsi_seeded {
             let old = self.rsi_ring[self.rsi_ring_head];
@@ -3005,11 +2819,9 @@ impl ModGodModeStream {
             }
         }
 
-        // ====== CSI / TSI ======
         let mut csi_val = f64::NAN;
         let mut csi_mg_val = f64::NAN;
 
-        // Godmode: RSI blended with TSI (double-EMA of momentum)
         if matches!(self.mode, ModGodModeMode::Godmode) && self.have_prev_close {
             let mom = close - self.prev_close;
             let am = mom.abs();
@@ -3040,7 +2852,6 @@ impl ModGodModeStream {
             }
         }
 
-        // GodmodeMg: RSI blended with modified TSI using normalized pc and abs(pc)
         if matches!(self.mode, ModGodModeMode::GodmodeMg) && self.have_prev_close {
             let a = self.prev_close;
             let b = close;
@@ -3078,7 +2889,6 @@ impl ModGodModeStream {
             }
         }
 
-        // ====== Willy (%R on close-only, window n2) via monotonic deques ======
         self.w_max.push(i, close, self.n2);
         self.w_min.push(i, close, self.n2);
         let mut willy_val = f64::NAN;
@@ -3091,7 +2901,6 @@ impl ModGodModeStream {
             }
         }
 
-        // ====== Combine by mode into wavetrend ======
         let ready_wt = i >= self.warm_wt;
         let mut wt = f64::NAN;
         if ready_wt {
@@ -3184,11 +2993,9 @@ impl ModGodModeStream {
             }
         }
 
-        // ====== signal SMA(6) (incremental seeding from warm_wt) ======
         let mut sig = f64::NAN;
         if i >= self.warm_wt && wt.is_finite() {
             if !self.sig_seeded {
-                // fill until we have 6 samples
                 self.sig_ring[self.sig_head] = wt;
                 self.sig_head = (self.sig_head + 1) % 6;
                 self.sig_sum += wt;
@@ -3206,7 +3013,6 @@ impl ModGodModeStream {
             }
         }
 
-        // ====== histogram EMA(n3) of diff ======
         let mut hist = f64::NAN;
         if self.sig_seeded && sig.is_finite() && wt.is_finite() {
             let d = (wt - sig) * 2.0 + 50.0;
@@ -3293,11 +3099,6 @@ impl ModGodModeStream {
     }
 }
 
-// ============================================================================
-// BATCH PROCESSING
-// ============================================================================
-
-/// Parameter range for batch processing
 #[derive(Clone, Debug)]
 pub struct ModGodModeBatchRange {
     pub n1: (usize, usize, usize),
@@ -3317,7 +3118,6 @@ impl Default for ModGodModeBatchRange {
     }
 }
 
-/// Batch output with flattened matrix layout
 #[derive(Clone, Debug)]
 pub struct ModGodModeBatchOutput {
     pub wavetrend: Vec<f64>,
@@ -3434,12 +3234,10 @@ pub fn mod_god_mode_batch_with_kernel(
         .checked_mul(cols)
         .ok_or_else(|| ModGodModeError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Allocate uninit matrices
     let mut mu_w = make_uninit_matrix(rows, cols);
     let mut mu_s = make_uninit_matrix(rows, cols);
     let mut mu_h = make_uninit_matrix(rows, cols);
 
-    // Warmup per row based on max(n1,n2,n3) and first-valid like alma.rs
     let first = close
         .iter()
         .position(|x| !x.is_nan())
@@ -3452,7 +3250,6 @@ pub fn mod_god_mode_batch_with_kernel(
     init_matrix_prefixes(&mut mu_s, cols, &warms);
     init_matrix_prefixes(&mut mu_h, cols, &warms);
 
-    // Cast to &mut [f64] with ManuallyDrop guards
     let mut guard_w = core::mem::ManuallyDrop::new(mu_w);
     let mut guard_s = core::mem::ManuallyDrop::new(mu_s);
     let mut guard_h = core::mem::ManuallyDrop::new(mu_h);
@@ -3463,7 +3260,6 @@ pub fn mod_god_mode_batch_with_kernel(
     let out_h: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard_h.as_mut_ptr() as *mut f64, guard_h.len()) };
 
-    // Map batch kernel to single-row kernel properly
     let batch_kern = match k {
         Kernel::Auto => detect_best_batch_kernel(),
         other if other.is_batch() => other,
@@ -3477,7 +3273,6 @@ pub fn mod_god_mode_batch_with_kernel(
         _ => unreachable!("Invalid batch kernel"),
     };
 
-    // Direct row writes using into_slices with correct kernel
     for (row, p) in combos.iter().enumerate() {
         let start = row * cols;
         let end = start + cols;
@@ -3489,7 +3284,6 @@ pub fn mod_god_mode_batch_with_kernel(
         mod_god_mode_into_slices(dst_w, dst_s, dst_h, &inp, row_kern)?;
     }
 
-    // Transmute to owned Vecs with no extra copy
     let wavetrend = unsafe {
         let ptr = out_w.as_mut_ptr();
         let len = out_w.len();
@@ -3519,7 +3313,6 @@ pub fn mod_god_mode_batch_with_kernel(
     })
 }
 
-/// Legacy batch builder for compatibility
 pub struct ModGodModeBatchBuilder {
     n1: usize,
     n2: usize,
@@ -3604,7 +3397,6 @@ impl ModGodModeBatchBuilder {
             }
             #[cfg(target_arch = "wasm32")]
             {
-                // WASM doesn't support parallel processing, use regular iteration
                 datasets
                     .iter()
                     .map(|candles| {
@@ -3624,10 +3416,6 @@ impl ModGodModeBatchBuilder {
         }
     }
 }
-
-
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "mod_god_mode")]
@@ -3762,7 +3550,6 @@ pub fn mod_god_mode_batch_py<'py>(
     Ok(d.into())
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaModGodMode};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -3827,7 +3614,9 @@ pub fn mod_god_mode_cuda_batch_dev_py<'py>(
         let cols = out.cols();
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        Ok::<_, PyErr>((out.wt1, out.wt2, out.hist, res.combos, rows, cols, ctx, dev_id))
+        Ok::<_, PyErr>((
+            out.wt1, out.wt2, out.hist, res.combos, rows, cols, ctx, dev_id,
+        ))
     })?;
     let dict = PyDict::new(py);
     dict.set_item(
@@ -4037,11 +3826,7 @@ impl ModGodModeStreamPy {
     }
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = mod_god_mode)]
 pub fn mod_god_mode_wasm(
     high: &[f64],
@@ -4083,7 +3868,7 @@ pub fn mod_god_mode_wasm(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mod_god_mode_alloc(size: usize) -> *mut f64 {
     let mut buf = Vec::<f64>::with_capacity(size);
@@ -4092,7 +3877,7 @@ pub fn mod_god_mode_alloc(size: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mod_god_mode_free(ptr: *mut f64, size: usize) {
     unsafe {
@@ -4100,7 +3885,7 @@ pub fn mod_god_mode_free(ptr: *mut f64, size: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mod_god_mode_into(
     high_ptr: *const f64,
@@ -4161,15 +3946,15 @@ pub fn mod_god_mode_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ModGodModeJsFlat {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mod_god_mode_into_flat(
     high_ptr: *const f64,
@@ -4182,7 +3967,7 @@ pub fn mod_god_mode_into_flat(
     n2: usize,
     n3: usize,
     mode: &str,
-    out_ptr: *mut f64, 
+    out_ptr: *mut f64,
 ) -> Result<(), JsValue> {
     if [
         high_ptr as usize,
@@ -4226,7 +4011,7 @@ pub fn mod_god_mode_into_flat(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = mod_god_mode_js_flat)]
 pub fn mod_god_mode_js_flat(
     high: &[f64],
@@ -4269,10 +4054,6 @@ pub fn mod_god_mode_js_flat(
     .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4294,17 +4075,9 @@ mod tests {
             volume[i] = 1000.0 + (i as f64) * 10.0;
         }
 
-        Candles::new(
-            vec![0; len], 
-            open,
-            high,
-            low,
-            close,
-            volume,
-        )
+        Candles::new(vec![0; len], open, high, low, close, volume)
     }
 
-    /// Generate all kernel variant tests for a test function
     macro_rules! generate_all_mod_god_mode_tests {
         ($($test_fn:ident),*) => {
             $(
@@ -4314,7 +4087,7 @@ mod tests {
                         $test_fn(Kernel::Scalar);
                     }
 
-                    
+
 
                     #[test]
                     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64", target_feature = "avx2"))]
@@ -4364,7 +4137,7 @@ mod tests {
     }
 
     fn check_mod_god_mode_all_nan(kernel: Kernel) {
-        let nan_data = vec![f64::NAN; 20]; 
+        let nan_data = vec![f64::NAN; 20];
         let params = ModGodModeParams {
             n1: Some(3),
             n2: Some(2),
@@ -4375,14 +4148,11 @@ mod tests {
         let input = ModGodModeInput::from_slices(&nan_data, &nan_data, &nan_data, None, params);
         let result = mod_god_mode_with_kernel(&input, kernel);
 
-        
         match result {
             Ok(output) => {
                 assert!(output.wavetrend.iter().all(|v| v.is_nan()));
             }
             Err(e) => {
-                
-                
                 println!("All NaN test returned error: {:?}", e);
             }
         }
@@ -4479,16 +4249,15 @@ mod tests {
     fn check_mod_god_mode_stream(_kernel: Kernel) {
         let mut stream = ModGodModeStream::new(3, 2, 2, ModGodModeMode::TraditionMg, false);
 
-        
         let test_data = vec![
             (10.5, 9.5, 10.0),
             (11.5, 10.5, 11.0),
             (12.5, 11.5, 12.0),
             (12.0, 11.0, 11.5),
             (11.0, 10.0, 10.5),
-            (11.5, 10.5, 11.0), 
-            (12.0, 11.0, 11.5), 
-            (12.5, 11.5, 12.0), 
+            (11.5, 10.5, 11.0),
+            (12.0, 11.0, 11.5),
+            (12.5, 11.5, 12.0),
         ];
 
         let mut got_result = false;
@@ -4499,7 +4268,6 @@ mod tests {
             }
         }
 
-        
         assert!(
             got_result,
             "Stream should produce results after sufficient data"
@@ -4539,21 +4307,18 @@ mod tests {
         let result2 = mod_god_mode_with_kernel(&input, kernel).unwrap();
 
         for i in 0..result1.wavetrend.len() {
-            
             if !result1.wavetrend[i].is_nan() && !result2.wavetrend[i].is_nan() {
                 assert_eq!(result1.wavetrend[i], result2.wavetrend[i]);
             } else if result1.wavetrend[i].is_nan() != result2.wavetrend[i].is_nan() {
                 panic!("Wavetrend NaN mismatch at index {}", i);
             }
 
-            
             if !result1.signal[i].is_nan() && !result2.signal[i].is_nan() {
                 assert_eq!(result1.signal[i], result2.signal[i]);
             } else if result1.signal[i].is_nan() != result2.signal[i].is_nan() {
                 panic!("Signal NaN mismatch at index {}", i);
             }
 
-            
             if !result1.histogram[i].is_nan() && !result2.histogram[i].is_nan() {
                 assert_eq!(result1.histogram[i], result2.histogram[i]);
             } else if result1.histogram[i].is_nan() != result2.histogram[i].is_nan() {
@@ -4563,7 +4328,6 @@ mod tests {
     }
 
     fn check_mod_god_mode_accuracy(kernel: Kernel) {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = match read_candles_from_csv(file_path) {
             Ok(c) => c,
@@ -4572,7 +4336,6 @@ mod tests {
             }
         };
 
-        
         let params = ModGodModeParams {
             n1: Some(17),
             n2: Some(6),
@@ -4584,7 +4347,6 @@ mod tests {
         let input = ModGodModeInput::from_candles(&candles, params);
         let result = mod_god_mode_with_kernel(&input, kernel).unwrap();
 
-        
         let expected_last_five = [
             61.66219598,
             55.92955776,
@@ -4593,7 +4355,6 @@ mod tests {
             15.74958884,
         ];
 
-        
         let non_nan_values: Vec<f64> = result
             .wavetrend
             .iter()
@@ -4610,7 +4371,7 @@ mod tests {
         let start = non_nan_values.len().saturating_sub(5);
         for (i, &val) in non_nan_values[start..].iter().enumerate() {
             let diff = (val - expected_last_five[i]).abs();
-            
+
             assert!(
                 diff < 4.0,
                 "MOD_GOD_MODE wavetrend mismatch at index {}: got {:.8}, expected {:.8}, diff {:.8}",
@@ -4634,8 +4395,7 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
 
-        
-        let warmup = 7 + 4 + 3; 
+        let warmup = 7 + 4 + 3;
         for i in warmup..output.wavetrend.len() {
             if output.wavetrend[i].is_nan() {
                 panic!("Found NaN at index {} after warmup period {}", i, warmup);
@@ -4653,11 +4413,9 @@ mod tests {
             use_volume: Some(false),
         };
 
-        
         let input1 = ModGodModeInput::from_candles(&candles, params.clone());
         let result1 = mod_god_mode_with_kernel(&input1, kernel).unwrap();
 
-        
         let input2 = ModGodModeInput::from_slices(
             &candles.high,
             &candles.low,
@@ -4667,7 +4425,6 @@ mod tests {
         );
         let result2 = mod_god_mode_with_kernel(&input2, kernel);
 
-        
         assert!(result2.is_ok());
     }
 
@@ -4681,11 +4438,9 @@ mod tests {
             use_volume: Some(false),
         };
 
-        
         let input = ModGodModeInput::from_candles(&candles, params.clone());
         let batch_result = mod_god_mode(&input).unwrap();
 
-        
         let mut stream = ModGodModeStream::try_new(params).unwrap();
         let mut stream_results = Vec::new();
 
@@ -4694,7 +4449,6 @@ mod tests {
             stream_results.push(result);
         }
 
-        
         if let Some(Some((wt, sig, hist))) = stream_results.last() {
             let last_idx = batch_result.wavetrend.len() - 1;
             if !batch_result.wavetrend[last_idx].is_nan() {
@@ -4715,7 +4469,6 @@ mod tests {
     }
 
     fn check_batch_default_row(kernel: Kernel) {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = match read_candles_from_csv(file) {
             Ok(c) => c,
@@ -4732,7 +4485,6 @@ mod tests {
             mode: ModGodModeMode::TraditionMg,
         };
 
-        
         let batch_kernel = match kernel {
             Kernel::Scalar => Kernel::ScalarBatch,
             Kernel::Avx2 => Kernel::Avx2Batch,
@@ -4758,7 +4510,6 @@ mod tests {
     }
 
     fn check_batch_sweep(kernel: Kernel) {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = match read_candles_from_csv(file) {
             Ok(c) => c,
@@ -4775,7 +4526,6 @@ mod tests {
             mode: ModGodModeMode::TraditionMg,
         };
 
-        
         let batch_kernel = match kernel {
             Kernel::Scalar => Kernel::ScalarBatch,
             Kernel::Avx2 => Kernel::Avx2Batch,
@@ -4795,11 +4545,9 @@ mod tests {
         )
         .unwrap();
 
-        
         assert_eq!(batch_result.rows, 6);
         assert_eq!(batch_result.combos.len(), 6);
 
-        
         let test_params = ModGodModeParams {
             n1: Some(4),
             n2: Some(2),
@@ -4845,7 +4593,6 @@ mod tests {
         check_batch_default_row(Kernel::Auto);
     }
 
-    
     generate_all_mod_god_mode_tests!(
         check_mod_god_mode_basic,
         check_mod_god_mode_accuracy,
@@ -4865,7 +4612,6 @@ mod tests {
         check_batch_sweep
     );
 
-    
     #[cfg(test)]
     mod proptest_tests {
         use super::*;
@@ -4880,7 +4626,7 @@ mod tests {
                 len in 0usize..100,
             ) {
                 let candles = generate_test_candles(len);
-                
+
                 let n3_safe = if len > 0 { n3.min(len.saturating_sub(1).max(1)) } else { n3 };
                 let params = ModGodModeParams {
                     n1: Some(n1),
@@ -4920,24 +4666,20 @@ mod tests {
         }
     }
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_mod_god_mode_into_matches_api() {
         fn eq_or_both_nan_eps(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a - b).abs() <= 1e-12
         }
 
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file).expect("failed to read candles CSV");
         let params = ModGodModeParams::default();
         let input = ModGodModeInput::from_candles(&candles, params);
 
-        
         let base = mod_god_mode(&input).expect("baseline mod_god_mode should succeed");
 
-        
         let len = candles.close.len();
         let mut wt = vec![0.0; len];
         let mut sig = vec![0.0; len];

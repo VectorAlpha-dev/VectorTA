@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::dm::{
     dm_batch_with_kernel, dm_with_kernel, DmBatchRange, DmInput, DmParams,
 };
@@ -104,7 +102,6 @@ fn dm_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     }
     let period = 14usize;
 
-    
     let mut cpu_plus_tm = vec![f64::NAN; cols * rows];
     let mut cpu_minus_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {

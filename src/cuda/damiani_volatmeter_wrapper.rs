@@ -1,18 +1,9 @@
-//! CUDA scaffolding for Damiani Volatmeter (ATR/stddev dual-volatility).
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX load via DetermineTargetFromContext with OptLevel O2 and simple fallbacks.
-//! - NON_BLOCKING stream.
-//! - Policy knobs for batch and many-series paths (block size).
-//! - VRAM checks and per-series/row first_valid validation.
-//! - Outputs stacked as 2 rows per combination/series: row0=vol, row1=anti.
-
 #![cfg(feature = "cuda")]
 
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{AsyncCopyDestination, DeviceBuffer, LockedBuffer, DeviceCopy};
+use cust::memory::{AsyncCopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -23,10 +14,12 @@ use thiserror::Error;
 
 use crate::indicators::damiani_volatmeter::{DamianiVolatmeterBatchRange, DamianiVolatmeterParams};
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-pub struct Float2 { pub x: f32, pub y: f32 }
+pub struct Float2 {
+    pub x: f32,
+    pub y: f32,
+}
 unsafe impl DeviceCopy for Float2 {}
 
 #[derive(Error, Debug)]
@@ -34,7 +27,11 @@ pub enum CudaDamianiError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -42,14 +39,20 @@ pub enum CudaDamianiError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle for Damiani Volatmeter with context guard and device id
 pub struct DeviceArrayF32Damiani {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -59,9 +62,13 @@ pub struct DeviceArrayF32Damiani {
 }
 impl DeviceArrayF32Damiani {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows.saturating_mul(self.cols) }
+    pub fn len(&self) -> usize {
+        self.rows.saturating_mul(self.cols)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -112,7 +119,8 @@ impl CudaDamianiVolatmeter {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -134,8 +142,12 @@ impl CudaDamianiVolatmeter {
         })
     }
 
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -201,14 +213,23 @@ impl CudaDamianiVolatmeter {
         }
     }
 
-    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) { self.policy_batch = p; }
-    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) { self.policy_many = p; }
-    pub fn batch_policy(&self) -> BatchKernelPolicy { self.policy_batch }
-    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy { self.policy_many }
+    pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
+        self.policy_batch = p;
+    }
+    pub fn set_many_series_policy(&mut self, p: ManySeriesKernelPolicy) {
+        self.policy_many = p;
+    }
+    pub fn batch_policy(&self) -> BatchKernelPolicy {
+        self.policy_batch
+    }
+    pub fn many_series_policy(&self) -> ManySeriesKernelPolicy {
+        self.policy_many
+    }
 
-    
     fn first_valid_close(data: &[f32]) -> Result<usize, CudaDamianiError> {
-        if data.is_empty() { return Err(CudaDamianiError::InvalidInput("empty series".into())); }
+        if data.is_empty() {
+            return Err(CudaDamianiError::InvalidInput("empty series".into()));
+        }
         if data.is_empty() {
             return Err(CudaDamianiError::InvalidInput("empty series".into()));
         }
@@ -217,29 +238,67 @@ impl CudaDamianiVolatmeter {
             .ok_or_else(|| CudaDamianiError::InvalidInput("all values are NaN".into()))
     }
 
-    fn expand_grid(range: &DamianiVolatmeterBatchRange) -> Result<Vec<DamianiVolatmeterParams>, CudaDamianiError> {
+    fn expand_grid(
+        range: &DamianiVolatmeterBatchRange,
+    ) -> Result<Vec<DamianiVolatmeterParams>, CudaDamianiError> {
         fn axis_usize((s, e, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaDamianiError> {
-            if step == 0 || s == e { return Ok(vec![s]); }
+            if step == 0 || s == e {
+                return Ok(vec![s]);
+            }
             let mut out = Vec::new();
             if s < e {
-                let mut x = s; while x <= e { out.push(x); if let Some(nx) = x.checked_add(step) { x = nx; } else { break; } }
+                let mut x = s;
+                while x <= e {
+                    out.push(x);
+                    if let Some(nx) = x.checked_add(step) {
+                        x = nx;
+                    } else {
+                        break;
+                    }
+                }
             } else {
-                let mut x = s as i64; let step_i = step as i64; while x >= e as i64 { out.push(x as usize); x -= step_i; }
+                let mut x = s as i64;
+                let step_i = step as i64;
+                while x >= e as i64 {
+                    out.push(x as usize);
+                    x -= step_i;
+                }
             }
-            if out.is_empty() { return Err(CudaDamianiError::InvalidInput("invalid range (usize)".into())); }
+            if out.is_empty() {
+                return Err(CudaDamianiError::InvalidInput(
+                    "invalid range (usize)".into(),
+                ));
+            }
             Ok(out)
         }
         fn axis_f64((s, e, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaDamianiError> {
-            if step == 0.0 || (s - e).abs() < 1e-12 { return Ok(vec![s]); }
-            let mut out = Vec::new(); let eps = 1e-12;
-            if s < e {
-                if step <= 0.0 { return Err(CudaDamianiError::InvalidInput("invalid range (f64)".into())); }
-                let mut x = s; while x <= e + eps { out.push(x); x += step; }
-            } else {
-                if step <= 0.0 { return Err(CudaDamianiError::InvalidInput("invalid range (f64)".into())); }
-                let mut x = s; while x >= e - eps { out.push(x); x -= step; }
+            if step == 0.0 || (s - e).abs() < 1e-12 {
+                return Ok(vec![s]);
             }
-            if out.is_empty() { return Err(CudaDamianiError::InvalidInput("invalid range (f64)".into())); }
+            let mut out = Vec::new();
+            let eps = 1e-12;
+            if s < e {
+                if step <= 0.0 {
+                    return Err(CudaDamianiError::InvalidInput("invalid range (f64)".into()));
+                }
+                let mut x = s;
+                while x <= e + eps {
+                    out.push(x);
+                    x += step;
+                }
+            } else {
+                if step <= 0.0 {
+                    return Err(CudaDamianiError::InvalidInput("invalid range (f64)".into()));
+                }
+                let mut x = s;
+                while x >= e - eps {
+                    out.push(x);
+                    x -= step;
+                }
+            }
+            if out.is_empty() {
+                return Err(CudaDamianiError::InvalidInput("invalid range (f64)".into()));
+            }
             Ok(out)
         }
         let a = axis_usize(range.vis_atr)?;
@@ -254,11 +313,27 @@ impl CudaDamianiVolatmeter {
             .and_then(|v| v.checked_mul(d.len()))
             .and_then(|v| v.checked_mul(e.len()))
             .ok_or_else(|| CudaDamianiError::InvalidInput("combination count overflow".into()))?;
-        if cap == 0 { return Err(CudaDamianiError::InvalidInput("empty combinations".into())); }
+        if cap == 0 {
+            return Err(CudaDamianiError::InvalidInput("empty combinations".into()));
+        }
         let mut out = Vec::with_capacity(cap);
-        for &va in &a { for &vb in &b { for &vc in &c { for &vd in &d { for &ve in &e {
-            out.push(DamianiVolatmeterParams { vis_atr: Some(va), vis_std: Some(vb), sed_atr: Some(vc), sed_std: Some(vd), threshold: Some(ve) });
-        }}}}}
+        for &va in &a {
+            for &vb in &b {
+                for &vc in &c {
+                    for &vd in &d {
+                        for &ve in &e {
+                            out.push(DamianiVolatmeterParams {
+                                vis_atr: Some(va),
+                                vis_std: Some(vb),
+                                sed_atr: Some(vc),
+                                sed_std: Some(vd),
+                                threshold: Some(ve),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -367,19 +442,34 @@ impl CudaDamianiVolatmeter {
     }
 
     #[inline]
-    fn compute_tr_close_only_pinned(prices: &[f32], first_valid: usize) -> Option<LockedBuffer<f32>> {
-        let mut buf: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(prices.len()) }.ok()?;
-        for i in 0..first_valid { buf[i] = 0.0; }
-        let mut prev_close = f32::NAN; let mut have_prev = false;
+    fn compute_tr_close_only_pinned(
+        prices: &[f32],
+        first_valid: usize,
+    ) -> Option<LockedBuffer<f32>> {
+        let mut buf: LockedBuffer<f32> =
+            unsafe { LockedBuffer::uninitialized(prices.len()) }.ok()?;
+        for i in 0..first_valid {
+            buf[i] = 0.0;
+        }
+        let mut prev_close = f32::NAN;
+        let mut have_prev = false;
         for i in first_valid..prices.len() {
             let c = prices[i];
-            buf[i] = if have_prev && c.is_finite() { (c - prev_close).abs() } else { 0.0 };
-            if c.is_finite() { prev_close = c; have_prev = true; }
+            buf[i] = if have_prev && c.is_finite() {
+                (c - prev_close).abs()
+            } else {
+                0.0
+            };
+            if c.is_finite() {
+                prev_close = c;
+                have_prev = true;
+            }
         }
         Some(buf)
     }
 
-    fn launch_batch(&self,
+    fn launch_batch(
+        &self,
         series_len: usize,
         first_valid: usize,
         d_vis_atr: &DeviceBuffer<i32>,
@@ -396,19 +486,25 @@ impl CudaDamianiVolatmeter {
         let func = self
             .module
             .get_function("damiani_volatmeter_batch_f32")
-            .map_err(|_| CudaDamianiError::MissingKernelSymbol { name: "damiani_volatmeter_batch_f32" })?;
-        let block_x_env = std::env::var("DAMIANI_BLOCK_X").ok().and_then(|v| v.parse::<u32>().ok());
-        
-        
-        
+            .map_err(|_| CudaDamianiError::MissingKernelSymbol {
+                name: "damiani_volatmeter_batch_f32",
+            })?;
+        let block_x_env = std::env::var("DAMIANI_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok());
+
         let block_x = block_x_env
-            .or_else(|| match self.policy_batch { BatchKernelPolicy::Plain { block_x } => Some(block_x), _ => None })
-            .unwrap_or(1).max(1);
+            .or_else(|| match self.policy_batch {
+                BatchKernelPolicy::Plain { block_x } => Some(block_x),
+                _ => None,
+            })
+            .unwrap_or(1)
+            .max(1);
         let gx = ((n_combos + (block_x as usize) - 1) / (block_x as usize)).max(1) as u32;
         let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
-            let mut p: u64 = 0; 
+            let mut p: u64 = 0;
             let mut n = series_len as i32;
             let mut fv = first_valid as i32;
             let mut va = d_vis_atr.as_device_ptr().as_raw();
@@ -464,7 +560,6 @@ impl CudaDamianiVolatmeter {
         }
         let first_valid = Self::first_valid_close(prices)?;
 
-        
         for prm in &combos {
             let needed = *[
                 prm.vis_atr.unwrap(),
@@ -485,13 +580,11 @@ impl CudaDamianiVolatmeter {
             }
         }
 
-        
         let tr = Self::compute_tr_close_only(prices, first_valid);
         let (s_prefix_f64, ss_prefix_f64) = Self::compute_prefix_sums(prices, first_valid);
         let s_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&s_prefix_f64);
         let ss_prefix: Vec<Float2> = Self::pack_double_prefix_to_float2(&ss_prefix_f64);
 
-        
         let rows = combos.len();
         let param_bytes = rows
             .checked_mul(4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
@@ -517,21 +610,24 @@ impl CudaDamianiVolatmeter {
             .unwrap_or(64 * 1024 * 1024);
         if !Self::will_fit(req, headroom) {
             let free = cust::memory::mem_get_info().map(|(f, _)| f).unwrap_or(0);
-            return Err(CudaDamianiError::OutOfMemory { required: req, free, headroom });
+            return Err(CudaDamianiError::OutOfMemory {
+                required: req,
+                free,
+                headroom,
+            });
         }
 
-        
         let vis_atr: Vec<i32> = combos.iter().map(|p| p.vis_atr.unwrap() as i32).collect();
         let vis_std: Vec<i32> = combos.iter().map(|p| p.vis_std.unwrap() as i32).collect();
         let sed_atr: Vec<i32> = combos.iter().map(|p| p.sed_atr.unwrap() as i32).collect();
         let sed_std: Vec<i32> = combos.iter().map(|p| p.sed_std.unwrap() as i32).collect();
-        let thresh:  Vec<f32> = combos.iter().map(|p| p.threshold.unwrap() as f32).collect();
+        let thresh: Vec<f32> = combos.iter().map(|p| p.threshold.unwrap() as f32).collect();
         let d_va = DeviceBuffer::from_slice(&vis_atr)?;
         let d_vs = DeviceBuffer::from_slice(&vis_std)?;
         let d_sa = DeviceBuffer::from_slice(&sed_atr)?;
         let d_ss_ = DeviceBuffer::from_slice(&sed_std)?;
         let d_th = DeviceBuffer::from_slice(&thresh)?;
-        
+
         let (d_s, d_ss) = match (
             Self::pack_double_prefix_to_float2_pinned(&s_prefix_f64),
             Self::pack_double_prefix_to_float2_pinned(&ss_prefix_f64),
@@ -557,7 +653,9 @@ impl CudaDamianiVolatmeter {
         let len_out = rows
             .checked_mul(series_len)
             .and_then(|n| n.checked_mul(2))
-            .ok_or_else(|| CudaDamianiError::InvalidInput("output element count overflow".into()))?;
+            .ok_or_else(|| {
+                CudaDamianiError::InvalidInput("output element count overflow".into())
+            })?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(len_out, &self.stream) }
                 .map_err(CudaDamianiError::Cuda)?;
@@ -576,11 +674,18 @@ impl CudaDamianiVolatmeter {
             &d_tr,
             &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(CudaDamianiError::Cuda)?;
+        self.stream.synchronize().map_err(CudaDamianiError::Cuda)?;
 
-        Ok((DeviceArrayF32Damiani { buf: d_out, rows: 2 * rows, cols: series_len, ctx: Arc::clone(&self.context), device_id: self.device_id }, combos))
+        Ok((
+            DeviceArrayF32Damiani {
+                buf: d_out,
+                rows: 2 * rows,
+                cols: series_len,
+                ctx: Arc::clone(&self.context),
+                device_id: self.device_id,
+            },
+            combos,
+        ))
     }
 
     fn launch_many_series(
@@ -598,17 +703,24 @@ impl CudaDamianiVolatmeter {
         d_first_valids: &DeviceBuffer<i32>,
         d_s_tm: &DeviceBuffer<Float2>,
         d_ss_tm: &DeviceBuffer<Float2>,
-        d_out_tm: &mut DeviceBuffer<f32>) -> Result<(), CudaDamianiError>
-    {
-        let func = self.module
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaDamianiError> {
+        let func = self
+            .module
             .get_function("damiani_volatmeter_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaDamianiError::MissingKernelSymbol { name: "damiani_volatmeter_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaDamianiError::MissingKernelSymbol {
+                name: "damiani_volatmeter_many_series_one_param_time_major_f32",
+            })?;
         let block_x_env = std::env::var("DAMIANI_MANY_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
         let block_x = block_x_env
-            .or_else(|| match self.policy_many { ManySeriesKernelPolicy::OneD { block_x } => Some(block_x), _ => None })
-            .unwrap_or(1).max(1);
+            .or_else(|| match self.policy_many {
+                ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
+                _ => None,
+            })
+            .unwrap_or(1)
+            .max(1);
         let gx = ((cols + (block_x as usize) - 1) / (block_x as usize)).max(1) as u32;
         let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -682,7 +794,6 @@ impl CudaDamianiVolatmeter {
         let sed_std = params.sed_std.unwrap_or(100);
         let threshold = params.threshold.unwrap_or(1.4) as f32;
 
-        
         let mut first_valids = vec![0i32; cols];
         for series in 0..cols {
             let mut fv = None;
@@ -711,9 +822,9 @@ impl CudaDamianiVolatmeter {
             first_valids[series] = val;
         }
 
-        
-        let (s_tm_f64, ss_tm_f64) = Self::compute_prefix_sums_time_major(close_tm, cols, rows, &first_valids);
-        
+        let (s_tm_f64, ss_tm_f64) =
+            Self::compute_prefix_sums_time_major(close_tm, cols, rows, &first_valids);
+
         let (s_tm_opt, ss_tm_opt) = (
             Self::pack_double_prefix_to_float2_pinned(&s_tm_f64),
             Self::pack_double_prefix_to_float2_pinned(&ss_tm_f64),
@@ -721,15 +832,20 @@ impl CudaDamianiVolatmeter {
         let (s_tm_vec, ss_tm_vec);
         let (use_pinned_s, use_pinned_ss);
         match (s_tm_opt, ss_tm_opt) {
-            (Some(_), Some(_)) => { use_pinned_s = true; use_pinned_ss = true; s_tm_vec = Vec::new(); ss_tm_vec = Vec::new(); }
+            (Some(_), Some(_)) => {
+                use_pinned_s = true;
+                use_pinned_ss = true;
+                s_tm_vec = Vec::new();
+                ss_tm_vec = Vec::new();
+            }
             _ => {
-                use_pinned_s = false; use_pinned_ss = false;
+                use_pinned_s = false;
+                use_pinned_ss = false;
                 s_tm_vec = Self::pack_double_prefix_to_float2(&s_tm_f64);
                 ss_tm_vec = Self::pack_double_prefix_to_float2(&ss_tm_f64);
             }
         }
 
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaDamianiError::InvalidInput("matrix size overflow".into()))?;
@@ -756,13 +872,16 @@ impl CudaDamianiVolatmeter {
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(req, headroom) {
             let free = cust::memory::mem_get_info().map(|(f, _)| f).unwrap_or(0);
-            return Err(CudaDamianiError::OutOfMemory { required: req, free, headroom });
+            return Err(CudaDamianiError::OutOfMemory {
+                required: req,
+                free,
+                headroom,
+            });
         }
 
-        
         let d_high = unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream) }?;
-        let d_low  = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream)  }?;
-        let d_close= unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream)}?;
+        let d_low = unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream) }?;
+        let d_close = unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream) }?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let d_s = if use_pinned_s {
             let pin = Self::pack_double_prefix_to_float2_pinned(&s_tm_f64).unwrap();
@@ -776,31 +895,17 @@ impl CudaDamianiVolatmeter {
         } else {
             unsafe { DeviceBuffer::from_slice_async(&ss_tm_vec, &self.stream) }?
         };
-        let len_out = elems
-            .checked_mul(2)
-            .ok_or_else(|| CudaDamianiError::InvalidInput("output element count overflow".into()))?;
+        let len_out = elems.checked_mul(2).ok_or_else(|| {
+            CudaDamianiError::InvalidInput("output element count overflow".into())
+        })?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(len_out, &self.stream) }?;
 
         self.launch_many_series(
-            &d_high,
-            &d_low,
-            &d_close,
-            cols,
-            rows,
-            vis_atr,
-            vis_std,
-            sed_atr,
-            sed_std,
-            threshold,
-            &d_first,
-            &d_s,
-            &d_ss,
-            &mut d_out,
+            &d_high, &d_low, &d_close, cols, rows, vis_atr, vis_std, sed_atr, sed_std, threshold,
+            &d_first, &d_s, &d_ss, &mut d_out,
         )?;
-        self.stream
-            .synchronize()
-            .map_err(CudaDamianiError::Cuda)?;
+        self.stream.synchronize().map_err(CudaDamianiError::Cuda)?;
 
         Ok(DeviceArrayF32Damiani {
             buf: d_out,
@@ -812,24 +917,27 @@ impl CudaDamianiVolatmeter {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const COLS_256: usize = 256; 
-    const ROWS_8K: usize = 8 * 1024; 
+    const COLS_256: usize = 256;
+    const ROWS_8K: usize = 8 * 1024;
 
-    fn synth_close(len: usize) -> Vec<f32> { gen_series(len) }
+    fn synth_close(len: usize) -> Vec<f32> {
+        gen_series(len)
+    }
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
         let mut low = close.to_vec();
         for i in 0..close.len() {
             let v = close[i];
-            if !v.is_finite() { continue; }
+            if !v.is_finite() {
+                continue;
+            }
             let x = i as f32 * 0.0025;
             let off = (0.002 * x.sin()).abs() + 0.15;
             high[i] = v + off;
@@ -927,13 +1035,16 @@ pub mod benches {
             threshold: (1.4, 1.4, 0.0),
         };
         let combos = CudaDamianiVolatmeter::expand_grid(&sweep).expect("damiani expand grid");
-        let first_valid = CudaDamianiVolatmeter::first_valid_close(&close).expect("damiani first_valid");
+        let first_valid =
+            CudaDamianiVolatmeter::first_valid_close(&close).expect("damiani first_valid");
 
-        
         let tr = CudaDamianiVolatmeter::compute_tr_close_only(&close, first_valid);
-        let (s_prefix_f64, ss_prefix_f64) = CudaDamianiVolatmeter::compute_prefix_sums(&close, first_valid);
-        let s_prefix: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&s_prefix_f64);
-        let ss_prefix: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&ss_prefix_f64);
+        let (s_prefix_f64, ss_prefix_f64) =
+            CudaDamianiVolatmeter::compute_prefix_sums(&close, first_valid);
+        let s_prefix: Vec<Float2> =
+            CudaDamianiVolatmeter::pack_double_prefix_to_float2(&s_prefix_f64);
+        let ss_prefix: Vec<Float2> =
+            CudaDamianiVolatmeter::pack_double_prefix_to_float2(&ss_prefix_f64);
 
         let rows = combos.len();
         let vis_atr: Vec<i32> = combos.iter().map(|p| p.vis_atr.unwrap() as i32).collect();
@@ -945,10 +1056,12 @@ pub mod benches {
         let d_va = unsafe { DeviceBuffer::from_slice_async(&vis_atr, &cuda.stream) }.expect("d_va");
         let d_vs = unsafe { DeviceBuffer::from_slice_async(&vis_std, &cuda.stream) }.expect("d_vs");
         let d_sa = unsafe { DeviceBuffer::from_slice_async(&sed_atr, &cuda.stream) }.expect("d_sa");
-        let d_ss_ = unsafe { DeviceBuffer::from_slice_async(&sed_std, &cuda.stream) }.expect("d_ss");
+        let d_ss_ =
+            unsafe { DeviceBuffer::from_slice_async(&sed_std, &cuda.stream) }.expect("d_ss");
         let d_th = unsafe { DeviceBuffer::from_slice_async(&thresh, &cuda.stream) }.expect("d_th");
         let d_s = unsafe { DeviceBuffer::from_slice_async(&s_prefix, &cuda.stream) }.expect("d_s");
-        let d_ss = unsafe { DeviceBuffer::from_slice_async(&ss_prefix, &cuda.stream) }.expect("d_ss2");
+        let d_ss =
+            unsafe { DeviceBuffer::from_slice_async(&ss_prefix, &cuda.stream) }.expect("d_ss2");
         let d_tr = unsafe { DeviceBuffer::from_slice_async(&tr, &cuda.stream) }.expect("d_tr");
 
         let len_out = (2usize)
@@ -990,7 +1103,8 @@ pub mod benches {
             v
         };
         let (high_tm, low_tm) = synth_hlc_from_close(&close_tm);
-        let (vis_atr, vis_std, sed_atr, sed_std, threshold) = (13usize, 20usize, 40usize, 100usize, 1.4f32);
+        let (vis_atr, vis_std, sed_atr, sed_std, threshold) =
+            (13usize, 20usize, 40usize, 100usize, 1.4f32);
         let mut first_valids = vec![-1i32; cols];
         for series in 0..cols {
             let mut fv = None;
@@ -1003,8 +1117,12 @@ pub mod benches {
             }
             first_valids[series] = fv.expect("series all NaN");
         }
-        let (s_tm_f64, ss_tm_f64) =
-            CudaDamianiVolatmeter::compute_prefix_sums_time_major(&close_tm, cols, rows, &first_valids);
+        let (s_tm_f64, ss_tm_f64) = CudaDamianiVolatmeter::compute_prefix_sums_time_major(
+            &close_tm,
+            cols,
+            rows,
+            &first_valids,
+        );
         let s_tm: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&s_tm_f64);
         let ss_tm: Vec<Float2> = CudaDamianiVolatmeter::pack_double_prefix_to_float2(&ss_tm_f64);
 
@@ -1038,7 +1156,7 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        let combos = 154usize; 
+        let combos = 154usize;
         let param_bytes = combos * (4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let prefix_bytes = ONE_SERIES_LEN * (2 * std::mem::size_of::<Float2>());
         let tr_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1046,10 +1164,10 @@ pub mod benches {
         param_bytes + prefix_bytes + tr_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many() -> usize {
-        (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()     
+        (3 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()
             + COLS_256 * std::mem::size_of::<i32>()
-            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<Float2>() 
-            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()    
+            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<Float2>()
+            + 2 * COLS_256 * ROWS_8K * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024)
     }
 

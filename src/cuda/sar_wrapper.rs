@@ -1,15 +1,3 @@
-//! CUDA support for Parabolic SAR (Stop and Reverse).
-//!
-//! Parity with ALMA/CWMA wrappers:
-//! - PTX load via include_str!(.../sar_kernel.ptx) with DetermineTargetFromContext + O2
-//! - NON_BLOCKING stream
-//! - Policy enums and simple selection
-//! - VRAM checks with ~64MB headroom and grid.y chunking (<= 65_535)
-//! - Public device entry points:
-//!     - one-series × many-params (batch)
-//!     - many-series × one-param (time‑major)
-//! - Numerics & warmup/NaN semantics match src/indicators/sar.rs
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -31,7 +19,11 @@ pub enum CudaSarError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -39,7 +31,14 @@ pub enum CudaSarError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -97,8 +96,7 @@ impl CudaSar {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -123,10 +121,14 @@ impl CudaSar {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaSarError> {
@@ -179,18 +181,10 @@ impl CudaSar {
         block: (u32, u32, u32),
     ) -> Result<(), CudaSarError> {
         let dev = Device::get_device(self.device_id)?;
-        let max_bx = dev
-            .get_attribute(DeviceAttribute::MaxBlockDimX)?
-            as u32;
-        let max_by = dev
-            .get_attribute(DeviceAttribute::MaxBlockDimY)?
-            as u32;
-        let max_gx = dev
-            .get_attribute(DeviceAttribute::MaxGridDimX)?
-            as u32;
-        let max_gy = dev
-            .get_attribute(DeviceAttribute::MaxGridDimY)?
-            as u32;
+        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
+        let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
+        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let max_gy = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
         if block.0 == 0
             || block.0 > max_bx
             || block.1 == 0
@@ -212,7 +206,6 @@ impl CudaSar {
         Ok(())
     }
 
-    
     pub fn sar_batch_dev(
         &self,
         high: &[f32],
@@ -235,7 +228,6 @@ impl CudaSar {
 
         let combos = expand_grid(sweep)?;
 
-        
         let mut accs = Vec::with_capacity(combos.len());
         let mut maxs = Vec::with_capacity(combos.len());
         for p in &combos {
@@ -250,7 +242,6 @@ impl CudaSar {
             maxs.push(m as f32);
         }
 
-        
         let elem_size = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(2)
@@ -274,13 +265,11 @@ impl CudaSar {
             .ok_or_else(|| CudaSarError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, Self::headroom_bytes())?;
 
-        
         let d_high = DeviceBuffer::from_slice(high)?;
         let d_low = DeviceBuffer::from_slice(low)?;
         let d_accs = DeviceBuffer::from_slice(&accs)?;
         let d_maxs = DeviceBuffer::from_slice(&maxs)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         let len_i32 = len
             .try_into()
@@ -294,22 +283,21 @@ impl CudaSar {
             .map_err(|_| CudaSarError::InvalidInput("n_rows exceeds i32".into()))?;
 
         self.launch_batch_kernel(
-            &d_high,
-            &d_low,
-            len_i32,
-            first_i32,
-            &d_accs,
-            &d_maxs,
-            rows_i32,
-            &mut d_out,
+            &d_high, &d_low, len_i32, first_i32, &d_accs, &d_maxs, rows_i32, &mut d_out,
         )?;
 
         self.stream.synchronize()?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
     }
 
-    /// Same as `sar_batch_dev`, but reuses device-resident inputs to avoid re-copying.
     pub fn sar_batch_dev_from_device(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -348,7 +336,6 @@ impl CudaSar {
             maxs.push(m as f32);
         }
 
-        
         let elem_size = std::mem::size_of::<f32>();
         let param_bytes = combos
             .len()
@@ -369,8 +356,7 @@ impl CudaSar {
 
         let d_accs = DeviceBuffer::from_slice(&accs)?;
         let d_maxs = DeviceBuffer::from_slice(&maxs)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
         let len_i32 = len
             .try_into()
@@ -384,19 +370,19 @@ impl CudaSar {
             .map_err(|_| CudaSarError::InvalidInput("n_rows exceeds i32".into()))?;
 
         self.launch_batch_kernel(
-            d_high,
-            d_low,
-            len_i32,
-            first_i32,
-            &d_accs,
-            &d_maxs,
-            rows_i32,
-            &mut d_out,
+            d_high, d_low, len_i32, first_i32, &d_accs, &d_maxs, rows_i32, &mut d_out,
         )?;
 
         self.stream.synchronize()?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -414,23 +400,22 @@ impl CudaSar {
         if len <= 0 || n_rows <= 0 {
             return Ok(());
         }
-        let mut func = self
-            .module
-            .get_function("sar_batch_f32")
-            .map_err(|_| CudaSarError::MissingKernelSymbol { name: "sar_batch_f32" })?;
+        let mut func = self.module.get_function("sar_batch_f32").map_err(|_| {
+            CudaSarError::MissingKernelSymbol {
+                name: "sar_batch_f32",
+            }
+        })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        
+
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => {
-                match func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0)) {
-                    Ok((_, bs)) => {
-                        let x: u32 = bs.into();
-                        x.max(32).min(1024)
-                    }
-                    Err(_) => 256,
+            _ => match func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0)) {
+                Ok((_, bs)) => {
+                    let x: u32 = bs.into();
+                    x.max(32).min(1024)
                 }
-            }
+                Err(_) => 256,
+            },
         };
         let grid_x = ((n_rows as u32) + block_x - 1) / block_x;
         let grid_tuple = (grid_x.max(1), 1u32, 1u32);
@@ -457,13 +442,11 @@ impl CudaSar {
                 &mut p_n as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
 
-    
     pub fn sar_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -493,7 +476,6 @@ impl CudaSar {
 
         let first_valids = first_valids_time_major(high_tm, low_tm, cols, rows)?;
 
-        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let in_bytes = elems
@@ -512,12 +494,10 @@ impl CudaSar {
             .ok_or_else(|| CudaSarError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, Self::headroom_bytes())?;
 
-        
         let d_high = DeviceBuffer::from_slice(high_tm)?;
         let d_low = DeviceBuffer::from_slice(low_tm)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         let cols_i32 = cols
             .try_into()
@@ -539,10 +519,13 @@ impl CudaSar {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
-    /// Many-series × one-param with device-resident inputs to avoid re-copying.
     pub fn sar_many_series_one_param_time_major_dev_from_device(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -578,8 +561,7 @@ impl CudaSar {
             .ok_or_else(|| CudaSarError::InvalidInput("size overflow".into()))?;
         Self::will_fit(required, Self::headroom_bytes())?;
 
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         let cols_i32 = cols
             .try_into()
@@ -601,7 +583,11 @@ impl CudaSar {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -657,13 +643,11 @@ impl CudaSar {
                 &mut p_max as *mut _ as *mut c_void,
                 &mut p_out as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, args)?;
+            self.stream.launch(&func, grid, block, 0, args)?;
         }
         Ok(())
     }
 }
-
 
 fn first_valid_hl(high: &[f32], low: &[f32]) -> Option<usize> {
     high.iter()
@@ -680,14 +664,11 @@ fn first_valids_time_major(
     let mut out = vec![-1i32; cols];
     for s in 0..cols {
         for t in s..rows {
-            
             let idx = t
                 .checked_mul(cols)
                 .and_then(|v| v.checked_add(s))
                 .ok_or_else(|| {
-                    CudaSarError::InvalidInput(
-                        "size overflow in first_valids_time_major".into(),
-                    )
+                    CudaSarError::InvalidInput("size overflow in first_valids_time_major".into())
                 })?;
             let h = high_tm[idx];
             let l = low_tm[idx];
@@ -722,7 +703,6 @@ fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaSarError> {
                 x += step;
             }
         } else {
-            
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
@@ -730,12 +710,11 @@ fn axis_f64(axis: (f64, f64, f64)) -> Result<Vec<f64>, CudaSarError> {
             }
         }
     } else {
-        
         if start >= end {
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
-                x += step; 
+                x += step;
             }
         } else {
             return Err(CudaSarError::InvalidInput(format!(
@@ -772,7 +751,6 @@ fn expand_grid(r: &SarBatchRange) -> Result<Vec<SarParams>, CudaSarError> {
     }
     Ok(out)
 }
-
 
 pub mod benches {
     use super::*;
@@ -915,7 +893,7 @@ pub mod benches {
         let cuda = CudaSar::new(0).expect("cuda sar");
         let cols = MANY_SERIES_COLS;
         let rows = MANY_SERIES_ROWS;
-        
+
         let mut high_tm = vec![f32::NAN; cols * rows];
         let mut low_tm = vec![f32::NAN; cols * rows];
         for s in 0..cols {

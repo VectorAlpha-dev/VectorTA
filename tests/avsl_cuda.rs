@@ -61,7 +61,7 @@ fn avsl_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_vals = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_vals)?;
 
-    let tol = 1.5e-2; 
+    let tol = 1.5e-2;
     for idx in 0..gpu_vals.len() {
         assert!(
             approx_eq(cpu.values[idx], gpu_vals[idx] as f64, tol),
@@ -100,7 +100,6 @@ fn avsl_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let slow = 26usize;
     let mult = 2.0;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut c = vec![f64::NAN; rows];

@@ -1,16 +1,3 @@
-//! CUDA scaffolding for the Gaussian moving average kernels.
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX JIT with DetermineTargetFromContext and O2 fallback
-//! - Non-blocking stream
-//! - VRAM estimation with optional mem-check toggle
-//! - Policy + selection introspection (Batch/ManySeries) with BENCH_DEBUG logging
-//! - Public device + host helpers returning `DeviceArrayF32`
-//!
-//! Math note: Gaussian here is implemented as a cascaded one‑pole recurrence
-//! (time-marching) for numerical parity with the scalar reference. Coefficients
-//! are precomputed on host per parameter set and uploaded once.
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -26,10 +13,10 @@ use cust::sys as cu;
 use std::env;
 use std::ffi::{c_void, CStr};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-const COEFF_STRIDE: usize = 5; 
+const COEFF_STRIDE: usize = 5;
 
 use thiserror::Error;
 
@@ -43,17 +30,28 @@ pub enum CudaGaussianError {
     InvalidPolicy(&'static str),
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
-    #[error("out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("not implemented")]
     NotImplemented,
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -81,8 +79,6 @@ impl Default for CudaGaussianPolicy {
         }
     }
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
@@ -121,7 +117,8 @@ impl CudaGaussian {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -143,7 +140,6 @@ impl CudaGaussian {
         })
     }
 
-    /// Create with explicit policy (tests/benches).
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaGaussianPolicy,
@@ -164,11 +160,20 @@ impl CudaGaussian {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn synchronize(&self) -> Result<(), CudaGaussianError> { self.stream.synchronize()?; Ok(()) }
+    pub fn synchronize(&self) -> Result<(), CudaGaussianError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
 
-    pub fn stream_handle(&self) -> usize { self.stream.as_inner() as usize }
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn stream_handle(&self) -> usize {
+        self.stream.as_inner() as usize
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     pub fn gaussian_batch_dev(
         &self,
@@ -197,9 +202,10 @@ impl CudaGaussian {
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
 
-        
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(arr.len())? };
-        unsafe { arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+        unsafe {
+            arr.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
+        }
         self.stream.synchronize()?;
         out.copy_from_slice(pinned.as_slice());
         let BatchInputs { combos, .. } = inputs;
@@ -322,17 +328,39 @@ impl CudaGaussian {
         let n_combos = inputs.combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let price_bytes = prices.len().checked_mul(sz_f32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let period_bytes = inputs.periods.len().checked_mul(sz_i32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let pole_bytes = inputs.poles.len().checked_mul(sz_i32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let coeff_bytes = inputs.coeffs.len().checked_mul(sz_f32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let out_elems = inputs.series_len.checked_mul(n_combos).ok_or_else(|| CudaGaussianError::InvalidInput("elem count overflow".into()))?;
-        let out_bytes = out_elems.checked_mul(sz_f32).ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let required = price_bytes
-            .checked_add(period_bytes).and_then(|v| v.checked_add(pole_bytes))
-            .and_then(|v| v.checked_add(coeff_bytes)).and_then(|v| v.checked_add(out_bytes))
+        let price_bytes = prices
+            .len()
+            .checked_mul(sz_f32)
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let period_bytes = inputs
+            .periods
+            .len()
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let pole_bytes = inputs
+            .poles
+            .len()
+            .checked_mul(sz_i32)
+            .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let coeff_bytes = inputs
+            .coeffs
+            .len()
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let out_elems = inputs
+            .series_len
+            .checked_mul(n_combos)
+            .ok_or_else(|| CudaGaussianError::InvalidInput("elem count overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sz_f32)
+            .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let required = price_bytes
+            .checked_add(period_bytes)
+            .and_then(|v| v.checked_add(pole_bytes))
+            .and_then(|v| v.checked_add(coeff_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
         let d_prices = DeviceBuffer::from_slice(prices)?;
@@ -369,11 +397,19 @@ impl CudaGaussian {
     ) -> Result<DeviceArrayF32, CudaGaussianError> {
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let price_bytes = prices_tm.len().checked_mul(sz_f32)
+        let price_bytes = prices_tm
+            .len()
+            .checked_mul(sz_f32)
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let coeff_bytes = prepared.coeffs.len().checked_mul(sz_f32)
+        let coeff_bytes = prepared
+            .coeffs
+            .len()
+            .checked_mul(sz_f32)
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let fv_bytes = prepared.first_valids.len().checked_mul(sz_i32)
+        let fv_bytes = prepared
+            .first_valids
+            .len()
+            .checked_mul(sz_i32)
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
         let out_bytes = price_bytes;
         let required = price_bytes
@@ -381,14 +417,14 @@ impl CudaGaussian {
             .and_then(|v| v.checked_add(fv_bytes))
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaGaussianError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 32 * 1024 * 1024; 
-        
+        let headroom = 32 * 1024 * 1024;
+
         Self::will_fit_checked(required, headroom)?;
 
-        let d_prices_tm = DeviceBuffer::from_slice(prices_tm)
-            .map_err(|e| CudaGaussianError::Cuda(e))?;
-        let d_coeffs = DeviceBuffer::from_slice(&prepared.coeffs)
-            .map_err(|e| CudaGaussianError::Cuda(e))?;
+        let d_prices_tm =
+            DeviceBuffer::from_slice(prices_tm).map_err(|e| CudaGaussianError::Cuda(e))?;
+        let d_coeffs =
+            DeviceBuffer::from_slice(&prepared.coeffs).map_err(|e| CudaGaussianError::Cuda(e))?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)
             .map_err(|e| CudaGaussianError::Cuda(e))?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(prices_tm.len()) }
@@ -397,7 +433,6 @@ impl CudaGaussian {
         let period = params.period.unwrap_or(14);
         let poles = params.poles.unwrap_or(4);
 
-        
         if let Ok(mut sym) = self.module.get_global::<[f64; COEFF_STRIDE]>(unsafe {
             CStr::from_bytes_with_nul_unchecked(b"GAUSS_COEFFS64\0")
         }) {
@@ -441,26 +476,24 @@ impl CudaGaussian {
         let mut func = self
             .module
             .get_function("gaussian_batch_f32")
-            .map_err(|_| CudaGaussianError::MissingKernelSymbol { name: "gaussian_batch_f32" })?;
+            .map_err(|_| CudaGaussianError::MissingKernelSymbol {
+                name: "gaussian_batch_f32",
+            })?;
 
-        
         func.set_cache_config(CacheConfig::PreferL1)?;
 
-        
-        let (_min_grid, suggested_block) = func.suggested_launch_configuration(0, BlockSize::xy(1024, 1))?;
+        let (_min_grid, suggested_block) =
+            func.suggested_launch_configuration(0, BlockSize::xy(1024, 1))?;
 
-        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
             BatchKernelPolicy::Auto => suggested_block.max(128),
         };
         let block: BlockSize = BlockSize::xyz(block_x, 1, 1);
 
-        
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = GridSize::xyz(grid_x.max(1), 1, 1);
 
-        
         unsafe {
             let this = self as *const _ as *mut CudaGaussian;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -508,9 +541,10 @@ impl CudaGaussian {
         let mut func = self
             .module
             .get_function("gaussian_many_series_one_param_f32")
-            .map_err(|_| CudaGaussianError::MissingKernelSymbol { name: "gaussian_many_series_one_param_f32" })?;
+            .map_err(|_| CudaGaussianError::MissingKernelSymbol {
+                name: "gaussian_many_series_one_param_f32",
+            })?;
 
-        
         func.set_cache_config(CacheConfig::PreferL1)?;
 
         let block_x = match self.policy.many_series {
@@ -520,7 +554,6 @@ impl CudaGaussian {
         let grid: GridSize = (num_series as u32, 1, 1).into();
         let block: BlockSize = (block_x.min(1), 1, 1).into();
 
-        
         unsafe {
             let this = self as *const _ as *mut CudaGaussian;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: 1 });
@@ -627,7 +660,11 @@ impl CudaGaussian {
                 "matrix dimensions must be positive".into(),
             ));
         }
-        if prices_tm.len() != cols.checked_mul(rows).ok_or_else(|| CudaGaussianError::InvalidInput("matrix shape overflow".into()))? {
+        if prices_tm.len()
+            != cols
+                .checked_mul(rows)
+                .ok_or_else(|| CudaGaussianError::InvalidInput("matrix shape overflow".into()))?
+        {
             return Err(CudaGaussianError::InvalidInput(
                 "matrix shape mismatch for time-major layout".into(),
             ));
@@ -697,7 +734,10 @@ impl CudaGaussian {
     }
 
     #[inline]
-    fn will_fit_checked(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaGaussianError> {
+    fn will_fit_checked(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaGaussianError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -708,7 +748,11 @@ impl CudaGaussian {
             if need <= free {
                 Ok(())
             } else {
-                Err(CudaGaussianError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaGaussianError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -755,8 +799,6 @@ impl CudaGaussian {
         }
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -821,7 +863,8 @@ pub mod benches {
             period: (10, 10 + PARAM_SWEEP - 1, 1),
             poles: (4, 4, 0),
         };
-        let inputs = CudaGaussian::prepare_batch_inputs(&price, &sweep).expect("gaussian prepare batch");
+        let inputs =
+            CudaGaussian::prepare_batch_inputs(&price, &sweep).expect("gaussian prepare batch");
         let n_combos = inputs.periods.len();
 
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
@@ -885,15 +928,15 @@ pub mod benches {
             period: Some(64),
             poles: Some(4),
         };
-        let prepared =
-            CudaGaussian::prepare_many_series_inputs(&data_tm, cols, rows, &params)
-                .expect("gaussian prepare many");
+        let prepared = CudaGaussian::prepare_many_series_inputs(&data_tm, cols, rows, &params)
+            .expect("gaussian prepare many");
         let period = params.period.unwrap_or(64);
         let poles = params.poles.unwrap_or(4);
 
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
         let d_coeffs = DeviceBuffer::from_slice(&prepared.coeffs).expect("d_coeffs");
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
         let d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(cols.checked_mul(rows).expect("out size")) }
                 .expect("d_out_tm");
@@ -1026,42 +1069,55 @@ fn compute_gaussian_coeffs(
     Ok(coeffs)
 }
 
-fn expand_grid_checked(range: &GaussianBatchRange) -> Result<Vec<GaussianParams>, CudaGaussianError> {
+fn expand_grid_checked(
+    range: &GaussianBatchRange,
+) -> Result<Vec<GaussianParams>, CudaGaussianError> {
     fn axis((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        if step == 0 || start == end { return vec![start]; }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        if step == 0 || start == end {
+            return vec![start];
+        }
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         (lo..=hi).step_by(step).collect()
     }
 
     let periods = axis(range.period);
     let poles = axis(range.poles);
     if periods.is_empty() || poles.is_empty() {
-        return Err(CudaGaussianError::InvalidInput("invalid sweep range: produced no values".to_string()));
+        return Err(CudaGaussianError::InvalidInput(
+            "invalid sweep range: produced no values".to_string(),
+        ));
     }
     let mut combos = Vec::with_capacity(periods.len() * poles.len());
     for &p in &periods {
         for &k in &poles {
-            combos.push(GaussianParams { period: Some(p), poles: Some(k) });
+            combos.push(GaussianParams {
+                period: Some(p),
+                poles: Some(k),
+            });
         }
     }
     if combos.is_empty() {
-        return Err(CudaGaussianError::InvalidInput("invalid sweep range: no parameter combinations".to_string()));
+        return Err(CudaGaussianError::InvalidInput(
+            "invalid sweep range: no parameter combinations".to_string(),
+        ));
     }
     Ok(combos)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use pyo3::types::PyDictMethods;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use pyo3::types::PyDictMethods;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32", unsendable)]
 pub struct DeviceArrayF32Py {
-    
     pub inner: Option<DeviceArrayF32>,
     stream_handle: usize,
     _ctx_guard: Arc<Context>,
@@ -1070,7 +1126,10 @@ pub struct DeviceArrayF32Py {
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-pub struct PrimaryCtxGuard { dev: i32, ctx: cu::CUcontext }
+pub struct PrimaryCtxGuard {
+    dev: i32,
+    ctx: cu::CUcontext,
+}
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl PrimaryCtxGuard {
     fn new(device_id: u32) -> Result<Self, cust::error::CudaError> {
@@ -1085,10 +1144,19 @@ impl PrimaryCtxGuard {
         }
     }
     #[inline]
-    unsafe fn push_current(&self) { let _ = cu::cuCtxSetCurrent(self.ctx); }
+    unsafe fn push_current(&self) {
+        let _ = cu::cuCtxSetCurrent(self.ctx);
+    }
 }
 #[cfg(all(feature = "python", feature = "cuda"))]
-impl Clone for PrimaryCtxGuard { fn clone(&self) -> Self { Self { dev: self.dev, ctx: self.ctx } } }
+impl Clone for PrimaryCtxGuard {
+    fn clone(&self) -> Self {
+        Self {
+            dev: self.dev,
+            ctx: self.ctx,
+        }
+    }
+}
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl Drop for PrimaryCtxGuard {
     fn drop(&mut self) {
@@ -1104,26 +1172,34 @@ impl Drop for PrimaryCtxGuard {
 impl DeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        
-        unsafe { let _ = cu::cuStreamSynchronize(self.stream_handle as cu::CUstream); }
+        unsafe {
+            let _ = cu::cuStreamSynchronize(self.stream_handle as cu::CUstream);
+        }
         let itemsize = std::mem::size_of::<f32>();
-        let inner = self.inner.as_ref().ok_or_else(|| pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__"))?;
+        let inner = self.inner.as_ref().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("buffer already exported via __dlpack__")
+        })?;
         let d = PyDict::new(py);
         d.set_item("shape", (inner.rows, inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         let size = inner.rows.saturating_mul(inner.cols);
-        let ptr_val: usize = if size == 0 { 0 } else { inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         if self.stream_handle != 0 {
-            
             d.set_item("stream", self.stream_handle)?;
         }
         Ok(d.into())
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1136,8 +1212,7 @@ impl DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1158,16 +1233,11 @@ impl DeviceArrayF32Py {
             }
         }
 
-        
         let _ = stream;
 
-        
-        let inner = self
-            .inner
-            .take()
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err(
-                "__dlpack__ may only be called once",
-            ))?;
+        let inner = self.inner.take().ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("__dlpack__ may only be called once")
+        })?;
 
         let rows = inner.rows;
         let cols = inner.cols;
@@ -1181,9 +1251,23 @@ impl DeviceArrayF32Py {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32Py {
-    pub fn new_from_rust(inner: DeviceArrayF32, stream_handle: usize, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        let pc = PrimaryCtxGuard::new(device_id).unwrap_or(PrimaryCtxGuard { dev: device_id as i32, ctx: std::ptr::null_mut() });
-        Self { inner: Some(inner), stream_handle, _ctx_guard: ctx_guard, _device_id: device_id, pc_guard: pc }
+    pub fn new_from_rust(
+        inner: DeviceArrayF32,
+        stream_handle: usize,
+        ctx_guard: Arc<Context>,
+        device_id: u32,
+    ) -> Self {
+        let pc = PrimaryCtxGuard::new(device_id).unwrap_or(PrimaryCtxGuard {
+            dev: device_id as i32,
+            ctx: std::ptr::null_mut(),
+        });
+        Self {
+            inner: Some(inner),
+            stream_handle,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+            pc_guard: pc,
+        }
     }
 }
 

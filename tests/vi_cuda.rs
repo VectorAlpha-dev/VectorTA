@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::vi::{
     vi_batch_with_kernel, vi_with_kernel, ViBatchRange, ViInput, ViParams,
 };
@@ -88,8 +86,8 @@ fn vi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         eprintln!("[vi_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 16usize; 
-    let rows = 8192usize; 
+    let cols = 16usize;
+    let rows = 8192usize;
     let mut high_tm = vec![f64::NAN; rows * cols];
     let mut low_tm = vec![f64::NAN; rows * cols];
     let mut close_tm = vec![f64::NAN; rows * cols];
@@ -104,7 +102,6 @@ fn vi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     }
     let period = 14usize;
 
-    
     let mut plus_cpu_tm = vec![f64::NAN; rows * cols];
     let mut minus_cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::ppo::{
     ppo_batch_with_kernel, ppo_with_kernel, PpoBatchRange, PpoData, PpoInput, PpoParams,
 };
@@ -156,7 +154,6 @@ fn ppo_cuda_many_series_one_param_matches_cpu_sma() -> Result<(), Box<dyn std::e
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];
@@ -221,7 +218,6 @@ fn ppo_cuda_many_series_one_param_matches_cpu_ema() -> Result<(), Box<dyn std::e
 
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

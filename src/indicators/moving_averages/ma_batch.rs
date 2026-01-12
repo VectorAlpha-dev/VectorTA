@@ -1,14 +1,3 @@
-//! # Moving Average Batch Dispatcher (CPU)
-//!
-//! A uniform, runtime-selected entry point for period-sweep batch kernels.
-//! This mirrors the single-series dispatcher in `ma.rs`, but calls each
-//! indicator's `*_batch_with_kernel` CPU implementation to produce a
-//! row-major result matrix (rows = parameter combos, cols = input length).
-//!
-//! Scope: This dispatcher is intentionally **period-sweep oriented**. Moving
-//! averages that don't use a `period` (or require non-period parameters) are
-//! reported as unsupported here - call their dedicated batch APIs directly.
-
 use super::ma::MaData;
 use crate::utilities::data_loader::source_type;
 use crate::utilities::enums::Kernel;
@@ -19,7 +8,9 @@ use thiserror::Error;
 pub enum MaBatchDispatchError {
     #[error("Unknown moving average type: {ma_type}")]
     UnknownType { ma_type: String },
-    #[error("{indicator} does not support period-sweep batch dispatch; use the indicator directly")]
+    #[error(
+        "{indicator} does not support period-sweep batch dispatch; use the indicator directly"
+    )]
     NotPeriodBased { indicator: &'static str },
     #[error("{indicator} requires candles (timestamp/volume/OHLC); pass MaData::Candles")]
     RequiresCandles { indicator: &'static str },
@@ -89,7 +80,9 @@ pub fn ma_batch_with_kernel<'a>(
 
     match ma_type.to_ascii_lowercase().as_str() {
         "sma" => {
-            let sweep = super::sma::SmaBatchRange { period: period_range };
+            let sweep = super::sma::SmaBatchRange {
+                period: period_range,
+            };
             let out = super::sma::sma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -99,7 +92,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "ema" => {
-            let sweep = super::ema::EmaBatchRange { period: period_range };
+            let sweep = super::ema::EmaBatchRange {
+                period: period_range,
+            };
             let out = super::ema::ema_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -109,7 +104,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "dema" => {
-            let sweep = super::dema::DemaBatchRange { period: period_range };
+            let sweep = super::dema::DemaBatchRange {
+                period: period_range,
+            };
             let out = super::dema::dema_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -119,7 +116,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "tema" => {
-            let sweep = super::tema::TemaBatchRange { period: period_range };
+            let sweep = super::tema::TemaBatchRange {
+                period: period_range,
+            };
             let out = super::tema::tema_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -129,7 +128,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "smma" => {
-            let sweep = super::smma::SmmaBatchRange { period: period_range };
+            let sweep = super::smma::SmmaBatchRange {
+                period: period_range,
+            };
             let out = super::smma::smma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -139,7 +140,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "zlema" => {
-            let sweep = super::zlema::ZlemaBatchRange { period: period_range };
+            let sweep = super::zlema::ZlemaBatchRange {
+                period: period_range,
+            };
             let out = super::zlema::zlema_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -149,7 +152,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "wma" => {
-            let sweep = super::wma::WmaBatchRange { period: period_range };
+            let sweep = super::wma::WmaBatchRange {
+                period: period_range,
+            };
             let out = super::wma::wma_with_kernel_batch(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -170,7 +175,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "cwma" => {
-            let sweep = super::cwma::CwmaBatchRange { period: period_range };
+            let sweep = super::cwma::CwmaBatchRange {
+                period: period_range,
+            };
             let out = super::cwma::cwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -180,7 +187,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "edcf" => {
-            let sweep = super::edcf::EdcfBatchRange { period: period_range };
+            let sweep = super::edcf::EdcfBatchRange {
+                period: period_range,
+            };
             let out = super::edcf::edcf_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -190,7 +199,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "fwma" => {
-            let sweep = super::fwma::FwmaBatchRange { period: period_range };
+            let sweep = super::fwma::FwmaBatchRange {
+                period: period_range,
+            };
             let out = super::fwma::fwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -211,7 +222,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "highpass" => {
-            let sweep = super::highpass::HighPassBatchRange { period: period_range };
+            let sweep = super::highpass::HighPassBatchRange {
+                period: period_range,
+            };
             let out = super::highpass::highpass_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(48)),
@@ -223,7 +236,8 @@ pub fn ma_batch_with_kernel<'a>(
         "highpass2" | "highpass_2_pole" => {
             let mut sweep = super::highpass_2_pole::HighPass2BatchRange::default();
             sweep.period = period_range;
-            let out = super::highpass_2_pole::highpass_2_pole_batch_with_kernel(prices, &sweep, kernel)?;
+            let out =
+                super::highpass_2_pole::highpass_2_pole_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(48)),
                 values: out.values,
@@ -232,7 +246,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "hma" => {
-            let sweep = super::hma::HmaBatchRange { period: period_range };
+            let sweep = super::hma::HmaBatchRange {
+                period: period_range,
+            };
             let out = super::hma::hma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -253,7 +269,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "jsa" => {
-            let sweep = super::jsa::JsaBatchRange { period: period_range };
+            let sweep = super::jsa::JsaBatchRange {
+                period: period_range,
+            };
             let out = super::jsa::jsa_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -263,7 +281,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "linreg" => {
-            let sweep = super::linreg::LinRegBatchRange { period: period_range };
+            let sweep = super::linreg::LinRegBatchRange {
+                period: period_range,
+            };
             let out = super::linreg::linreg_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -273,7 +293,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "kama" => {
-            let sweep = super::kama::KamaBatchRange { period: period_range };
+            let sweep = super::kama::KamaBatchRange {
+                period: period_range,
+            };
             let out = super::kama::kama_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -283,7 +305,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "ehlers_kama" => {
-            let sweep = super::ehlers_kama::EhlersKamaBatchRange { period: period_range };
+            let sweep = super::ehlers_kama::EhlersKamaBatchRange {
+                period: period_range,
+            };
             let out = super::ehlers_kama::ehlers_kama_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -297,7 +321,8 @@ pub fn ma_batch_with_kernel<'a>(
                 warmup_bars: (20, 20, 0),
                 max_dc_period: period_range,
             };
-            let out = super::ehlers_itrend::ehlers_itrend_batch_with_kernel(prices, &sweep, kernel)?;
+            let out =
+                super::ehlers_itrend::ehlers_itrend_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.max_dc_period.unwrap_or(48)),
                 values: out.values,
@@ -319,7 +344,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "ehma" => {
-            let sweep = super::ehma::EhmaBatchRange { period: period_range };
+            let sweep = super::ehma::EhmaBatchRange {
+                period: period_range,
+            };
             let out = super::ehma::ehma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -329,7 +356,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "nama" => {
-            let sweep = super::nama::NamaBatchRange { period: period_range };
+            let sweep = super::nama::NamaBatchRange {
+                period: period_range,
+            };
             let out = super::nama::nama_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -339,7 +368,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "nma" => {
-            let sweep = super::nma::NmaBatchRange { period: period_range };
+            let sweep = super::nma::NmaBatchRange {
+                period: period_range,
+            };
             let out = super::nma::nma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -349,7 +380,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "pwma" => {
-            let sweep = super::pwma::PwmaBatchRange { period: period_range };
+            let sweep = super::pwma::PwmaBatchRange {
+                period: period_range,
+            };
             let out = super::pwma::pwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -359,7 +392,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "reflex" => {
-            let sweep = super::reflex::ReflexBatchRange { period: period_range };
+            let sweep = super::reflex::ReflexBatchRange {
+                period: period_range,
+            };
             let out = super::reflex::reflex_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(48)),
@@ -369,7 +404,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "sinwma" => {
-            let sweep = super::sinwma::SinWmaBatchRange { period: period_range };
+            let sweep = super::sinwma::SinWmaBatchRange {
+                period: period_range,
+            };
             let out = super::sinwma::sinwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -379,7 +416,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "sqwma" => {
-            let sweep = super::sqwma::SqwmaBatchRange { period: period_range };
+            let sweep = super::sqwma::SqwmaBatchRange {
+                period: period_range,
+            };
             let out = super::sqwma::sqwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -389,7 +428,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "srwma" => {
-            let sweep = super::srwma::SrwmaBatchRange { period: period_range };
+            let sweep = super::srwma::SrwmaBatchRange {
+                period: period_range,
+            };
             let out = super::srwma::srwma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -399,7 +440,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "swma" => {
-            let sweep = super::swma::SwmaBatchRange { period: period_range };
+            let sweep = super::swma::SwmaBatchRange {
+                period: period_range,
+            };
             let out = super::swma::swma_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -409,8 +452,11 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "supersmoother" => {
-            let sweep = super::supersmoother::SuperSmootherBatchRange { period: period_range };
-            let out = super::supersmoother::supersmoother_batch_with_kernel(prices, &sweep, kernel)?;
+            let sweep = super::supersmoother::SuperSmootherBatchRange {
+                period: period_range,
+            };
+            let out =
+                super::supersmoother::supersmoother_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(48)),
                 values: out.values,
@@ -419,8 +465,12 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "supersmoother_3_pole" => {
-            let sweep = super::supersmoother_3_pole::SuperSmoother3PoleBatchRange { period: period_range };
-            let out = super::supersmoother_3_pole::supersmoother_3_pole_batch_with_kernel(prices, &sweep, kernel)?;
+            let sweep = super::supersmoother_3_pole::SuperSmoother3PoleBatchRange {
+                period: period_range,
+            };
+            let out = super::supersmoother_3_pole::supersmoother_3_pole_batch_with_kernel(
+                prices, &sweep, kernel,
+            )?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(48)),
                 values: out.values,
@@ -440,7 +490,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "trendflex" => {
-            let sweep = super::trendflex::TrendFlexBatchRange { period: period_range };
+            let sweep = super::trendflex::TrendFlexBatchRange {
+                period: period_range,
+            };
             let out = super::trendflex::trendflex_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(48)),
@@ -450,7 +502,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "trima" => {
-            let sweep = super::trima::TrimaBatchRange { period: period_range };
+            let sweep = super::trima::TrimaBatchRange {
+                period: period_range,
+            };
             let out = super::trima::trima_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(9)),
@@ -460,7 +514,9 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "wilders" => {
-            let sweep = super::wilders::WildersBatchRange { period: period_range };
+            let sweep = super::wilders::WildersBatchRange {
+                period: period_range,
+            };
             let out = super::wilders::wilders_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(14)),
@@ -483,8 +539,11 @@ pub fn ma_batch_with_kernel<'a>(
             })
         }
         "vwma" => {
-            let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles { indicator: "vwma" })?;
-            let sweep = super::vwma::VwmaBatchRange { period: period_range };
+            let candles =
+                candles.ok_or(MaBatchDispatchError::RequiresCandles { indicator: "vwma" })?;
+            let sweep = super::vwma::VwmaBatchRange {
+                period: period_range,
+            };
             let out = super::vwma::vwma_batch_with_kernel(prices, &candles.volume, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(20)),
@@ -493,9 +552,15 @@ pub fn ma_batch_with_kernel<'a>(
                 cols: out.cols,
             })
         }
-        "tradjema" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "tradjema" }.into()),
+        "tradjema" => Err(MaBatchDispatchError::NotPeriodBased {
+            indicator: "tradjema",
+        }
+        .into()),
         "uma" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "uma" }.into()),
-        "volume_adjusted_ma" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "volume_adjusted_ma" }.into()),
+        "volume_adjusted_ma" => Err(MaBatchDispatchError::NotPeriodBased {
+            indicator: "volume_adjusted_ma",
+        }
+        .into()),
         "hwma" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "hwma" }.into()),
         "mama" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "mama" }.into()),
         "mwdx" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "mwdx" }.into()),
@@ -544,7 +609,8 @@ pub fn ma_batch_with_kernel<'a>(
                 base_period: period_range,
                 vol_period: (51, 51, 0),
             };
-            let out = super::volatility_adjusted_ma::vama_batch_with_kernel(prices, &sweep, kernel)?;
+            let out =
+                super::volatility_adjusted_ma::vama_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.base_period.unwrap_or(10)),
                 values: out.values,
@@ -563,6 +629,9 @@ pub fn ma_batch_with_kernel<'a>(
                 cols: out.cols,
             })
         }
-        other => Err(MaBatchDispatchError::UnknownType { ma_type: other.to_string() }.into()),
+        other => Err(MaBatchDispatchError::UnknownType {
+            ma_type: other.to_string(),
+        }
+        .into()),
     }
 }

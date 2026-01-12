@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::maaq::{
     maaq_batch_with_kernel, MaaqBatchRange, MaaqBuilder, MaaqParams,
 };

@@ -1,28 +1,6 @@
-//! # Median Absolute Deviation (MEDIUM_AD)
-//!
-//! A robust measure of dispersion that calculates the median of the absolute
-//! deviations from the median for a specified `period`.
-//!
-//! ## Parameters
-//! - **period**: The window size (number of data points). Defaults to 5.
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **values**: Vector of median absolute deviation values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - SIMD enabled: AVX2/AVX512 accelerate copy/NaN-scan and |x−median|; selection remains scalar. Gains are period-dependent (>5% for larger windows).
-//! - Decision log: SIMD enabled (AVX2/AVX512) for scalar/batch paths with AVX512 currently routed to scalar for exactness; CUDA wrappers present for batch and many-series; Python interop exposes CUDA Array Interface v3 and DLPack v1.x with legacy fallback. Numerical outputs remain identical to the scalar CPU implementation.
-//! - Streaming: exact via order-statistics treap — O(log p) insert/remove; MAD computed exactly via full-scan median over |x−median| for now (matches batch); deterministic. Future work: O(log^2 p) MAD selection.
-//! - Zero-copy memory: uses `alloc_with_nan_prefix` and `make_uninit_matrix` for batch operations.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
-};
+use crate::utilities::helpers::{alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -55,7 +33,10 @@ pub struct MediumAdOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MediumAdParams {
     pub period: Option<usize>,
 }
@@ -176,7 +157,11 @@ pub enum MediumAdError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("medium_ad: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("medium_ad: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -223,7 +208,6 @@ pub fn medium_ad_with_kernel(
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -233,7 +217,7 @@ pub fn medium_ad_with_kernel(
             Kernel::Scalar | Kernel::ScalarBatch => medium_ad_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => medium_ad_avx2(data, period, first, &mut out),
-            
+
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => medium_ad_scalar(data, period, first, &mut out),
             _ => unreachable!(),
@@ -243,15 +227,9 @@ pub fn medium_ad_with_kernel(
     Ok(MediumAdOutput { values: out })
 }
 
-/// Writes MEDIUM_AD values into a caller-provided output slice without allocating.
-///
-/// - Preserves the module's NaN warmup semantics (prefix up to `first + period - 1`).
-/// - `out.len()` must equal the input length; returns the module's length/period error on mismatch.
-/// - Uses the same kernel auto-selection policy as `medium_ad()` (short-circuits AVX2 to scalar).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), MediumAdError> {
-    
     let data: &[f64] = match &input.data {
         MediumAdData::Candles { candles, source } => source_type(candles, source),
         MediumAdData::Slice(sl) => sl,
@@ -262,7 +240,6 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
         return Err(MediumAdError::EmptyInputData);
     }
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -270,7 +247,10 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
 
     let period = input.get_period();
     if period == 0 || period > len {
-        return Err(MediumAdError::InvalidPeriod { period, data_len: len });
+        return Err(MediumAdError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
         return Err(MediumAdError::NotEnoughValidData {
@@ -286,23 +266,20 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
         });
     }
 
-    
     let warm = first + period - 1;
     let warm_cap = warm.min(len);
     for v in &mut out[..warm_cap] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     let chosen = Kernel::Scalar;
 
-    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => medium_ad_scalar(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => medium_ad_avx2(data, period, first, out),
-            
+
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => medium_ad_scalar(data, period, first, out),
             _ => unreachable!(),
@@ -314,18 +291,15 @@ pub fn medium_ad_into(input: &MediumAdInput, out: &mut [f64]) -> Result<(), Medi
 
 #[inline]
 pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    
     use core::cmp::Ordering;
 
     #[inline(always)]
     fn fast_abs_f64(x: f64) -> f64 {
-        
         f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
     }
 
     #[inline(always)]
     fn median_from(buf: &mut [f64], mid: usize) -> f64 {
-        
         buf.select_nth_unstable_by(mid, |a, b| {
             if *a < *b {
                 Ordering::Less
@@ -336,10 +310,8 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
             }
         });
         if (buf.len() & 1) == 1 {
-            
             unsafe { *buf.get_unchecked(mid) }
         } else {
-            
             let mut lo_max = f64::NEG_INFINITY;
             let left = unsafe { core::slice::from_raw_parts(buf.as_ptr(), mid) };
             for &v in left.iter() {
@@ -361,7 +333,6 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
         return;
     }
 
-    
     let mut buf: Vec<f64> = Vec::with_capacity(period);
     unsafe { buf.set_len(period) };
     let mid = period >> 1;
@@ -370,14 +341,12 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
     for i in warm..len {
         let start = i + 1 - period;
 
-        
         let mut has_nan = false;
         unsafe {
             let dp = data.as_ptr().add(start);
             let bp = buf.as_mut_ptr();
             let mut k = 0usize;
 
-            
             while k + 4 <= period {
                 let a = *dp.add(k);
                 let b = *dp.add(k + 1);
@@ -402,10 +371,8 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
             continue;
         }
 
-        
         let med = median_from(&mut buf, mid);
 
-        
         unsafe {
             let bp = buf.as_mut_ptr();
             let mut k = 0usize;
@@ -427,7 +394,6 @@ pub fn medium_ad_scalar(data: &[f64], period: usize, first_valid: usize, out: &m
             }
         }
 
-        
         let mad = median_from(&mut buf, mid);
         unsafe { *out.get_unchecked_mut(i) = mad };
     }
@@ -439,7 +405,7 @@ pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &m
     use core::cmp::Ordering;
     unsafe {
         let len = data.len();
-        
+
         let mut buf: Vec<f64> = Vec::with_capacity(period);
         unsafe { buf.set_len(period) };
         let mid = period >> 1;
@@ -473,7 +439,6 @@ pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &m
         for i in warm..len {
             let start = i + 1 - period;
 
-            
             let mut has_nan = false;
             let mut k = 0usize;
             while k + 8 <= period {
@@ -485,7 +450,7 @@ pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &m
                 }
                 k += 8;
             }
-            
+
             while k + 4 <= period {
                 let v = _mm256_loadu_pd(data.as_ptr().add(start + k));
                 _mm256_storeu_pd(buf.as_mut_ptr().add(k), v);
@@ -508,7 +473,6 @@ pub fn medium_ad_avx512(data: &[f64], period: usize, first_valid: usize, out: &m
 
             let med = median_from(&mut buf, mid);
 
-            
             let mv = _mm512_set1_pd(med);
             let mut k = 0usize;
             while k + 8 <= period {
@@ -544,11 +508,11 @@ pub fn medium_ad_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut
     use core::cmp::Ordering;
     unsafe {
         let len = data.len();
-        
+
         let mut buf: Vec<f64> = Vec::with_capacity(period);
         unsafe { buf.set_len(period) };
         let mid = period >> 1;
-        let sign_mask = _mm256_set1_pd(-0.0); 
+        let sign_mask = _mm256_set1_pd(-0.0);
 
         #[inline(always)]
         fn median_from(buf: &mut [f64], mid: usize) -> f64 {
@@ -578,13 +542,12 @@ pub fn medium_ad_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut
         for i in warm..len {
             let start = i + 1 - period;
 
-            
             let mut has_nan = false;
             let mut k = 0usize;
             while k + 4 <= period {
                 let v = _mm256_loadu_pd(data.as_ptr().add(start + k));
                 _mm256_storeu_pd(buf.as_mut_ptr().add(k), v);
-                
+
                 let nan_mask = _mm256_cmp_pd(v, v, 0x03);
                 if _mm256_movemask_pd(nan_mask) != 0 {
                     has_nan = true;
@@ -602,10 +565,8 @@ pub fn medium_ad_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut
                 continue;
             }
 
-            
             let med = median_from(&mut buf, mid);
 
-            
             let mv = _mm256_set1_pd(med);
             let mut k = 0usize;
             while k + 4 <= period {
@@ -645,8 +606,6 @@ pub fn medium_ad_batch_with_kernel(
     k: Kernel,
 ) -> Result<MediumAdBatchOutput, MediumAdError> {
     let kernel = match k {
-        
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(MediumAdError::InvalidKernelForBatch(other)),
@@ -668,7 +627,9 @@ pub struct MediumAdBatchRange {
 
 impl Default for MediumAdBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -750,9 +711,7 @@ impl MediumAdBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &MediumAdBatchRange) -> Result<Vec<MediumAdParams>, MediumAdError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, MediumAdError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, MediumAdError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -842,14 +801,11 @@ fn medium_ad_batch_inner(
 
     let rows = combos.len();
 
-    
-    let _total_elems = rows
-        .checked_mul(cols)
-        .ok_or(MediumAdError::InvalidRange {
-            start: sweep.period.0.to_string(),
-            end: sweep.period.1.to_string(),
-            step: sweep.period.2.to_string(),
-        })?;
+    let _total_elems = rows.checked_mul(cols).ok_or(MediumAdError::InvalidRange {
+        start: sweep.period.0.to_string(),
+        end: sweep.period.1.to_string(),
+        step: sweep.period.2.to_string(),
+    })?;
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos
         .iter()
@@ -857,11 +813,9 @@ fn medium_ad_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let out_mu = buf_mu.as_mut_slice();
 
     let do_row = |row: usize, dst_mu: &mut [core::mem::MaybeUninit<f64>]| {
-        
         let dst = unsafe {
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
         };
@@ -900,7 +854,6 @@ fn medium_ad_batch_inner(
         }
     }
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let values = unsafe {
         Vec::from_raw_parts(
@@ -951,7 +904,6 @@ fn medium_ad_batch_inner_into(
             step: sweep.period.2.to_string(),
         })?;
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap() - 1;
         let row_start = match row.checked_mul(cols) {
@@ -1046,7 +998,6 @@ unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &
         return;
     }
 
-    
     let mut buf: Vec<f64> = Vec::with_capacity(period);
     unsafe { buf.set_len(period) };
     let mid = period >> 1;
@@ -1055,7 +1006,6 @@ unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &
     for i in warm..data.len() {
         let start = i + 1 - period;
 
-        
         let mut has_nan = false;
         let dp = data.as_ptr().add(start);
         let bp = buf.as_mut_ptr();
@@ -1085,7 +1035,6 @@ unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &
 
         let med = median_from(&mut buf, mid);
 
-        
         let bp = buf.as_mut_ptr();
         let mut k = 0usize;
         while k + 4 <= period {
@@ -1112,7 +1061,6 @@ unsafe fn medium_ad_row_scalar(data: &[f64], first: usize, period: usize, out: &
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 unsafe fn medium_ad_row_avx2(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
-    
     medium_ad_avx2(data, period, first, out)
 }
 
@@ -1138,16 +1086,14 @@ unsafe fn medium_ad_row_avx512_long(data: &[f64], first: usize, period: usize, o
     medium_ad_avx512(data, period, first, out)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct MediumAdStream {
     period: usize,
-    
+
     ring: Vec<Option<Entry>>,
     head: usize,
     filled: bool,
 
-    
     os: OrderStatTree,
     next_id: u64,
 }
@@ -1155,7 +1101,7 @@ pub struct MediumAdStream {
 #[derive(Copy, Clone, Debug)]
 struct Entry {
     val: f64,
-    id: u64, 
+    id: u64,
 }
 
 impl MediumAdStream {
@@ -1177,16 +1123,12 @@ impl MediumAdStream {
         })
     }
 
-    /// O(log p) insert/remove + O(log^2 p) MAD selection (exact)
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if let Some(old) = self.ring[self.head] {
-            
             self.os.remove(old);
         }
 
-        
         let _inserted = if value.is_nan() {
             self.ring[self.head] = None;
             false
@@ -1201,61 +1143,47 @@ impl MediumAdStream {
             true
         };
 
-        
         self.head = (self.head + 1) % self.period;
         if !self.filled && self.head == 0 {
             self.filled = true;
         }
 
-        
-        
-        
         if !self.filled || self.os.len() != self.period {
             return None;
         }
 
-        
         if self.period == 1 {
             return Some(0.0);
         }
 
-        
         let n = self.period;
-        let left_sz = n >> 1; 
+        let left_sz = n >> 1;
         let median = if (n & 1) == 1 {
-            
             self.os.kth(left_sz).val
         } else {
-            
             let lo = self.os.kth(left_sz - 1).val;
             let hi = self.os.kth(left_sz).val;
             0.5 * (lo + hi)
         };
 
-        
         Some(self.mad_from_tree(median))
     }
 
     #[inline(always)]
     fn ldist(&self, i: usize, median: f64, left_sz: usize) -> f64 {
-        
-        
         let idx = left_sz - 1 - i;
         let x = self.os.kth(idx).val;
-        
+
         median - x
     }
 
     #[inline(always)]
     fn rdist(&self, j: usize, median: f64, left_sz: usize) -> f64 {
-        
         let idx = left_sz + j;
         let x = self.os.kth(idx).val;
         x - median
     }
 
-    /// k-th (0-based) smallest in the merged sorted sequence of Ldist and Rdist.
-    /// Classic "k-th of two sorted arrays" with binary search on i = elements taken from Ldist.
     #[inline(always)]
     fn kth_absdev_union(&self, k: usize, median: f64, left_sz: usize) -> f64 {
         let right_sz = self.period - left_sz;
@@ -1264,8 +1192,8 @@ impl MediumAdStream {
         let mut hi = k.min(left_sz);
 
         while lo <= hi {
-            let i = (lo + hi) >> 1; 
-            let j = k - i; 
+            let i = (lo + hi) >> 1;
+            let j = k - i;
 
             let l_im1 = if i == 0 {
                 f64::NEG_INFINITY
@@ -1289,12 +1217,9 @@ impl MediumAdStream {
                 self.rdist(j, median, left_sz)
             };
 
-            
             if l_im1 <= r_j && r_jm1 <= l_i {
-                
                 return if l_im1 > r_jm1 { l_im1 } else { r_jm1 };
             } else if l_im1 > r_j {
-                
                 hi = i - 1;
             } else {
                 lo = i + 1;
@@ -1306,7 +1231,6 @@ impl MediumAdStream {
 
     #[inline(always)]
     fn mad_from_tree(&self, median: f64) -> f64 {
-        
         let n = self.period;
         let mid = n >> 1;
         let mut buf = Vec::with_capacity(n);
@@ -1378,7 +1302,6 @@ impl OrderStatTree {
         self.root = remove_rec(self.root.take(), key);
     }
 
-    /// 0-based select
     #[inline(always)]
     fn kth(&self, k: usize) -> Entry {
         kth_rec(&self.root, k)
@@ -1399,7 +1322,6 @@ fn upd(node: &mut Box<Node>) {
 
 #[inline(always)]
 fn less(a: Entry, b: Entry) -> bool {
-    
     if a.val < b.val {
         true
     } else if a.val > b.val {
@@ -1461,12 +1383,10 @@ fn remove_rec(node: Link, key: Entry) -> Link {
         None => None,
         Some(mut n) => {
             if n.key.id == key.id {
-                
                 return match (n.left.take(), n.right.take()) {
                     (None, r) => r,
                     (l, None) => l,
                     (Some(lc), Some(rc)) => {
-                        
                         let (mut n2, left_is_higher) = if lc.prio > rc.prio {
                             let mut n2 = Box::new(Node {
                                 key: n.key,
@@ -1522,10 +1442,8 @@ fn kth_rec(node: &Link, mut k: usize) -> Entry {
     }
 }
 
-
 #[inline(always)]
 fn treap_priority(e: Entry) -> u64 {
-    
     let mut z = e.id ^ e.val.to_bits();
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -1754,7 +1672,6 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1772,24 +1689,20 @@ mod tests {
                 };
                 let input = MediumAdInput::from_slice(&data, params);
 
-                
                 let MediumAdOutput { values: out } = medium_ad_with_kernel(&input, kernel).unwrap();
-                
+
                 let MediumAdOutput { values: ref_out } =
                     medium_ad_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_nan() {
                         prop_assert!(r.is_nan(), "Kernel consistency: NaN mismatch at idx {}", i);
                     } else if r.is_nan() {
                         prop_assert!(y.is_nan(), "Kernel consistency: NaN mismatch at idx {}", i);
                     } else {
-                        
                         let ulp_diff = y.to_bits().abs_diff(r.to_bits());
                         prop_assert!(
                             (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1802,7 +1715,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..(period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1812,7 +1724,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in (period - 1)..data.len() {
                     let mad = out[i];
                     prop_assert!(
@@ -1823,7 +1734,6 @@ mod tests {
                     );
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON)
                     && data.len() >= period
                 {
@@ -1837,7 +1747,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in (period - 1)..data.len() {
                     let window = &data[i + 1 - period..=i];
                     let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -1845,7 +1754,6 @@ mod tests {
                     let range = max_val - min_val;
                     let mad = out[i];
 
-                    
                     prop_assert!(
                         mad <= range * 0.5 + 1e-9,
                         "MAD {} exceeds theoretical maximum (50% of range {}) at idx {}",
@@ -1855,7 +1763,6 @@ mod tests {
                     );
                 }
 
-                
                 if period == 1 {
                     for i in 0..data.len() {
                         if !out[i].is_nan() {
@@ -1869,7 +1776,6 @@ mod tests {
                     }
                 }
 
-                
                 let neg_data: Vec<f64> = data.iter().map(|&x| -x).collect();
                 let neg_input = MediumAdInput::from_slice(
                     &neg_data,
@@ -1892,8 +1798,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let scale_factors = [2.0, -3.0, 0.5];
                 for &scale in &scale_factors {
                     let scaled_data: Vec<f64> = data.iter().map(|&x| x * scale).collect();
@@ -1922,26 +1826,19 @@ mod tests {
                     }
                 }
 
-                
-                
                 if period >= 5 && data.len() >= period + 10 {
-                    
                     let mut outlier_data = data.clone();
 
-                    
                     for test_idx in (period + 4..data.len().min(period + 20)).step_by(5) {
-                        
                         let window = &data[test_idx + 1 - period..=test_idx];
                         let win_min = window.iter().cloned().fold(f64::INFINITY, f64::min);
                         let win_max = window.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                         let win_range = win_max - win_min;
 
-                        
                         let outlier_idx = test_idx - period / 2;
                         let original_value = outlier_data[outlier_idx];
                         outlier_data[outlier_idx] = win_max + win_range * 10.0;
 
-                        
                         let outlier_input = MediumAdInput::from_slice(
                             &outlier_data,
                             MediumAdParams {
@@ -1952,42 +1849,30 @@ mod tests {
                             values: outlier_out,
                         } = medium_ad_with_kernel(&outlier_input, kernel).unwrap();
 
-                        
                         let original_mad = out[test_idx];
                         let outlier_mad = outlier_out[test_idx];
 
-                        
-                        
-                        
-                        let outlier_effect = win_range * 10.0; 
+                        let outlier_effect = win_range * 10.0;
                         prop_assert!(
 							outlier_mad <= original_mad * 10.0 + outlier_effect * 0.1,
 							"MAD not robust enough to outliers at idx {}: original {}, with outlier {}",
 							test_idx, original_mad, outlier_mad
 						);
 
-                        
-                        
-	                        if original_mad > win_range * 0.05 {
-	                            
-	                            let mad_ratio = outlier_mad / original_mad;
-	                            prop_assert!(
-	                                mad_ratio <= 25.0,
-	                                "MAD ratio too high with outlier at idx {}: ratio {}",
-	                                test_idx,
-	                                mad_ratio
-	                            );
-	                        }
+                        if original_mad > win_range * 0.05 {
+                            let mad_ratio = outlier_mad / original_mad;
+                            prop_assert!(
+                                mad_ratio <= 25.0,
+                                "MAD ratio too high with outlier at idx {}: ratio {}",
+                                test_idx,
+                                mad_ratio
+                            );
+                        }
 
-                        
                         outlier_data[outlier_idx] = original_value;
                     }
                 }
 
-                
-                
-
-                
                 if period >= 3 && period <= 20 {
                     let sequential: Vec<f64> = (1..=period).map(|i| i as f64).collect();
                     let seq_input = MediumAdInput::from_slice(
@@ -1999,37 +1884,29 @@ mod tests {
                     let MediumAdOutput { values: seq_out } =
                         medium_ad_with_kernel(&seq_input, kernel).unwrap();
 
-                    
-                    
                     let median = if period % 2 == 1 {
                         (period / 2 + 1) as f64
                     } else {
                         (period / 2) as f64 + 0.5
                     };
 
-                    
-                    
                     if period - 1 < sequential.len() {
                         let calculated_mad = seq_out[period - 1];
-                        let seq_range = (period - 1) as f64; 
+                        let seq_range = (period - 1) as f64;
 
-                        
                         prop_assert!(
 							calculated_mad > 0.0 && calculated_mad <= seq_range * 0.5,
 							"MAD for sequential data with period {} out of bounds: got {}, range is {}",
 							period, calculated_mad, seq_range
 						);
 
-                        
                         if period == 3 {
-                            
                             prop_assert!(
                                 (calculated_mad - 1.0).abs() < 1e-9,
                                 "MAD for [1,2,3] should be 1.0, got {}",
                                 calculated_mad
                             );
                         } else if period == 5 {
-                            
                             prop_assert!(
                                 (calculated_mad - 1.0).abs() < 1e-9,
                                 "MAD for [1,2,3,4,5] should be 1.0, got {}",
@@ -2039,14 +1916,11 @@ mod tests {
                     }
                 }
 
-                
-                
                 if period >= 4 && period % 2 == 0 {
                     let mut extreme_data = vec![0.0; period];
                     for i in 0..period / 2 {
-                        extreme_data[i] = 100.0; 
+                        extreme_data[i] = 100.0;
                     }
-                    
 
                     let extreme_input = MediumAdInput::from_slice(
                         &extreme_data,
@@ -2058,7 +1932,6 @@ mod tests {
                         values: extreme_out,
                     } = medium_ad_with_kernel(&extreme_input, kernel).unwrap();
 
-                    
                     let expected_extreme_mad = 50.0;
 
                     if period - 1 < extreme_data.len() {
@@ -2276,7 +2149,6 @@ pub fn medium_ad_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::medium_ad_wrapper::CudaMediumAd;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2305,11 +2177,11 @@ impl MediumAdDeviceArrayF32Py {
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let inner = &self.inner;
         let d = PyDict::new(py);
-        // shape: (rows, cols)
+
         d.set_item("shape", (inner.rows, inner.cols))?;
-        // typestr: little-endian float32
+
         d.set_item("typestr", "<f4")?;
-        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+
         d.set_item(
             "strides",
             (
@@ -2323,14 +2195,12 @@ impl MediumAdDeviceArrayF32Py {
             inner.device_ptr() as usize
         };
         d.set_item("data", (ptr_val, false))?;
-        // Stream is omitted because producing kernels synchronize before returning
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
-        // Discover allocation device from pointer attributes to avoid relying
-        // on the current context. Fallback to the current device if needed.
         let mut device_ordinal: i32 = 0;
         unsafe {
             let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
@@ -2358,8 +2228,6 @@ impl MediumAdDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Stream semantics: producer is synchronized; only reject explicitly
-        // disallowed stream==0 per Array API spec.
         if let Some(obj) = &stream {
             if let Ok(i) = obj.extract::<i64>(py) {
                 if i == 0 {
@@ -2370,7 +2238,6 @@ impl MediumAdDeviceArrayF32Py {
             }
         }
 
-        // Device / copy negotiation (no cross-device copies supported here).
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_type, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2402,10 +2269,8 @@ impl MediumAdDeviceArrayF32Py {
             ));
         }
 
-        // Move VRAM handle into the DLPack manager so the capsule owns the
-        // buffer. After this point, `self.inner` only holds an empty dummy.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -2419,8 +2284,6 @@ impl MediumAdDeviceArrayF32Py {
         let cols = inner.cols;
         let buf = inner.buf;
 
-        // Forward to the shared helper which builds the appropriate
-        // DLManagedTensor and capsule (legacy or versioned).
         let max_version_bound = max_version.map(|obj| obj.into_bound(py));
         export_f32_cuda_dlpack_2d(py, buf, rows, cols, alloc_dev, max_version_bound)
     }
@@ -2443,16 +2306,17 @@ pub fn medium_ad_cuda_batch_dev_py(
     let sweep = MediumAdBatchRange {
         period: period_range,
     };
-    let (inner, ctx, dev_id) = py.allow_threads(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
-        let cuda =
-            CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let dev_id = cuda.device_id();
-        let arr = cuda
-            .medium_ad_batch_dev(slice, &sweep)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok((arr, ctx, dev_id))
-    })?;
+    let (inner, ctx, dev_id) =
+        py.allow_threads(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
+            let cuda =
+                CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .medium_ad_batch_dev(slice, &sweep)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok((arr, ctx, dev_id))
+        })?;
     Ok(MediumAdDeviceArrayF32Py {
         inner,
         ctx,
@@ -2476,16 +2340,17 @@ pub fn medium_ad_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let slice = data_tm_f32.as_slice()?;
-    let (inner, ctx, dev_id) = py.allow_threads(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
-        let cuda =
-            CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-        let ctx = cuda.context_arc();
-        let dev_id = cuda.device_id();
-        let arr = cuda
-            .medium_ad_many_series_one_param_time_major_dev(slice, cols, rows, period)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok((arr, ctx, dev_id))
-    })?;
+    let (inner, ctx, dev_id) =
+        py.allow_threads(|| -> PyResult<(DeviceArrayF32, Arc<Context>, u32)> {
+            let cuda =
+                CudaMediumAd::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+            let ctx = cuda.context_arc();
+            let dev_id = cuda.device_id();
+            let arr = cuda
+                .medium_ad_many_series_one_param_time_major_dev(slice, cols, rows, period)
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            Ok((arr, ctx, dev_id))
+        })?;
     Ok(MediumAdDeviceArrayF32Py {
         inner,
         ctx,
@@ -2493,12 +2358,11 @@ pub fn medium_ad_cuda_many_series_one_param_dev_py(
     })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-/// Write directly to output slice - no allocations
 pub fn medium_ad_into_slice(
     dst: &mut [f64],
     input: &MediumAdInput,
@@ -2525,19 +2389,22 @@ pub fn medium_ad_into_slice(
     }
 
     let first = data.iter().position(|&x| !x.is_nan()).unwrap_or(0);
-    let chosen = if kern == Kernel::Auto { Kernel::Scalar } else { kern };
+    let chosen = if kern == Kernel::Auto {
+        Kernel::Scalar
+    } else {
+        kern
+    };
 
     match chosen {
         Kernel::Scalar => medium_ad_scalar(data, period, first, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx2 => medium_ad_avx2(data, period, first, dst),
-        // Delegate AVX512 to scalar to ensure exactness with scalar path.
+
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         Kernel::Avx512 => medium_ad_scalar(data, period, first, dst),
         _ => unreachable!(),
     }
 
-    // Fill warmup with NaN
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -2546,7 +2413,7 @@ pub fn medium_ad_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn medium_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = MediumAdParams {
@@ -2554,7 +2421,7 @@ pub fn medium_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = MediumAdInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; // Single allocation
+    let mut output = vec![0.0; data.len()];
 
     medium_ad_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2562,7 +2429,7 @@ pub fn medium_ad_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn medium_ad_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2571,7 +2438,7 @@ pub fn medium_ad_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn medium_ad_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2581,7 +2448,7 @@ pub fn medium_ad_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn medium_ad_into(
     in_ptr: *const f64,
@@ -2606,7 +2473,6 @@ pub fn medium_ad_into(
         let input = MediumAdInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Handle aliasing
             let mut temp = vec![0.0; len];
             medium_ad_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2622,13 +2488,13 @@ pub fn medium_ad_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MediumAdBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MediumAdBatchJsOutput {
     pub values: Vec<f64>,
@@ -2637,7 +2503,7 @@ pub struct MediumAdBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = medium_ad_batch)]
 pub fn medium_ad_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MediumAdBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2661,7 +2527,7 @@ pub fn medium_ad_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsVal
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn medium_ad_batch_into(
     in_ptr: *const f64,
@@ -2684,8 +2550,7 @@ pub fn medium_ad_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
@@ -2707,14 +2572,12 @@ pub fn medium_ad_batch_into(
     }
 }
 
-// Minimal parity test for the native into API
-#[cfg(all(test, not(feature = "wasm")))]
+#[cfg(all(test, not(all(target_arch = "wasm32", feature = "wasm"))))]
 mod tests_into_parity {
     use super::*;
 
     #[test]
     fn test_medium_ad_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        // Build a small but non-trivial input with a NaN prefix
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253usize {
@@ -2724,10 +2587,8 @@ mod tests_into_parity {
 
         let input = MediumAdInput::from_slice(&data, MediumAdParams::default());
 
-        // Baseline via existing Vec-returning API
         let baseline = medium_ad(&input)?.values;
 
-        // Preallocate output; function should write warmups to NaN and values thereafter
         let mut out = vec![0.0; data.len()];
         medium_ad_into(&input, &mut out)?;
 

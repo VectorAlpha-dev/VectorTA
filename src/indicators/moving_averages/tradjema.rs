@@ -1,30 +1,3 @@
-//! # True Range Adjusted Exponential Moving Average (TRADJEMA)
-//!
-//! The True Range Adjusted EMA adjusts the exponential moving average smoothing factor
-//! based on the normalized true range, providing a dynamic response to volatility.
-//!
-//! ## Parameters
-//! - **length**: The lookback period for calculations (default: 40)
-//! - **mult**: Multiplier for the adjustment factor (default: 10.0)
-//!
-//! ## Returns
-//! - **`Ok(TradjemaOutput)`** on success, containing a Vec<f64> of length matching the input.
-//! - **`Err(TradjemaError)`** otherwise.
-//!
-//! ## Developer Status
-//! - **AVX2 kernel**: STUB — delegates to scalar (EMA dependency limits gains)
-//! - **AVX512 kernel**: STUB — delegates to scalar (EMA dependency limits gains)
-//! - **Scalar hot path**: Uses monotonic deques for TR min/max (O(1) amortized)
-//! - **Memory**: Uses zero-copy helpers (alloc_with_nan_prefix) ✓; O(length) scratch only
-//! - **SIMD status**: Disabled by default; recurrence + deque updates limit benefits
-//! - **Batch**: Precomputes TR once; per-length deques drive all rows
-//!
-//! Decision log: SIMD remains disabled by default (scalar is fastest/stable at 100k+).
-//! CUDA wrapper exists; this module now returns more precise errors and hardens batch range
-//! expansion without changing outputs or public API behavior.
-
-
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -33,8 +6,6 @@ use crate::cuda::moving_averages::CudaTradjema;
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -45,13 +16,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
 
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
@@ -62,18 +33,14 @@ use crate::utilities::helpers::{
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 
-
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-
 
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-
-/// Input data enum supporting both candle data and raw slices
 #[derive(Debug, Clone)]
 pub enum TradjemaData<'a> {
     Candles {
@@ -86,15 +53,16 @@ pub enum TradjemaData<'a> {
     },
 }
 
-/// Output structure containing calculated values
 #[derive(Debug, Clone)]
 pub struct TradjemaOutput {
     pub values: Vec<f64>,
 }
 
-/// Parameters structure with optional fields for defaults
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct TradjemaParams {
     pub length: Option<usize>,
     pub mult: Option<f64>,
@@ -109,7 +77,6 @@ impl Default for TradjemaParams {
     }
 }
 
-/// Input structure combining data and parameters
 #[derive(Debug, Clone)]
 pub struct TradjemaInput<'a> {
     pub data: TradjemaData<'a>,
@@ -153,7 +120,6 @@ impl<'a> TradjemaInput<'a> {
         self.params.mult.unwrap_or(10.0)
     }
 }
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct TradjemaBuilder {
@@ -231,7 +197,6 @@ impl TradjemaBuilder {
     }
 }
 
-
 #[derive(Debug, Error)]
 pub enum TradjemaError {
     #[error("tradjema: Input data slice is empty.")]
@@ -255,20 +220,19 @@ pub enum TradjemaError {
     #[error("tradjema: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
 
-    #[error(
-        "tradjema: Invalid length range (start={start}, end={end}, step={step})"
-    )]
-    InvalidLengthRange { start: usize, end: usize, step: usize },
+    #[error("tradjema: Invalid length range (start={start}, end={end}, step={step})")]
+    InvalidLengthRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
-    #[error(
-        "tradjema: Invalid mult range (start={start}, end={end}, step={step})"
-    )]
+    #[error("tradjema: Invalid mult range (start={start}, end={end}, step={step})")]
     InvalidMultRange { start: f64, end: f64, step: f64 },
 
     #[error("tradjema: non-batch kernel passed to batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
-
 
 #[inline(always)]
 fn tradjema_prepare<'a>(
@@ -347,11 +311,7 @@ pub fn tradjema_with_kernel(
     Ok(TradjemaOutput { values: out })
 }
 
-/// Compute TRADJEMA into a caller-provided buffer (no allocations).
-///
-/// - Preserves NaN warmup prefix exactly like the Vec-returning API.
-/// - `out.len()` must equal the input data length; returns `InvalidLength` on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn tradjema_into(input: &TradjemaInput, out: &mut [f64]) -> Result<(), TradjemaError> {
     let (h, l, c, length, first, mult, chosen) = tradjema_prepare(input, Kernel::Auto)?;
@@ -362,13 +322,13 @@ pub fn tradjema_into(input: &TradjemaInput, out: &mut [f64]) -> Result<(), Tradj
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN used by alloc_with_nan_prefix
     let warm = first + length - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let w = warm.min(out.len());
-    for v in &mut out[..w] { *v = qnan; }
+    for v in &mut out[..w] {
+        *v = qnan;
+    }
 
-    // Compute in-place for the remainder
     tradjema_compute_into(h, l, c, length, mult, first, chosen, out);
     Ok(())
 }
@@ -413,13 +373,11 @@ fn tradjema_compute_into_scalar(
     let n = out.len();
     let warm = first + length - 1;
     if warm >= n {
-        // Nothing to compute (validated earlier); keep defensive in release
         return;
     }
 
     let alpha = 2.0 / (length as f64 + 1.0);
 
-    // Monotonic deques (ring buffers) for sliding min/max over TR
     let cap = length;
     let mut min_vals = vec![0.0f64; cap];
     let mut min_idx = vec![0usize; cap];
@@ -510,8 +468,6 @@ fn tradjema_compute_into_scalar(
         }
     }
 
-    // --- Seed window: [first .. warm] ---
-    // i == first: TR = H-L
     let tr0 = unsafe { *high.get_unchecked(first) - *low.get_unchecked(first) };
     minq_push(
         tr0,
@@ -561,7 +517,6 @@ fn tradjema_compute_into_scalar(
         i += 1;
     }
 
-    // Compute first output at warm
     let tr_low = unsafe { *min_vals.get_unchecked(min_head) };
     let tr_high = unsafe { *max_vals.get_unchecked(max_head) };
     let denom = tr_high - tr_low;
@@ -571,20 +526,17 @@ fn tradjema_compute_into_scalar(
         0.0
     };
     let a0 = alpha * (1.0 + tr_adj0 * mult);
-    let src0 = unsafe { *close.get_unchecked(warm - 1) }; // 1-bar lag
-    let mut y = src0.mul_add(a0, 0.0); // Pine seed (0 + a0*(src0-0))
+    let src0 = unsafe { *close.get_unchecked(warm - 1) };
+    let mut y = src0.mul_add(a0, 0.0);
     unsafe {
         *out.get_unchecked_mut(warm) = y;
     }
 
-    // --- Main loop ---
     i = warm + 1;
     while i < n {
-        // expire outdated indices
         q_expire(i, length, &mut min_idx, &mut min_head, &mut min_tail, cap);
         q_expire(i, length, &mut max_idx, &mut max_head, &mut max_tail, cap);
 
-        // compute TR at i and push
         let hi = unsafe { *high.get_unchecked(i) };
         let lo = unsafe { *low.get_unchecked(i) };
         let pc1 = unsafe { *close.get_unchecked(i - 1) };
@@ -608,7 +560,6 @@ fn tradjema_compute_into_scalar(
             cap,
         );
 
-        // normalize and update EMA with lagged source close[i-1]
         let lo_tr = unsafe { *min_vals.get_unchecked(min_head) };
         let hi_tr = unsafe { *max_vals.get_unchecked(max_head) };
         let den = hi_tr - lo_tr;
@@ -664,9 +615,6 @@ fn tradjema_compute_into(
     }
 }
 
-// AVX stubs: keep selection plumbing intact. EMA dependency and deque updates
-// make across-time vectorization ineffective for single-series, so these
-// delegate to the scalar path for now.
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[target_feature(enable = "avx2")]
 unsafe fn tradjema_compute_into_avx2(
@@ -695,24 +643,18 @@ unsafe fn tradjema_compute_into_avx512(
     tradjema_compute_into_scalar(high, low, close, length, mult, first, out);
 }
 
-// ==================== STREAMING IMPLEMENTATION ====================
-/// Streaming TRADJEMA with O(1) amortized updates using monotonic deques
 #[derive(Debug, Clone)]
 pub struct TradjemaStream {
     length: usize,
     mult: f64,
     alpha: f64,
 
-    // absolute time index (0-based)
     i: usize,
     filled: bool,
 
-    // EMA state
-    prev_close: f64, // src is lagged: close[i-1]
-    tradjema: f64,   // last EMA value (y)
+    prev_close: f64,
+    tradjema: f64,
 
-    // Monotonic deques for TR window [i-length+1 .. i]
-    // We use ring buffers identical in behavior to the scalar path.
     min_vals: Vec<f64>,
     min_idx: Vec<usize>,
     max_vals: Vec<f64>,
@@ -780,7 +722,7 @@ impl TradjemaStream {
     fn minq_push(&mut self, v: f64, idx: usize) {
         let cap = self.length;
         let mut back = Self::dec(self.min_tail, cap);
-        // strict ">" to preserve older equal elements (matches batch/scalar)
+
         while self.min_tail != self.min_head && self.min_vals[back] > v {
             self.min_tail = back;
             back = Self::dec(self.min_tail, cap);
@@ -793,7 +735,7 @@ impl TradjemaStream {
     fn maxq_push(&mut self, v: f64, idx: usize) {
         let cap = self.length;
         let mut back = Self::dec(self.max_tail, cap);
-        // strict "<" to preserve older equal elements (matches batch/scalar)
+
         while self.max_tail != self.max_head && self.max_vals[back] < v {
             self.max_tail = back;
             back = Self::dec(self.max_tail, cap);
@@ -811,7 +753,6 @@ impl TradjemaStream {
         len: usize,
         cap: usize,
     ) {
-        // Drop anything with index <= cur - len  (window is [cur-len+1 .. cur])
         let lim = cur.saturating_sub(len);
         while *head != *tail && id[*head] <= lim {
             Self::inc(head, cap);
@@ -828,11 +769,8 @@ impl TradjemaStream {
         }
     }
 
-    /// Stream one OHLC bar. Returns `Some(value)` once the window is full,
-    /// otherwise `None` during warmup.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        // --- Compute True Range for the current bar (matches batch/scalar) ---
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
@@ -842,37 +780,31 @@ impl TradjemaStream {
             Self::max3(hl, hc, lc)
         };
 
-        // --- Warmup: push until window is full (i == length-1) ---
         if !self.filled {
             self.minq_push(tr, self.i);
             self.maxq_push(tr, self.i);
 
             if self.i + 1 < self.length {
-                // Not full yet
-                self.prev_close = close; // maintain lagged src
+                self.prev_close = close;
                 self.i += 1;
                 return None;
             }
 
-            // First full window at i == length-1
             let lo = self.min_vals[self.min_head];
             let hi = self.max_vals[self.max_head];
             let den = hi - lo;
             let tr_adj = if den != 0.0 { (tr - lo) / den } else { 0.0 };
             let a0 = self.alpha * (1.0 + tr_adj * self.mult);
 
-            // Seed EMA with lag-1 source (src = close[i-1])
-            let src = self.prev_close; // guaranteed finite here
-            self.tradjema = src.mul_add(a0, 0.0); // FMA for accuracy/perf
+            let src = self.prev_close;
+            self.tradjema = src.mul_add(a0, 0.0);
 
-            self.prev_close = close; // advance lag
+            self.prev_close = close;
             self.filled = true;
             self.i += 1;
             return Some(self.tradjema);
         }
 
-        // --- Steady-state (window already full) ---
-        // 1) expire elements that just left the window (do this *before* push)
         let cap = self.length;
         Self::q_expire(
             &mut self.min_head,
@@ -891,21 +823,18 @@ impl TradjemaStream {
             cap,
         );
 
-        // 2) push TR for the current index
         self.minq_push(tr, self.i);
         self.maxq_push(tr, self.i);
 
-        // 3) read window min/max and update EMA with the lagged source
         let lo = self.min_vals[self.min_head];
         let hi = self.max_vals[self.max_head];
         let den = hi - lo;
         let tr_adj = if den != 0.0 { (tr - lo) / den } else { 0.0 };
         let a = self.alpha * (1.0 + tr_adj * self.mult);
 
-        let src = self.prev_close; // src is close[i-1]
+        let src = self.prev_close;
         self.tradjema = (src - self.tradjema).mul_add(a, self.tradjema);
 
-        // 4) advance state
         self.prev_close = close;
         self.i += 1;
 
@@ -913,7 +842,6 @@ impl TradjemaStream {
     }
 }
 
-// ==================== PYTHON BINDINGS ====================
 #[cfg(feature = "python")]
 #[pyfunction(name = "tradjema")]
 #[pyo3(signature = (high, low, close, length, mult, kernel=None))]
@@ -980,16 +908,14 @@ pub fn tradjema_batch_py<'py>(
     }
     let rows = combos.len();
     let cols = c.len();
-    // Checked rows*cols to avoid overflow in extreme inputs
+
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // Create uninitialized NumPy buffer
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Warm-prefix NaNs per row without copying full rows
     let first = c
         .iter()
         .position(|v| !v.is_nan())
@@ -1012,7 +938,6 @@ pub fn tradjema_batch_py<'py>(
         _ => Kernel::Scalar,
     };
 
-    // Fill from warm onward
     let combos = py
         .allow_threads(|| tradjema_batch_inner_into(h, l, c, &sweep, simd, true, slice_out))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -1070,7 +995,8 @@ pub fn tradjema_cuda_batch_dev_py(
     };
 
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let arr = cuda
@@ -1120,7 +1046,8 @@ pub fn tradjema_cuda_many_series_one_param_dev_py(
     };
 
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaTradjema::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let arr = cuda
@@ -1132,9 +1059,12 @@ pub fn tradjema_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32TradjemaPy::new(inner, ctx, dev_id))
 }
 
-// ==================== PYTHON: Device handle with CAI v3 + DLPack ====================
 #[cfg(all(feature = "python", feature = "cuda"))]
-#[pyclass(module = "ta_indicators.cuda", name = "DeviceArrayF32Tradjema", unsendable)]
+#[pyclass(
+    module = "ta_indicators.cuda",
+    name = "DeviceArrayF32Tradjema",
+    unsendable
+)]
 pub struct DeviceArrayF32TradjemaPy {
     pub(crate) inner: DeviceArrayF32,
     _ctx_guard: Arc<Context>,
@@ -1159,13 +1089,19 @@ impl DeviceArrayF32TradjemaPy {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let size = self.inner.rows.saturating_mul(self.inner.cols);
-        let ptr_val: usize = if size == 0 { 0 } else { self.inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            self.inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1179,7 +1115,6 @@ impl DeviceArrayF32TradjemaPy {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
-        
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1200,12 +1135,15 @@ impl DeviceArrayF32TradjemaPy {
         }
         let _ = stream;
 
-        
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -1221,7 +1159,11 @@ impl DeviceArrayF32TradjemaPy {
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32TradjemaPy {
     pub fn new(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        Self { inner, _ctx_guard: ctx_guard, _device_id: device_id }
+        Self {
+            inner,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
     }
 }
 
@@ -1248,8 +1190,7 @@ impl TradjemaStreamPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tradjema_into(
     high_ptr: *const f64,
@@ -1281,7 +1222,6 @@ pub fn tradjema_into(
             || (out_ptr as *const f64) == high_ptr
             || (out_ptr as *const f64) == low_ptr
         {
-            
             let mut tmp = vec![f64::NAN; len];
             tradjema_into_slice(&mut tmp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1295,7 +1235,7 @@ pub fn tradjema_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tradjema_batch_into(
     high_ptr: *const f64,
@@ -1319,7 +1259,6 @@ pub fn tradjema_batch_into(
         let low = std::slice::from_raw_parts(low_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        
         let sweep = TradjemaBatchRange {
             length: (length_start, length_end, length_step),
             mult: (mult_start, mult_end, mult_step),
@@ -1331,11 +1270,8 @@ pub fn tradjema_batch_into(
         let rows = combos.len();
         let cols = len;
 
-        
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
-        
         let first = close
             .iter()
             .position(|v| !v.is_nan())
@@ -1349,7 +1285,6 @@ pub fn tradjema_batch_into(
             }
         }
 
-        
         let simd = match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx512,
             Kernel::Avx2Batch => Kernel::Avx2,
@@ -1362,7 +1297,7 @@ pub fn tradjema_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tradjema_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1371,7 +1306,7 @@ pub fn tradjema_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tradjema_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1379,7 +1314,7 @@ pub fn tradjema_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tradjema_js(
     high: &[f64],
@@ -1388,14 +1323,13 @@ pub fn tradjema_js(
     length: usize,
     mult: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    
     if close.is_empty() {
         return Err(JsValue::from_str("Input data slice is empty"));
     }
     if high.len() != low.len() || low.len() != close.len() {
         return Err(JsValue::from_str("length mismatch"));
     }
-    
+
     if length < 2 || length > close.len() {
         return Err(JsValue::from_str("Invalid length"));
     }
@@ -1411,10 +1345,8 @@ pub fn tradjema_js(
     }
     let warm = first + length - 1;
 
-    
     let mut out = alloc_with_nan_prefix(close.len(), warm);
 
-    
     tradjema_compute_into(
         high,
         low,
@@ -1429,14 +1361,14 @@ pub fn tradjema_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TradjemaBatchConfig {
     pub length_range: (usize, usize, usize),
     pub mult_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TradjemaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1445,7 +1377,7 @@ pub struct TradjemaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "tradjema_batch")]
 pub fn tradjema_batch_unified_js(
     high: &[f64],
@@ -1460,7 +1392,6 @@ pub fn tradjema_batch_unified_js(
         mult: cfg.mult_range,
     };
 
-    
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(JsValue::from_str("Input arrays are empty"));
     }
@@ -1477,7 +1408,6 @@ pub fn tradjema_batch_unified_js(
     serde_wasm_bindgen::to_value(&js)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {e}")))
 }
-
 
 #[derive(Clone, Debug)]
 pub struct TradjemaBatchRange {
@@ -1580,7 +1510,6 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
     let (ls, le, lstep) = r.length;
     let (ms, me, mstep) = r.mult;
 
-    
     #[inline]
     fn axis_usize(start: usize, end: usize, step: usize) -> Vec<usize> {
         if step == 0 {
@@ -1597,7 +1526,6 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
                 }
             }
         } else {
-            
             let mut v = start;
             loop {
                 vals.push(v);
@@ -1605,7 +1533,9 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
                     break;
                 }
                 v = v.saturating_sub(step);
-                if v < end { break; }
+                if v < end {
+                    break;
+                }
             }
         }
         vals
@@ -1622,17 +1552,25 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
             while v <= end {
                 vals.push(v);
                 v += step;
-                
-                if !v.is_finite() { break; }
-                if step.is_sign_negative() { break; }
+
+                if !v.is_finite() {
+                    break;
+                }
+                if step.is_sign_negative() {
+                    break;
+                }
             }
         } else {
             let mut v = start;
             while v >= end {
                 vals.push(v);
                 v -= step.abs();
-                if !v.is_finite() { break; }
-                if step == 0.0 { break; }
+                if !v.is_finite() {
+                    break;
+                }
+                if step == 0.0 {
+                    break;
+                }
             }
         }
         vals
@@ -1646,7 +1584,10 @@ fn expand_grid(r: &TradjemaBatchRange) -> Vec<TradjemaParams> {
     let mut combos = Vec::with_capacity(lengths.len().saturating_mul(mults.len()));
     for &l in &lengths {
         for &m in &mults {
-            combos.push(TradjemaParams { length: Some(l), mult: Some(m) });
+            combos.push(TradjemaParams {
+                length: Some(l),
+                mult: Some(m),
+            });
         }
     }
     combos
@@ -1672,32 +1613,39 @@ pub fn tradjema_batch_with_kernel(
         Kernel::Avx512Batch => Kernel::Avx512,
         Kernel::Avx2Batch => Kernel::Avx2,
         Kernel::ScalarBatch => Kernel::Scalar,
-        _ => Kernel::Scalar, 
+        _ => Kernel::Scalar,
     };
 
-    
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        
         let (ls, le, lstep) = sweep.length;
         let (ms, me, mstep) = sweep.mult;
-        
-        let length_empty = (lstep == 0 && ls != le)
-            || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
+
+        let length_empty =
+            (lstep == 0 && ls != le) || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
         if length_empty {
-            return Err(TradjemaError::InvalidLengthRange { start: ls, end: le, step: lstep });
+            return Err(TradjemaError::InvalidLengthRange {
+                start: ls,
+                end: le,
+                step: lstep,
+            });
         } else {
-            return Err(TradjemaError::InvalidMultRange { start: ms, end: me, step: mstep });
+            return Err(TradjemaError::InvalidMultRange {
+                start: ms,
+                end: me,
+                step: mstep,
+            });
         }
     }
     let rows = combos.len();
     let cols = close.len();
-    rows.checked_mul(cols).ok_or(TradjemaError::InvalidLengthRange {
-        start: sweep.length.0,
-        end: sweep.length.1,
-        step: sweep.length.2,
-    })?;
-    
+    rows.checked_mul(cols)
+        .ok_or(TradjemaError::InvalidLengthRange {
+            start: sweep.length.0,
+            end: sweep.length.1,
+            step: sweep.length.2,
+        })?;
+
     tradjema_batch_inner(high, low, close, sweep, simd, true)
 }
 
@@ -1715,12 +1663,20 @@ fn tradjema_batch_inner_into(
     if combos.is_empty() {
         let (ls, le, lstep) = sweep.length;
         let (ms, me, mstep) = sweep.mult;
-        let length_empty = (lstep == 0 && ls != le)
-            || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
+        let length_empty =
+            (lstep == 0 && ls != le) || (lstep > 0 && ls > le && ls.saturating_sub(le) < lstep);
         if length_empty {
-            return Err(TradjemaError::InvalidLengthRange { start: ls, end: le, step: lstep });
+            return Err(TradjemaError::InvalidLengthRange {
+                start: ls,
+                end: le,
+                step: lstep,
+            });
         } else {
-            return Err(TradjemaError::InvalidMultRange { start: ms, end: me, step: mstep });
+            return Err(TradjemaError::InvalidMultRange {
+                start: ms,
+                end: me,
+                step: mstep,
+            });
         }
     }
     if high.len() != low.len() || low.len() != close.len() {
@@ -1733,7 +1689,6 @@ fn tradjema_batch_inner_into(
         .position(|v| !v.is_nan())
         .ok_or(TradjemaError::AllValuesNaN)?;
 
-    
     #[inline(always)]
     fn precompute_tr(high: &[f64], low: &[f64], close: &[f64], first: usize) -> Vec<f64> {
         let n = close.len();
@@ -1770,7 +1725,6 @@ fn tradjema_batch_inner_into(
         }
         let alpha = 2.0 / (length as f64 + 1.0);
 
-        
         let cap = length;
         let mut min_vals = vec![0.0f64; cap];
         let mut min_idx = vec![0usize; cap];
@@ -1846,7 +1800,6 @@ fn tradjema_batch_inner_into(
             }
         }
 
-        
         let mut i = first;
         while i <= warm {
             let v = tr[i];
@@ -1879,7 +1832,6 @@ fn tradjema_batch_inner_into(
         let mut y = a0 * close[warm - 1];
         out[warm] = y;
 
-        
         i = warm + 1;
         while i < out.len() {
             q_expire(i, length, &mut min_idx, &mut min_head, &mut min_tail, cap);
@@ -1918,7 +1870,6 @@ fn tradjema_batch_inner_into(
         }
     }
 
-    
     let pre_tr = precompute_tr(high, low, close, first);
     let do_row = |row: usize, dst: &mut [f64]| {
         let p = &combos[row];
@@ -1927,8 +1878,8 @@ fn tradjema_batch_inner_into(
         if length < 2 {
             return;
         }
-        
-        let _ = kern; 
+
+        let _ = kern;
         compute_from_tr_into(&pre_tr, close, length, mult, first, dst);
     };
 
@@ -1968,7 +1919,6 @@ fn tradjema_batch_inner(
     let rows = combos.len();
     let cols = close.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let first = close
         .iter()
@@ -1980,12 +1930,10 @@ fn tradjema_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warms);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let combos = tradjema_batch_inner_into(high, low, close, sweep, kern, parallel, out)?;
 
     let values = unsafe {
@@ -2003,7 +1951,6 @@ fn tradjema_batch_inner(
         cols,
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -2049,11 +1996,9 @@ mod tests {
         let input = TradjemaInput::from_slices(high, low, close, TradjemaParams::default());
         let result = tradjema_with_kernel(&input, kernel)?;
 
-        
         assert_eq!(result.values.len(), candles.close.len());
 
-        
-        let warmup = 39; 
+        let warmup = 39;
         for i in 0..warmup {
             assert!(
                 result.values[i].is_nan(),
@@ -2063,7 +2008,6 @@ mod tests {
             );
         }
 
-        
         for i in warmup..result.values.len() {
             assert!(
                 !result.values[i].is_nan(),
@@ -2073,7 +2017,6 @@ mod tests {
             );
         }
 
-        
         let expected_last_five = [
             59395.39322263,
             59388.09683228,
@@ -2118,7 +2061,6 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let input_data = vec![10.0, 20.0, 30.0];
 
-        
         let params = TradjemaParams {
             length: Some(0),
             mult: None,
@@ -2131,7 +2073,6 @@ mod tests {
             test_name
         );
 
-        
         let params = TradjemaParams {
             length: Some(1),
             mult: None,
@@ -2204,7 +2145,6 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        
         let params = TradjemaParams {
             length: Some(2),
             mult: Some(-10.0),
@@ -2217,7 +2157,6 @@ mod tests {
             test_name
         );
 
-        
         let params = TradjemaParams {
             length: Some(2),
             mult: Some(f64::NAN),
@@ -2242,7 +2181,6 @@ mod tests {
         let low = candles.select_candle_field("low")?;
         let close = candles.select_candle_field("close")?;
 
-        
         let first_params = TradjemaParams {
             length: Some(20),
             mult: Some(5.0),
@@ -2250,7 +2188,6 @@ mod tests {
         let first_input = TradjemaInput::from_slices(high, low, close, first_params);
         let first_result = tradjema_with_kernel(&first_input, kernel)?;
 
-        
         let second_params = TradjemaParams {
             length: Some(20),
             mult: Some(5.0),
@@ -2288,7 +2225,6 @@ mod tests {
         let res = tradjema_with_kernel(&input, kernel)?;
         assert_eq!(res.values.len(), candles.close.len());
 
-        
         if res.values.len() > 50 {
             for (i, &val) in res.values[50..].iter().enumerate() {
                 assert!(
@@ -2476,7 +2412,6 @@ mod tests {
                     mult: Some(mult),
                 };
 
-                
                 let input = TradjemaInput::from_slices(&data, &data, &data, params);
 
                 let TradjemaOutput { values: out } = tradjema_with_kernel(&input, kernel).unwrap();
@@ -2582,7 +2517,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_tradjema_tests!(check_tradjema_property);
 
-    
     fn check_batch_default_row(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
 
@@ -2612,7 +2546,7 @@ mod tests {
             .mult_range(5.0, 15.0, 5.0)
             .apply_candles(&c)?;
 
-        let expected_combos = 4 * 3; 
+        let expected_combos = 4 * 3;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -2709,7 +2643,6 @@ mod tests {
 
     #[test]
     fn test_expand_grid_single_value() {
-        
         let range = TradjemaBatchRange {
             length: (2, 2, 0),
             mult: (10.0, 10.0, 0.0),
@@ -2723,7 +2656,6 @@ mod tests {
         assert_eq!(combos[0].length, Some(2));
         assert_eq!(combos[0].mult, Some(10.0));
 
-        
         let range2 = TradjemaBatchRange {
             length: (40, 40, 0),
             mult: (10.0, 10.0, 0.0),
@@ -2744,7 +2676,6 @@ mod tests {
 
     #[test]
     fn test_tradjema_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
         let (h, l, cl) = (
@@ -2755,21 +2686,24 @@ mod tests {
 
         let input = TradjemaInput::from_slices(h, l, cl, TradjemaParams::default());
 
-        
         let base = tradjema(&input)?.values;
 
-        
         let mut out = vec![0.0; cl.len()];
         tradjema_into(&input, &mut out)?;
 
         assert_eq!(base.len(), out.len());
 
-        
         for i in 0..out.len() {
             let a = base[i];
             let b = out[i];
             if a.is_nan() || b.is_nan() {
-                assert!(a.is_nan() && b.is_nan(), "NaN mismatch at index {}: {:?} vs {:?}", i, a, b);
+                assert!(
+                    a.is_nan() && b.is_nan(),
+                    "NaN mismatch at index {}: {:?} vs {:?}",
+                    i,
+                    a,
+                    b
+                );
             } else {
                 assert_eq!(a, b, "Value mismatch at index {}: {} vs {}", i, a, b);
             }

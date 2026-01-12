@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::mass::{
     mass_batch_with_kernel, mass_with_kernel, MassBatchRange, MassData, MassInput, MassParams,
 };
@@ -98,7 +96,6 @@ fn mass_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 9usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

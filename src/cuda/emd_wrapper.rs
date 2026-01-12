@@ -1,17 +1,3 @@
-//! CUDA wrapper for the Empirical Mode Decomposition (EMD) indicator.
-//!
-//! Parity with ALMA wrapper conventions:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/emd_kernel.ptx"))
-//! - NON_BLOCKING stream
-//! - Simple policy enums and introspection hooks
-//! - VRAM estimation and grid.y chunking (<= 65_535 rows)
-//!
-//! Math category: Recurrence/IIR. We parallelize across parameter combinations
-//! (batch) or across independent series (many-series). Warmup/NaN semantics
-//! match the scalar path in `indicators::emd`:
-//! - upper/lower warmup = first_valid + 50 - 1
-//! - middle warmup      = first_valid + 2*period - 1
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -24,23 +10,39 @@ use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffe
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
+use cust::sys::{
+    cuDeviceGetAttribute, cuFuncSetAttribute, CUdevice_attribute, CUfunction_attribute,
+};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::Arc;
-use cust::sys::{
-    cuDeviceGetAttribute, cuFuncSetAttribute, CUdevice_attribute, CUfunction_attribute,
-};
 
 #[derive(Debug)]
 pub enum CudaEmdError {
     Cuda(CudaError),
     InvalidInput(String),
-    MissingKernelSymbol { name: &'static str },
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     InvalidPolicy(&'static str),
-    DeviceMismatch { buf: u32, current: u32 },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 impl fmt::Display for CudaEmdError {
@@ -48,18 +50,33 @@ impl fmt::Display for CudaEmdError {
         match self {
             CudaEmdError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaEmdError::InvalidInput(s) => write!(f, "Invalid input: {}", s),
-            CudaEmdError::MissingKernelSymbol { name } => write!(f, "Missing kernel symbol: {}", name),
-            CudaEmdError::OutOfMemory { required, free, headroom } => write!(
+            CudaEmdError::MissingKernelSymbol { name } => {
+                write!(f, "Missing kernel symbol: {}", name)
+            }
+            CudaEmdError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "Out of memory on device: required={}B, free={}B, headroom={}B",
                 required, free, headroom
             ),
-            CudaEmdError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaEmdError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))"
             ),
             CudaEmdError::InvalidPolicy(p) => write!(f, "Invalid policy: {}", p),
-            CudaEmdError::DeviceMismatch { buf, current } => write!(f, "Device mismatch: buffer on {}, current {}", buf, current),
+            CudaEmdError::DeviceMismatch { buf, current } => {
+                write!(f, "Device mismatch: buffer on {}, current {}", buf, current)
+            }
             CudaEmdError::NotImplemented => write!(f, "Not implemented"),
         }
     }
@@ -130,7 +147,6 @@ pub struct CudaEmd {
     policy: CudaEmdPolicy,
 }
 
-// ----- Helpers: dynamic shared memory attribute and cache preference -----
 fn opt_in_dynamic_smem(func: &Function, bytes: u32) -> Result<(), CudaEmdError> {
     let res = unsafe {
         cuFuncSetAttribute(
@@ -141,7 +157,8 @@ fn opt_in_dynamic_smem(func: &Function, bytes: u32) -> Result<(), CudaEmdError> 
     };
     if res != cust::sys::CUresult::CUDA_SUCCESS {
         return Err(CudaEmdError::InvalidInput(format!(
-            "cuFuncSetAttribute(MAX_DYNAMIC_SHARED) failed: {:?}", res
+            "cuFuncSetAttribute(MAX_DYNAMIC_SHARED) failed: {:?}",
+            res
         )));
     }
     Ok(())
@@ -154,9 +171,8 @@ fn prefer_shared(func: &mut Function) -> Result<(), CudaEmdError> {
         .map_err(CudaEmdError::Cuda)
 }
 
-// ---- Shared-memory sizing and device limits ----
 const PER_UP_LOW: usize = 50;
-const RINGS_PER_BLOCK: usize = 2; // ub + lb
+const RINGS_PER_BLOCK: usize = 2;
 
 #[inline]
 fn smem_for(block_x: u32) -> usize {
@@ -165,7 +181,6 @@ fn smem_for(block_x: u32) -> usize {
 
 #[inline]
 fn query_optin_smem_limit(device: Device) -> usize {
-    // Fallback to legacy per-block limit first
     let default = device
         .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)
         .unwrap_or(48 * 1024) as usize;
@@ -185,7 +200,7 @@ fn clamp_block_x_for_smem(device: Device, requested: u32) -> u32 {
     let limit = query_optin_smem_limit(device);
     let mut bx = requested.max(64).min(1024);
     while smem_for(bx) > limit && bx > 32 {
-        bx -= 32; // step down by a warp
+        bx -= 32;
     }
     let max_tpb = device
         .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
@@ -200,7 +215,7 @@ impl CudaEmd {
         let context = Arc::new(Context::new(device).map_err(CudaEmdError::Cuda)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/emd_kernel.ptx"));
-        // Prefer most aggressive JIT optimization level explicitly
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -211,15 +226,27 @@ impl CudaEmd {
             .map_err(CudaEmdError::Cuda)?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaEmdError::Cuda)?;
 
-        Ok(Self { module, stream, context, device_id: device_id as u32, policy: CudaEmdPolicy::default() })
+        Ok(Self {
+            module,
+            stream,
+            context,
+            device_id: device_id as u32,
+            policy: CudaEmdPolicy::default(),
+        })
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     #[inline]
-    pub fn stream_handle_usize(&self) -> usize { self.stream.as_inner() as usize }
+    pub fn stream_handle_usize(&self) -> usize {
+        self.stream.as_inner() as usize
+    }
 
     #[inline]
     pub fn set_policy(&mut self, policy: CudaEmdPolicy) {
@@ -242,56 +269,108 @@ impl CudaEmd {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaEmdError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaEmdError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaEmdError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
-    fn validate_launch(&self, grid: (u32,u32,u32), block: (u32,u32,u32)) -> Result<(), CudaEmdError> {
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaEmdError> {
         let dev = Device::get_device(self.device_id).map_err(CudaEmdError::Cuda)?;
-        let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX).map_err(CudaEmdError::Cuda)? as u32;
-        let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX).map_err(CudaEmdError::Cuda)? as u32;
+        let max_bx = dev
+            .get_attribute(DeviceAttribute::MaxBlockDimX)
+            .map_err(CudaEmdError::Cuda)? as u32;
+        let max_gx = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .map_err(CudaEmdError::Cuda)? as u32;
         if block.0 == 0 || block.0 > max_bx || grid.0 == 0 || grid.0 > max_gx {
-            return Err(CudaEmdError::LaunchConfigTooLarge { gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+            return Err(CudaEmdError::LaunchConfigTooLarge {
+                gx: grid.0,
+                gy: grid.1,
+                gz: grid.2,
+                bx: block.0,
+                by: block.1,
+                bz: block.2,
+            });
         }
         Ok(())
     }
 
-    // Expand the batch range into concrete parameter combos
     fn expand_combos(range: &EmdBatchRange) -> Result<Vec<EmdParams>, CudaEmdError> {
         fn axis_usize(t: (usize, usize, usize)) -> Vec<usize> {
             let (start, end, step) = t;
-            if step == 0 || start == end { return vec![start]; }
+            if step == 0 || start == end {
+                return vec![start];
+            }
             let mut v = Vec::new();
             if start < end {
                 let mut cur = start;
-                while cur <= end { v.push(cur); match cur.checked_add(step) { Some(n)=>cur=n, None=>break } }
+                while cur <= end {
+                    v.push(cur);
+                    match cur.checked_add(step) {
+                        Some(n) => cur = n,
+                        None => break,
+                    }
+                }
             } else {
                 let mut cur = start;
-                while cur >= end { v.push(cur); match cur.checked_sub(step) { Some(n)=>cur=n, None=>break } }
+                while cur >= end {
+                    v.push(cur);
+                    match cur.checked_sub(step) {
+                        Some(n) => cur = n,
+                        None => break,
+                    }
+                }
             }
             v
         }
         fn axis_f64(t: (f64, f64, f64)) -> Vec<f64> {
             let (start, end, step) = t;
-            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 { return vec![start]; }
+            if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
+                return vec![start];
+            }
             let mut v = Vec::new();
             if start < end {
                 let mut x = start;
-                while x <= end + 1e-12 { v.push(x); x += step; if !x.is_finite() { break } }
+                while x <= end + 1e-12 {
+                    v.push(x);
+                    x += step;
+                    if !x.is_finite() {
+                        break;
+                    }
+                }
             } else {
                 let mut x = start;
                 let st = step.abs();
-                while x >= end - 1e-12 { v.push(x); x -= st; if !x.is_finite() { break } }
+                while x >= end - 1e-12 {
+                    v.push(x);
+                    x -= st;
+                    if !x.is_finite() {
+                        break;
+                    }
+                }
             }
             v
         }
@@ -299,7 +378,9 @@ impl CudaEmd {
         let deltas = axis_f64(range.delta);
         let fracs = axis_f64(range.fraction);
         if periods.is_empty() || deltas.is_empty() || fracs.is_empty() {
-            return Err(CudaEmdError::InvalidInput("empty parameter expansion".into()));
+            return Err(CudaEmdError::InvalidInput(
+                "empty parameter expansion".into(),
+            ));
         }
         let cap = periods
             .len()
@@ -307,13 +388,20 @@ impl CudaEmd {
             .and_then(|v| v.checked_mul(fracs.len()))
             .ok_or_else(|| CudaEmdError::InvalidInput("parameter grid size overflow".into()))?;
         let mut out = Vec::with_capacity(cap);
-        for &p in &periods { for &d in &deltas { for &f in &fracs {
-            out.push(EmdParams { period: Some(p), delta: Some(d), fraction: Some(f) });
-        }}}
+        for &p in &periods {
+            for &d in &deltas {
+                for &f in &fracs {
+                    out.push(EmdParams {
+                        period: Some(p),
+                        delta: Some(d),
+                        fraction: Some(f),
+                    });
+                }
+            }
+        }
         Ok(out)
     }
 
-    // -------- Batch: one series × many params --------
     pub fn emd_batch_dev(
         &self,
         high: &[f32],
@@ -331,22 +419,24 @@ impl CudaEmd {
             .ok_or_else(|| CudaEmdError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_combos(sweep)?;
-        if combos.is_empty() { return Err(CudaEmdError::InvalidInput("no parameter combinations".into())); }
+        if combos.is_empty() {
+            return Err(CudaEmdError::InvalidInput(
+                "no parameter combinations".into(),
+            ));
+        }
         let max_p = combos.iter().map(|c| c.period.unwrap_or(20)).max().unwrap();
-        // Basic feasibility guard: ensure tail can cover the longest warmup
+
         if len - first_valid < (2 * max_p).max(50) {
             return Err(CudaEmdError::InvalidInput(
                 "not enough valid data for warmup".into(),
             ));
         }
 
-        // Host precompute: midpoint prices
         let mut prices = vec![f32::NAN; len];
         for i in first_valid..len {
             prices[i] = 0.5f32 * (high[i] + low[i]);
         }
 
-        // Gather params
         let n = combos.len();
         let mut periods_i32 = Vec::with_capacity(n);
         let mut deltas_f32 = Vec::with_capacity(n);
@@ -357,7 +447,6 @@ impl CudaEmd {
             fracs_f32.push(c.fraction.unwrap_or(0.1) as f32);
         }
 
-        // VRAM estimate (inputs + params + outputs(3 planes))
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let in_bytes = len
@@ -384,38 +473,39 @@ impl CudaEmd {
             .ok_or_else(|| CudaEmdError::InvalidInput("byte size overflow".into()))?;
         Self::ensure_fit(required, 64 * 1024 * 1024)?;
 
-        // H2D (pinned host + async copies on our NON_BLOCKING stream)
         let h_prices = LockedBuffer::from_slice(&prices).map_err(CudaEmdError::Cuda)?;
         let h_p = LockedBuffer::from_slice(&periods_i32).map_err(CudaEmdError::Cuda)?;
         let h_d = LockedBuffer::from_slice(&deltas_f32).map_err(CudaEmdError::Cuda)?;
         let h_f = LockedBuffer::from_slice(&fracs_f32).map_err(CudaEmdError::Cuda)?;
 
-        let mut d_prices: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_p: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_d: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_f: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_p: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_d: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_f: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n) }.map_err(CudaEmdError::Cuda)?;
         unsafe {
             d_prices
                 .async_copy_from(h_prices.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
-            d_p
-                .async_copy_from(h_p.as_slice(), &self.stream)
+            d_p.async_copy_from(h_p.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
-            d_d
-                .async_copy_from(h_d.as_slice(), &self.stream)
+            d_d.async_copy_from(h_d.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
-            d_f
-                .async_copy_from(h_f.as_slice(), &self.stream)
+            d_f.async_copy_from(h_f.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
         }
 
         let elems = plane_elems;
-        let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_ub: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_mb: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_lb: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
 
-        // Chunk grid.y to <= 65_535 if needed (rows == combos). Use x dimension like other wrappers.
-        // Kernel uses dynamic shared memory for 2*50 rings; choose safe block size
         let req_block = match self.policy.batch {
             BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::Plain { block_x } => block_x,
@@ -424,18 +514,17 @@ impl CudaEmd {
         let block_x = clamp_block_x_for_smem(device, req_block);
         let grid_x = ((n as u32) + block_x - 1) / block_x;
 
-        // Single launch is fine (x-dimension only) — kernels index combos along x.
         unsafe {
-            let mut func = self
-                .module
-                .get_function("emd_batch_f32")
-                .map_err(|_| CudaEmdError::MissingKernelSymbol { name: "emd_batch_f32" })?;
+            let mut func = self.module.get_function("emd_batch_f32").map_err(|_| {
+                CudaEmdError::MissingKernelSymbol {
+                    name: "emd_batch_f32",
+                }
+            })?;
 
-            // Configure for dynamic shared memory and prefer shared cache
             let dyn_smem_bytes: u32 = smem_for(block_x) as u32;
             opt_in_dynamic_smem(&func, dyn_smem_bytes)?;
             prefer_shared(&mut func)?;
-            // Additionally hint carve-out preference to shared
+
             unsafe {
                 let _ = cuFuncSetAttribute(
                     func.to_raw(),
@@ -468,15 +557,13 @@ impl CudaEmd {
             ];
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            self.validate_launch((grid_x,1,1),(block_x,1,1))?;
+            self.validate_launch((grid_x, 1, 1), (block_x, 1, 1))?;
             self.stream
                 .launch(&func, grid, block, dyn_smem_bytes as u32, args)
                 .map_err(CudaEmdError::Cuda)?;
         }
 
-        self.stream
-            .synchronize()
-            .map_err(CudaEmdError::Cuda)?;
+        self.stream.synchronize().map_err(CudaEmdError::Cuda)?;
 
         let outputs = DeviceArrayF32Triple {
             upper: DeviceArrayF32 {
@@ -498,7 +585,6 @@ impl CudaEmd {
         Ok(CudaEmdBatchResult { outputs, combos })
     }
 
-    // -------- Many series × one param (time-major) --------
     pub fn emd_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -524,7 +610,6 @@ impl CudaEmd {
         let delta = params.delta.unwrap_or(0.5) as f32;
         let fraction = params.fraction.unwrap_or(0.1) as f32;
 
-        // VRAM estimate (inputs + first_valids + 3 outputs)
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let input_bytes = data_tm_f32
@@ -556,15 +641,16 @@ impl CudaEmd {
             d_prices
                 .async_copy_from(h_prices.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
-            d_fv
-                .async_copy_from(h_fv.as_slice(), &self.stream)
+            d_fv.async_copy_from(h_fv.as_slice(), &self.stream)
                 .map_err(CudaEmdError::Cuda)?;
         }
-        let mut d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.map_err(CudaEmdError::Cuda)?;
-        let mut d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_ub: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_mb: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }.map_err(CudaEmdError::Cuda)?;
+        let mut d_lb: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }.map_err(CudaEmdError::Cuda)?;
 
-        // Needs dynamic shared memory like batch path
         let req_block = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -576,7 +662,9 @@ impl CudaEmd {
             let mut func = self
                 .module
                 .get_function("emd_many_series_one_param_time_major_f32")
-                .map_err(|_| CudaEmdError::MissingKernelSymbol { name: "emd_many_series_one_param_time_major_f32" })?;
+                .map_err(|_| CudaEmdError::MissingKernelSymbol {
+                    name: "emd_many_series_one_param_time_major_f32",
+                })?;
             let dyn_smem_bytes: u32 = smem_for(block_x) as u32;
             opt_in_dynamic_smem(&func, dyn_smem_bytes)?;
             prefer_shared(&mut func)?;
@@ -611,14 +699,12 @@ impl CudaEmd {
             ];
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
-            self.validate_launch((grid_x,1,1),(block_x,1,1))?;
+            self.validate_launch((grid_x, 1, 1), (block_x, 1, 1))?;
             self.stream
                 .launch(&func, grid, block, dyn_smem_bytes as u32, args)
                 .map_err(CudaEmdError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(CudaEmdError::Cuda)?;
+        self.stream.synchronize().map_err(CudaEmdError::Cuda)?;
         Ok(DeviceArrayF32Triple {
             upper: DeviceArrayF32 {
                 buf: d_ub,
@@ -894,9 +980,12 @@ pub mod benches {
         let d_prices = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
         let d_fv = DeviceBuffer::from_slice(&first_valids).expect("d_first_valids");
         let expected = cols * rows;
-        let d_ub: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_ub");
-        let d_mb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_mb");
-        let d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_lb");
+        let d_ub: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_ub");
+        let d_mb: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_mb");
+        let d_lb: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(expected) }.expect("d_lb");
 
         let req_block = match cuda.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,

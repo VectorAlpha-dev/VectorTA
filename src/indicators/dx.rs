@@ -1,27 +1,3 @@
-//! # DX (Directional Movement Index)
-//!
-//! Measures trend strength by comparing smoothed +DI and -DI, using Welles Wilder's logic.
-//!
-//! ## Parameters
-//! - `period`: window size (typically 14)
-//!
-//! ## Inputs
-//! - `high`: High prices
-//! - `low`: Low prices
-//! - `close`: Close prices
-//!
-//! ## Returns
-//! - **Ok(DxOutput)** containing values (Vec<f64>) with trend strength between 0-100
-//! - Output length matches input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - SIMD status: loop-carried Wilder smoothing makes time-wise SIMD ineffective; keep AVX2/AVX512 as stubs delegating to scalar.
-//! - CUDA status: FP64-accumulation kernels mirror scalar DX; Python VRAM handle uses CAI v3 and DLPack v1.x with primary-context lifetime guards.
-//! - Streaming: implemented via `DxStream`, matching batch numerics within tight tolerance (<1e-9).
-//! - Scalar path: single-pass, loop-jammed; relies on caller-provided warmup NaN prefix; minimal branching; hoists invariants.
-//! - Memory: uses `alloc_with_nan_prefix`/`init_matrix_prefixes` for zero-copy warmup handling.
-//! - Batch: parallel per-row with row-specific precompute of +DM/−DM/TR shared across rows; improves dense sweeps (e.g., ~15% at 1M).
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -49,9 +25,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -72,7 +48,10 @@ pub struct DxOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct DxParams {
     pub period: Option<usize>,
 }
@@ -212,7 +191,11 @@ pub enum DxError {
     #[error("dx: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("dx: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("dx: invalid input: {0}")]
     InvalidInput(String),
 }
@@ -259,7 +242,6 @@ fn dx_prepare<'a>(
         });
     }
     let chosen = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
@@ -294,17 +276,11 @@ pub fn dx_with_kernel(input: &DxInput, kernel: Kernel) -> Result<DxOutput, DxErr
     Ok(DxOutput { values: out })
 }
 
-/// Write DX values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup semantics (prefix up to `first_valid + period - 1`).
-/// - `out.len()` must equal the effective input length (min of H/L/C lengths).
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn dx_into(input: &DxInput, out: &mut [f64]) -> Result<(), DxError> {
     dx_into_slice(out, input, Kernel::Auto)
 }
-
 
 #[inline]
 pub fn dx_scalar(
@@ -320,16 +296,13 @@ pub fn dx_scalar(
         return;
     }
 
-    
     let p_f64 = period as f64;
     let hundred = 100.0f64;
 
-    
     let mut prev_high = high[first_valid_idx];
     let mut prev_low = low[first_valid_idx];
     let mut prev_close = close[first_valid_idx];
 
-    
     let mut plus_dm_sum = 0.0f64;
     let mut minus_dm_sum = 0.0f64;
     let mut tr_sum = 0.0f64;
@@ -342,7 +315,6 @@ pub fn dx_scalar(
             let l = *low.get_unchecked(i);
             let cl = *close.get_unchecked(i);
 
-            
             if h.is_nan() | l.is_nan() | cl.is_nan() {
                 *out.get_unchecked_mut(i) = if i > 0 {
                     *out.get_unchecked(i - 1)
@@ -356,7 +328,6 @@ pub fn dx_scalar(
                 continue;
             }
 
-            
             let up_move = h - prev_high;
             let down_move = prev_low - l;
             let mut plus_dm = 0.0f64;
@@ -367,20 +338,17 @@ pub fn dx_scalar(
                 minus_dm = down_move;
             }
 
-            
             let tr1 = h - l;
             let tr2 = (h - prev_close).abs();
             let tr3 = (l - prev_close).abs();
             let tr = tr1.max(tr2).max(tr3);
 
             if initial_count < (period - 1) {
-                
                 plus_dm_sum += plus_dm;
                 minus_dm_sum += minus_dm;
                 tr_sum += tr;
                 initial_count += 1;
 
-                
                 if initial_count == (period - 1) {
                     let plus_di = (plus_dm_sum / tr_sum) * hundred;
                     let minus_di = (minus_dm_sum / tr_sum) * hundred;
@@ -392,12 +360,10 @@ pub fn dx_scalar(
                     };
                 }
             } else {
-                
                 plus_dm_sum = plus_dm_sum - (plus_dm_sum / p_f64) + plus_dm;
                 minus_dm_sum = minus_dm_sum - (minus_dm_sum / p_f64) + minus_dm;
                 tr_sum = tr_sum - (tr_sum / p_f64) + tr;
 
-                
                 let plus_di = if tr_sum != 0.0 {
                     (plus_dm_sum / tr_sum) * hundred
                 } else {
@@ -416,7 +382,6 @@ pub fn dx_scalar(
                 };
             }
 
-            
             prev_high = h;
             prev_low = l;
             prev_close = cl;
@@ -452,7 +417,6 @@ pub fn dx_avx2(
     first_valid: usize,
     out: &mut [f64],
 ) {
-    
     dx_scalar(high, low, close, period, first_valid, out)
 }
 
@@ -482,30 +446,24 @@ pub fn dx_avx512_long(
     dx_scalar(high, low, close, period, first_valid, out)
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct DxStream {
     period: usize,
-    
-    p_f64: f64,   
-    hundred: f64, 
 
-    
+    p_f64: f64,
+    hundred: f64,
+
     plus_dm_sum: f64,
     minus_dm_sum: f64,
     tr_sum: f64,
 
-    
     prev_high: f64,
     prev_low: f64,
     prev_close: f64,
 
-    
-    initial_count: usize, 
-    filled: bool,         
+    initial_count: usize,
+    filled: bool,
 
-    
     last_dx: f64,
 }
 
@@ -539,7 +497,6 @@ impl DxStream {
 
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<f64> {
-        
         if self.prev_high.is_nan() || self.prev_low.is_nan() || self.prev_close.is_nan() {
             self.prev_high = high;
             self.prev_low = low;
@@ -547,8 +504,6 @@ impl DxStream {
             return None;
         }
 
-        
-        
         if high.is_nan() || low.is_nan() || close.is_nan() {
             let carried = if self.filled { self.last_dx } else { f64::NAN };
             self.prev_high = high;
@@ -557,7 +512,6 @@ impl DxStream {
             return Some(carried);
         }
 
-        
         let up_move = high - self.prev_high;
         let down_move = self.prev_low - low;
         let plus_dm = if up_move > 0.0 && up_move > down_move {
@@ -571,7 +525,6 @@ impl DxStream {
             0.0
         };
 
-        
         let tr1 = high - low;
         let tr2 = (high - self.prev_close).abs();
         let tr3 = (low - self.prev_close).abs();
@@ -580,34 +533,30 @@ impl DxStream {
         let mut out: Option<f64> = None;
 
         if self.initial_count < (self.period - 1) {
-            
             self.plus_dm_sum += plus_dm;
             self.minus_dm_sum += minus_dm;
             self.tr_sum += tr;
             self.initial_count += 1;
 
-            
             if self.initial_count == (self.period - 1) {
-                let plus_di = (self.plus_dm_sum / self.tr_sum) * self.hundred; 
+                let plus_di = (self.plus_dm_sum / self.tr_sum) * self.hundred;
                 let minus_di = (self.minus_dm_sum / self.tr_sum) * self.hundred;
                 let sum_di = plus_di + minus_di;
 
                 let dx = if sum_di != 0.0 {
                     self.hundred * ((plus_di - minus_di).abs() / sum_di)
                 } else {
-                    0.0 
+                    0.0
                 };
                 self.filled = true;
                 self.last_dx = dx;
                 out = Some(dx);
             }
         } else {
-            
             self.plus_dm_sum = self.plus_dm_sum - (self.plus_dm_sum / self.p_f64) + plus_dm;
             self.minus_dm_sum = self.minus_dm_sum - (self.minus_dm_sum / self.p_f64) + minus_dm;
             self.tr_sum = self.tr_sum - (self.tr_sum / self.p_f64) + tr;
 
-            
             let plus_di = if self.tr_sum != 0.0 {
                 (self.plus_dm_sum / self.tr_sum) * self.hundred
             } else {
@@ -620,7 +569,6 @@ impl DxStream {
             };
             let sum_di = plus_di + minus_di;
 
-            
             let dx = if sum_di != 0.0 {
                 self.hundred * ((plus_di - minus_di).abs() / sum_di)
             } else if self.filled {
@@ -632,7 +580,6 @@ impl DxStream {
             out = Some(dx);
         }
 
-        
         self.prev_high = high;
         self.prev_low = low;
         self.prev_close = close;
@@ -640,7 +587,6 @@ impl DxStream {
         out
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct DxBatchRange {
@@ -728,12 +674,13 @@ impl DxBatchOutput {
 #[inline(always)]
 fn expand_grid_checked(r: &DxBatchRange) -> Result<Vec<DxParams>, DxError> {
     let (start, end, step) = r.period;
-    
+
     if step == 0 || start == end {
-        return Ok(vec![DxParams { period: Some(start) }]);
+        return Ok(vec![DxParams {
+            period: Some(start),
+        }]);
     }
 
-    
     let mut out: Vec<usize> = Vec::new();
     if start < end {
         let mut v = start;
@@ -745,23 +692,29 @@ fn expand_grid_checked(r: &DxBatchRange) -> Result<Vec<DxParams>, DxError> {
             }
         }
     } else {
-        
         let mut v = start;
-        
+
         loop {
             out.push(v);
-            if v <= end { break; }
+            if v <= end {
+                break;
+            }
             let dec = v.saturating_sub(step);
-            if dec == v { break; }
+            if dec == v {
+                break;
+            }
             v = dec;
         }
-        
+
         out.sort_unstable();
     }
     if out.is_empty() {
         return Err(DxError::InvalidRange { start, end, step });
     }
-    Ok(out.into_iter().map(|p| DxParams { period: Some(p) }).collect())
+    Ok(out
+        .into_iter()
+        .map(|p| DxParams { period: Some(p) })
+        .collect())
 }
 
 pub fn dx_batch_with_kernel(
@@ -772,7 +725,6 @@ pub fn dx_batch_with_kernel(
     k: Kernel,
 ) -> Result<DxBatchOutput, DxError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(DxError::InvalidKernelForBatch(other)),
@@ -858,13 +810,11 @@ fn dx_batch_inner_into(
         _ => unreachable!(),
     };
 
-    
     let (plus_dm, minus_dm, tr, carry) = dx_precompute_terms(high, low, close, first, len);
 
     let do_row = |row: usize, dst_row: &mut [f64]| unsafe {
         let p = combos[row].period.unwrap();
         dx_row_scalar_precomputed(&plus_dm, &minus_dm, &tr, &carry, first, p, dst_row);
-        
     };
 
     if parallel {
@@ -895,10 +845,9 @@ fn dx_precompute_terms(
     let mut plus_dm: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
     let mut minus_dm: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
     let mut tr: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, len);
-    
+
     let mut carry: Vec<u8> = vec![0; len];
 
-    
     for _ in 0..len {
         plus_dm.push(0.0);
     }
@@ -913,7 +862,6 @@ fn dx_precompute_terms(
         return (plus_dm, minus_dm, tr, carry);
     }
 
-    
     for i in (first + 1)..len {
         let h = high[i];
         let l = low[i];
@@ -923,7 +871,6 @@ fn dx_precompute_terms(
             continue;
         }
 
-        
         let up_move = h - high[i - 1];
         let down_move = low[i - 1] - l;
         let pdm = if up_move > 0.0 && up_move > down_move {
@@ -937,7 +884,6 @@ fn dx_precompute_terms(
             0.0
         };
 
-        
         let tr1 = h - l;
         let tr2 = (h - close[i - 1]).abs();
         let tr3 = (l - close[i - 1]).abs();
@@ -1151,7 +1097,6 @@ unsafe fn dx_row_avx512_long(
 
 #[inline(always)]
 pub fn expand_grid_dx(r: &DxBatchRange) -> Vec<DxParams> {
-    
     expand_grid_checked(r).unwrap_or_else(|_| vec![])
 }
 
@@ -1173,10 +1118,9 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_dx_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 512usize;
         let mut close = vec![0.0f64; n];
         for i in 0..n {
@@ -1187,7 +1131,7 @@ mod tests {
         let mut low = vec![0.0f64; n];
         for i in 0..n {
             let t = i as f64;
-            
+
             high[i] = close[i] + 0.6 + 0.05 * (t * 0.3).sin();
             low[i] = close[i] - 0.6 - 0.05 * (t * 0.3).cos();
             if low[i] > high[i] {
@@ -1198,14 +1142,11 @@ mod tests {
         let params = DxParams { period: Some(14) };
         let input = DxInput::from_hlc_slices(&high, &low, &close, params);
 
-        
         let base = dx(&input)?.values;
 
-        
         let mut into_out = vec![0.0f64; n];
         dx_into(&input, &mut into_out)?;
 
-        
         #[inline]
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b) || ((a - b).abs() <= 1e-12)
@@ -1446,23 +1387,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             DxParams::default(),
-            
             DxParams { period: Some(2) },
-            
             DxParams { period: Some(5) },
             DxParams { period: Some(7) },
-            
             DxParams { period: Some(10) },
-            DxParams { period: Some(14) }, 
+            DxParams { period: Some(14) },
             DxParams { period: Some(20) },
-            
             DxParams { period: Some(30) },
             DxParams { period: Some(50) },
-            
             DxParams { period: Some(100) },
             DxParams { period: Some(200) },
         ];
@@ -1473,12 +1407,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1525,7 +1458,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_dx_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(test)]
@@ -1537,32 +1470,28 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        let strat = (2usize..=50) 
+        let strat = (2usize..=50)
             .prop_flat_map(|period| {
                 (
-                    100.0f64..5000.0f64, 
-                    (period + 20)..400,  
-                    0.001f64..0.05f64,   
-                    -0.01f64..0.01f64,   
+                    100.0f64..5000.0f64,
+                    (period + 20)..400,
+                    0.001f64..0.05f64,
+                    -0.01f64..0.01f64,
                     Just(period),
                 )
             })
             .prop_map(|(base_price, data_len, volatility, trend, period)| {
-                
                 let mut high = Vec::with_capacity(data_len);
                 let mut low = Vec::with_capacity(data_len);
                 let mut close = Vec::with_capacity(data_len);
 
                 let mut price = base_price;
                 for i in 0..data_len {
-                    
                     let trend_component = trend * i as f64;
                     let random_component = ((i * 7 + 13) % 17) as f64 / 17.0 - 0.5;
                     price =
                         base_price + trend_component + random_component * volatility * base_price;
 
-                    
                     let daily_volatility = volatility * price;
                     let h = price + daily_volatility * (0.5 + ((i * 3) % 7) as f64 / 14.0);
                     let l = price - daily_volatility * (0.5 + ((i * 5) % 7) as f64 / 14.0);
@@ -1584,7 +1513,7 @@ mod tests {
 				let DxOutput { values: out } = dx_with_kernel(&input, kernel).unwrap();
 				let DxOutput { values: ref_out } = dx_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				
+
 				for (i, &val) in out.iter().enumerate() {
 					if !val.is_nan() {
 						prop_assert!(
@@ -1595,9 +1524,9 @@ mod tests {
 					}
 				}
 
-				
-				
-				
+
+
+
 				let warmup = period - 1;
 				for i in 0..warmup {
 					prop_assert!(
@@ -1607,7 +1536,7 @@ mod tests {
 					);
 				}
 
-				
+
 				if out.len() > warmup + 10 {
 					for i in (warmup + 10)..out.len() {
 						prop_assert!(
@@ -1618,7 +1547,7 @@ mod tests {
 					}
 				}
 
-				
+
 				for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
 					if val.is_nan() && ref_val.is_nan() {
 						continue;
@@ -1632,19 +1561,19 @@ mod tests {
 					);
 				}
 
-				
+
 				let all_same_high = high.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 				let all_same_low = low.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 				let all_same_close = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
 				if all_same_high && all_same_low && all_same_close {
-					
+
 					if out.len() > warmup + 10 {
 						let stable_vals = &out[warmup + 10..];
 						for (i, &val) in stable_vals.iter().enumerate() {
 							if !val.is_nan() {
 								prop_assert!(
-									val < 1.0,  
+									val < 1.0,
 									"[{}] With constant prices, expected DX < 1.0, got {} at index {}",
 									test_name, val, warmup + 10 + i
 								);
@@ -1653,17 +1582,17 @@ mod tests {
 					}
 				}
 
-				
+
 				if period <= 20 && out.len() > 100 {
-					
+
 					let mid = out.len() / 2;
 					let first_half_avg_price = close[..mid].iter().sum::<f64>() / mid as f64;
 					let second_half_avg_price = close[mid..].iter().sum::<f64>() / (out.len() - mid) as f64;
 					let price_change = ((second_half_avg_price - first_half_avg_price) / first_half_avg_price).abs();
 
-					
+
 					if price_change > 0.05 {
-						
+
 						let first_half_dx = &out[warmup..mid];
 						let second_half_dx = &out[mid..];
 
@@ -1674,7 +1603,7 @@ mod tests {
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / second_half_dx.len() as f64;
 
-						
+
 						prop_assert!(
 							second_avg > 20.0 || first_avg > 20.0,
 							"[{}] Expected higher average DX in trending market. First half avg: {}, Second half avg: {}",
@@ -1683,15 +1612,15 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				if period <= 14 && out.len() > 50 {
-					
+
 					let trend_base = close[0];
 					let perfect_trend = (0..50)
 						.map(|i| {
-							let price = trend_base + (i as f64 * trend_base * 0.01); 
-							let h = price * 1.005;  
+							let price = trend_base + (i as f64 * trend_base * 0.01);
+							let h = price * 1.005;
 							let l = price * 0.995;
 							let c = price;
 							(h, l, c)
@@ -1705,7 +1634,7 @@ mod tests {
 					let perfect_input = DxInput::from_hlc_slices(&perfect_high, &perfect_low, &perfect_close, params.clone());
 					let DxOutput { values: perfect_out } = dx_with_kernel(&perfect_input, kernel).unwrap();
 
-					
+
 					if perfect_out.len() > warmup + 10 {
 						let stable_dx = &perfect_out[warmup + 10..];
 						let avg_dx = stable_dx.iter()
@@ -1713,21 +1642,21 @@ mod tests {
 							.sum::<f64>() / stable_dx.len() as f64;
 
 						prop_assert!(
-							avg_dx > 50.0,  
+							avg_dx > 50.0,
 							"[{}] Expected high DX (>50) in perfect trend, got avg {}",
 							test_name, avg_dx
 						);
 					}
 				}
 
-				
-				
+
+
 				if period <= 14 && out.len() > 50 {
-					
+
 					let range_base = close[0];
 					let ranging_data = (0..50)
 						.map(|i| {
-							
+
 							let price = if i % 4 < 2 {
 								range_base * 1.01
 							} else {
@@ -1747,17 +1676,17 @@ mod tests {
 					let ranging_input = DxInput::from_hlc_slices(&ranging_high, &ranging_low, &ranging_close, params.clone());
 					let DxOutput { values: ranging_out } = dx_with_kernel(&ranging_input, kernel).unwrap();
 
-					
+
 					if ranging_out.len() > warmup + 10 {
 						let stable_dx = &ranging_out[warmup + 10..];
 						let avg_dx = stable_dx.iter()
 							.filter(|v| !v.is_nan())
 							.sum::<f64>() / stable_dx.len() as f64;
 
-						
-						
+
+
 						prop_assert!(
-							avg_dx < 65.0,  
+							avg_dx < 65.0,
 							"[{}] Expected moderate DX (<65) in ranging market, got avg {}",
 							test_name, avg_dx
 						);
@@ -1848,7 +1777,7 @@ mod tests {
             .period_range(10, 30, 5)
             .apply_candles(&c)?;
 
-        let expected_combos = 5; 
+        let expected_combos = 5;
         assert_eq!(output.combos.len(), expected_combos);
         assert_eq!(output.rows, expected_combos);
         assert_eq!(output.cols, c.close.len());
@@ -1863,17 +1792,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),     
-            (5, 25, 5),     
-            (30, 60, 15),   
-            (2, 5, 1),      
-            (10, 20, 2),    
-            (14, 14, 0),    
-            (5, 50, 15),    
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (14, 14, 0),
+            (5, 50, 15),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1993,17 +1920,15 @@ pub fn dx_batch_py<'py>(
     let l = low.as_slice()?;
     let c = close.as_slice()?;
     let sweep = DxBatchRange::from_tuple(period_range);
-    let combos = expand_grid_checked(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
-    
+
     let cols = h.len().min(l.len()).min(c.len());
     let kern = validate_kernel(kernel, true)?;
     let DxBatchOutput { values, .. } = py
         .allow_threads(|| dx_batch_with_kernel(h, l, c, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let out_arr = PyArray1::from_vec(py, values);
 
     let dict = PyDict::new(py);
@@ -2018,7 +1943,6 @@ pub fn dx_batch_py<'py>(
     )?;
     Ok(dict.into())
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::dx_wrapper::CudaDx;
@@ -2052,8 +1976,7 @@ pub fn dx_cuda_batch_dev_py<'py>(
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .dx_batch_dev(h, l, c, &sweep)
+        cuda.dx_batch_dev(h, l, c, &sweep)
             .map(|(arr, combos)| (arr, combos, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2066,7 +1989,14 @@ pub fn dx_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((DxDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id }, dict))
+    Ok((
+        DxDeviceArrayF32Py {
+            inner,
+            _ctx: ctx,
+            device_id: dev_id,
+        },
+        dict,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2093,14 +2023,16 @@ pub fn dx_cuda_many_series_one_param_dev_py(
         let cuda = CudaDx::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .dx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
+        cuda.dx_many_series_one_param_time_major_dev(h, l, c, cols, rows, period)
             .map(|arr| (arr, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(DxDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
+    Ok(DxDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -2117,11 +2049,11 @@ impl DxDeviceArrayF32Py {
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let inner = &self.inner;
         let d = PyDict::new(py);
-        // shape: (rows, cols)
+
         d.set_item("shape", (inner.rows, inner.cols))?;
-        // typestr: little-endian float32
+
         d.set_item("typestr", "<f4")?;
-        // Explicit strides for row-major FP32: (row stride in bytes, item stride in bytes)
+
         d.set_item(
             "strides",
             (
@@ -2130,15 +2062,18 @@ impl DxDeviceArrayF32Py {
             ),
         )?;
         let size = inner.rows.saturating_mul(inner.cols);
-        let ptr = if size == 0 { 0usize } else { inner.device_ptr() as usize };
+        let ptr = if size == 0 {
+            0usize
+        } else {
+            inner.device_ptr() as usize
+        };
         d.set_item("data", (ptr, false))?;
-        // Stream omitted: producing kernels synchronize before returning the handle.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> PyResult<(i32, i32)> {
-        // Prefer allocation device via pointer attributes; fallback to stored id.
         unsafe {
             use cust::sys::cuPointerGetAttribute;
             let attr = cust::sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL;
@@ -2164,8 +2099,7 @@ impl DxDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2185,12 +2119,15 @@ impl DxDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let dummy = cust::memory::DeviceBuffer::<f32>::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32Cuda { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32Cuda {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -2234,14 +2171,14 @@ impl DxStreamPy {
     }
 }
 
-// WASM bindings
-
-/// Write directly to `dst` with ALMA-style warmup semantics.
 #[inline]
 pub fn dx_into_slice(dst: &mut [f64], input: &DxInput, kern: Kernel) -> Result<(), DxError> {
     let (h, l, c, len, first, chosen) = dx_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(DxError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(DxError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
     unsafe {
         match chosen {
@@ -2264,7 +2201,7 @@ pub fn dx_into_slice(dst: &mut [f64], input: &DxInput, kern: Kernel) -> Result<(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dx_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let input = DxInput::from_hlc_slices(
@@ -2281,7 +2218,7 @@ pub fn dx_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dx_into(
     h_ptr: *const f64,
@@ -2333,7 +2270,7 @@ pub fn dx_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dx_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2342,7 +2279,7 @@ pub fn dx_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dx_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2352,13 +2289,13 @@ pub fn dx_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DxBatchConfig {
-    pub period_range: (usize, usize, usize), // (start, end, step)
+    pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct DxBatchJsOutput {
     pub values: Vec<f64>,
@@ -2367,7 +2304,7 @@ pub struct DxBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "dx_batch")]
 pub fn dx_batch_unified_js(
     high: &[f64],
@@ -2379,8 +2316,9 @@ pub fn dx_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
     let sweep = DxBatchRange::from_tuple(cfg.period_range);
 
-    // allocate with helpers and compute via inner into
-    let rows = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?.len();
+    let rows = expand_grid_checked(&sweep)
+        .map_err(|e| JsValue::from_str(&e.to_string()))?
+        .len();
     let cols = high.len().min(low.len()).min(close.len());
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
@@ -2424,7 +2362,7 @@ pub fn dx_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn dx_batch_into(
     high_ptr: *const f64,
@@ -2449,18 +2387,14 @@ pub fn dx_batch_into(
         let n_combos = combos.len();
 
         if high_ptr == out_ptr || low_ptr == out_ptr || close_ptr == out_ptr {
-            // Aliasing detected - use temporary buffer
             let result = dx_batch_with_kernel(high, low, close, &batch_range, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len * n_combos);
             out.copy_from_slice(&result.values);
         } else {
-            // No aliasing - write directly
-            // Use the Python-style batch_inner_into function for direct writing
             let params = combos;
             let out = std::slice::from_raw_parts_mut(out_ptr, len * n_combos);
 
-            // Write directly into the output buffer using the pattern from Python bindings
             let first = high
                 .iter()
                 .zip(low)
@@ -2475,23 +2409,18 @@ pub fn dx_batch_into(
                 .collect();
             init_matrix_prefixes(&mut buf_uninit, len, &warmup_periods);
 
-            // Convert to initialized slice
             let buf_ptr = buf_uninit.as_mut_ptr() as *mut f64;
             std::mem::forget(buf_uninit);
             let slice_out = std::slice::from_raw_parts_mut(buf_ptr, params.len() * len);
 
-            // Process each parameter combination
             for (i, param) in params.iter().enumerate() {
                 let row_offset = i * len;
                 let row = &mut slice_out[row_offset..row_offset + len];
 
                 let warmup = first + param.period.unwrap() - 1;
                 dx_scalar(high, low, close, param.period.unwrap(), first, row);
-
-                // NaN prefix already set by init_matrix_prefixes
             }
 
-            // Copy to output
             out.copy_from_slice(slice_out);
         }
         Ok(())

@@ -1,10 +1,3 @@
-//! CUDA wrapper for the 3-pole SuperSmoother filter kernels.
-//!
-//! Mirrors the ALMA/CWMA-style wrapper: VRAM-first device handles, simple
-//! policy selection (plain kernels only), JIT options for PTX loading,
-//! VRAM checks, and chunked launches to respect grid limits. Kernels operate
-//! in FP32 with FP64 intermediates to match f64 scalar behavior.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -37,20 +30,29 @@ pub enum CudaSuperSmoother3PoleError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer device={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error("not implemented")] 
+    #[error("not implemented")]
     NotImplemented,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -108,7 +110,7 @@ impl CudaSupersmoother3Pole {
         let ctx = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/supersmoother_3_pole_kernel.ptx"));
-        
+
         let opt = match std::env::var("CUDA_JIT_OPT").ok().as_deref() {
             Some("O0") => OptLevel::O0,
             Some("O1") => OptLevel::O1,
@@ -163,7 +165,6 @@ impl CudaSupersmoother3Pole {
         Ok(())
     }
 
-    
     pub fn stream_handle(&self) -> usize {
         self.stream.as_inner() as usize
     }
@@ -197,12 +198,12 @@ impl CudaSupersmoother3Pole {
     }
 
     #[inline]
-    fn ptr_device_id<T: cust::memory::DeviceCopy>(_buf: &DeviceBuffer<T>) -> Result<u32, CudaSuperSmoother3PoleError> {
+    fn ptr_device_id<T: cust::memory::DeviceCopy>(
+        _buf: &DeviceBuffer<T>,
+    ) -> Result<u32, CudaSuperSmoother3PoleError> {
         unsafe {
             use cust::sys as cu;
-            
-            
-            
+
             let mut cur_dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut cur_dev as *mut _);
             if cur_dev < 0 {
@@ -220,13 +221,14 @@ impl CudaSupersmoother3Pole {
         } else if start < end {
             (start..=end).step_by(step).collect::<Vec<_>>()
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
                 if let Some(next) = cur.checked_sub(step) {
-                    if next == cur { break; }
+                    if next == cur {
+                        break;
+                    }
                     cur = next;
                 } else {
                     break;
@@ -348,7 +350,6 @@ impl CudaSupersmoother3Pole {
             }
         }
 
-        
         let mut func = self
             .module
             .get_function("supersmoother_3_pole_batch_f32")
@@ -357,7 +358,6 @@ impl CudaSupersmoother3Pole {
             })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => {
                 match func.suggested_launch_configuration(0, (0, 0, 0).into()) {
@@ -372,7 +372,6 @@ impl CudaSupersmoother3Pole {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        
         let device = Device::get_device(self.device_id)?;
         let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as usize;
         let max_block_x = device.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
@@ -431,20 +430,26 @@ impl CudaSupersmoother3Pole {
         series_len: usize,
     ) -> Result<DeviceArrayF32, CudaSuperSmoother3PoleError> {
         let n_combos = combos.len();
-        let total_elems = n_combos
-            .checked_mul(series_len)
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
+        let total_elems = n_combos.checked_mul(series_len).ok_or_else(|| {
+            CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into())
+        })?;
         let prices_bytes = series_len
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("series_len * sizeof overflow".into()))?;
+            .ok_or_else(|| {
+                CudaSuperSmoother3PoleError::InvalidInput("series_len * sizeof overflow".into())
+            })?;
         let periods_bytes = n_combos
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("n_combos * sizeof overflow".into()))?;
+            .ok_or_else(|| {
+                CudaSuperSmoother3PoleError::InvalidInput("n_combos * sizeof overflow".into())
+            })?;
         let out_bytes = total_elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
+            .ok_or_else(|| {
+                CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into())
+            })?;
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             let free = Self::device_mem_info().map(|(f, _)| f).unwrap_or(0);
             return Err(CudaSuperSmoother3PoleError::OutOfMemory {
@@ -528,18 +533,27 @@ impl CudaSupersmoother3Pole {
                 "series_len and n_combos must be > 0".into(),
             ));
         }
-        
+
         let dev_prices = Self::ptr_device_id(d_prices)?;
         let dev_periods = Self::ptr_device_id(d_periods)?;
         let dev_out = Self::ptr_device_id(d_out)?;
         if dev_prices != self.device_id {
-            return Err(CudaSuperSmoother3PoleError::DeviceMismatch { buf: dev_prices, current: self.device_id });
+            return Err(CudaSuperSmoother3PoleError::DeviceMismatch {
+                buf: dev_prices,
+                current: self.device_id,
+            });
         }
         if dev_periods != self.device_id {
-            return Err(CudaSuperSmoother3PoleError::DeviceMismatch { buf: dev_periods, current: self.device_id });
+            return Err(CudaSuperSmoother3PoleError::DeviceMismatch {
+                buf: dev_periods,
+                current: self.device_id,
+            });
         }
         if dev_out != self.device_id {
-            return Err(CudaSuperSmoother3PoleError::DeviceMismatch { buf: dev_out, current: self.device_id });
+            return Err(CudaSuperSmoother3PoleError::DeviceMismatch {
+                buf: dev_out,
+                current: self.device_id,
+            });
         }
         self.launch_batch_kernel(
             d_prices,
@@ -672,7 +686,7 @@ impl CudaSupersmoother3Pole {
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().add(launched).as_raw();
                 let mut period_i = period as i32;
-                let mut cols_i = cols as i32; 
+                let mut cols_i = cols as i32;
                 let mut rows_i = rows as i32;
                 let mut first_ptr = d_first_valids.as_device_ptr().add(launched).as_raw();
                 let mut out_ptr = d_out.as_device_ptr().add(launched).as_raw();
@@ -702,18 +716,24 @@ impl CudaSupersmoother3Pole {
         first_valids: &[i32],
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSuperSmoother3PoleError> {
-        let total_elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
+        let total_elems = cols.checked_mul(rows).ok_or_else(|| {
+            CudaSuperSmoother3PoleError::InvalidInput("rows * cols overflow".into())
+        })?;
         let prices_bytes = total_elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
+            .ok_or_else(|| {
+                CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into())
+            })?;
         let first_valid_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("cols * sizeof overflow".into()))?;
+            .ok_or_else(|| {
+                CudaSuperSmoother3PoleError::InvalidInput("cols * sizeof overflow".into())
+            })?;
         let out_bytes = total_elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into()))?;
+            .ok_or_else(|| {
+                CudaSuperSmoother3PoleError::InvalidInput("total_elems * sizeof overflow".into())
+            })?;
         let required = prices_bytes + first_valid_bytes + out_bytes;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
@@ -836,7 +856,6 @@ impl CudaSupersmoother3Pole {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -862,8 +881,11 @@ impl DeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (self.inner.cols * itemsize, itemsize))?;
         let size = self.inner.rows.saturating_mul(self.inner.cols);
-        let ptr_val: usize =
-            if size == 0 { 0 } else { self.inner.buf.as_device_ptr().as_raw() as usize };
+        let ptr_val: usize = if size == 0 {
+            0
+        } else {
+            self.inner.buf.as_device_ptr().as_raw() as usize
+        };
         d.set_item("data", (ptr_val, false))?;
         d.set_item("version", 3)?;
         if self.stream_handle != 0 {
@@ -871,7 +893,9 @@ impl DeviceArrayF32Py {
         }
         Ok(d.into())
     }
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -884,8 +908,7 @@ impl DeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -906,17 +929,20 @@ impl DeviceArrayF32Py {
             }
         }
 
-        
-        
-        unsafe { let _ = cust::sys::cuStreamSynchronize(self.stream_handle as *mut _); }
+        unsafe {
+            let _ = cust::sys::cuStreamSynchronize(self.stream_handle as *mut _);
+        }
         let _ = stream;
 
-        
         let dummy = DeviceBuffer::from_slice(&[])
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -931,12 +957,20 @@ impl DeviceArrayF32Py {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl DeviceArrayF32Py {
-    pub fn new_from_rust(inner: DeviceArrayF32, stream_handle: usize, ctx_guard: Arc<Context>, device_id: u32) -> Self {
-        Self { inner, stream_handle, _ctx_guard: ctx_guard, _device_id: device_id }
+    pub fn new_from_rust(
+        inner: DeviceArrayF32,
+        stream_handle: usize,
+        ctx_guard: Arc<Context>,
+        device_id: u32,
+    ) -> Self {
+        Self {
+            inner,
+            stream_handle,
+            _ctx_guard: ctx_guard,
+            _device_id: device_id,
+        }
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -982,7 +1016,10 @@ pub mod benches {
                     &mut self.d_out,
                 )
                 .expect("supersmoother_3_pole batch kernel");
-            self.cuda.stream.synchronize().expect("supersmoother_3_pole sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("supersmoother_3_pole sync");
         }
     }
 
@@ -996,14 +1033,18 @@ pub mod benches {
         let (combos, first_valid, series_len) =
             CudaSupersmoother3Pole::prepare_batch_inputs(&price, &sweep)
                 .expect("supersmoother_3_pole prepare batch");
-        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
         let n_combos = periods_i32.len();
 
         let d_prices = DeviceBuffer::from_slice(&price).expect("d_prices");
         let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
-        let d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size")) }
-                .expect("d_out");
+        let d_out: DeviceBuffer<f32> = unsafe {
+            DeviceBuffer::uninitialized(series_len.checked_mul(n_combos).expect("out size"))
+        }
+        .expect("d_out");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(BatchDevState {
@@ -1038,7 +1079,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("supersmoother_3_pole many-series kernel");
-            self.cuda.stream.synchronize().expect("supersmoother_3_pole sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("supersmoother_3_pole sync");
         }
     }
 

@@ -1,17 +1,3 @@
-//! CUDA wrapper for the Sine Weighted Moving Average (SINWMA) kernels.
-//!
-//! Mirrors the ALMA/CWMA wrapper shape for API parity:
-//! - VRAM-first design returning `DeviceArrayF32` handles
-//! - JIT options: DetermineTargetFromContext + OptLevel O2 with graceful fallbacks
-//! - NON_BLOCKING stream
-//! - Policy enums and introspection (Plain 1D for batch and many-series)
-//! - VRAM checks using `mem_get_info` and grid.y chunking (≤ 65_535)
-//!
-//! Math category: dot-product MA (fixed weights per period). We compute sine
-//! weights on-device per kernel launch to avoid extra VRAM traffic. This keeps
-//! parity with warmup/NaN semantics of the scalar path: outputs are NaN for
-//! `first_valid + period - 1` warmup, then normalized windows thereafter.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -32,7 +18,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-
 use cust::sys::{cuFuncSetAttribute, CUfunction_attribute_enum as CUfuncAttr};
 
 #[derive(Debug, Error)]
@@ -42,22 +27,29 @@ pub enum CudaSinwmaError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory on device: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid kernel policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
-
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchThreadsPerOutput {
@@ -134,7 +126,8 @@ impl CudaSinwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -227,29 +220,63 @@ impl CudaSinwma {
         }
     }
 
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     fn ensure_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaSinwmaError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) > free {
-                return Err(CudaSinwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+                return Err(CudaSinwmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
             }
         }
         Ok(())
     }
 
-    fn validate_launch_dims(&self, grid: (u32,u32,u32), block: (u32,u32,u32)) -> Result<(), CudaSinwmaError> {
+    fn validate_launch_dims(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaSinwmaError> {
         let dev = Device::get_device(self.device_id)?;
-        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock).unwrap_or(1024) as u32;
+        let max_threads = dev
+            .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
+            .unwrap_or(1024) as u32;
         if block.0.saturating_mul(block.1).saturating_mul(block.2) > max_threads {
-            return Err(CudaSinwmaError::LaunchConfigTooLarge{ gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+            return Err(CudaSinwmaError::LaunchConfigTooLarge {
+                gx: grid.0,
+                gy: grid.1,
+                gz: grid.2,
+                bx: block.0,
+                by: block.1,
+                bz: block.2,
+            });
         }
-        let gx_max = dev.get_attribute(DeviceAttribute::MaxGridDimX).unwrap_or(2_147_483_647) as u32;
-        let gy_max = dev.get_attribute(DeviceAttribute::MaxGridDimY).unwrap_or(65_535) as u32;
-        let gz_max = dev.get_attribute(DeviceAttribute::MaxGridDimZ).unwrap_or(65_535) as u32;
+        let gx_max = dev
+            .get_attribute(DeviceAttribute::MaxGridDimX)
+            .unwrap_or(2_147_483_647) as u32;
+        let gy_max = dev
+            .get_attribute(DeviceAttribute::MaxGridDimY)
+            .unwrap_or(65_535) as u32;
+        let gz_max = dev
+            .get_attribute(DeviceAttribute::MaxGridDimZ)
+            .unwrap_or(65_535) as u32;
         if grid.0 > gx_max || grid.1 > gy_max || grid.2 > gz_max {
-            return Err(CudaSinwmaError::LaunchConfigTooLarge{ gx: grid.0, gy: grid.1, gz: grid.2, bx: block.0, by: block.1, bz: block.2 });
+            return Err(CudaSinwmaError::LaunchConfigTooLarge {
+                gx: grid.0,
+                gy: grid.1,
+                gz: grid.2,
+                bx: block.0,
+                by: block.1,
+                bz: block.2,
+            });
         }
         Ok(())
     }
@@ -268,14 +295,17 @@ impl CudaSinwma {
             }
             v
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
-                if cur == end { break; }
+                if cur == end {
+                    break;
+                }
                 let next = cur.saturating_sub(step);
-                if next == cur { break; }
+                if next == cur {
+                    break;
+                }
                 cur = next;
             }
             if v.is_empty() {
@@ -337,11 +367,8 @@ impl CudaSinwma {
         Ok((combos, first_valid, series_len, max_period))
     }
 
-    
-
     #[inline]
     fn dynamic_smem_bytes(period: usize, block_x: u32) -> usize {
-        
         (2usize.saturating_mul(period).saturating_sub(1) + block_x as usize)
             * std::mem::size_of::<f32>()
     }
@@ -352,7 +379,6 @@ impl CudaSinwma {
         period: usize,
         prefer: Option<u32>,
     ) -> Result<(u32, usize), CudaSinwmaError> {
-        
         let mut candidates = [512u32, 384, 256, 192, 128, 96, 64, 48, 32];
         if let Some(px) = prefer {
             if !candidates.contains(&px) {
@@ -366,7 +392,6 @@ impl CudaSinwma {
             }
         }
 
-        
         let device = Device::get_device(self.device_id).map_err(|e| CudaSinwmaError::Cuda(e))?;
         let max_threads = device
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
@@ -387,7 +412,7 @@ impl CudaSinwma {
                 return Ok((bx, need));
             }
         }
-        
+
         let probe_bx = 64u32.min(max_threads);
         let avail = func
             .available_dynamic_shared_memory_per_block(
@@ -418,11 +443,9 @@ impl CudaSinwma {
         func: &mut Function,
         dynamic_smem: usize,
     ) -> Result<(), CudaSinwmaError> {
-        
         func.set_cache_config(CacheConfig::PreferShared)?;
         func.set_shared_memory_config(SharedMemoryConfig::FourByteBankSize)?;
 
-        
         unsafe {
             let raw = func.to_raw();
             let rc = cuFuncSetAttribute(
@@ -430,7 +453,7 @@ impl CudaSinwma {
                 CUfuncAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                 dynamic_smem as i32,
             );
-            let _ = rc; 
+            let _ = rc;
         }
         Ok(())
     }
@@ -460,12 +483,12 @@ impl CudaSinwma {
             ));
         }
 
-        let mut func = self
-            .module
-            .get_function("sinwma_batch_f32")
-            .map_err(|_| CudaSinwmaError::MissingKernelSymbol { name: "sinwma_batch_f32" })?;
+        let mut func = self.module.get_function("sinwma_batch_f32").map_err(|_| {
+            CudaSinwmaError::MissingKernelSymbol {
+                name: "sinwma_batch_f32",
+            }
+        })?;
 
-        
         let prefer = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => Some(block_x),
             _ => None,
@@ -530,7 +553,7 @@ impl CudaSinwma {
             .checked_add(periods_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         Self::ensure_fit(required, headroom)?;
 
         let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
@@ -576,7 +599,11 @@ impl CudaSinwma {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     pub fn sinwma_batch_dev(
@@ -702,7 +729,9 @@ impl CudaSinwma {
         let mut func = self
             .module
             .get_function("sinwma_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaSinwmaError::MissingKernelSymbol { name: "sinwma_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaSinwmaError::MissingKernelSymbol {
+                name: "sinwma_many_series_one_param_time_major_f32",
+            })?;
 
         let prefer = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => Some(block_x),
@@ -730,7 +759,8 @@ impl CudaSinwma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
             self.validate_launch_dims((grid_x.max(1), cols as u32, 1), (block_x, 1, 1))?;
-            self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
+            self.stream
+                .launch(&func, grid, block, shared_bytes as u32, args)?;
         }
         unsafe {
             (*(self as *const _ as *mut CudaSinwma)).last_many =
@@ -764,7 +794,7 @@ impl CudaSinwma {
             .checked_add(first_valid_bytes)
             .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaSinwmaError::InvalidInput("byte size overflow".into()))?;
-        let headroom = 32 * 1024 * 1024; 
+        let headroom = 32 * 1024 * 1024;
         Self::ensure_fit(required, headroom)?;
 
         let use_pinned = std::env::var("CUDA_PINNED").ok().as_deref() == Some("1");
@@ -801,7 +831,11 @@ impl CudaSinwma {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn sinwma_many_series_one_param_time_major_dev(
@@ -860,8 +894,6 @@ impl CudaSinwma {
         )
     }
 }
-
-
 
 pub mod benches {
     use super::*;

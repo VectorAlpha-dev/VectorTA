@@ -1,15 +1,3 @@
-//! CUDA support for the NATR (Normalized Average True Range) indicator.
-//!
-//! Parity goals (mirrors ALMA/CWMA wrappers):
-//! - PTX load via DetermineTargetFromContext + OptLevel O2 with simple fallback
-//! - NON_BLOCKING stream
-//! - VRAM checks with optional headroom and grid chunking
-//! - Public entry points:
-//!     - one-series × many-params (batch)
-//!     - many-series × one-param (time‑major)
-//! - Numerics: warmup/NaN identical to scalar; warmup ATR by mean(TR) and
-//!   sequential Wilder recurrence; outputs in f32.
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::natr::{NatrBatchRange, NatrParams};
@@ -31,23 +19,33 @@ pub enum CudaNatrError {
     Cuda(#[from] cust::error::CudaError),
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "Launch configuration too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})"
-    )]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("Launch configuration too large: grid=({gx},{gy},{gz}), block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device mismatch: buffer on {buf}, current device {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle for NATR with context guard and device id
 pub struct DeviceArrayF32Natr {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -81,7 +79,7 @@ impl Default for BatchKernelPolicy {
 #[derive(Clone, Copy, Debug)]
 pub enum ManySeriesKernelPolicy {
     Auto,
-    OneD { block_x: u32 }, 
+    OneD { block_x: u32 },
 }
 
 impl Default for ManySeriesKernelPolicy {
@@ -136,10 +134,14 @@ impl CudaNatr {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { Arc::clone(&self._context) }
+    pub fn context_arc(&self) -> Arc<Context> {
+        Arc::clone(&self._context)
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn headroom_bytes() -> usize {
@@ -185,23 +187,12 @@ impl CudaNatr {
         let max_threads = device
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
             .max(1) as u32;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)?
-            .max(1) as u32;
-        let max_grid_y = device
-            .get_attribute(DeviceAttribute::MaxGridDimY)?
-            .max(1) as u32;
-        let max_grid_z = device
-            .get_attribute(DeviceAttribute::MaxGridDimZ)?
-            .max(1) as u32;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)?.max(1) as u32;
+        let max_grid_y = device.get_attribute(DeviceAttribute::MaxGridDimY)?.max(1) as u32;
+        let max_grid_z = device.get_attribute(DeviceAttribute::MaxGridDimZ)?.max(1) as u32;
 
-        let threads_per_block = bx
-            .saturating_mul(by)
-            .saturating_mul(bz);
-        if threads_per_block > max_threads
-            || gx > max_grid_x
-            || gy > max_grid_y
-            || gz > max_grid_z
+        let threads_per_block = bx.saturating_mul(by).saturating_mul(bz);
+        if threads_per_block > max_threads || gx > max_grid_x || gy > max_grid_y || gz > max_grid_z
         {
             return Err(CudaNatrError::LaunchConfigTooLarge {
                 gx,
@@ -215,11 +206,9 @@ impl CudaNatr {
         Ok(())
     }
 
-    
     fn first_valid_hlc(high: &[f32], low: &[f32], close: &[f32]) -> Option<usize> {
         let n = high.len().min(low.len()).min(close.len());
         for i in 0..n {
-            
             if high[i].is_finite() && low[i].is_finite() && close[i].is_finite() {
                 return Some(i);
             }
@@ -269,17 +258,14 @@ impl CudaNatr {
         let expected = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaNatrError::InvalidInput("rows*cols overflow".into()))?;
-        if high_tm.len() != expected
-            || low_tm.len() != expected
-            || close_tm.len() != expected
-        {
+        if high_tm.len() != expected || low_tm.len() != expected || close_tm.len() != expected {
             return Err(CudaNatrError::InvalidInput(
                 "time-major inputs wrong length".into(),
             ));
         }
         let mut fv = vec![0i32; cols];
         for s in 0..cols {
-            let mut first: i32 = rows as i32; 
+            let mut first: i32 = rows as i32;
             for t in 0..rows {
                 let idx = match t.checked_mul(cols).and_then(|v| v.checked_add(s)) {
                     Some(i) => i,
@@ -300,7 +286,6 @@ impl CudaNatr {
         Ok(fv)
     }
 
-    
     pub fn natr_batch_dev(
         &mut self,
         high: &[f32],
@@ -315,8 +300,9 @@ impl CudaNatr {
             ));
         }
 
-        
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaNatrError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaNatrError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
             }
@@ -369,14 +355,15 @@ impl CudaNatr {
         let periods_i32: Vec<i32> = periods_v.iter().map(|&p| p as i32).collect();
         let rows = periods_v.len();
 
-        
         let min_period = *periods_v.iter().min().unwrap();
         let warm_needed = first_valid + min_period - 1;
-        let active_len = if len > warm_needed { len - warm_needed } else { 0 };
-        let use_precompute = rows >= 4
-            || rows.saturating_mul(active_len) >= 1_000_000;
+        let active_len = if len > warm_needed {
+            len - warm_needed
+        } else {
+            0
+        };
+        let use_precompute = rows >= 4 || rows.saturating_mul(active_len) >= 1_000_000;
 
-        
         let elem_out = rows
             .checked_mul(len)
             .ok_or_else(|| CudaNatrError::InvalidInput("rows*len overflow".into()))?;
@@ -401,13 +388,11 @@ impl CudaNatr {
             .ok_or_else(|| CudaNatrError::InvalidInput("input bytes overflow".into()))?;
         let head = Self::headroom_bytes();
 
-        
         let base_bytes = out_bytes
             .checked_add(in_bytes)
             .ok_or_else(|| CudaNatrError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(base_bytes, head)?;
 
-        
         let inv_bytes = len
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaNatrError::InvalidInput("inv bytes overflow".into()))?;
@@ -420,23 +405,17 @@ impl CudaNatr {
             false
         };
 
-        
-        let d_tr: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::from_slice_async(&tr, &self.stream)?
-        };
-        let d_close: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::from_slice_async(close, &self.stream)?
-        };
-        let d_periods: DeviceBuffer<i32> = unsafe {
-            DeviceBuffer::from_slice_async(&periods_i32, &self.stream)?
-        };
+        let d_tr: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(&tr, &self.stream)? };
+        let d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(close, &self.stream)? };
+        let d_periods: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
             match unsafe { DeviceBuffer::uninitialized_async(elem_out, &self.stream) } {
                 Ok(buf) => buf,
                 Err(_) => unsafe { DeviceBuffer::uninitialized(elem_out)? },
             };
 
-        
         let mut d_inv: Option<DeviceBuffer<f32>> = None;
         if allow_inv {
             let mut d = match unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }
@@ -447,7 +426,9 @@ impl CudaNatr {
             let make_fn = self
                 .module
                 .get_function("natr_make_inv_close100")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_make_inv_close100" })?;
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_make_inv_close100",
+                })?;
             unsafe {
                 let mut c_ptr = d_close.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
@@ -483,26 +464,32 @@ impl CudaNatr {
 
         let use_warp_io = warp_io_enabled && block_x == 32;
 
-        
         let func = match (use_warp_io, d_inv.is_some()) {
             (true, true) => self
                 .module
                 .get_function("natr_batch_warp_io_f32_with_inv")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_warp_io_f32_with_inv" })?,
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_warp_io_f32_with_inv",
+                })?,
             (true, false) => self
                 .module
                 .get_function("natr_batch_warp_io_f32")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_warp_io_f32" })?,
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_warp_io_f32",
+                })?,
             (false, true) => self
                 .module
                 .get_function("natr_batch_f32_with_inv")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32_with_inv" })?,
-            (false, false) => self
-                .module
-                .get_function("natr_batch_f32")
-                .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_batch_f32" })?,
+                .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_f32_with_inv",
+                })?,
+            (false, false) => self.module.get_function("natr_batch_f32").map_err(|_| {
+                CudaNatrError::MissingKernelSymbol {
+                    name: "natr_batch_f32",
+                }
+            })?,
         };
-        let grid_x = rows as u32; 
+        let grid_x = rows as u32;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         self.validate_launch(grid_x, 1, 1, block_x, 1, 1)?;
@@ -547,9 +534,7 @@ impl CudaNatr {
             }
         }
 
-        self.stream
-            .synchronize()
-            ?;
+        self.stream.synchronize()?;
 
         Ok(DeviceArrayF32Natr {
             buf: d_out,
@@ -575,10 +560,7 @@ impl CudaNatr {
         let expected = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaNatrError::InvalidInput("rows*cols overflow".into()))?;
-        if high_tm.len() != expected
-            || low_tm.len() != expected
-            || close_tm.len() != expected
-        {
+        if high_tm.len() != expected || low_tm.len() != expected || close_tm.len() != expected {
             return Err(CudaNatrError::InvalidInput(
                 "time-major inputs wrong length".into(),
             ));
@@ -589,7 +571,6 @@ impl CudaNatr {
 
         let first_valids = Self::first_valids_time_major(high_tm, low_tm, close_tm, cols, rows)?;
 
-        
         let elem_out = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaNatrError::InvalidInput("rows*cols overflow".into()))?;
@@ -617,32 +598,27 @@ impl CudaNatr {
             .ok_or_else(|| CudaNatrError::InvalidInput("VRAM size overflow".into()))?;
         Self::will_fit(total, head)?;
 
-        
-        let d_high: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::from_slice_async(high_tm, &self.stream)?
-        };
-        let d_low: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::from_slice_async(low_tm, &self.stream)?
-        };
-        let d_close: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::from_slice_async(close_tm, &self.stream)?
-        };
-        let d_fv: DeviceBuffer<i32> = unsafe {
-            DeviceBuffer::from_slice_async(&first_valids, &self.stream)?
-        };
+        let d_high: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(high_tm, &self.stream)? };
+        let d_low: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(low_tm, &self.stream)? };
+        let d_close: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(close_tm, &self.stream)? };
+        let d_fv: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
             match unsafe { DeviceBuffer::uninitialized_async(elem_out, &self.stream) } {
                 Ok(buf) => buf,
                 Err(_) => unsafe { DeviceBuffer::uninitialized(elem_out)? },
             };
 
-        
         let func = self
             .module
             .get_function("natr_many_series_one_param_f32")
-            .map_err(|_| CudaNatrError::MissingKernelSymbol { name: "natr_many_series_one_param_f32" })?;
+            .map_err(|_| CudaNatrError::MissingKernelSymbol {
+                name: "natr_many_series_one_param_f32",
+            })?;
 
-        
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32).min(1024),
@@ -687,7 +663,6 @@ impl CudaNatr {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -696,7 +671,6 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series(n_combos: usize) -> usize {
-        
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>()
             + ONE_SERIES_LEN * std::mem::size_of::<f32>()
             + n_combos * std::mem::size_of::<i32>();
@@ -780,9 +754,10 @@ pub mod benches {
 
         let (tr, first_valid) = CudaNatr::build_tr_one_series(&high, &low, &close).expect("tr");
         let d_tr = unsafe { DeviceBuffer::from_slice_async(&tr, &cuda.stream) }.expect("d_tr");
-        let d_close = unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
-        let d_periods =
-            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }.expect("d_periods");
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close");
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }
+            .expect("d_periods");
         let out_elems = rows * ONE_SERIES_LEN;
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &cuda.stream) }.expect("d_out");

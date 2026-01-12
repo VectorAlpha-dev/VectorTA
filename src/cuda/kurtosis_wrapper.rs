@@ -1,12 +1,3 @@
-//! CUDA wrapper for Kurtosis (excess kurtosis) indicator.
-//!
-//! Parity goals per Agents Guide:
-//! - API/behavior match ALMA-style wrappers (policy enums, NON_BLOCKING stream)
-//! - PTX load with DetermineTargetFromContext and O2 fallback
-//! - VRAM estimation with ~64MB headroom; grid-y chunking to <= 65_535
-//! - Batch builds DS (float2) host prefix sums of x, x^2, x^3, x^4 and NaN counts (pinned memory)
-//! - Many-series×one-param uses time-major scan with incremental raw sums (DS accumulators)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -23,7 +14,6 @@ use std::env;
 use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
-
 
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
@@ -55,7 +45,11 @@ pub enum CudaKurtosisError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -63,7 +57,14 @@ pub enum CudaKurtosisError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -130,8 +131,7 @@ impl CudaKurtosis {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -155,12 +155,24 @@ impl CudaKurtosis {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaKurtosisPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaKurtosisPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn set_policy(&mut self, policy: CudaKurtosisPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaKurtosisPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     pub fn synchronize(&self) -> Result<(), CudaKurtosisError> {
@@ -175,10 +187,14 @@ impl CudaKurtosis {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> bool {
-        if !Self::mem_check_enabled() { return true; }
+        if !Self::mem_check_enabled() {
+            return true;
+        }
         if let Some((free, _)) = Self::device_mem_info() {
             return required_bytes.saturating_add(headroom_bytes) <= free;
         }
@@ -189,7 +205,9 @@ impl CudaKurtosis {
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
@@ -205,7 +223,9 @@ impl CudaKurtosis {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
@@ -289,7 +309,6 @@ impl CudaKurtosis {
         Ok((combos, first_valid, len))
     }
 
-    
     fn build_prefixes_ds(
         &self,
         data: &[f32],
@@ -310,14 +329,12 @@ impl CudaKurtosis {
         let mut ps4 = unsafe { LockedBuffer::<Float2>::uninitialized(n + 1) }?;
         let mut ps_nan = unsafe { LockedBuffer::<i32>::uninitialized(n + 1) }?;
 
-        
         ps1.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps2.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps3.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps4.as_mut_slice()[0] = Float2 { x: 0.0, y: 0.0 };
         ps_nan.as_mut_slice()[0] = 0;
 
-        
         let mut s1 = (0.0f32, 0.0f32);
         let mut s2 = (0.0f32, 0.0f32);
         let mut s3 = (0.0f32, 0.0f32);
@@ -368,7 +385,9 @@ impl CudaKurtosis {
         let func = self
             .module
             .get_function("kurtosis_batch_f32")
-            .map_err(|_| CudaKurtosisError::MissingKernelSymbol { name: "kurtosis_batch_f32" })?;
+            .map_err(|_| CudaKurtosisError::MissingKernelSymbol {
+                name: "kurtosis_batch_f32",
+            })?;
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
@@ -382,7 +401,6 @@ impl CudaKurtosis {
                 Some(BatchKernelSelected::Plain { block_x });
         }
 
-        
         let mut launched = 0usize;
         while launched < combos {
             let chunk = (combos - launched).min(65_535);
@@ -395,7 +413,7 @@ impl CudaKurtosis {
                 let mut psn = d_ps_nan.as_device_ptr().as_raw();
                 let mut len_i = len as i32;
                 let mut first_valid_i = first_valid as i32;
-                
+
                 let mut periods = d_periods
                     .as_device_ptr()
                     .as_raw()
@@ -432,43 +450,30 @@ impl CudaKurtosis {
         let (h_ps1, h_ps2, h_ps3, h_ps4, h_ps_nan) = self.build_prefixes_ds(data_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
 
-        
         let bytes_prefix = (h_ps1.len() + h_ps2.len() + h_ps3.len() + h_ps4.len())
             .checked_mul(std::mem::size_of::<Float2>())
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("prefix bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("prefix bytes overflow".into()))?;
         let bytes_nan = h_ps_nan
             .len()
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("nan bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("nan bytes overflow".into()))?;
         let bytes_periods = periods
             .len()
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("period bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("period bytes overflow".into()))?;
         let out_elems = combos
             .len()
             .checked_mul(len)
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("rows*cols overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("rows*cols overflow".into()))?;
         let bytes_out = out_elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("output bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("output bytes overflow".into()))?;
         let required = bytes_prefix
             .checked_add(bytes_nan)
             .and_then(|v| v.checked_add(bytes_periods))
             .and_then(|v| v.checked_add(bytes_out))
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("VRAM bytes overflow".into())
-            })?;
-        let headroom = 64 * 1024 * 1024; 
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("VRAM bytes overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaKurtosisError::OutOfMemory {
@@ -483,22 +488,14 @@ impl CudaKurtosis {
             }
         }
 
-        
-        let d_ps1 =
-            unsafe { DeviceBuffer::from_slice_async(h_ps1.as_slice(), &self.stream) }?;
-        let d_ps2 =
-            unsafe { DeviceBuffer::from_slice_async(h_ps2.as_slice(), &self.stream) }?;
-        let d_ps3 =
-            unsafe { DeviceBuffer::from_slice_async(h_ps3.as_slice(), &self.stream) }?;
-        let d_ps4 =
-            unsafe { DeviceBuffer::from_slice_async(h_ps4.as_slice(), &self.stream) }?;
-        let d_psn =
-            unsafe { DeviceBuffer::from_slice_async(h_ps_nan.as_slice(), &self.stream) }?;
-        let d_periods =
-            unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
-        let mut d_out = unsafe {
-            DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream)?
-        };
+        let d_ps1 = unsafe { DeviceBuffer::from_slice_async(h_ps1.as_slice(), &self.stream) }?;
+        let d_ps2 = unsafe { DeviceBuffer::from_slice_async(h_ps2.as_slice(), &self.stream) }?;
+        let d_ps3 = unsafe { DeviceBuffer::from_slice_async(h_ps3.as_slice(), &self.stream) }?;
+        let d_ps4 = unsafe { DeviceBuffer::from_slice_async(h_ps4.as_slice(), &self.stream) }?;
+        let d_psn = unsafe { DeviceBuffer::from_slice_async(h_ps_nan.as_slice(), &self.stream) }?;
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
+        let mut d_out =
+            unsafe { DeviceBuffer::<f32>::uninitialized_async(out_elems, &self.stream)? };
 
         self.launch_batch(
             &d_ps1,
@@ -537,9 +534,7 @@ impl CudaKurtosis {
         }
         let elems = cols
             .checked_mul(rows)
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("cols*rows overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("cols*rows overflow".into()))?;
         if data_tm_f32.len() != elems {
             return Err(CudaKurtosisError::InvalidInput(
                 "time-major slice length mismatch".into(),
@@ -549,7 +544,6 @@ impl CudaKurtosis {
             return Err(CudaKurtosisError::InvalidInput("period must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -563,24 +557,17 @@ impl CudaKurtosis {
             first_valids[s] = fv;
         }
 
-        
         let bytes_in = elems
             .checked_mul(std::mem::size_of::<f32>())
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("bytes_in overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("bytes_in overflow".into()))?;
         let bytes_out = bytes_in;
         let bytes_fv = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("bytes_fv overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("bytes_fv overflow".into()))?;
         let required = bytes_in
             .checked_add(bytes_out)
             .and_then(|v| v.checked_add(bytes_fv))
-            .ok_or_else(|| {
-                CudaKurtosisError::InvalidInput("VRAM bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaKurtosisError::InvalidInput("VRAM bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
@@ -596,21 +583,15 @@ impl CudaKurtosis {
             }
         }
 
-        let d_in =
-            unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
-        let d_fv =
-            unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
-        let mut d_out = unsafe {
-            DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream)?
-        };
+        let d_in = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
+        let d_fv = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream)? };
 
         let func = self
             .module
             .get_function("kurtosis_many_series_one_param_f32")
-            .map_err(|_| {
-                CudaKurtosisError::MissingKernelSymbol {
-                    name: "kurtosis_many_series_one_param_f32",
-                }
+            .map_err(|_| CudaKurtosisError::MissingKernelSymbol {
+                name: "kurtosis_many_series_one_param_f32",
             })?;
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128,
@@ -654,7 +635,6 @@ impl CudaKurtosis {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;

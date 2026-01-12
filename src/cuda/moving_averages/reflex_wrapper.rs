@@ -1,13 +1,3 @@
-//! CUDA scaffolding for the Reflex indicator.
-//!
-//! The GPU implementation mirrors the scalar Reflex algorithm (recurrence/IIR):
-//! each parameter combination is evaluated sequentially while its smoothed
-//! history (the last `period` samples) lives in shared memory. This keeps the
-//! warmup/NaN semantics identical to the scalar path (first `period` outputs
-//! are 0.0; NaN written outside valid ranges), and matches the public API
-//! shape used by ALMA for CUDA wrappers (VRAM handle, policies, BENCH_DEBUG,
-//! and grid chunking).
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -33,13 +23,29 @@ pub enum CudaReflexError {
     #[allow(dead_code)]
     Cuda(cust::error::CudaError),
     InvalidInput(String),
-    OutOfMemory { required: usize, free: usize, headroom: usize },
-    MissingKernelSymbol { name: &'static str },
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
+    MissingKernelSymbol {
+        name: &'static str,
+    },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[allow(dead_code)]
     InvalidPolicy(&'static str),
     #[allow(dead_code)]
-    DeviceMismatch { buf: u32, current: u32 },
+    DeviceMismatch {
+        buf: u32,
+        current: u32,
+    },
     NotImplemented,
 }
 
@@ -48,7 +54,11 @@ impl fmt::Display for CudaReflexError {
         match self {
             CudaReflexError::Cuda(e) => write!(f, "CUDA error: {}", e),
             CudaReflexError::InvalidInput(e) => write!(f, "Invalid input: {}", e),
-            CudaReflexError::OutOfMemory { required, free, headroom } => write!(
+            CudaReflexError::OutOfMemory {
+                required,
+                free,
+                headroom,
+            } => write!(
                 f,
                 "insufficient device memory: required={}B (including headroom={}B), free={}B",
                 required, headroom, free
@@ -56,7 +66,14 @@ impl fmt::Display for CudaReflexError {
             CudaReflexError::MissingKernelSymbol { name } => {
                 write!(f, "missing kernel symbol: {}", name)
             }
-            CudaReflexError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz } => write!(
+            CudaReflexError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            } => write!(
                 f,
                 "launch config too large (grid=({}, {}, {}), block=({}, {}, {}))",
                 gx, gy, gz, bx, by, bz
@@ -85,7 +102,7 @@ pub struct CudaReflex {
     stream: Stream,
     _context: Arc<Context>,
     device_id: u32,
-    // Policy/introspection (mirrors ALMA/CWMA wrappers)
+
     policy: CudaReflexPolicy,
     last_batch: Option<ReflexBatchKernelSelected>,
     last_many: Option<ReflexManySeriesKernelSelected>,
@@ -110,16 +127,13 @@ impl CudaReflex {
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
 
-        // Prefer L1 cache (kernels use small shared memory)
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
-        // Optional stream priority via env; default priority if parse fails
         let prio = std::env::var("CUDA_STREAM_PRIORITY")
             .ok()
             .and_then(|v| v.parse::<i32>().ok());
         let stream = Stream::new(StreamFlags::NON_BLOCKING, prio)?;
 
-        // Query device limits for simple launch validation
         let max_grid_x = device
             .get_attribute(DeviceAttribute::MaxGridDimX)
             .unwrap_or(65_535) as u32;
@@ -138,7 +152,6 @@ impl CudaReflex {
         })
     }
 
-    /// Create with explicit kernel selection policy (test/bench control).
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaReflexPolicy,
@@ -170,7 +183,9 @@ impl CudaReflex {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -198,7 +213,10 @@ impl CudaReflex {
     }
 
     #[inline]
-    fn will_fit_or_err(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaReflexError> {
+    fn will_fit_or_err(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaReflexError> {
         if !Self::mem_check_enabled() {
             return Ok(());
         }
@@ -207,7 +225,11 @@ impl CudaReflex {
             if need <= free {
                 Ok(())
             } else {
-                Err(CudaReflexError::OutOfMemory { required: need, free, headroom: headroom_bytes })
+                Err(CudaReflexError::OutOfMemory {
+                    required: need,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -240,9 +262,7 @@ impl CudaReflex {
         }
 
         let arr = self.run_batch_kernel(prices, &inputs)?;
-        arr.buf
-            .copy_to(out)
-            .map_err(CudaReflexError::Cuda)?;
+        arr.buf.copy_to(out).map_err(CudaReflexError::Cuda)?;
         Ok((arr.rows, arr.cols, inputs.combos))
     }
 
@@ -256,14 +276,16 @@ impl CudaReflex {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
-        // Validate that the current CUDA context is on the expected device.
         let cur_dev = unsafe {
             let mut dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut dev as *mut _);
             dev as u32
         };
         if cur_dev != self.device_id {
-            return Err(CudaReflexError::DeviceMismatch { buf: self.device_id, current: cur_dev });
+            return Err(CudaReflexError::DeviceMismatch {
+                buf: self.device_id,
+                current: cur_dev,
+            });
         }
 
         if series_len == 0 || n_combos == 0 {
@@ -302,14 +324,16 @@ impl CudaReflex {
         d_first_valids: Option<&DeviceBuffer<i32>>,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
-        // Validate that the current CUDA context is on the expected device.
         let cur_dev = unsafe {
             let mut dev: i32 = 0;
             let _ = cu::cuCtxGetDevice(&mut dev as *mut _);
             dev as u32
         };
         if cur_dev != self.device_id {
-            return Err(CudaReflexError::DeviceMismatch { buf: self.device_id, current: cur_dev });
+            return Err(CudaReflexError::DeviceMismatch {
+                buf: self.device_id,
+                current: cur_dev,
+            });
         }
 
         if period < 2 || num_series == 0 || series_len == 0 {
@@ -355,7 +379,11 @@ impl CudaReflex {
         period: usize,
         out_tm: &mut [f32],
     ) -> Result<(), CudaReflexError> {
-        if out_tm.len() != cols.checked_mul(rows).ok_or_else(|| CudaReflexError::InvalidInput("rows*cols overflow".into()))? {
+        if out_tm.len()
+            != cols
+                .checked_mul(rows)
+                .ok_or_else(|| CudaReflexError::InvalidInput("rows*cols overflow".into()))?
+        {
             return Err(CudaReflexError::InvalidInput(format!(
                 "out slice wrong length: got {}, expected {}",
                 out_tm.len(),
@@ -365,9 +393,7 @@ impl CudaReflex {
 
         let prepared = Self::prepare_many_series_inputs(prices_tm_f32, cols, rows, period)?;
         let arr = self.run_many_series_kernel(prices_tm_f32, cols, rows, period, &prepared)?;
-        arr.buf
-            .copy_to(out_tm)
-            .map_err(CudaReflexError::Cuda)?;
+        arr.buf.copy_to(out_tm).map_err(CudaReflexError::Cuda)?;
         Ok(())
     }
 
@@ -386,11 +412,10 @@ impl CudaReflex {
             .ok_or_else(|| CudaReflexError::InvalidInput("rows*cols overflow".into()))?;
         let out_bytes = out_elems.saturating_mul(std::mem::size_of::<f32>());
         let required = prices_bytes + periods_bytes + out_bytes;
-        let headroom = 64 * 1024 * 1024; // 64MB safety margin (match ALMA)
+        let headroom = 64 * 1024 * 1024;
 
         Self::will_fit_or_err(required, headroom)?;
 
-        // Pinned+async H2D for higher bandwidth and overlap (default enabled)
         let d_prices = self.htod_copy_f32(prices)?;
         let d_periods = DeviceBuffer::from_slice(&inputs.periods).map_err(CudaReflexError::from)?;
         let mut d_out: DeviceBuffer<f32> =
@@ -427,7 +452,7 @@ impl CudaReflex {
         let prices_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
         let out_bytes = prices_tm_f32.len() * std::mem::size_of::<f32>();
         let required = prices_bytes + out_bytes;
-        let headroom = 32 * 1024 * 1024; // 32MB safety margin
+        let headroom = 32 * 1024 * 1024;
 
         if !Self::will_fit(required, headroom) {
             return Err(CudaReflexError::InvalidInput(
@@ -461,31 +486,31 @@ impl CudaReflex {
         max_period: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaReflexError> {
-        // Prefer precomputed-coefficient kernel if present; compute coeffs on device kernel otherwise
-        // Look up function each time (avoid self-referential lifetime for cached Function)
         let func = match self.module.get_function("reflex_batch_f32") {
             Ok(f) => f,
             Err(_) => self
                 .module
                 .get_function("reflex_batch_f32_precomp")
-                .map_err(|_| CudaReflexError::MissingKernelSymbol { name: "reflex_batch_f32_precomp" })?,
+                .map_err(|_| CudaReflexError::MissingKernelSymbol {
+                    name: "reflex_batch_f32_precomp",
+                })?,
         };
 
-        // Log selected kernel once per scenario when BENCH_DEBUG=1
         unsafe {
             let this = self as *const _ as *mut CudaReflex;
             (*this).last_batch = Some(ReflexBatchKernelSelected::Plain1D { block_x: 1 });
         }
         self.maybe_log_batch_debug();
 
-        // Chunk very large sweeps to avoid grid dimension pitfalls and reduce launch failures.
-        const MAX_CHUNK: usize = 65_535; // conservative (matches ALMA grid.y rule)
+        const MAX_CHUNK: usize = 65_535;
         let block: BlockSize = (1, 1, 1).into();
-        // Ring buffer of size period+1 is used in kernels (double-precision)
-        let shared_bytes_u64 = (max_period as u64 + 1)
-            .saturating_mul(std::mem::size_of::<f64>() as u64);
+
+        let shared_bytes_u64 =
+            (max_period as u64 + 1).saturating_mul(std::mem::size_of::<f64>() as u64);
         if shared_bytes_u64 > (u32::MAX as u64) {
-            return Err(CudaReflexError::InvalidInput("dynamic shared memory size exceeds u32".into()));
+            return Err(CudaReflexError::InvalidInput(
+                "dynamic shared memory size exceeds u32".into(),
+            ));
         }
         let shared_bytes = shared_bytes_u64 as u32;
         let mut start = 0usize;
@@ -493,12 +518,19 @@ impl CudaReflex {
             let len = (n_combos - start).min(MAX_CHUNK);
             let grid_x = len as u32;
             if grid_x > self.max_grid_x {
-                return Err(CudaReflexError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: 1, by: 1, bz: 1 });
+                return Err(CudaReflexError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: 1,
+                    gz: 1,
+                    bx: 1,
+                    by: 1,
+                    bz: 1,
+                });
             }
             let grid: GridSize = (grid_x, 1, 1).into();
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                // Offset parameter and output pointers for this slice
+
                 let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut combos_i = len as i32;
@@ -512,7 +544,9 @@ impl CudaReflex {
                     &mut first_valid_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, grid, block, shared_bytes, args).map_err(CudaReflexError::from)?;
+                self.stream
+                    .launch(&func, grid, block, shared_bytes, args)
+                    .map_err(CudaReflexError::from)?;
             }
             start += len;
         }
@@ -531,9 +565,10 @@ impl CudaReflex {
         let func = self
             .module
             .get_function("reflex_many_series_one_param_f32")
-            .map_err(|_| CudaReflexError::MissingKernelSymbol { name: "reflex_many_series_one_param_f32" })?;
+            .map_err(|_| CudaReflexError::MissingKernelSymbol {
+                name: "reflex_many_series_one_param_f32",
+            })?;
 
-        // For recurrence, 1D kernel is the canonical choice (one thread per series).
         unsafe {
             let this = self as *const _ as *mut CudaReflex;
             (*this).last_many = Some(ReflexManySeriesKernelSelected::OneD { block_x: 1 });
@@ -542,15 +577,24 @@ impl CudaReflex {
 
         let grid_x = num_series as u32;
         if grid_x > self.max_grid_x {
-            return Err(CudaReflexError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: 1, by: 1, bz: 1 });
+            return Err(CudaReflexError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: 1,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (1, 1, 1).into();
-        // Ring buffer of size period+1 is used in kernels (double-precision)
-        let shared_bytes_u64 = (period as u64 + 1)
-            .saturating_mul(std::mem::size_of::<f64>() as u64);
+
+        let shared_bytes_u64 =
+            (period as u64 + 1).saturating_mul(std::mem::size_of::<f64>() as u64);
         if shared_bytes_u64 > (u32::MAX as u64) {
-            return Err(CudaReflexError::InvalidInput("dynamic shared memory size exceeds u32".into()));
+            return Err(CudaReflexError::InvalidInput(
+                "dynamic shared memory size exceeds u32".into(),
+            ));
         }
         let shared_bytes = shared_bytes_u64 as u32;
 
@@ -637,8 +681,14 @@ impl CudaReflex {
                 "matrix dimensions must be positive".into(),
             ));
         }
-        if prices_tm_f32.len() != cols.checked_mul(rows).ok_or_else(|| CudaReflexError::InvalidInput("rows*cols overflow".into()))? {
-            return Err(CudaReflexError::InvalidInput("matrix shape mismatch".into()));
+        if prices_tm_f32.len()
+            != cols
+                .checked_mul(rows)
+                .ok_or_else(|| CudaReflexError::InvalidInput("rows*cols overflow".into()))?
+        {
+            return Err(CudaReflexError::InvalidInput(
+                "matrix shape mismatch".into(),
+            ));
         }
         if period < 2 {
             return Err(CudaReflexError::InvalidInput("period must be >= 2".into()));
@@ -681,7 +731,6 @@ impl CudaReflex {
 impl CudaReflex {
     #[inline]
     fn htod_copy_f32(&self, src: &[f32]) -> Result<DeviceBuffer<f32>, CudaReflexError> {
-        // Default to pinned+async H2D for best bandwidth; fall back to sync if pinning fails
         match LockedBuffer::from_slice(src) {
             Ok(h_pinned) => unsafe {
                 let mut dst = DeviceBuffer::uninitialized_async(src.len(), &self.stream)
@@ -690,14 +739,10 @@ impl CudaReflex {
                     .map_err(CudaReflexError::from)?;
                 Ok(dst)
             },
-            Err(_) => {
-                DeviceBuffer::from_slice(src).map_err(CudaReflexError::from)
-            }
+            Err(_) => DeviceBuffer::from_slice(src).map_err(CudaReflexError::from),
         }
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
@@ -756,8 +801,8 @@ pub mod benches {
         let d_prices = DeviceBuffer::from_slice(&price).expect("upload prices");
         let d_periods = DeviceBuffer::from_slice(&periods).expect("upload periods");
         let out_elems = ONE_SERIES_LEN * PARAM_SWEEP;
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }
-            .expect("alloc out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("alloc out");
 
         Box::new(ReflexBatchDeviceState {
             cuda,
@@ -784,24 +829,36 @@ pub mod benches {
     }
 }
 
-fn expand_grid_reflex_checked(range: &ReflexBatchRange) -> Result<Vec<ReflexParams>, CudaReflexError> {
+fn expand_grid_reflex_checked(
+    range: &ReflexBatchRange,
+) -> Result<Vec<ReflexParams>, CudaReflexError> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return Ok(vec![ReflexParams { period: Some(start) }]);
+        return Ok(vec![ReflexParams {
+            period: Some(start),
+        }]);
     }
     let mut out = Vec::new();
     if start < end {
         let mut cur = start;
         while cur <= end {
             out.push(ReflexParams { period: Some(cur) });
-            cur = match cur.checked_add(step) { Some(v) => v, None => break };
+            cur = match cur.checked_add(step) {
+                Some(v) => v,
+                None => break,
+            };
         }
     } else {
         let mut cur = start;
         while cur >= end {
             out.push(ReflexParams { period: Some(cur) });
-            cur = match cur.checked_sub(step) { Some(v) => v, None => break };
-            if cur == 0 { break; }
+            cur = match cur.checked_sub(step) {
+                Some(v) => v,
+                None => break,
+            };
+            if cur == 0 {
+                break;
+            }
         }
     }
     if out.is_empty() {
@@ -822,8 +879,6 @@ struct ManySeriesInputs {
     first_valids: Vec<i32>,
 }
 
-// ---------- Policy + introspection (simple for recurrence) ----------
-
 #[derive(Clone, Copy, Debug)]
 pub struct CudaReflexPolicy {
     pub batch: BatchKernelPolicy,
@@ -840,13 +895,11 @@ impl Default for CudaReflexPolicy {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ReflexBatchKernelSelected {
-    /// Plain 1D: one block per combo, one thread per block (sequential in-thread scan)
     Plain1D { block_x: u32 },
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ReflexManySeriesKernelSelected {
-    /// OneD: one block per series, one thread per block (sequential scan)
     OneD { block_x: u32 },
 }
 
@@ -870,7 +923,7 @@ impl CudaReflex {
     fn maybe_log_batch_debug(&self) {
         if let Some(sel) = self.last_batch {
             let msg = format!("[DEBUG] Reflex batch selected kernel: {:?}", sel);
-            // Safety: only toggles a bool; avoid &mut self requirement
+
             unsafe {
                 maybe_log_once(
                     &mut (*(self as *const _ as *mut CudaReflex)).debug_batch_logged,

@@ -1,31 +1,3 @@
-//! # Volume Price Confirmation Index (VPCI)
-//!
-//! VPCI confirms price movements using volume-weighted moving averages (VWMAs), comparing
-//! price and volume trends to detect confluence/divergence. It supports SIMD kernels and
-//! batch grid evaluation for hyperparameter sweeps.
-//!
-//! ## Parameters
-//! - **short_range**: Window size for short-term averages (default: 5).
-//! - **long_range**: Window size for long-term averages (default: 25).
-//!
-//! ## Returns
-//! - **Ok(VpciOutput)** on success (`vpci`, `vpcis` of same length as input).
-//! - **Err(VpciError)** otherwise.
-//!
-//! ## Developer Notes / Decision log
-//! - SIMD enabled: AVX2/AVX512 single-series kernels vectorize the VPCI pass using contiguous
-//!   prefix-differences; VPCIS stays scalar (rolling dependency). Typical speedups vs scalar at 100k:
-//!   AVX2 ~1.3–1.5×, AVX-512 up to ~1.5×+ (CPU dependent).
-//! - Batch: per-row execution reuses shared prefix sums and selects AVX2/AVX512 per row when
-//!   `short_range <= long_range`; VPCIS remains scalar per row. Gains are modest (memory-bound),
-//!   but positive on 100k.
-//! - CUDA: wrapper provides one-series×many-params and many-series×one-param kernels, returning
-//!   VRAM-backed handles; Python interop exposes CUDA Array Interface v3 and DLPack v1.x capsules.
-//! - Streaming: O(1) ring-buffer implementation using rolling sums for
-//!   short/long windows; returns a proper VPCIS (volume-weighted average of
-//!   VPCI over the short window). See Decision note in VpciStream.
-//! - Allocation: Uses `alloc_with_nan_prefix`/matrix helpers for zero-copy outputs and warmup prefixes.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -47,11 +19,11 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::mem::{ManuallyDrop, MaybeUninit};
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::sma::{sma, SmaData, SmaError, SmaInput, SmaParams};
@@ -76,7 +48,10 @@ pub struct VpciOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct VpciParams {
     pub short_range: Option<usize>,
     pub long_range: Option<usize>,
@@ -202,36 +177,28 @@ impl VpciBuilder {
     }
 }
 
-///
-/// Decision: Streaming is O(1) per update with rolling sums; VPCIS is the
-/// short-window volume-weighted average of VPCI, matching the batch path.
 #[derive(Clone, Debug)]
 pub struct VpciStream {
     short_range: usize,
     long_range: usize,
 
-    
     close_buf: Vec<f64>,
     volume_buf: Vec<f64>,
-    head: usize,  
-    count: usize, 
+    head: usize,
+    count: usize,
 
-    
     sum_c_long: f64,
     sum_v_long: f64,
     sum_cv_long: f64,
 
-    
     sum_c_short: f64,
     sum_v_short: f64,
     sum_cv_short: f64,
 
-    
     vpci_vol_buf: Vec<f64>,
     vpci_vol_head: usize,
     sum_vpci_vol_short: f64,
 
-    
     inv_long: f64,
     inv_short: f64,
 }
@@ -288,37 +255,29 @@ impl VpciStream {
         }
     }
 
-    /// Push one (close, volume). Returns (VPCI, VPCIS) once long window is filled.
     #[inline(always)]
     pub fn update(&mut self, close: f64, volume: f64) -> Option<(f64, f64)> {
-        
         let c_new = Self::zf(close);
         let v_new = Self::zf(volume);
         let cv_new = c_new * v_new;
 
-        
-        let i = self.head; 
-        let j = (self.head + self.long_range - self.short_range) % self.long_range; 
+        let i = self.head;
+        let j = (self.head + self.long_range - self.short_range) % self.long_range;
 
-        
         let c_old_L = Self::zf(self.close_buf[i]);
         let v_old_L = Self::zf(self.volume_buf[i]);
         let cv_old_L = c_old_L * v_old_L;
 
-        
         let c_old_S = Self::zf(self.close_buf[j]);
         let v_old_S = Self::zf(self.volume_buf[j]);
         let cv_old_S = c_old_S * v_old_S;
 
-        
         self.close_buf[i] = close;
         self.volume_buf[i] = volume;
 
-        
         self.head = (self.head + 1) % self.long_range;
         self.count = self.count.saturating_add(1);
 
-        
         self.sum_c_long += c_new - c_old_L;
         self.sum_v_long += v_new - v_old_L;
         self.sum_cv_long += cv_new - cv_old_L;
@@ -327,12 +286,10 @@ impl VpciStream {
         self.sum_v_short += v_new - v_old_S;
         self.sum_cv_short += cv_new - cv_old_S;
 
-        
         if self.count < self.long_range {
             return None;
         }
 
-        
         let sv_l = self.sum_v_long;
         let sc_l = self.sum_c_long;
         let scv_l = self.sum_cv_long;
@@ -340,19 +297,16 @@ impl VpciStream {
         let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
         let vpc = vwma_l - sma_l;
 
-        
         let sv_s = self.sum_v_short;
         let sc_s = self.sum_c_short;
         let scv_s = self.sum_cv_short;
 
-        
         let vpr = if sv_s != 0.0 && sc_s != 0.0 {
             (scv_s * (self.short_range as f64)) / (sv_s * sc_s)
         } else {
             f64::NAN
         };
 
-        
         let vm = if sv_l != 0.0 {
             (sv_s * (self.long_range as f64)) / (sv_l * (self.short_range as f64))
         } else {
@@ -361,14 +315,13 @@ impl VpciStream {
 
         let vpci = vpc * vpr * vm;
 
-        
         let vpci_vol_new = if vpci.is_finite() { vpci * v_new } else { 0.0 };
         let vpci_vol_old = self.vpci_vol_buf[self.vpci_vol_head];
         self.sum_vpci_vol_short += vpci_vol_new - vpci_vol_old;
         self.vpci_vol_buf[self.vpci_vol_head] = vpci_vol_new;
         self.vpci_vol_head = (self.vpci_vol_head + 1) % self.short_range;
 
-        let denom = sv_s * self.inv_short; 
+        let denom = sv_s * self.inv_short;
         let vpcis = if denom != 0.0 && denom.is_finite() {
             (self.sum_vpci_vol_short * self.inv_short) / denom
         } else {
@@ -400,7 +353,11 @@ pub enum VpciError {
     InvalidKernelForBatch(Kernel),
 
     #[error("vpci: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("vpci: invalid input: {0}")]
     InvalidInput(String),
@@ -411,7 +368,6 @@ pub enum VpciError {
     #[error("vpci: mismatched input lengths: close = {close_len}, volume = {volume_len}")]
     MismatchedInputLengths { close_len: usize, volume_len: usize },
 
-    
     #[error("vpci: Mismatched output lengths: vpci_len = {vpci_len}, vpcis_len = {vpcis_len}, expected = {data_len}")]
     MismatchedOutputLengths {
         vpci_len: usize,
@@ -422,10 +378,6 @@ pub enum VpciError {
     #[error("vpci: Kernel not available")]
     KernelNotAvailable,
 }
-
-
-
-
 
 #[inline(always)]
 fn first_valid_both(close: &[f64], volume: &[f64]) -> Option<usize> {
@@ -456,8 +408,7 @@ fn build_prefix_sums(close: &[f64], volume: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
     for i in 0..n {
         let c = close[i];
         let v = volume[i];
-        
-        
+
         let c_val = if c.is_finite() { c } else { 0.0 };
         let v_val = if v.is_finite() { v } else { 0.0 };
         ps_close[i + 1] = ps_close[i] + c_val;
@@ -469,7 +420,6 @@ fn build_prefix_sums(close: &[f64], volume: &[f64]) -> (Vec<f64>, Vec<f64>, Vec<
 
 #[inline(always)]
 fn window_sum(ps: &[f64], start: usize, end_inclusive: usize) -> f64 {
-    
     let a = start;
     let b = end_inclusive + 1;
     ps[b] - ps[a]
@@ -529,10 +479,6 @@ fn vpci_prepare<'a>(
     Ok((close, volume, first, short, long, chosen))
 }
 
-
-
-
-
 #[inline(always)]
 fn vpci_scalar_into_from_psums(
     close: &[f64],
@@ -562,15 +508,12 @@ fn vpci_scalar_into_from_psums(
         }
     }
 
-    
     let inv_long = 1.0 / (long as f64);
     let inv_short = 1.0 / (short as f64);
 
-    
     let mut sum_vpci_vol_short = 0.0;
 
     unsafe {
-        
         let pc = ps_close.as_ptr();
         let pv = ps_vol.as_ptr();
         let pcv = ps_cv.as_ptr();
@@ -580,12 +523,10 @@ fn vpci_scalar_into_from_psums(
 
         let mut i = warmup;
         while i < n {
-            
             let end = i + 1;
             let long_start = end.saturating_sub(long);
             let short_start = end.saturating_sub(short);
 
-            
             let sc_l = *pc.add(end) - *pc.add(long_start);
             let sv_l = *pv.add(end) - *pv.add(long_start);
             let scv_l = *pcv.add(end) - *pcv.add(long_start);
@@ -594,17 +535,14 @@ fn vpci_scalar_into_from_psums(
             let sv_s = *pv.add(end) - *pv.add(short_start);
             let scv_s = *pcv.add(end) - *pcv.add(short_start);
 
-            
             let sma_l = sc_l * inv_long;
             let sma_s = sc_s * inv_short;
             let sma_v_l = sv_l * inv_long;
             let sma_v_s = sv_s * inv_short;
 
-            
             let vwma_l = if sv_l != 0.0 { scv_l / sv_l } else { f64::NAN };
             let vwma_s = if sv_s != 0.0 { scv_s / sv_s } else { f64::NAN };
 
-            
             let vpc = vwma_l - sma_l;
             let vpr = if sma_s != 0.0 {
                 vwma_s / sma_s
@@ -617,11 +555,9 @@ fn vpci_scalar_into_from_psums(
                 f64::NAN
             };
 
-            
             let vpci = vpc * vpr * vm;
             *vpci_ptr.add(i) = vpci;
 
-            
             let v_i = *vptr.add(i);
             sum_vpci_vol_short += zf(vpci) * zf(v_i);
             if i >= warmup + short {
@@ -631,7 +567,6 @@ fn vpci_scalar_into_from_psums(
                 sum_vpci_vol_short -= zf(vpci_rm) * zf(v_rm);
             }
 
-            
             let denom = sma_v_s;
             *vpcis_ptr.add(i) = if denom != 0.0 && denom.is_finite() {
                 (sum_vpci_vol_short * inv_short) / denom
@@ -722,13 +657,7 @@ pub fn vpci_into_slice(
     Ok(())
 }
 
-/// VPCI into (no allocations): writes results into caller-provided buffers.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (`vpci`) does.
-/// - Each output slice length must equal the input length; otherwise returns
-///   `VpciError::MismatchedOutputLengths`.
-/// - Uses `Kernel::Auto` for runtime kernel selection (same as `vpci`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn vpci_into(
     input: &VpciInput,
@@ -737,7 +666,6 @@ pub fn vpci_into(
 ) -> Result<(), VpciError> {
     vpci_into_slice(out_vpci, out_vpcis, input, Kernel::Auto)
 }
-
 
 #[inline]
 pub unsafe fn vpci_scalar(
@@ -861,12 +789,12 @@ unsafe fn vpci_avx2_into_from_psums(
     let yptr = vpci_out.as_mut_ptr();
 
     let mut i = warmup;
-    let step = 4usize; 
-    let vec_end = n.saturating_sub(step) + 1; 
+    let step = 4usize;
+    let vec_end = n.saturating_sub(step) + 1;
 
     while i < vec_end {
         let end = i + 1;
-        
+
         let c_end = _mm256_loadu_pd(pc.add(end));
         let c_l = _mm256_loadu_pd(pc.add(end - long));
         let v_end = _mm256_loadu_pd(pv.add(end));
@@ -878,7 +806,6 @@ unsafe fn vpci_avx2_into_from_psums(
         let v_s = _mm256_loadu_pd(pv.add(end - short));
         let cv_s = _mm256_loadu_pd(pcv.add(end - short));
 
-        
         let sc_l = _mm256_sub_pd(c_end, c_l);
         let sv_l = _mm256_sub_pd(v_end, v_l);
         let scv_l = _mm256_sub_pd(cv_end, cv_l);
@@ -887,20 +814,17 @@ unsafe fn vpci_avx2_into_from_psums(
         let sv_s = _mm256_sub_pd(v_end, v_s);
         let scv_s = _mm256_sub_pd(cv_end, cv_s);
 
-        
         let sma_l = _mm256_mul_pd(sc_l, inv_long);
         let sma_s = _mm256_mul_pd(sc_s, inv_short);
         let sma_v_l = _mm256_mul_pd(sv_l, inv_long);
         let sma_v_s = _mm256_mul_pd(sv_s, inv_short);
 
-        
         let mask_l = _mm256_cmp_pd(sv_l, zero, _CMP_NEQ_OQ);
         let vwma_l = _mm256_blendv_pd(nan, _mm256_div_pd(scv_l, sv_l), mask_l);
 
         let mask_s = _mm256_cmp_pd(sv_s, zero, _CMP_NEQ_OQ);
         let vwma_s = _mm256_blendv_pd(nan, _mm256_div_pd(scv_s, sv_s), mask_s);
 
-        
         let vpc = _mm256_sub_pd(vwma_l, sma_l);
         let mask_vpr = _mm256_cmp_pd(sma_s, zero, _CMP_NEQ_OQ);
         let vpr = _mm256_blendv_pd(nan, _mm256_div_pd(vwma_s, sma_s), mask_vpr);
@@ -912,7 +836,6 @@ unsafe fn vpci_avx2_into_from_psums(
         i += step;
     }
 
-    
     while i < n {
         let end = i + 1;
         let long_start = end - long;
@@ -948,7 +871,6 @@ unsafe fn vpci_avx2_into_from_psums(
         i += 1;
     }
 
-    
     #[inline(always)]
     fn zf(x: f64) -> f64 {
         if x.is_finite() {
@@ -1018,7 +940,7 @@ unsafe fn vpci_avx512_into_from_psums(
     let yptr = vpci_out.as_mut_ptr();
 
     let mut i = warmup;
-    let step = 8usize; 
+    let step = 8usize;
     let vec_end = n.saturating_sub(step) + 1;
 
     while i < vec_end {
@@ -1065,7 +987,6 @@ unsafe fn vpci_avx512_into_from_psums(
         i += step;
     }
 
-    
     while i < n {
         let end = i + 1;
         let long_start = end - long;
@@ -1101,7 +1022,6 @@ unsafe fn vpci_avx512_into_from_psums(
         i += 1;
     }
 
-    
     #[inline(always)]
     fn zf(x: f64) -> f64 {
         if x.is_finite() {
@@ -1168,13 +1088,10 @@ pub fn vpci_batch_with_kernel(
     kernel: Kernel,
 ) -> Result<VpciBatchOutput, VpciError> {
     let k = match kernel {
-        Kernel::Auto => {
-            
-            match detect_best_batch_kernel() {
-                Kernel::Avx512Batch => Kernel::Avx2Batch,
-                other => other,
-            }
-        }
+        Kernel::Auto => match detect_best_batch_kernel() {
+            Kernel::Avx512Batch => Kernel::Avx2Batch,
+            other => other,
+        },
         other if other.is_batch() => other,
         other => {
             return Err(VpciError::InvalidKernelForBatch(other));
@@ -1347,7 +1264,6 @@ fn vpci_batch_inner(
         return Err(VpciError::InvalidRange { start, end, step });
     }
 
-    
     let first = first_valid_both(close, volume).ok_or(VpciError::AllValuesNaN)?;
     let warmups: Vec<usize> = combos
         .iter()
@@ -1357,7 +1273,6 @@ fn vpci_batch_inner(
     let mut vpci_mu = make_uninit_matrix(rows, cols);
     let mut vpcis_mu = make_uninit_matrix(rows, cols);
 
-    
     init_matrix_prefixes(&mut vpci_mu, cols, &warmups);
     init_matrix_prefixes(&mut vpcis_mu, cols, &warmups);
 
@@ -1366,7 +1281,6 @@ fn vpci_batch_inner(
     let cap_v = vpci_mu.capacity();
     let cap_s = vpcis_mu.capacity();
 
-    
     let total_len = rows
         .checked_mul(cols)
         .ok_or_else(|| VpciError::InvalidInput("rows*cols overflow in vpci_batch_inner".into()))?;
@@ -1384,7 +1298,6 @@ fn vpci_batch_inner(
         _ => kernel,
     };
 
-    
     let combos = vpci_batch_inner_into(
         close,
         volume,
@@ -1395,7 +1308,6 @@ fn vpci_batch_inner(
         vpcis_slice,
     )?;
 
-    
     core::mem::forget(vpci_mu);
     core::mem::forget(vpcis_mu);
     let vpci_vec = unsafe { Vec::from_raw_parts(ptr_v, total_len, cap_v) };
@@ -1410,7 +1322,6 @@ fn vpci_batch_inner(
     })
 }
 
-/// Zero-copy batch operation that writes directly into provided output buffers
 #[inline(always)]
 fn vpci_batch_inner_into(
     close: &[f64],
@@ -1439,12 +1350,8 @@ fn vpci_batch_inner_into(
     let rows = combos.len();
     let cols = len;
 
-    
     let (ps_c, ps_v, ps_cv) = build_prefix_sums(close, volume);
 
-    
-    
-    
     for (row, prm) in combos.iter().enumerate() {
         let warmup = first + prm.long_range.unwrap() - 1;
         let s = row * cols;
@@ -1454,7 +1361,6 @@ fn vpci_batch_inner_into(
         }
     }
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1737,60 +1643,57 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            VpciParams::default(), 
+            VpciParams::default(),
             VpciParams {
                 short_range: Some(2),
                 long_range: Some(3),
-            }, 
+            },
             VpciParams {
                 short_range: Some(2),
                 long_range: Some(10),
-            }, 
+            },
             VpciParams {
                 short_range: Some(5),
                 long_range: Some(20),
-            }, 
+            },
             VpciParams {
                 short_range: Some(10),
                 long_range: Some(30),
-            }, 
+            },
             VpciParams {
                 short_range: Some(20),
                 long_range: Some(50),
-            }, 
+            },
             VpciParams {
                 short_range: Some(3),
                 long_range: Some(100),
-            }, 
+            },
             VpciParams {
                 short_range: Some(50),
                 long_range: Some(100),
-            }, 
+            },
             VpciParams {
                 short_range: Some(7),
                 long_range: Some(21),
-            }, 
+            },
             VpciParams {
                 short_range: Some(14),
                 long_range: Some(28),
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = VpciInput::from_candles(&candles, "close", "volume", params.clone());
             let output = vpci_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.vpci.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1834,15 +1737,13 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.vpcis.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1895,7 +1796,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1927,15 +1828,13 @@ mod tests {
 
         let strat = (2usize..=20).prop_flat_map(|short_range| {
             ((short_range + 1)..=50).prop_flat_map(move |long_range| {
-                let min_len = long_range + 10; 
+                let min_len = long_range + 10;
                 (min_len..400).prop_flat_map(move |data_len| {
                     (
-                        
                         prop::collection::vec(
                             (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
                         ),
-                        
                         prop::collection::vec(
                             (1000f64..1000000f64).prop_filter("finite", |x| x.is_finite()),
                             data_len,
@@ -1964,17 +1863,14 @@ mod tests {
                     vpcis: ref_out_smooth,
                 } = vpci_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let first_valid = close
                     .iter()
                     .zip(volume.iter())
                     .position(|(c, v)| !c.is_nan() && !v.is_nan())
                     .unwrap_or(0);
 
-                
                 let expected_warmup = first_valid + long_range - 1;
 
-                
                 for i in 0..expected_warmup.min(out.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1990,14 +1886,12 @@ mod tests {
                     );
                 }
 
-                
                 for i in expected_warmup..close.len() {
                     let y = out[i];
                     let ys = out_smooth[i];
                     let r = ref_out[i];
                     let rs = ref_out_smooth[i];
 
-                    
                     if !close[i].is_nan() && !volume[i].is_nan() {
                         prop_assert!(
                             y.is_finite() || r.is_nan(),
@@ -2007,7 +1901,6 @@ mod tests {
                         );
                     }
 
-                    
                     if !y.is_finite() || !r.is_finite() {
                         prop_assert!(
                             y.to_bits() == r.to_bits(),
@@ -2031,7 +1924,6 @@ mod tests {
                         );
                     }
 
-                    
                     if !ys.is_finite() || !rs.is_finite() {
                         prop_assert!(
                             ys.to_bits() == rs.to_bits(),
@@ -2056,10 +1948,6 @@ mod tests {
                     }
                 }
 
-                
-
-                
-                
                 let prices_constant = close.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
 
                 if prices_constant && expected_warmup < close.len() {
@@ -2075,15 +1963,11 @@ mod tests {
                     }
                 }
 
-                
                 let volumes_constant = volume.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-9);
 
                 if volumes_constant && expected_warmup < close.len() {
-                    
-                    
                     for i in expected_warmup..close.len() {
                         if out[i].is_finite() && ref_out[i].is_finite() {
-                            
                             prop_assert!(
                                 (out[i] - ref_out[i]).abs() <= 1e-9,
                                 "VPCI kernels should match exactly with constant volume"
@@ -2092,15 +1976,10 @@ mod tests {
                     }
                 }
 
-                
-                
                 if expected_warmup + short_range < close.len() {
                     for i in (expected_warmup + short_range)..close.len() {
                         if out[i].is_finite() && volume[i].is_finite() && volume[i] > 0.0 {
-                            
-                            
                             if !out_smooth[i].is_finite() {
-                                
                                 let vol_window = &volume[i.saturating_sub(short_range - 1)..=i];
                                 let vol_sum: f64 = vol_window.iter().sum();
                                 prop_assert!(
@@ -2113,13 +1992,9 @@ mod tests {
                     }
                 }
 
-                
                 if short_range == long_range && expected_warmup < close.len() {
-                    
-                    
                     for i in expected_warmup..close.len().min(expected_warmup + 10) {
                         if out[i].is_finite() {
-                            
                             prop_assert!(
                                 !out[i].is_nan(),
                                 "VPCI should be valid even when short_range == long_range"
@@ -2128,7 +2003,6 @@ mod tests {
                     }
                 }
 
-                
                 let extreme_ratio = long_range as f64 / short_range as f64 > 10.0;
                 if extreme_ratio && expected_warmup < close.len() {
                     for i in expected_warmup..close.len().min(expected_warmup + 5) {
@@ -2140,7 +2014,6 @@ mod tests {
                     }
                 }
 
-                
                 let valid_count = out
                     .iter()
                     .skip(expected_warmup)
@@ -2236,17 +2109,15 @@ mod tests {
         let close = &c.close;
         let volume = &c.volume;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 5, 25, 5),     
-            (5, 15, 5, 20, 40, 10),   
-            (10, 20, 5, 30, 60, 15),  
-            (2, 5, 1, 10, 15, 1),     
-            (20, 30, 2, 40, 60, 5),   
-            (3, 7, 2, 21, 35, 7),     
-            (8, 12, 1, 25, 30, 1),    
-            (2, 50, 10, 10, 100, 20), 
+            (2, 10, 2, 5, 25, 5),
+            (5, 15, 5, 20, 40, 10),
+            (10, 20, 5, 30, 60, 15),
+            (2, 5, 1, 10, 15, 1),
+            (20, 30, 2, 40, 60, 5),
+            (3, 7, 2, 21, 35, 7),
+            (8, 12, 1, 25, 30, 1),
+            (2, 50, 10, 10, 100, 20),
         ];
 
         for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in
@@ -2258,7 +2129,6 @@ mod tests {
                 .long_range(long_start, long_end, long_step)
                 .apply_slices(close, volume)?;
 
-            
             for (idx, &val) in output.vpci.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2269,7 +2139,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2319,7 +2188,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.vpcis.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2330,7 +2198,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2389,7 +2256,7 @@ mod tests {
         _test: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2416,26 +2283,22 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
 #[cfg(test)]
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 mod tests_into {
     use super::*;
     use crate::utilities::data_loader::read_candles_from_csv;
 
     #[test]
     fn test_vpci_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let params = VpciParams::default();
         let input = VpciInput::from_candles(&candles, "close", "volume", params);
 
-        
         let base = vpci(&input)?;
 
-        
         let n = candles.close.len();
         let mut y = vec![0.0f64; n];
         let mut ys = vec![0.0f64; n];
@@ -2565,13 +2428,14 @@ pub fn vpci_batch_py<'py>(
     let rows = combos.len();
     let cols = close_slice.len();
     if rows == 0 || cols == 0 {
-        return Err(PyValueError::new_err("no parameter combinations or empty input"));
+        return Err(PyValueError::new_err(
+            "no parameter combinations or empty input",
+        ));
     }
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow in vpci_batch_py"))?;
 
-    // Pre-allocate output arrays for batch operations
     let vpci_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let vpcis_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let vpci_slice = unsafe { vpci_arr.as_slice_mut()? };
@@ -2586,7 +2450,6 @@ pub fn vpci_batch_py<'py>(
                 k => k,
             };
 
-            // Map batch kernels to regular kernels for computation
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2594,7 +2457,6 @@ pub fn vpci_batch_py<'py>(
                 _ => kernel,
             };
 
-            // Use zero-copy batch operation directly into pre-allocated arrays
             vpci_batch_inner_into(
                 close_slice,
                 volume_slice,
@@ -2630,9 +2492,7 @@ pub fn vpci_batch_py<'py>(
     Ok(dict)
 }
 
-/// WASM helper: Write directly to output slices - no allocations
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpci_js(
     close: &[f64],
@@ -2659,7 +2519,7 @@ pub fn vpci_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpci_into(
     close_ptr: *const f64,
@@ -2691,7 +2551,7 @@ pub fn vpci_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpci_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2700,7 +2560,7 @@ pub fn vpci_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpci_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2710,14 +2570,14 @@ pub fn vpci_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VpciBatchConfig {
     pub short_range: (usize, usize, usize),
     pub long_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct VpciBatchJsOutput {
     pub vpci: Vec<f64>,
@@ -2727,7 +2587,7 @@ pub struct VpciBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "vpci_batch")]
 pub fn vpci_batch_unified_js(
     close: &[f64],
@@ -2753,7 +2613,6 @@ pub fn vpci_batch_unified_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// ================== CUDA Python Bindings (Device outputs) ==================
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2789,8 +2648,7 @@ pub fn vpci_cuda_batch_dev_py<'py>(
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();
-        cuda
-            .vpci_batch_dev(c, v, &sweep)
+        cuda.vpci_batch_dev(c, v, &sweep)
             .map(|(pair, combos)| (pair, combos, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2874,8 +2732,7 @@ pub fn vpci_cuda_many_series_one_param_dev_py<'py>(
         let cuda = CudaVpci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id_u32 = cuda.device_id();
-        cuda
-            .vpci_many_series_one_param_time_major_dev(c, v, cols, rows, &params)
+        cuda.vpci_many_series_one_param_time_major_dev(c, v, cols, rows, &params)
             .map(|pair| (pair, ctx, dev_id_u32))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
@@ -2909,7 +2766,7 @@ pub fn vpci_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vpci_batch_into(
     close_ptr: *const f64,
@@ -2940,34 +2797,31 @@ pub fn vpci_batch_into(
         let combos = expand_grid_vpci(&sweep);
         let rows = combos.len();
         if rows == 0 {
-            return Err(JsValue::from_str("no parameter combinations for vpci_batch_into"));
+            return Err(JsValue::from_str(
+                "no parameter combinations for vpci_batch_into",
+            ));
         }
         let total_len = rows
             .checked_mul(len)
             .ok_or_else(|| JsValue::from_str("rows*len overflow in vpci_batch_into"))?;
 
-        // Need to handle aliasing only between outputs and inputs
         let need_temp = close_ptr == vpci_ptr as *const f64
             || close_ptr == vpcis_ptr as *const f64
             || volume_ptr == vpci_ptr as *const f64
             || volume_ptr == vpcis_ptr as *const f64;
 
         if need_temp {
-            // Run batch into temporary buffers
             let output = vpci_batch_inner(close, volume, &sweep, detect_best_kernel(), false)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy to output pointers
             let vpci_out = std::slice::from_raw_parts_mut(vpci_ptr, total_len);
             let vpcis_out = std::slice::from_raw_parts_mut(vpcis_ptr, total_len);
             vpci_out.copy_from_slice(&output.vpci);
             vpcis_out.copy_from_slice(&output.vpcis);
         } else {
-            // Direct computation using zero-copy batch operation
             let vpci_out = std::slice::from_raw_parts_mut(vpci_ptr, total_len);
             let vpcis_out = std::slice::from_raw_parts_mut(vpcis_ptr, total_len);
 
-            // Use zero-copy batch operation directly into output buffers
             vpci_batch_inner_into(
                 close,
                 volume,
@@ -2984,7 +2838,7 @@ pub fn vpci_batch_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 #[deprecated(
     since = "1.0.0",
@@ -2996,7 +2850,7 @@ pub struct VpciContext {
     kernel: Kernel,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 impl VpciContext {
     #[wasm_bindgen(constructor)]
@@ -3039,7 +2893,6 @@ impl VpciContext {
             };
             let input = VpciInput::from_slices(close, volume, params);
 
-            // Check for aliasing
             let need_temp = close_ptr == vpci_ptr as *const f64
                 || close_ptr == vpcis_ptr as *const f64
                 || volume_ptr == vpci_ptr as *const f64

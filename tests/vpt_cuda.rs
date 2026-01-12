@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::vpt::{vpt_with_kernel, VptInput};
 use vector_ta::utilities::enums::Kernel;
 
@@ -36,7 +34,7 @@ fn vpt_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let len = 4096usize;
     let mut price = vec![f64::NAN; len];
     let mut volume = vec![f64::NAN; len];
-    
+
     for i in 0..len {
         if i == 0 {
             price[i] = 100.0;
@@ -104,11 +102,10 @@ fn vpt_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
             price_tm[t * cols + s] = (x * 0.0013).sin() + 100.0 + 0.0002 * x;
             volume_tm[t * cols + s] = (x * 0.0011).cos().abs() * 450.0 + 110.0;
         }
-        
+
         price_tm[s.min(6) * cols + s] = 100.0;
     }
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

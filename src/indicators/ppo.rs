@@ -1,25 +1,3 @@
-//! # Percentage Price Oscillator (PPO)
-//!
-//! Expresses the difference between two moving averages as a percentage of the slower MA.
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//! - **fast_period**: Short-term MA period (default: 12)
-//! - **slow_period**: Long-term MA period (default: 26)
-//! - **ma_type**: Moving average type (default: "sma")
-//!
-//! ## Returns
-//! - `Vec<f64>` - PPO values as percentage, matching input length
-//!
-//! ## Developer Status
-//! **Scalar**: Optimized (loop-jammed SMA/EMA, fewer divisions, FMA)
-//! **AVX2**: Stub (delegates to optimized scalar)
-//! **AVX512**: Stub (short/long variants delegate to scalar)
-//! Rationale: PPO EMA/SMA are loop-carried; post-ratio is cheap, SIMD offers no win.
-//! **Streaming**: O(1) for SMA/EMA; fallback O(n) for other MA types
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//! **Decision log**: SIMD kept as stubs (scalar fastest); CUDA wrapper uses typed errors + context-backed VRAM handles; Python interop exposes CAI v3 and DLPack v1.x.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -38,9 +16,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyAny, PyDict};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::indicators::moving_averages::ma::{ma, MaData};
@@ -87,7 +65,10 @@ pub struct PpoOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct PpoParams {
     pub fast_period: Option<usize>,
     pub slow_period: Option<usize>,
@@ -241,7 +222,11 @@ pub enum PpoError {
     #[error("ppo: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("ppo: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("ppo: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("ppo: invalid input: {0}")]
@@ -311,7 +296,6 @@ pub fn ppo_with_kernel(input: &PpoInput, kernel: Kernel) -> Result<PpoOutput, Pp
     Ok(PpoOutput { values: out })
 }
 
-/// Write PPO result directly to output slice - no allocations
 pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result<(), PpoError> {
     let data = input.as_ref();
     if data.is_empty() {
@@ -369,18 +353,12 @@ pub fn ppo_into_slice(dst: &mut [f64], input: &PpoInput, kern: Kernel) -> Result
 
     let warmup_end = first + slow - 1;
     for v in &mut dst[..warmup_end] {
-        
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
     Ok(())
 }
 
-/// Percentage Price Oscillator (PPO) into an existing buffer (no allocation).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - `out.len()` must equal the input length; returns the indicator's length/period errors on mismatch.
-/// - Uses `Kernel::Auto` dispatch matching `ppo()` semantics.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn ppo_into(input: &PpoInput, out: &mut [f64]) -> Result<(), PpoError> {
     ppo_into_slice(out, input, Kernel::Auto)
@@ -395,7 +373,6 @@ pub unsafe fn ppo_scalar(
     first: usize,
     out: &mut [f64],
 ) {
-    // Fast paths for the two hot MA types
     if ma_type == "ema" {
         ppo_scalar_classic_ema(data, fast, slow, first, out);
         return;
@@ -404,8 +381,6 @@ pub unsafe fn ppo_scalar(
         return;
     }
 
-    // Generic fallback via MA engine (unchanged semantics).
-    // If MA fails (shouldn't after earlier validation), write NaNs for the valid tail.
     let start = first + slow - 1;
     let fast_ma = match ma(ma_type, MaData::Slice(data), fast) {
         Ok(v) => v,
@@ -438,7 +413,6 @@ pub unsafe fn ppo_scalar(
         let y = if sf == 0.0 || sf.is_nan() || ff.is_nan() {
             f64::NAN
         } else {
-            
             let ratio = ff / sf;
             f64::mul_add(ratio, 100.0, -100.0)
         };
@@ -446,7 +420,6 @@ pub unsafe fn ppo_scalar(
         i += 1;
     }
 }
-
 
 #[inline]
 pub unsafe fn ppo_scalar_classic_ema(
@@ -456,7 +429,6 @@ pub unsafe fn ppo_scalar_classic_ema(
     first: usize,
     out: &mut [f64],
 ) {
-    
     let n = data.len();
     let start_idx = first + slow - 1;
 
@@ -465,8 +437,6 @@ pub unsafe fn ppo_scalar_classic_ema(
     let fb = 1.0 - fa;
     let sb = 1.0 - sa;
 
-    
-    
     let mut slow_sum = 0.0f64;
     let mut fast_sum = 0.0f64;
     let overlap = slow - fast;
@@ -480,11 +450,9 @@ pub unsafe fn ppo_scalar_classic_ema(
         k += 1;
     }
 
-    
     let mut fast_ema = fast_sum / (fast as f64);
     let mut slow_ema = slow_sum / (slow as f64);
 
-    
     let mut i = first + fast;
     while i <= start_idx {
         let x = *data.get_unchecked(i);
@@ -492,7 +460,6 @@ pub unsafe fn ppo_scalar_classic_ema(
         i += 1;
     }
 
-    
     *out.get_unchecked_mut(start_idx) = if slow_ema == 0.0 || slow_ema.is_nan() || fast_ema.is_nan()
     {
         f64::NAN
@@ -501,7 +468,6 @@ pub unsafe fn ppo_scalar_classic_ema(
         f64::mul_add(ratio, 100.0, -100.0)
     };
 
-    
     let mut j = start_idx + 1;
     while j < n {
         let x = *data.get_unchecked(j);
@@ -519,7 +485,6 @@ pub unsafe fn ppo_scalar_classic_ema(
     }
 }
 
-
 #[inline]
 pub unsafe fn ppo_scalar_classic_sma(
     data: &[f64],
@@ -528,19 +493,14 @@ pub unsafe fn ppo_scalar_classic_sma(
     first: usize,
     out: &mut [f64],
 ) {
-    
     let n = data.len();
     let start_idx = first + slow - 1;
 
-    
-    
-    
     let k = (slow as f64) / (fast as f64);
 
-    
     let mut slow_sum = 0.0f64;
     let mut fast_sum = 0.0f64;
-    let overlap = slow - fast; 
+    let overlap = slow - fast;
     let mut t = 0usize;
     while t < slow {
         let v = *data.get_unchecked(first + t);
@@ -551,7 +511,6 @@ pub unsafe fn ppo_scalar_classic_sma(
         t += 1;
     }
 
-    
     *out.get_unchecked_mut(start_idx) = if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan()
     {
         f64::NAN
@@ -560,11 +519,10 @@ pub unsafe fn ppo_scalar_classic_sma(
         f64::mul_add(ratio, 100.0, -100.0)
     };
 
-    
     let mut i = start_idx + 1;
     while i < n {
         let add = *data.get_unchecked(i);
-        
+
         let sub_fast = *data.get_unchecked(i - fast);
         let sub_slow = *data.get_unchecked(i - slow);
 
@@ -850,26 +808,24 @@ fn ppo_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or_else(|| PpoError::InvalidInput("rows*cols overflow in ppo_batch_inner_into".into()))?;
+    let expected = rows.checked_mul(cols).ok_or_else(|| {
+        PpoError::InvalidInput("rows*cols overflow in ppo_batch_inner_into".into())
+    })?;
     if out.len() != expected {
         return Err(PpoError::OutputLengthMismatch {
             expected,
             got: out.len(),
         });
     }
-    
+
     let out_uninit: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     let ma_type = sweep.ma_type.as_str();
     let use_cached = ma_type == "sma" || ma_type == "ema";
     let mut ma_cache: HashMap<usize, Vec<f64>> = HashMap::new();
     if use_cached {
-        
         let mut uniq: Vec<usize> = Vec::new();
         for c in &combos {
             let f = c.fast_period.unwrap();
@@ -885,7 +841,6 @@ fn ppo_batch_inner_into(
             if let Ok(v) = ma(ma_type, MaData::Slice(data), p) {
                 ma_cache.insert(p, v);
             } else {
-                
                 let mut v = vec![f64::NAN; data.len()];
                 ma_cache.insert(p, v);
             }
@@ -1000,30 +955,24 @@ fn ppo_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| PpoError::InvalidInput("rows*cols overflow in ppo_batch_inner".into()))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + c.slow_period.unwrap() - 1)
         .collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let ma_type = sweep.ma_type.as_str();
     let use_cached = ma_type == "sma" || ma_type == "ema";
     let mut ma_cache: HashMap<usize, Vec<f64>> = HashMap::new();
     if use_cached {
-        
         let mut uniq: Vec<usize> = Vec::new();
         for c in &combos {
             let f = c.fast_period.unwrap();
@@ -1120,7 +1069,6 @@ fn ppo_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1146,7 +1094,6 @@ pub unsafe fn ppo_row_scalar(
     ma_type: &str,
     out: &mut [f64],
 ) {
-    
     if ma_type == "ema" {
         ppo_row_scalar_classic_ema(data, first, fast, slow, out);
     } else if ma_type == "sma" {
@@ -1155,7 +1102,6 @@ pub unsafe fn ppo_row_scalar(
         ppo_scalar(data, fast, slow, ma_type, first, out);
     }
 }
-
 
 #[inline(always)]
 pub unsafe fn ppo_row_scalar_classic_ema(
@@ -1167,7 +1113,6 @@ pub unsafe fn ppo_row_scalar_classic_ema(
 ) {
     ppo_scalar_classic_ema(data, fast, slow, first, out);
 }
-
 
 #[inline(always)]
 pub unsafe fn ppo_row_scalar_classic_sma(
@@ -1236,12 +1181,6 @@ pub unsafe fn ppo_row_avx512_long(
     ppo_scalar(data, fast, slow, ma_type, first, out)
 }
 
-
-
-
-
-
-
 pub struct PpoStream {
     fast_period: usize,
     slow_period: usize,
@@ -1251,21 +1190,20 @@ pub struct PpoStream {
 
 #[derive(Debug)]
 enum StreamMode {
-    
     Sma(SmaState),
-    
+
     Ema(EmaState),
-    
+
     Generic { data: Vec<f64> },
 }
 
 #[derive(Debug)]
 struct SmaState {
-    started: bool, 
+    started: bool,
     fast: usize,
     slow: usize,
-    k: f64, 
-    
+    k: f64,
+
     fast_sum: f64,
     slow_sum: f64,
     fast_buf: Vec<f64>,
@@ -1278,19 +1216,19 @@ struct SmaState {
 
 #[derive(Debug)]
 struct EmaState {
-    started: bool, 
+    started: bool,
     fast: usize,
     slow: usize,
-    
+
     fa: f64,
     fb: f64,
     sa: f64,
     sb: f64,
-    
+
     fast_ema: f64,
     slow_ema: f64,
     seeded: bool,
-    
+
     warm: Vec<f64>,
 }
 
@@ -1343,19 +1281,18 @@ impl PpoStream {
         })
     }
 
-    /// O(1) per call for SMA/EMA. For unknown MA types, preserves the old O(n) semantics.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         match &mut self.mode {
             StreamMode::Sma(state) => update_sma(state, value),
             StreamMode::Ema(state) => update_ema(state, value),
-            
+
             StreamMode::Generic { data } => {
                 data.push(value);
                 if data.len() < self.slow_period {
                     return None;
                 }
-                
+
                 let fast_ma = ma(&self.ma_type, MaData::Slice(&data), self.fast_period).ok()?;
                 let slow_ma = ma(&self.ma_type, MaData::Slice(&data), self.slow_period).ok()?;
                 let ff = *fast_ma.last()?;
@@ -1373,7 +1310,6 @@ impl PpoStream {
 
 #[inline(always)]
 fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
-    
     if !s.started {
         if x.is_nan() {
             return None;
@@ -1381,7 +1317,6 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
         s.started = true;
     }
 
-    
     if s.filled_fast < s.fast {
         s.fast_buf.push(x);
         s.fast_sum += x;
@@ -1393,13 +1328,12 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
         s.i_fast = (s.i_fast + 1) % s.fast;
     }
 
-    
     if s.filled_slow < s.slow {
         s.slow_buf.push(x);
         s.slow_sum += x;
         s.filled_slow += 1;
         if s.filled_slow < s.slow {
-            return None; 
+            return None;
         }
     } else {
         let old = s.slow_buf[s.i_slow];
@@ -1408,7 +1342,6 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
         s.i_slow = (s.i_slow + 1) % s.slow;
     }
 
-    
     let slow_sum = s.slow_sum;
     let fast_sum = s.fast_sum;
     if slow_sum == 0.0 || slow_sum.is_nan() || fast_sum.is_nan() {
@@ -1421,7 +1354,6 @@ fn update_sma(s: &mut SmaState, x: f64) -> Option<f64> {
 
 #[inline(always)]
 fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
-    
     if !e.started {
         if x.is_nan() {
             return None;
@@ -1429,29 +1361,25 @@ fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
         e.started = true;
     }
 
-    
     if !e.seeded {
         e.warm.push(x);
         if e.warm.len() < e.slow {
             return None;
         }
 
-        
         let mut slow_sum = 0.0f64;
         for &v in &e.warm {
             slow_sum += v;
         }
         e.slow_ema = slow_sum / e.slow as f64;
 
-        
         let mut fast_sum = 0.0f64;
-        let start = e.slow - e.fast; 
+        let start = e.slow - e.fast;
         for &v in &e.warm[start..] {
             fast_sum += v;
         }
         e.fast_ema = fast_sum / e.fast as f64;
 
-        
         for &v in &e.warm[e.fast..] {
             e.fast_ema = f64::mul_add(e.fa, v, e.fb * e.fast_ema);
         }
@@ -1468,7 +1396,6 @@ fn update_ema(e: &mut EmaState, x: f64) -> Option<f64> {
         };
     }
 
-    
     e.fast_ema = f64::mul_add(e.fa, x, e.fb * e.fast_ema);
     e.slow_ema = f64::mul_add(e.sa, x, e.sb * e.slow_ema);
 
@@ -1503,17 +1430,15 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_ppo_into_matches_api() -> Result<(), Box<dyn Error>> {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = PpoInput::from_candles(&candles, "close", PpoParams::default());
 
-        
         let baseline = ppo(&input)?.values;
 
-        
         let mut out = vec![0.0; candles.close.len()];
         ppo_into(&input, &mut out)?;
 
@@ -1720,23 +1645,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             PpoParams::default(),
-            
             PpoParams {
                 fast_period: Some(2),
                 slow_period: Some(3),
                 ma_type: Some("sma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(5),
                 slow_period: Some(10),
                 ma_type: Some("sma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(12),
                 slow_period: Some(26),
@@ -1747,31 +1667,26 @@ mod tests {
                 slow_period: Some(26),
                 ma_type: Some("wma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(20),
                 slow_period: Some(40),
                 ma_type: Some("sma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(50),
                 slow_period: Some(100),
                 ma_type: Some("sma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(10),
                 slow_period: Some(11),
                 ma_type: Some("sma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(3),
                 slow_period: Some(21),
                 ma_type: Some("ema".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(7),
                 slow_period: Some(14),
@@ -1782,7 +1697,6 @@ mod tests {
                 slow_period: Some(21),
                 ma_type: Some("sma".to_string()),
             },
-            
             PpoParams {
                 fast_period: Some(100),
                 slow_period: Some(200),
@@ -1796,12 +1710,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1854,7 +1767,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ppo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1867,19 +1780,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=64).prop_flat_map(|slow_period| {
             (
-                
                 prop::collection::vec(
                     (10f64..100000f64)
                         .prop_filter("positive finite", |x| x.is_finite() && *x > 0.0),
                     slow_period..400,
                 ),
-                
                 2usize..=slow_period,
                 Just(slow_period),
-                
                 Just("sma"),
             )
         });
@@ -1893,17 +1802,14 @@ mod tests {
                 };
                 let input = PpoInput::from_slice(&data, params);
 
-                
                 let PpoOutput { values: out } = ppo_with_kernel(&input, kernel).unwrap();
-                
+
                 let PpoOutput { values: ref_out } =
                     ppo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let fast_ma = ma(&ma_type, MaData::Slice(&data), fast_period).unwrap();
                 let slow_ma = ma(&ma_type, MaData::Slice(&data), slow_period).unwrap();
 
-                
                 for i in 0..(slow_period - 1).min(data.len()) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1913,15 +1819,12 @@ mod tests {
                     );
                 }
 
-                
                 for i in (slow_period - 1)..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
                     let fast_val = fast_ma[i];
                     let slow_val = slow_ma[i];
 
-                    
-                    
                     if !fast_val.is_nan() && !slow_val.is_nan() && slow_val != 0.0 {
                         let expected_ppo = 100.0 * (fast_val - slow_val) / slow_val;
 
@@ -1934,7 +1837,6 @@ mod tests {
                         }
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1959,7 +1861,6 @@ mod tests {
                         ulp_diff
                     );
 
-                    
                     if y.is_finite()
                         && fast_val.is_finite()
                         && slow_val.is_finite()
@@ -1986,7 +1887,6 @@ mod tests {
                         }
                     }
 
-                    
                     if fast_period == slow_period && y.is_finite() {
                         prop_assert!(
                             y.abs() < 1e-9,
@@ -1996,7 +1896,6 @@ mod tests {
                         );
                     }
 
-                    
                     if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && y.is_finite() {
                         prop_assert!(
                             y.abs() < 1e-6,
@@ -2006,11 +1905,7 @@ mod tests {
                         );
                     }
 
-                    
-                    
-                    
                     if y.is_finite() {
-                        
                         let window_start = i.saturating_sub(slow_period - 1);
                         let window = &data[window_start..=i];
                         let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -2021,20 +1916,16 @@ mod tests {
                             1.0
                         };
 
-                        
-                        
                         let max_expected_ppo = 100.0 * (volatility_ratio - 1.0);
 
                         prop_assert!(
-							y.abs() <= max_expected_ppo * 1.5, 
+							y.abs() <= max_expected_ppo * 1.5,
 							"PPO exceeds expected bounds at index {}: got {}%, max expected ~{}% (volatility ratio {})",
 							i, y, max_expected_ppo, volatility_ratio
 						);
                     }
 
-                    
                     if slow_val.abs() < 1e-10 && slow_val != 0.0 {
-                        
                         prop_assert!(
 							y.is_nan() || y.abs() > 1000.0,
 							"PPO should be NaN or very large when slow_ma ~0 at index {}: slow_ma={}, ppo={}",
@@ -2043,14 +1934,12 @@ mod tests {
                     }
                 }
 
-                
                 let is_monotonic_increasing = data.windows(2).all(|w| w[1] >= w[0]);
                 let is_monotonic_decreasing = data.windows(2).all(|w| w[1] <= w[0]);
 
                 if (is_monotonic_increasing || is_monotonic_decreasing)
                     && data.len() > slow_period * 2
                 {
-                    
                     let last_values = &out[out.len() - slow_period / 2..];
                     let valid_last: Vec<f64> = last_values
                         .iter()
@@ -2060,7 +1949,6 @@ mod tests {
 
                     if valid_last.len() > 2 {
                         if is_monotonic_increasing && fast_period < slow_period {
-                            
                             let avg = valid_last.iter().sum::<f64>() / valid_last.len() as f64;
                             prop_assert!(
                                 avg > -1e-6,
@@ -2068,7 +1956,6 @@ mod tests {
                                 avg
                             );
                         } else if is_monotonic_decreasing && fast_period < slow_period {
-                            
                             let avg = valid_last.iter().sum::<f64>() / valid_last.len() as f64;
                             prop_assert!(
                                 avg < 1e-6,
@@ -2180,16 +2067,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 12, 30, 3, "sma"),     
-            (5, 25, 5, 26, 50, 5, "sma"),     
-            (30, 60, 15, 65, 100, 10, "sma"), 
-            (2, 5, 1, 6, 10, 1, "ema"),       
-            (10, 20, 2, 21, 40, 4, "wma"),    
-            (3, 9, 3, 12, 21, 3, "sma"),      
-            (7, 14, 7, 21, 28, 7, "ema"),     
+            (2, 10, 2, 12, 30, 3, "sma"),
+            (5, 25, 5, 26, 50, 5, "sma"),
+            (30, 60, 15, 65, 100, 10, "sma"),
+            (2, 5, 1, 6, 10, 1, "ema"),
+            (10, 20, 2, 21, 40, 4, "wma"),
+            (3, 9, 3, 12, 21, 3, "sma"),
+            (7, 14, 7, 21, 28, 7, "ema"),
         ];
 
         for (cfg_idx, &(f_start, f_end, f_step, s_start, s_end, s_step, ma_type)) in
@@ -2212,7 +2097,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2278,10 +2162,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "ppo")]
 #[pyo3(signature = (data, fast_period=None, slow_period=None, ma_type=None, kernel=None))]
@@ -2340,7 +2220,6 @@ impl PpoStreamPy {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct PpoDeviceArrayF32Py {
@@ -2363,13 +2242,12 @@ impl PpoDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producer stream is synchronized before returning the handle; omit "stream" per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA
         (2, self.inner.device_id as i32)
     }
 
@@ -2382,7 +2260,6 @@ impl PpoDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2404,7 +2281,6 @@ impl PpoDeviceArrayF32Py {
             }
         }
 
-        // copy=True is not supported for PPO CUDA buffers.
         if let Some(copy_obj) = copy.as_ref() {
             let do_copy: bool = copy_obj.extract::<bool>(py)?;
             if do_copy {
@@ -2414,8 +2290,6 @@ impl PpoDeviceArrayF32Py {
             }
         }
 
-        // Stream semantics: producer synchronizes before __dlpack__; accept but do not use stream,
-        // but disallow explicit stream 0 for CUDA to match existing behavior.
         if let Some(s) = stream.as_ref() {
             if let Ok(i) = s.extract::<i64>(py) {
                 if i == 0 {
@@ -2426,11 +2300,10 @@ impl PpoDeviceArrayF32Py {
             }
         }
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let dev_id_u32 = self.inner.device_id;
         let ctx_clone = self.inner.ctx.clone();
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32Ppo {
@@ -2481,7 +2354,6 @@ pub fn ppo_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Initialize NaN prefixes directly on the NumPy buffer using helpers
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| {
@@ -2544,7 +2416,6 @@ pub fn ppo_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "ppo_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, fast_period_range, slow_period_range, ma_type="sma", device_id=0))]
@@ -2555,10 +2426,7 @@ pub fn ppo_cuda_batch_dev_py<'py>(
     slow_period_range: (usize, usize, usize),
     ma_type: &str,
     device_id: usize,
-) -> PyResult<(
-    PpoDeviceArrayF32Py,
-    Bound<'py, PyDict>,
-)> {
+) -> PyResult<(PpoDeviceArrayF32Py, Bound<'py, PyDict>)> {
     if !cuda_available() {
         return Err(PyValueError::new_err("CUDA not available"));
     }
@@ -2650,11 +2518,7 @@ pub fn register_ppo_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()>
     Ok(())
 }
 
-// ────────────────────────────────────────────────────────────────────────────────
-// WASM Bindings
-// ────────────────────────────────────────────────────────────────────────────────
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ppo_js(
     data: &[f64],
@@ -2674,7 +2538,7 @@ pub fn ppo_js(
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ppo_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2683,7 +2547,7 @@ pub fn ppo_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ppo_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2693,7 +2557,7 @@ pub fn ppo_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ppo_into(
     in_ptr: *const f64,
@@ -2729,7 +2593,7 @@ pub fn ppo_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PpoBatchConfig {
     pub fast_period_range: (usize, usize, usize),
@@ -2737,7 +2601,7 @@ pub struct PpoBatchConfig {
     pub ma_type: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PpoBatchJsOutput {
     pub values: Vec<f64>,
@@ -2746,7 +2610,7 @@ pub struct PpoBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "ppo_batch")]
 pub fn ppo_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: PpoBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2768,7 +2632,7 @@ pub fn ppo_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ppo_batch_into(
     in_ptr: *const f64,
@@ -2792,8 +2656,7 @@ pub fn ppo_batch_into(
             slow_period: (slow_start, slow_end, slow_step),
             ma_type: ma_type.to_string(),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows

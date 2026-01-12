@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::vpci::{
     vpci_batch_with_kernel, vpci_with_kernel, VpciBatchRange, VpciInput, VpciParams,
 };
@@ -65,7 +63,7 @@ fn vpci_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.a.buf.copy_to(&mut vpci_g)?;
     pair.b.buf.copy_to(&mut vpcis_g)?;
 
-    let tol = 5e-2; 
+    let tol = 5e-2;
     for idx in 0..(cpu.rows * cpu.cols) {
         assert!(
             approx_eq(cpu.vpci[idx], vpci_g[idx] as f64, tol),
@@ -88,13 +86,12 @@ fn vpci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         eprintln!("[vpci_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 12usize; 
-    let rows = 8192usize; 
+    let cols = 12usize;
+    let rows = 8192usize;
     let mut close_tm = vec![f64::NAN; rows * cols];
     let mut volume_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         for r in (s + 10)..rows {
-            
             let idx = r * cols + s;
             let x = (r as f64) * 0.002 + (s as f64) * 0.01;
             close_tm[idx] = (x).sin() + 0.01 * x;
@@ -104,7 +101,6 @@ fn vpci_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let short = 7usize;
     let long = 24usize;
 
-    
     let mut vpci_cpu_tm = vec![f64::NAN; rows * cols];
     let mut vpcis_cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {

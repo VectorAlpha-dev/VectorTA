@@ -1,8 +1,3 @@
-//! CUDA integration scaffolding (cust-based)
-//!
-//! This module is built only when the `cuda` feature is enabled. It provides
-//! runtime detection helpers and submodules for GPU-accelerated indicators.
-
 #[cfg(feature = "cuda")]
 use std::sync::OnceLock;
 
@@ -414,15 +409,12 @@ pub use vosc_wrapper::{
     ManySeriesKernelPolicy as VoscManySeriesKernelPolicy,
 };
 
-/// Returns true if a CUDA device is available and the driver API can be initialized.
 #[inline]
 pub fn cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
         static CUDA_AVAILABLE_CACHED: OnceLock<bool> = OnceLock::new();
 
-        
-        
         if std::env::var("CUDA_PLACEHOLDER_ON_FAIL").ok().as_deref() == Some("1")
             || std::env::var("CUDA_FORCE_SKIP").ok().as_deref() == Some("1")
         {
@@ -440,8 +432,6 @@ pub fn cuda_available() -> bool {
 
             let debug = std::env::var("CUDA_PROBE_DEBUG").ok().as_deref() == Some("1");
 
-            
-            
             if let Err(err) = cust::init(CudaFlags::empty()) {
                 if debug {
                     eprintln!("cuda_available: cust::init failed: {err:?}");
@@ -465,14 +455,6 @@ pub fn cuda_available() -> bool {
                 return false;
             }
 
-            
-            
-            
-            
-            
-            
-            
-            
             const PROBE_PTXS: [&str; 3] = [
                 r#"
                     .version 9.0
@@ -510,9 +492,6 @@ pub fn cuda_available() -> bool {
                 }
             };
 
-            
-            
-            
             let _context = match cust::context::Context::new(device) {
                 Ok(c) => c,
                 Err(err) => {
@@ -572,13 +551,9 @@ pub fn cuda_available() -> bool {
             };
             unsafe {
                 let args: &mut [*mut std::ffi::c_void] = &mut [];
-                if let Err(err) = stream.launch(
-                    &func,
-                    GridSize::xy(1, 1),
-                    BlockSize::xyz(1, 1, 1),
-                    0,
-                    args,
-                ) {
+                if let Err(err) =
+                    stream.launch(&func, GridSize::xy(1, 1), BlockSize::xyz(1, 1, 1), 0, args)
+                {
                     if debug {
                         eprintln!("cuda_available: stream.launch failed: {err:?}");
                     }
@@ -601,7 +576,6 @@ pub fn cuda_available() -> bool {
     }
 }
 
-/// Returns the number of CUDA devices available (0 on error or when disabled).
 #[inline]
 pub fn cuda_device_count() -> usize {
     #[cfg(feature = "cuda")]

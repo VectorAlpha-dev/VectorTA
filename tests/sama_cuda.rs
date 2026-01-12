@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::sama::{
     sama_batch_with_kernel, sama_with_kernel, SamaBatchRange, SamaInput, SamaParams,
 };

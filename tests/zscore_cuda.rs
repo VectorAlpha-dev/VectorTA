@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::zscore::{zscore_batch_with_kernel, ZscoreBatchRange};
 use vector_ta::utilities::enums::Kernel;
 
@@ -161,7 +159,6 @@ fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (s % 5)..rows {
-            
             let x = (t as f64) + (s as f64) * 0.3;
             let base = (x * 0.00131).sin() + (x * 0.00071).cos();
             let noise = 0.0005 * ((t + s) % 17) as f64;
@@ -173,7 +170,6 @@ fn zscore_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let period = 21usize;
     let nbdev = 2.0f64;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut col = vec![f64::NAN; rows];

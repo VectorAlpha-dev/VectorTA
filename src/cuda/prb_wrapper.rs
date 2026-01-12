@@ -1,16 +1,3 @@
-//! CUDA wrapper for Polynomial Regression Bands (PRB)
-//!
-//! Parity goals with ALMA-style wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/prb_kernel.ptx"))
-//! - NON_BLOCKING stream
-//! - Policy enums for batch and many-series kernels; simple defaults
-//! - VRAM estimate + ~64MB headroom; chunk grid.y for batch <= 65_535
-//! - Host precompute when beneficial:
-//!     - Expand parameter grid (smooth/period/order/offset)
-//!     - Optional SSF smoothing per unique smooth_period
-//!     - Precompute A^{-1} of the fixed normal matrix (per row)
-//!     - Precompute contiguous-valid counts to mirror warmup/NaN resets
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -37,11 +24,22 @@ pub enum CudaPrbError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -87,8 +85,7 @@ impl CudaPrb {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/prb_kernel.ptx"));
-        
-        
+
         let jit_opts = &[ModuleJitOption::DetermineTargetFromContext];
         let module = Module::from_ptx(ptx, jit_opts)
             .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
@@ -153,7 +150,6 @@ impl CudaPrb {
         }
     }
 
-    
     fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, CudaPrbError> {
         let (s, e, st) = a;
         if st == 0 || s == e {
@@ -225,7 +221,10 @@ impl CudaPrb {
         }
         Ok(out)
     }
-    fn expand_grid(range: &PrbBatchRange, smooth_flag: bool) -> Result<Vec<PrbParams>, CudaPrbError> {
+    fn expand_grid(
+        range: &PrbBatchRange,
+        smooth_flag: bool,
+    ) -> Result<Vec<PrbParams>, CudaPrbError> {
         let sps = Self::axis_usize(range.smooth_period)?;
         let rps = Self::axis_usize(range.regression_period)?;
         let pos = Self::axis_usize(range.polynomial_order)?;
@@ -279,7 +278,7 @@ impl CudaPrb {
         let mut y2 = f32::NAN;
         for i in first..len {
             let x = data[i];
-            
+
             let prev1 = if y1.is_nan() { x } else { y1 };
             let prev2 = if y2.is_nan() { prev1 } else { y2 };
             let y = c1 * x + c2 * prev1 + c3 * prev2;
@@ -305,11 +304,10 @@ impl CudaPrb {
     }
 
     fn build_a_inv(n: usize, k: usize) -> Vec<f32> {
-        
         let m = k + 1;
         let max_m = 8usize;
         let mut a = vec![0.0f64; m * m];
-        
+
         let mut sx = vec![0.0f64; 2 * k + 1];
         for j in 1..=n {
             let jf = j as f64;
@@ -325,7 +323,7 @@ impl CudaPrb {
                 a[i * m + j] = sx[i + j];
             }
         }
-        
+
         let mut aug = vec![0.0f64; m * 2 * m];
         for r in 0..m {
             for c in 0..m {
@@ -334,7 +332,6 @@ impl CudaPrb {
             aug[r * (2 * m) + (m + r)] = 1.0;
         }
         for i in 0..m {
-            
             let mut piv = i;
             let mut best = aug[i * (2 * m) + i].abs();
             for r in (i + 1)..m {
@@ -367,7 +364,7 @@ impl CudaPrb {
                 }
             }
         }
-        let mut inv = vec![0.0f32; max_m * max_m]; 
+        let mut inv = vec![0.0f32; max_m * max_m];
         for r in 0..m {
             for c in 0..m {
                 inv[r * max_m + c] = aug[r * (2 * m) + (m + c)] as f32;
@@ -392,7 +389,6 @@ impl CudaPrb {
             .ok_or_else(|| CudaPrbError::InvalidInput("all values are NaN".into()))?;
         let combos = Self::expand_grid(sweep, smooth_data)?;
 
-        
         let mut uniq_nk: BTreeSet<(usize, usize)> = BTreeSet::new();
         let mut uniq_sp: BTreeSet<usize> = BTreeSet::new();
         for c in &combos {
@@ -408,12 +404,12 @@ impl CudaPrb {
                 uniq_sp.insert(c.smooth_period.unwrap_or(10));
             }
         }
-        
+
         let mut a_inv_map: BTreeMap<(usize, usize), Vec<f32>> = BTreeMap::new();
         for &(n, k) in &uniq_nk {
             a_inv_map.insert((n, k), Self::build_a_inv(n, k));
         }
-        
+
         let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
         if smooth_data {
             for (idx, c) in combos.iter().enumerate() {
@@ -424,7 +420,6 @@ impl CudaPrb {
             groups.insert(0, (0..combos.len()).collect());
         }
 
-        
         let total_elems = combos
             .len()
             .checked_mul(len)
@@ -451,24 +446,18 @@ impl CudaPrb {
         let mut d_up: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
         let mut d_lo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_elems) }?;
 
-        
         let mut d_src: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_contig: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
-        
-        
         let mut h_src_keepalive: Vec<LockedBuffer<f32>> = Vec::new();
         let mut h_contig_keepalive: Vec<LockedBuffer<i32>> = Vec::new();
 
-        
-        
         let mut keep_periods: Vec<DeviceBuffer<i32>> = Vec::new();
         let mut keep_orders: Vec<DeviceBuffer<i32>> = Vec::new();
         let mut keep_offsets: Vec<DeviceBuffer<i32>> = Vec::new();
         let mut keep_ainv: Vec<DeviceBuffer<f32>> = Vec::new();
         let mut keep_rowmap: Vec<DeviceBuffer<i32>> = Vec::new();
         for (sp, rows_idx) in groups.iter() {
-            
             let source: Vec<f32> = if smooth_data {
                 Self::ssf_filter_f32(data_f32, *sp, first_valid)
             } else {
@@ -478,26 +467,19 @@ impl CudaPrb {
             let contig = if smooth_data {
                 Self::contig_valid(&source)
             } else {
-                
                 Self::contig_valid(data_f32)
             };
 
-            
             let h_src = LockedBuffer::from_slice(&source)?;
             let h_contig = LockedBuffer::from_slice(&contig)?;
             unsafe {
-                d_src
-                    .async_copy_from(h_src.as_slice(), &self.stream)
-                    ?;
-                d_contig
-                    .async_copy_from(h_contig.as_slice(), &self.stream)
-                    ?;
+                d_src.async_copy_from(h_src.as_slice(), &self.stream)?;
+                d_contig.async_copy_from(h_contig.as_slice(), &self.stream)?;
             }
-            
+
             h_src_keepalive.push(h_src);
             h_contig_keepalive.push(h_contig);
 
-            
             let mut periods: Vec<i32> = Vec::with_capacity(rows_idx.len());
             let mut orders: Vec<i32> = Vec::with_capacity(rows_idx.len());
             let mut offsets: Vec<i32> = Vec::with_capacity(rows_idx.len());
@@ -523,15 +505,16 @@ impl CudaPrb {
             let d_ainv = DeviceBuffer::from_slice(&a_invs)?;
             let d_rowmap = DeviceBuffer::from_slice(&row_map)?;
 
-            
             const PRB_BATCH_CHUNK_LEN: usize = 4096;
-            let use_chunked = matches!(self.policy.batch, BatchKernelPolicy::Auto) && !has_nan_after_first;
+            let use_chunked =
+                matches!(self.policy.batch, BatchKernelPolicy::Auto) && !has_nan_after_first;
             let (func, block_x, grid_x): (Function, u32, u32) = if use_chunked {
-                let f = self.module.get_function("prb_batch_chunked_f32").map_err(|_| {
-                    CudaPrbError::MissingKernelSymbol {
+                let f = self
+                    .module
+                    .get_function("prb_batch_chunked_f32")
+                    .map_err(|_| CudaPrbError::MissingKernelSymbol {
                         name: "prb_batch_chunked_f32",
-                    }
-                })?;
+                    })?;
                 let bx = 32u32;
                 let chunks = len.div_ceil(PRB_BATCH_CHUNK_LEN);
                 let gx = chunks.div_ceil(bx as usize) as u32;
@@ -565,7 +548,7 @@ impl CudaPrb {
                 });
             }
 
-            const MAX_GRID_Y: usize = 65_535; 
+            const MAX_GRID_Y: usize = 65_535;
             let mut start = 0usize;
             while start < rows_idx.len() {
                 let chunk = (rows_idx.len() - start).min(MAX_GRID_Y);
@@ -588,13 +571,12 @@ impl CudaPrb {
                         .wrapping_add((start * std::mem::size_of::<i32>()) as u64);
                     let mut combos_i = chunk as i32;
                     let mut max_m_i = max_m;
-                    let mut p_ainv = d_ainv
-                        .as_device_ptr()
-                        .as_raw()
-                        .wrapping_add((start * ainv_stride_elems * std::mem::size_of::<f32>()) as u64);
+                    let mut p_ainv = d_ainv.as_device_ptr().as_raw().wrapping_add(
+                        (start * ainv_stride_elems * std::mem::size_of::<f32>()) as u64,
+                    );
                     let mut stride_i = ainv_stride_elems as i32;
                     let mut p_contig = d_contig.as_device_ptr().as_raw();
-                    let mut ndev_f = 2.0f32; 
+                    let mut ndev_f = 2.0f32;
                     let mut p_rowmap = d_rowmap
                         .as_device_ptr()
                         .as_raw()
@@ -624,16 +606,14 @@ impl CudaPrb {
                 }
                 start += chunk;
             }
-            
+
             keep_periods.push(d_periods);
             keep_orders.push(d_orders);
             keep_offsets.push(d_offsets);
             keep_ainv.push(d_ainv);
             keep_rowmap.push(d_rowmap);
-            
         }
 
-        
         self.stream.synchronize()?;
         drop(h_src_keepalive);
         drop(h_contig_keepalive);
@@ -681,7 +661,7 @@ impl CudaPrb {
                 "invalid regression_period".into(),
             ));
         }
-        
+
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -699,7 +679,7 @@ impl CudaPrb {
                 }
             }
         }
-        
+
         let smooth = params.smooth_data.unwrap_or(true);
         let sp = params.smooth_period.unwrap_or(10);
         let mut sm_tm = vec![f32::NAN; elems];
@@ -709,7 +689,7 @@ impl CudaPrb {
                 if fv < 0 {
                     continue;
                 }
-                
+
                 let mut col = vec![f32::NAN; rows];
                 for t in 0..rows {
                     col[t] = data_tm_f32[t * cols + s];
@@ -740,28 +720,19 @@ impl CudaPrb {
         };
 
         let ainv = Self::build_a_inv(n, k);
-        
-        let mut d_prices_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_contig_tm: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
+
+        let mut d_prices_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_contig_tm: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
         let h_prices_tm = LockedBuffer::from_slice(&sm_tm)?;
         let h_contig_tm = LockedBuffer::from_slice(&contig_tm)?;
         unsafe {
-            d_prices_tm
-                .async_copy_from(h_prices_tm.as_slice(), &self.stream)
-                ?;
-            d_contig_tm
-                .async_copy_from(h_contig_tm.as_slice(), &self.stream)
-                ?;
+            d_prices_tm.async_copy_from(h_prices_tm.as_slice(), &self.stream)?;
+            d_contig_tm.async_copy_from(h_contig_tm.as_slice(), &self.stream)?;
         }
         let d_ainv = DeviceBuffer::from_slice(&ainv)?;
-        let mut d_m: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_u: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_l: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_m: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_u: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_l: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         let func = self
             .module
@@ -847,7 +818,6 @@ impl CudaPrb {
         ))
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -1093,7 +1063,10 @@ pub mod benches {
                     .launch(&func, self.grid, self.block, 0, &mut args)
                     .expect("prb many-series launch");
             }
-            self.cuda.stream.synchronize().expect("prb many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("prb many-series sync");
         }
     }
     fn prep_many_series_one_param() -> Box<dyn CudaBenchState> {
@@ -1115,7 +1088,6 @@ pub mod benches {
         let off = params.regression_offset.unwrap_or(0);
         let ndev = params.ndev.unwrap_or(2.0) as f32;
 
-        
         let elems = cols.checked_mul(rows).expect("cols*rows overflow");
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {

@@ -1,15 +1,3 @@
-//! CUDA wrapper for Holt-Winters Moving Average (HWMA) kernels.
-//!
-//! Aligned with the ALMA wrapper conventions:
-//! - JIT options with DetermineTargetFromContext and O2 fallback.
-//! - Policy enums + introspection for selected kernels.
-//! - VRAM estimation (with ~64MB headroom) and early failure when insufficient.
-//! - Chunked launches for large parameter sweeps.
-//! - NON_BLOCKING stream and zero-copy DeviceArrayF32 return type.
-//!
-//! HWMA is a recurrence (time‑marching) indicator: each thread scans time for a
-//! single parameter combo (batch) or a single series (many‑series).
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -23,8 +11,8 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,18 +24,27 @@ pub enum CudaHwmaError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Out of memory on device (required={required} bytes, free={free} bytes, headroom={headroom} bytes)")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("Device buffer context/device mismatch (buf device={buf}, current={current})")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("Not implemented")]
     NotImplemented,
 }
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -104,7 +101,7 @@ impl CudaHwma {
         let context = Arc::new(context);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/hwma_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -113,7 +110,7 @@ impl CudaHwma {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => { Module::from_ptx(ptx, &[])? }
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -153,12 +150,15 @@ impl CudaHwma {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
     pub fn synchronize(&self) -> Result<(), CudaHwmaError> {
-        self.stream.synchronize().map_err(|e| CudaHwmaError::Cuda(e))
+        self.stream
+            .synchronize()
+            .map_err(|e| CudaHwmaError::Cuda(e))
     }
 
-    
     #[inline]
     fn env_flag(name: &str, default: bool) -> bool {
         match env::var(name) {
@@ -189,7 +189,6 @@ impl CudaHwma {
         }
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -210,7 +209,11 @@ impl CudaHwma {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaHwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaHwmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -264,19 +267,27 @@ impl CudaHwma {
         if step > 0.0 {
             if start > end + eps {
                 return Err(CudaHwmaError::InvalidInput(format!(
-                    "invalid range: start={} end={} step={}", start, end, step
+                    "invalid range: start={} end={} step={}",
+                    start, end, step
                 )));
             }
             let mut x = start;
-            while x <= end + eps { v.push(x); x += step; }
+            while x <= end + eps {
+                v.push(x);
+                x += step;
+            }
         } else {
             if start < end - eps {
                 return Err(CudaHwmaError::InvalidInput(format!(
-                    "invalid range: start={} end={} step={}", start, end, step
+                    "invalid range: start={} end={} step={}",
+                    start, end, step
                 )));
             }
             let mut x = start;
-            while x >= end - eps { v.push(x); x += step; }
+            while x >= end - eps {
+                v.push(x);
+                x += step;
+            }
         }
         Ok(v)
     }
@@ -291,7 +302,17 @@ impl CudaHwma {
             .and_then(|x| x.checked_mul(ncs.len()))
             .ok_or_else(|| CudaHwmaError::InvalidInput("expand_grid capacity overflow".into()))?;
         let mut out = Vec::with_capacity(cap);
-        for &a in &nas { for &b in &nbs { for &c in &ncs { out.push(HwmaParams { na: Some(a), nb: Some(b), nc: Some(c) }); } } }
+        for &a in &nas {
+            for &b in &nbs {
+                for &c in &ncs {
+                    out.push(HwmaParams {
+                        na: Some(a),
+                        nb: Some(b),
+                        nc: Some(c),
+                    });
+                }
+            }
+        }
         Ok(out)
     }
 
@@ -308,7 +329,6 @@ impl CudaHwma {
             .ok_or_else(|| CudaHwmaError::InvalidInput("all values are NaN".into()))?;
         let len = data_f32.len();
 
-        
         let combos = Self::expand_grid_cuda_checked(sweep)?;
 
         for (idx, prm) in combos.iter().enumerate() {
@@ -359,12 +379,12 @@ impl CudaHwma {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("hwma_batch_f32")
-            .map_err(|_| CudaHwmaError::MissingKernelSymbol { name: "hwma_batch_f32" })?;
+        let func = self.module.get_function("hwma_batch_f32").map_err(|_| {
+            CudaHwmaError::MissingKernelSymbol {
+                name: "hwma_batch_f32",
+            }
+        })?;
 
-        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => std::env::var("HWMA_BLOCK_X")
@@ -377,12 +397,17 @@ impl CudaHwma {
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
-        
         if block_x == 0 || grid_x == 0 {
-            return Err(CudaHwmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaHwmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
-        
         unsafe {
             (*(self as *const _ as *mut CudaHwma)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
@@ -449,7 +474,6 @@ impl CudaHwma {
         let (combos, first_valid, series_len) = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        
         let sz_f32 = std::mem::size_of::<f32>();
         let prices_bytes = series_len
             .checked_mul(sz_f32)
@@ -485,9 +509,9 @@ impl CudaHwma {
         let d_nbs = self.h2d_f32(&nbs)?;
         let d_ncs = self.h2d_f32(&ncs)?;
 
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
-        
         self.launch_batch_kernel(
             &d_prices,
             &d_nas,
@@ -498,7 +522,7 @@ impl CudaHwma {
             n_combos,
             &mut d_out,
         )?;
-        
+
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -591,7 +615,9 @@ impl CudaHwma {
         let func = self
             .module
             .get_function("hwma_multi_series_one_param_f32")
-            .map_err(|_| CudaHwmaError::MissingKernelSymbol { name: "hwma_multi_series_one_param_f32" })?;
+            .map_err(|_| CudaHwmaError::MissingKernelSymbol {
+                name: "hwma_multi_series_one_param_f32",
+            })?;
 
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -682,7 +708,6 @@ impl CudaHwma {
         let (first_valids, na, nb, nc) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
         let sz_f32 = std::mem::size_of::<f32>();
         let prices_elems = cols
             .checked_mul(rows)
@@ -717,7 +742,7 @@ impl CudaHwma {
             &d_first_valids,
             &mut d_out_tm,
         )?;
-        
+
         self.stream.synchronize()?;
 
         Ok(DeviceArrayF32 {
@@ -727,8 +752,6 @@ impl CudaHwma {
         })
     }
 }
-
-
 
 pub mod benches {
     use super::*;

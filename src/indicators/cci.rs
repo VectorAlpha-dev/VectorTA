@@ -1,23 +1,3 @@
-//! # Commodity Channel Index (CCI)
-//! Decision log: SIMD present but short‑circuited to scalar for stability; CUDA wrappers available; Python interop via CAI v3 and DLPack; numerical outputs unchanged.
-//!
-//! CCI measures the variation of a security's price from its statistical mean.
-//! It is calculated as the difference between typical price and its moving average,
-//! divided by the mean absolute deviation multiplied by a constant (0.015).
-//!
-//! ## Parameters
-//! - **period**: Window size for calculations (default: 14)
-//!
-//! ## Returns
-//! - **`Ok(CciOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CciError)`** on various error conditions.
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: Implemented but disabled by default (runtime short-circuits to scalar). Compensated per-lane sums are present for future use; current versions are slower at 10k/100k/1M.
-//! - **Streaming Performance**: O(log n) exact — maintains an order‑statistics treap to compute MAD without full rescans
-//! - **Memory Optimization**: GOOD - properly uses alloc_with_nan_prefix helper for zero-copy allocation
-//! - Note: CCI’s MAD requires a full window scan; SIMD accelerates that scan but cannot make it O(1).
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -27,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -37,14 +17,14 @@ use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::oscillators::CudaCci;
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, make_uninit_matrix,
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -56,11 +36,9 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
-use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-
-// ---- Input/Output Structs ----
+use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum CciData<'a> {
@@ -77,7 +55,10 @@ pub struct CciOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CciParams {
     pub period: Option<usize>,
 }
@@ -139,8 +120,6 @@ impl<'a> CciInput<'a> {
     }
 }
 
-// ---- Builder ----
-
 #[derive(Copy, Clone, Debug)]
 pub struct CciBuilder {
     period: Option<usize>,
@@ -196,8 +175,6 @@ impl CciBuilder {
     }
 }
 
-// ---- Error ----
-
 #[derive(Debug, Error)]
 pub enum CciError {
     #[error("cci: Input data slice is empty.")]
@@ -211,12 +188,14 @@ pub enum CciError {
     #[error("cci: output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("cci: invalid range expansion: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("cci: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
-
-// ---- Indicator API ----
 
 #[inline]
 pub fn cci(input: &CciInput) -> Result<CciOutput, CciError> {
@@ -227,19 +206,7 @@ pub fn cci(input: &CciInput) -> Result<CciOutput, CciError> {
 fn cci_prepare<'a>(
     input: &'a CciInput,
     kernel: Kernel,
-) -> Result<
-    (
-        // data
-        &'a [f64],
-        
-        usize,
-        
-        usize,
-        
-        Kernel,
-    ),
-    CciError,
-> {
+) -> Result<(&'a [f64], usize, usize, Kernel), CciError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -251,7 +218,6 @@ fn cci_prepare<'a>(
         .ok_or(CciError::AllValuesNaN)?;
     let period = input.get_period();
 
-    
     if period == 0 || period > len {
         return Err(CciError::InvalidPeriod {
             period,
@@ -265,7 +231,6 @@ fn cci_prepare<'a>(
         });
     }
 
-    
     let chosen = match kernel {
         Kernel::Auto => detect_best_kernel(),
         k => k,
@@ -277,7 +242,6 @@ fn cci_prepare<'a>(
 pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, CciError> {
     let (data, period, first, chosen) = cci_prepare(input, kernel)?;
 
-    
     let prefix = first + period - 1;
     let mut out = alloc_with_nan_prefix(data.len(), prefix);
 
@@ -290,7 +254,6 @@ pub fn cci_with_kernel(input: &CciInput, kernel: Kernel) -> Result<CciOutput, Cc
             Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, &mut out),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                
                 cci_scalar(data, period, first, &mut out)
             }
             _ => unreachable!(),
@@ -310,7 +273,6 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
         });
     }
 
-    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => cci_scalar(data, period, first, dst),
@@ -320,14 +282,12 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
             Kernel::Avx512 | Kernel::Avx512Batch => cci_avx512(data, period, first, dst),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                
                 cci_scalar(data, period, first, dst)
             }
             _ => unreachable!(),
         }
     }
 
-    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -336,24 +296,12 @@ pub fn cci_into_slice(dst: &mut [f64], input: &CciInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Writes CCI values into a caller-provided output slice without allocating.
-///
-/// - Preserves the module's NaN warmup semantics (prefix up to `first + period - 1`).
-/// - `out.len()` must equal `input` length; returns the module's length error on mismatch.
-/// - Uses kernel auto-detection (same path as `cci()`), delegating to the existing compute kernels.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cci_into(input: &CciInput, out: &mut [f64]) -> Result<(), CciError> {
     cci_into_slice(out, input, Kernel::Auto)
 }
 
-
-
-/// Optimized safe scalar implementation.
-///
-/// - Single-pass rolling sum for SMA
-/// - Recomputes MAD per step (mathematically required), but uses chunked iterations
-/// - Minimizes divisions by precomputing constants
 #[inline]
 pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
     debug_assert_eq!(data.len(), out.len());
@@ -364,13 +312,11 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 
     let inv_p = 1.0 / (period as f64);
 
-    
     let start0 = first_valid;
     let end0 = start0 + period;
     let mut sum: f64 = data[start0..end0].iter().sum();
     let mut sma = sum * inv_p;
 
-    
     let mut sum_abs = 0.0;
     for &v in &data[start0..end0] {
         sum_abs += (v - sma).abs();
@@ -387,7 +333,6 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
         }
     };
 
-    
     for i in (first_out + 1)..n {
         let exiting = data[i - period];
         let entering = data[i];
@@ -395,7 +340,7 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
         sma = sum * inv_p;
 
         let wstart = i + 1 - period;
-        let wend = i + 1; 
+        let wend = i + 1;
         let mut sabs = 0.0;
         for &v in &data[wstart..wend] {
             sabs += (v - sma).abs();
@@ -415,14 +360,12 @@ pub fn cci_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cci_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    
     cci_scalar(data, period, first_valid, out)
 }
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cci_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    
     cci_scalar(data, period, first_valid, out)
 }
 
@@ -436,7 +379,6 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
     let inv_p = 1.0 / (period as f64);
     let scale = (period as f64) * (1.0 / 0.015);
 
-    
     let base = data.as_ptr().add(first_valid);
     let mut sum = 0.0;
     {
@@ -458,7 +400,6 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
     let first_out = first_valid + period - 1;
     let mut sma = sum * inv_p;
 
-    
     {
         let vmean = _mm256_set1_pd(sma);
         let vsgn = _mm256_set1_pd(-0.0f64);
@@ -471,7 +412,7 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
             let a = _mm256_andnot_pd(vsgn, d);
             let mut lane = [0.0f64; 4];
             _mm256_storeu_pd(lane.as_mut_ptr(), a);
-            
+
             for &val in &lane {
                 let y = val - comp;
                 let t = sum_abs + y;
@@ -497,7 +438,6 @@ unsafe fn cci_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         };
     }
 
-    
     let mut i = first_out + 1;
     while i < n {
         let exiting = *data.get_unchecked(i - period);
@@ -568,7 +508,6 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     let inv_p = 1.0 / (period as f64);
     let scale = (period as f64) * (1.0 / 0.015);
 
-    
     let base = data.as_ptr().add(first_valid);
     let mut sum = 0.0;
     {
@@ -590,11 +529,9 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     let first_out = first_valid + period - 1;
     let mut sma = sum * inv_p;
 
-    
     let pos_mask_i = _mm512_set1_epi64(0x7FFF_FFFF_FFFF_FFFFu64 as i64);
     let pos_mask = _mm512_castsi512_pd(pos_mask_i);
 
-    
     {
         let vmean = _mm512_set1_pd(sma);
         let mut k = 0usize;
@@ -603,7 +540,7 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
         while k + 8 <= period {
             let x = _mm512_loadu_pd(base.add(k));
             let d = _mm512_sub_pd(x, vmean);
-            let a = _mm512_and_pd(d, pos_mask); 
+            let a = _mm512_and_pd(d, pos_mask);
             let mut lane = [0.0f64; 8];
             _mm512_storeu_pd(lane.as_mut_ptr(), a);
             for &val in &lane {
@@ -631,7 +568,6 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
         };
     }
 
-    
     let mut i = first_out + 1;
     while i < n {
         let exiting = *data.get_unchecked(i - period);
@@ -678,8 +614,6 @@ unsafe fn cci_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     }
 }
 
-
-
 #[inline(always)]
 pub unsafe fn cci_row_scalar(
     data: &[f64],
@@ -690,9 +624,6 @@ pub unsafe fn cci_row_scalar(
     _inv: f64,
     out: &mut [f64],
 ) {
-    
-    
-    
     cci_scalar(data, period, first, out)
 }
 
@@ -752,11 +683,6 @@ pub unsafe fn cci_row_avx512_long(
     cci_avx512_long(data, period, first, out)
 }
 
-
-
-
-
-
 #[derive(Debug, Clone)]
 pub struct CciStream {
     period: usize,
@@ -764,16 +690,12 @@ pub struct CciStream {
     head: usize,
     filled: bool,
 
-    
     sum: f64,
 
-    
     scale: f64,
 
-    
     ost: OrderStatsTreap,
 }
-
 
 #[inline(always)]
 fn splitmix64(mut x: u64) -> u64 {
@@ -792,11 +714,11 @@ struct OrderStatsTreap {
 
 #[derive(Debug, Clone)]
 struct Node {
-    key: f64,    
-    prio: u64,   
-    cnt: u32,    
-    size: usize, 
-    sum: f64,    
+    key: f64,
+    prio: u64,
+    cnt: u32,
+    size: usize,
+    sum: f64,
     left: Option<Box<Node>>,
     right: Option<Box<Node>>,
 }
@@ -833,7 +755,6 @@ impl Node {
 impl OrderStatsTreap {
     #[inline(always)]
     fn new() -> Self {
-        
         let seed = splitmix64((&() as *const () as usize as u64) ^ 0xA5A5_A5A5_A5A5_A5A5);
         Self { root: None, seed }
     }
@@ -844,7 +765,6 @@ impl OrderStatsTreap {
         self.seed
     }
 
-    
     fn merge(a: Option<Box<Node>>, b: Option<Box<Node>>) -> Option<Box<Node>> {
         match (a, b) {
             (None, t) | (t, None) => t,
@@ -862,7 +782,6 @@ impl OrderStatsTreap {
         }
     }
 
-    
     fn split(mut t: Option<Box<Node>>, key: f64) -> (Option<Box<Node>>, Option<Box<Node>>) {
         match t.take() {
             None => (None, None),
@@ -882,13 +801,11 @@ impl OrderStatsTreap {
         }
     }
 
-    
     fn insert(&mut self, key: f64) {
         debug_assert!(key.is_finite());
         self.root = match self.root.take() {
             None => Some(Box::new(Node::new(key, self.next_prio()))),
             Some(mut _n) => {
-                
                 self.root = Some(_n);
                 Self::insert_into(self.root.take(), key, self.next_prio())
             }
@@ -923,7 +840,6 @@ impl OrderStatsTreap {
         }
     }
 
-    
     fn erase(&mut self, key: f64) {
         debug_assert!(key.is_finite());
         self.root = Self::erase_from(self.root.take(), key);
@@ -954,7 +870,6 @@ impl OrderStatsTreap {
         }
     }
 
-    
     fn prefix_le(&self, key: f64) -> (usize, f64) {
         debug_assert!(key.is_finite());
         let mut t = &self.root;
@@ -965,7 +880,6 @@ impl OrderStatsTreap {
             if key < n.key {
                 t = &n.left;
             } else {
-                
                 count += sz(&n.left) + n.cnt as usize;
                 sum += sm(&n.left) + (n.key * n.cnt as f64);
                 t = &n.right;
@@ -989,7 +903,7 @@ impl CciStream {
                 data_len: 0,
             });
         }
-        
+
         let buffer = alloc_with_nan_prefix(period, period);
         let scale = (period as f64) * (1.0 / 0.015);
 
@@ -1004,15 +918,10 @@ impl CciStream {
         })
     }
 
-    /// O(log n) exact update:
-    /// - Maintain rolling sum and treap of window values.
-    /// - Compute sum|x - mean| via prefix count/sum at 'mean'.
-    /// - Return None until the buffer is filled (same semantics as before).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         debug_assert!(value.is_finite(), "CCI stream expects finite inputs");
 
-        
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % self.period;
@@ -1021,13 +930,11 @@ impl CciStream {
         }
 
         if !self.filled {
-            
             self.sum += value;
             self.ost.insert(value);
             return None;
         }
 
-        
         if !old.is_nan() {
             self.sum -= old;
             self.ost.erase(old);
@@ -1035,27 +942,20 @@ impl CciStream {
         self.sum += value;
         self.ost.insert(value);
 
-        
         let mean = self.sum / (self.period as f64);
 
-        
         let (k_le, sum_le) = self.ost.prefix_le(mean);
 
-        
-        
         let n = self.period as f64;
         let sum_abs = mean.mul_add(2.0 * (k_le as f64) - n, self.sum - 2.0 * sum_le);
 
         if sum_abs == 0.0 {
             Some(0.0)
         } else {
-            
             Some((value - mean) * (self.scale / sum_abs))
         }
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct CciBatchRange {
@@ -1135,7 +1035,6 @@ impl CciBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &CciBatchRange) -> Result<Vec<CciParams>, CciError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CciError> {
-        
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -1154,24 +1053,36 @@ fn expand_grid(r: &CciBatchRange) -> Result<Vec<CciParams>, CciError> {
                     None => break,
                 }
             }
-            if v.is_empty() { return Err(CciError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(CciError::InvalidRange { start, end, step });
+            }
             Ok(v)
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
                 v.push(cur);
-                if cur <= end { break; }
-                
-                if cur < step { break; }
+                if cur <= end {
+                    break;
+                }
+
+                if cur < step {
+                    break;
+                }
                 cur -= step;
-                if cur == end { v.push(cur); break; }
-                if cur < end { break; }
+                if cur == end {
+                    v.push(cur);
+                    break;
+                }
+                if cur < end {
+                    break;
+                }
             }
             v.sort_unstable();
             v.dedup();
-            if v.is_empty() { return Err(CciError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(CciError::InvalidRange { start, end, step });
+            }
             Ok(v)
         }
     }
@@ -1241,7 +1152,10 @@ fn cci_batch_inner(
     for c in &combos {
         let p = c.period.unwrap();
         if p == 0 || p > cols {
-            return Err(CciError::InvalidPeriod { period: p, data_len: cols });
+            return Err(CciError::InvalidPeriod {
+                period: p,
+                data_len: cols,
+            });
         }
         max_p = max_p.max(p);
     }
@@ -1252,26 +1166,20 @@ fn cci_batch_inner(
         });
     }
 
-    
     rows.checked_mul(cols).ok_or(CciError::InvalidRange {
         start: sweep.period.0,
         end: sweep.period.1,
         step: sweep.period.2,
     })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let out_ptr = buf_mu.as_mut_ptr() as *mut f64;
     let out_len = buf_mu.len();
     let out_cap = buf_mu.capacity();
     let out: &mut [f64] = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_len) };
 
-    
-    
-    
     let _ = cci_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    
     let values = unsafe { Vec::from_raw_parts(out_ptr, out_len, out_cap) };
     core::mem::forget(buf_mu);
 
@@ -1293,7 +1201,11 @@ fn cci_batch_inner_into(
 ) -> Result<Vec<CciParams>, CciError> {
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
-        return Err(CciError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(CciError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     if data.is_empty() {
@@ -1308,7 +1220,10 @@ fn cci_batch_inner_into(
     for c in &combos {
         let p = c.period.unwrap();
         if p == 0 || p > data.len() {
-            return Err(CciError::InvalidPeriod { period: p, data_len: data.len() });
+            return Err(CciError::InvalidPeriod {
+                period: p,
+                data_len: data.len(),
+            });
         }
         max_p = max_p.max(p);
     }
@@ -1322,14 +1237,11 @@ fn cci_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(CciError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(CciError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
         return Err(CciError::OutputLengthMismatch {
             expected,
@@ -1337,7 +1249,6 @@ fn cci_batch_inner_into(
         });
     }
 
-    
     let kernel = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::Scalar => Kernel::ScalarBatch,
@@ -1352,18 +1263,15 @@ fn cci_batch_inner_into(
         _ => unreachable!(),
     };
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
 
-    
     for (row, &warmup) in warm.iter().enumerate() {
         let row_start = row * cols;
         for col in 0..warmup.min(cols) {
@@ -1374,10 +1282,8 @@ fn cci_batch_inner_into(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        
         assert_eq!(dst.len(), cols, "Output row length mismatch");
 
         match simd {
@@ -1388,7 +1294,6 @@ fn cci_batch_inner_into(
             Kernel::Avx512 => cci_row_avx512(data, first, period, 0, std::ptr::null(), 0.0, dst),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx512 => {
-                
                 cci_row_scalar(data, first, period, 0, std::ptr::null(), 0.0, dst)
             }
             _ => unreachable!(),
@@ -1418,8 +1323,6 @@ fn cci_batch_inner_into(
 
     Ok(combos)
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1669,7 +1572,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_cci_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1677,27 +1579,21 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = CciInput::from_candles(&candles, "close", CciParams::default());
         let output = cci_with_kernel(&input, kernel)?;
 
-        
         let params_20 = CciParams { period: Some(20) };
         let input_20 = CciInput::from_candles(&candles, "hlc3", params_20);
         let output_20 = cci_with_kernel(&input_20, kernel)?;
 
-        
         for output in [output, output_20] {
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {}",
@@ -1705,7 +1601,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {}",
@@ -1713,7 +1608,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {}",
@@ -1726,7 +1620,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_cci_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1738,7 +1631,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1755,12 +1647,10 @@ mod tests {
             };
             let input = CciInput::from_slice(&data, params);
 
-            
             let CciOutput { values: out } = cci_with_kernel(&input, kernel).unwrap();
-            
+
             let CciOutput { values: ref_out } = cci_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            
             for i in 0..(period - 1) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1771,7 +1661,6 @@ mod tests {
                 );
             }
 
-            
             for i in (period - 1)..data.len() {
                 prop_assert!(
                     !out[i].is_nan(),
@@ -1781,16 +1670,14 @@ mod tests {
                 );
             }
 
-            
             for i in 0..data.len() {
                 let y = out[i];
                 let r = ref_out[i];
 
                 if y.is_nan() && r.is_nan() {
-                    continue; 
+                    continue;
                 }
 
-                
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
                 let ulp_diff = if y_bits > r_bits {
@@ -1810,7 +1697,6 @@ mod tests {
                 );
             }
 
-            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() >= period {
                 for i in (period - 1)..data.len() {
                     prop_assert!(
@@ -1823,19 +1709,15 @@ mod tests {
                 }
             }
 
-            
             for i in (period - 1)..data.len() {
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
 
-                
                 let sum: f64 = window.iter().sum();
                 let sma = sum / period as f64;
 
-                
                 let mad: f64 = window.iter().map(|&x| (x - sma).abs()).sum::<f64>() / period as f64;
 
-                
                 let price = data[i];
                 let expected_cci = if mad == 0.0 {
                     0.0
@@ -1843,7 +1725,6 @@ mod tests {
                     (price - sma) / (0.015 * mad)
                 };
 
-                
                 let actual_cci = out[i];
                 let diff = (actual_cci - expected_cci).abs();
 
@@ -1858,9 +1739,7 @@ mod tests {
                 );
             }
 
-            
             if period == 1 {
-                
                 for i in 0..data.len() {
                     prop_assert!(
                         out[i].abs() < 1e-9,
@@ -1872,11 +1751,8 @@ mod tests {
                 }
             }
 
-            
-            
             for i in (period - 1)..data.len() {
                 if out[i].abs() > 500.0 {
-                    
                     eprintln!(
 							"[{}] Warning: Extreme CCI value {} at index {} (typical range is -300 to 300)",
 							test_name,
@@ -1886,8 +1762,6 @@ mod tests {
                 }
             }
 
-            
-            
             for i in (period - 1)..data.len() {
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
@@ -1895,10 +1769,9 @@ mod tests {
                 let sma = sum / period as f64;
                 let mad: f64 = window.iter().map(|&x| (x - sma).abs()).sum::<f64>() / period as f64;
 
-                
                 if mad > 0.0 && mad < 1e-12 {
                     let actual_cci = out[i];
-                    
+
                     prop_assert!(
 							actual_cci.is_finite(),
 							"[{}] CCI should be finite even with very small MAD ({}) at index {}, got {}",
@@ -1908,12 +1781,10 @@ mod tests {
 							actual_cci
 						);
 
-                    
                     let price = data[i];
                     let expected_cci = (price - sma) / (0.015 * mad);
                     let relative_error = ((actual_cci - expected_cci) / expected_cci).abs();
 
-                    
                     prop_assert!(
 							relative_error < 1e-8 || (actual_cci - expected_cci).abs() < 1e-10,
 							"[{}] CCI calculation with small MAD at index {}: expected {}, got {}, relative error {}",
@@ -1973,10 +1844,9 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_cci_tests!(check_cci_property);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_cci_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253usize {
@@ -1986,10 +1856,8 @@ mod tests {
 
         let input = CciInput::from_slice(&data, CciParams::default());
 
-        
         let baseline = cci(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
         cci_into(&input, &mut out)?;
 
@@ -2042,7 +1910,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2050,15 +1917,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CciBatchBuilder::new()
             .kernel(kernel)
-            .period_range(10, 30, 10) 
+            .period_range(10, 30, 10)
             .apply_candles(&c, "close")?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -2067,7 +1931,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2075,7 +1938,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2083,7 +1945,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -2095,7 +1956,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2145,7 +2005,6 @@ pub fn cci_py<'py>(
     };
     let cci_in = CciInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| cci_with_kernel(&cci_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2172,8 +2031,6 @@ impl CciStreamPy {
         Ok(CciStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated CCI value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update(value)
     }
@@ -2198,16 +2055,13 @@ pub fn cci_batch_py<'py>(
         period: period_range,
     };
 
-    
     let output = py
         .allow_threads(|| cci_batch_with_kernel(slice_in, &sweep, kern))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let values_arr = output.values.into_pyarray(py);
     let reshaped = values_arr.reshape((output.rows, output.cols))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", reshaped)?;
     dict.set_item(
@@ -2222,9 +2076,6 @@ pub fn cci_batch_py<'py>(
 
     Ok(dict)
 }
-
-
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "CciDeviceArrayF32", unsendable)]
@@ -2252,8 +2103,7 @@ impl CciDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // CCI CUDA wrappers synchronize the producing stream before returning,
-        // so CAI v3 permits omitting the "stream" key.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2271,7 +2121,6 @@ impl CciDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2292,9 +2141,8 @@ impl CciDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -2331,8 +2179,7 @@ pub fn cci_cuda_batch_dev_py(
         period: period_range,
     };
     let (inner, dev_id, ctx, stream) = py.allow_threads(|| -> PyResult<_> {
-        let cuda =
-            CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();
         let out = cuda
@@ -2368,8 +2215,7 @@ pub fn cci_cuda_many_series_one_param_dev_py(
     }
     let slice = data_tm.as_slice()?;
     let (inner, dev_id, ctx, stream) = py.allow_threads(|| -> PyResult<_> {
-        let cuda =
-            CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaCci::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev_id = cuda.device_id();
         let ctx = cuda.context_arc();
         let out = cuda
@@ -2388,7 +2234,7 @@ pub fn cci_cuda_many_series_one_param_dev_py(
     })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = CciParams {
@@ -2404,7 +2250,7 @@ pub fn cci_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_into(
     in_ptr: *const f64,
@@ -2428,16 +2274,13 @@ pub fn cci_into(
         };
         let input = CciInput::from_slice(data, params);
 
-        // Check for aliasing
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid aliasing issues
             let mut temp = vec![0.0; len];
             cci_into_slice(&mut temp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // Direct write to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             cci_into_slice(out, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2447,7 +2290,7 @@ pub fn cci_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2456,7 +2299,7 @@ pub fn cci_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2464,7 +2307,7 @@ pub fn cci_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_batch_js(
     data: &[f64],
@@ -2476,13 +2319,12 @@ pub fn cci_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     cci_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_batch_metadata_js(
     period_start: usize,
@@ -2503,14 +2345,13 @@ pub fn cci_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CciBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CciBatchJsOutput {
     pub values: Vec<f64>,
@@ -2519,10 +2360,9 @@ pub struct CciBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = cci_batch)]
 pub fn cci_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    // 1. Deserialize the configuration object from JavaScript
     let config: CciBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -2530,11 +2370,9 @@ pub fn cci_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         period: config.period_range,
     };
 
-    // 2. Run the existing core logic
     let output = cci_batch_inner(data, &sweep, detect_best_kernel(), false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // 3. Create the structured output
     let js_output = CciBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2542,12 +2380,11 @@ pub fn cci_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         cols: output.cols,
     };
 
-    // 4. Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cci_batch_into(
     in_ptr: *const f64,

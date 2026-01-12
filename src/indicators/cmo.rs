@@ -1,24 +1,3 @@
-//! # Chande Momentum Oscillator (CMO)
-//!
-//! A momentum oscillator that compares the sum of recent gains to recent losses over a given period.
-//! The CMO oscillates between +100 and -100, with values near +100 indicating strong upward momentum and values near -100 indicating strong downward momentum.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points, default: 14).
-//! - **source**: Candle field (e.g., `"close"`, default: `"close"`).
-//!
-//! ## Returns
-//! - **`Ok(CmoOutput)`** on success, containing a `Vec<f64>` of length matching the input.
-//! - **`Err(CmoError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: Implemented (warm-up vectorized only). Underperforms (<5%) vs scalar at 100k; Auto short-circuits to scalar.
-//! - **AVX512 kernel**: Implemented (warm-up vectorized only). Underperforms vs scalar; Auto short-circuits to scalar.
-//! - **Streaming**: Implemented (Wilder-style O(1) update; FMA-friendly)
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy)
-//! - **Batch operations**: ✅ Implemented with parallel processing support
-//! - **Decision log**: SIMD present but underperforms; Auto short-circuits to scalar. CUDA wrapper available; numerical outputs unchanged.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -34,9 +13,9 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for CmoInput<'a> {
@@ -64,7 +43,10 @@ pub struct CmoOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CmoParams {
     pub period: Option<usize>,
 }
@@ -189,7 +171,11 @@ pub enum CmoError {
     NotEnoughValidData { needed: usize, valid: usize },
 
     #[error("cmo: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("cmo: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -234,7 +220,7 @@ fn cmo_prepare<'a>(
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    // Normalize any batch kernels to their single-series equivalents here.
+
     if chosen.is_batch() {
         chosen = match chosen {
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -284,11 +270,7 @@ pub fn cmo_into_slice(dst: &mut [f64], input: &CmoInput, kern: Kernel) -> Result
     Ok(())
 }
 
-/// Writes CMO results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cmo_into(input: &CmoInput, out: &mut [f64]) -> Result<(), CmoError> {
     let (data, period, first, chosen) = cmo_prepare(input, Kernel::Auto)?;
@@ -300,7 +282,6 @@ pub fn cmo_into(input: &CmoInput, out: &mut [f64]) -> Result<(), CmoError> {
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by alloc_with_nan_prefix
     let warmup_end = first + period;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let warm = warmup_end.min(out.len());
@@ -308,7 +289,6 @@ pub fn cmo_into(input: &CmoInput, out: &mut [f64]) -> Result<(), CmoError> {
         *v = qnan;
     }
 
-    // Compute into the destination buffer for the valid range
     cmo_compute_into(data, period, first, chosen, out);
 
     Ok(())
@@ -381,7 +361,6 @@ pub fn cmo_avx512(data: &[f64], period: usize, first_valid: usize, out: &mut [f6
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn cmo_avx2(data: &[f64], period: usize, first_valid: usize, out: &mut [f64]) {
-    // Vectorize warm-up, then scalar rolling update for parity
     unsafe { cmo_avx2_impl(data, period, first_valid, out) }
 }
 
@@ -420,7 +399,6 @@ unsafe fn cmo_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
     let inv_period = 1.0 / (period as f64);
     let period_m1 = (period - 1) as f64;
 
-    // Warm-up accumulation
     let mut acc_gain_v = _mm256_setzero_pd();
     let mut acc_loss_v = _mm256_setzero_pd();
     let half_v = _mm256_set1_pd(0.5);
@@ -448,7 +426,6 @@ unsafe fn cmo_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
     sum_gain += hsum256_pd(acc_gain_v);
     sum_loss += hsum256_pd(acc_loss_v);
 
-    // Scalar tail of warm-up
     let mut prev = if i == start {
         *data.get_unchecked(first_valid)
     } else {
@@ -466,7 +443,6 @@ unsafe fn cmo_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         i += 1;
     }
 
-    // First output at warm-up end
     let mut avg_gain = sum_gain * inv_period;
     let mut avg_loss = sum_loss * inv_period;
     {
@@ -478,7 +454,6 @@ unsafe fn cmo_avx2_impl(data: &[f64], period: usize, first_valid: usize, out: &m
         };
     }
 
-    // Rolling update (scalar)
     while i < len {
         let curr = *data.get_unchecked(i);
         let diff = curr - prev;
@@ -536,7 +511,6 @@ unsafe fn cmo_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     let inv_period = 1.0 / (period as f64);
     let period_m1 = (period - 1) as f64;
 
-    // Warm-up accumulation (8 diffs per iter)
     let mut acc_gain_v = _mm512_setzero_pd();
     let mut acc_loss_v = _mm512_setzero_pd();
     let half_v = _mm512_set1_pd(0.5);
@@ -567,7 +541,6 @@ unsafe fn cmo_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
     sum_gain += hsum512_pd(acc_gain_v);
     sum_loss += hsum512_pd(acc_loss_v);
 
-    // Scalar tail of warm-up
     let mut prev = if i == start {
         *data.get_unchecked(first_valid)
     } else {
@@ -585,7 +558,6 @@ unsafe fn cmo_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
         i += 1;
     }
 
-    // First output at warm-up end
     let mut avg_gain = sum_gain * inv_period;
     let mut avg_loss = sum_loss * inv_period;
     {
@@ -597,7 +569,6 @@ unsafe fn cmo_avx512_impl(data: &[f64], period: usize, first_valid: usize, out: 
         };
     }
 
-    // Rolling update (scalar)
     while i < len {
         let curr = *data.get_unchecked(i);
         let diff = curr - prev;
@@ -632,7 +603,6 @@ pub fn cmo_batch_with_kernel(
     k: Kernel,
 ) -> Result<CmoBatchOutput, CmoError> {
     let kernel = match k {
-        // SIMD batch underperforms/unused for CMO; default to scalar batch
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => return Err(CmoError::InvalidKernelForBatch(k)),
@@ -734,16 +704,22 @@ fn expand_grid(r: &CmoBatchRange) -> Vec<CmoParams> {
             while x <= end {
                 vals.push(x);
                 let next = x.saturating_add(step);
-                if next == x { break; }
+                if next == x {
+                    break;
+                }
                 x = next;
             }
         } else {
             let mut x = start;
             loop {
                 vals.push(x);
-                if x <= end { break; }
+                if x <= end {
+                    break;
+                }
                 let next = x.saturating_sub(step);
-                if next >= x { break; }
+                if next >= x {
+                    break;
+                }
                 x = next;
             }
         }
@@ -795,11 +771,14 @@ fn cmo_batch_inner(
         .position(|x| !x.is_nan())
         .ok_or(CmoError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let _ = combos.len().checked_mul(max_p).ok_or(CmoError::InvalidRange {
-        start: sweep.period.0,
-        end: sweep.period.1,
-        step: sweep.period.2,
-    })?;
+    let _ = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or(CmoError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     if data.len() - first <= max_p {
         return Err(CmoError::NotEnoughValidData {
             needed: max_p + 1,
@@ -814,22 +793,17 @@ fn cmo_batch_inner(
         step: sweep.period.2,
     })?;
 
-    // Step 1: Allocate uninitialized matrix
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Calculate warmup periods for each row
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    // Step 3: Initialize NaN prefixes for each row
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slice for computation
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Precompute per-step gain/loss and their prefix sums once for all rows
     let len = data.len();
     let start = first + 1;
     let mut gains = vec![0.0f64; len];
@@ -872,7 +846,6 @@ fn cmo_batch_inner(
         }
     }
 
-    // Step 5: Reclaim as Vec<f64>
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -910,11 +883,14 @@ fn cmo_batch_inner_into(
         .position(|x| !x.is_nan())
         .ok_or(CmoError::AllValuesNaN)?;
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
-    let _ = combos.len().checked_mul(max_p).ok_or(CmoError::InvalidRange {
-        start: sweep.period.0,
-        end: sweep.period.1,
-        step: sweep.period.2,
-    })?;
+    let _ = combos
+        .len()
+        .checked_mul(max_p)
+        .ok_or(CmoError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        })?;
     if data.len() - first <= max_p {
         return Err(CmoError::NotEnoughValidData {
             needed: max_p + 1,
@@ -929,17 +905,18 @@ fn cmo_batch_inner_into(
         step: sweep.period.2,
     })?;
     if out.len() != expected {
-        return Err(CmoError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(CmoError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
 
-    // 2a) Treat caller buffer as MaybeUninit and initialize only warm prefixes.
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    // 2b) Precompute per-step gain/loss and prefix sums once
     let len = data.len();
     let start = first + 1;
     let mut gains = vec![0.0f64; len];
@@ -957,7 +934,6 @@ fn cmo_batch_inner_into(
         pl[i + 1] = pl[i] + losses[i];
     }
 
-    // 2c) Now compute rows writing real values after warmup using precompute.
     let do_row = |row: usize, row_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let row_dst: &mut [f64] =
@@ -1058,13 +1034,11 @@ unsafe fn cmo_row_from_gl(
     let inv_period = 1.0 / (period as f64);
     let period_m1 = (period - 1) as f64;
 
-    // Warm-up sums via prefix differences
     let sum_gain = pg[init_end + 1] - pg[start];
     let sum_loss = pl[init_end + 1] - pl[start];
     let mut avg_gain = sum_gain * inv_period;
     let mut avg_loss = sum_loss * inv_period;
 
-    // First output at warm-up end
     {
         let sum_gl = avg_gain + avg_loss;
         *out.get_unchecked_mut(init_end) = if sum_gl != 0.0 {
@@ -1074,7 +1048,6 @@ unsafe fn cmo_row_from_gl(
         };
     }
 
-    // Rolling update using precomputed gains/losses
     let mut i = init_end + 1;
     while i < len {
         let g = *gains.get_unchecked(i);
@@ -1100,7 +1073,7 @@ unsafe fn cmo_row_from_gl(
 #[derive(Debug, Clone)]
 pub struct CmoStream {
     period: usize,
-    inv_period: f64, // 1/period (precomputed)
+    inv_period: f64,
     avg_gain: f64,
     avg_loss: f64,
     prev: f64,
@@ -1131,14 +1104,12 @@ impl CmoStream {
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Seed on the first observed value.
         if !self.started {
             self.prev = value;
             self.started = true;
             return None;
         }
 
-        // Branchless up/down decomposition
         let diff = value - self.prev;
         self.prev = value;
 
@@ -1146,7 +1117,6 @@ impl CmoStream {
         let gain = 0.5 * (ad + diff);
         let loss = 0.5 * (ad - diff);
 
-        // Warm-up: accumulate raw sums, then normalize once
         if !self.filled {
             self.avg_gain += gain;
             self.avg_loss += loss;
@@ -1167,7 +1137,6 @@ impl CmoStream {
             return None;
         }
 
-        // Rolling EMA-like (Wilder) update: avg += (x - avg) * inv_period
         let ip = self.inv_period;
         self.avg_gain = (gain - self.avg_gain).mul_add(ip, self.avg_gain);
         self.avg_loss = (loss - self.avg_loss).mul_add(ip, self.avg_loss);
@@ -1259,14 +1228,12 @@ pub fn cmo_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "cmo_batch: size overflow for rows={} cols={}",
-                rows, cols
-            ))
-        })?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "cmo_batch: size overflow for rows={} cols={}",
+            rows, cols
+        ))
+    })?;
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
@@ -1327,8 +1294,7 @@ pub fn cmo_cuda_batch_dev_py<'py>(
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx_arc = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .cmo_batch_dev(prices, &sweep)
+        cuda.cmo_batch_dev(prices, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
             .map(|inner| (inner, ctx_arc, dev_id))
     })?;
@@ -1374,8 +1340,7 @@ pub fn cmo_cuda_many_series_one_param_dev_py(
         let cuda = CudaCmo::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx_arc = cuda.context_arc();
         let dev_id = cuda.device_id();
-        cuda
-            .cmo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
+        cuda.cmo_many_series_one_param_time_major_dev(flat, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))
             .map(|inner| (inner, ctx_arc, dev_id))
     })?;
@@ -1392,10 +1357,9 @@ mod tests {
     use crate::skip_if_unsupported;
     use crate::utilities::data_loader::read_candles_from_csv;
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_cmo_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with an initial NaN prefix
         let mut data = vec![f64::NAN; 3];
         data.extend((0..256).map(|i| {
             let x = i as f64;
@@ -1404,10 +1368,8 @@ mod tests {
 
         let input = CmoInput::from_slice(&data, CmoParams::default());
 
-        // Baseline via Vec API
         let baseline = cmo_with_kernel(&input, Kernel::Auto)?.values;
 
-        // Preallocate output and compute via into API
         let mut out = vec![0.0; data.len()];
         cmo_into(&input, &mut out)?;
 
@@ -1556,7 +1518,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_cmo_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1564,7 +1525,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to increase coverage
         let test_periods = vec![7, 14, 21, 28];
 
         for period in test_periods {
@@ -1574,16 +1534,13 @@ mod tests {
             let input = CmoInput::from_candles(&candles, "close", params);
             let output = cmo_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1591,7 +1548,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1599,7 +1555,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1612,7 +1567,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_cmo_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1651,14 +1605,12 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (1usize..=50).prop_flat_map(|period| {
             (
                 prop::collection::vec(
                     (-1e6f64..1e6f64)
                         .prop_filter("finite and non-zero", |x| x.is_finite() && x.abs() > 1e-10),
-                    (period + 1).max(2)..400, 
+                    (period + 1).max(2)..400,
                 ),
                 Just(period),
             )
@@ -1675,11 +1627,8 @@ mod tests {
                 let CmoOutput { values: ref_out } =
                     cmo_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
                 let warmup = first_valid + period;
 
@@ -1692,7 +1641,6 @@ mod tests {
                     );
                 }
 
-                
                 if warmup < out.len() {
                     prop_assert!(
                         !out[warmup].is_nan(),
@@ -1701,12 +1649,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     prop_assert!(
                         y.is_nan() || (y >= -100.0 - 1e-9 && y <= 100.0 + 1e-9),
                         "CMO value {} at index {} outside bounds [-100, 100]",
@@ -1714,7 +1660,6 @@ mod tests {
                         i
                     );
 
-                    
                     if data[..=i].iter().all(|x| x.is_finite()) {
                         prop_assert!(
                             y.is_finite(),
@@ -1724,7 +1669,6 @@ mod tests {
                         );
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
 
@@ -1751,7 +1695,6 @@ mod tests {
                     );
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup < data.len() {
                     let cmo_val = out[warmup];
                     prop_assert!(
@@ -1762,7 +1705,6 @@ mod tests {
                     );
                 }
 
-                
                 let is_increasing = data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
                 if is_increasing && warmup < data.len() {
                     for i in warmup..data.len() {
@@ -1775,7 +1717,6 @@ mod tests {
                     }
                 }
 
-                
                 let is_decreasing = data.windows(2).all(|w| w[1] <= w[0] + 1e-10);
                 if is_decreasing && warmup < data.len() {
                     for i in warmup..data.len() {
@@ -1788,12 +1729,10 @@ mod tests {
                     }
                 }
 
-                
                 if period > 1 && warmup + 5 < data.len() {
-                    
                     let has_strong_gains = (warmup..data.len().min(warmup + 10))
                         .zip(warmup.saturating_sub(1)..data.len().saturating_sub(1).min(warmup + 9))
-                        .all(|(i, j)| data[i] > data[j] * 1.1); 
+                        .all(|(i, j)| data[i] > data[j] * 1.1);
 
                     if has_strong_gains {
                         let last_idx = data.len() - 1;
@@ -1840,7 +1779,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1848,15 +1786,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CmoBatchBuilder::new()
             .kernel(kernel)
-            .period_range(7, 28, 7) 
+            .period_range(7, 28, 7)
             .apply_candles(&c, "close")?;
 
-        
         for (idx, &val) in output.values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -1865,7 +1800,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1873,7 +1807,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1881,7 +1814,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {})",
@@ -1893,7 +1825,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1923,21 +1854,20 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cmo_js(data: &[f64], period: Option<usize>) -> Result<Vec<f64>, JsValue> {
     let params = CmoParams { period };
     let input = CmoInput::from_slice(data, params);
 
-    let mut output = vec![0.0; data.len()]; 
+    let mut output = vec![0.0; data.len()];
     cmo_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cmo_into(
     in_ptr: *const f64,
@@ -1955,7 +1885,6 @@ pub fn cmo_into(
         let input = CmoInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             cmo_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1970,7 +1899,7 @@ pub fn cmo_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cmo_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1979,7 +1908,7 @@ pub fn cmo_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cmo_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1989,13 +1918,13 @@ pub fn cmo_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CmoBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CmoBatchJsOutput {
     pub values: Vec<f64>,
@@ -2004,7 +1933,7 @@ pub struct CmoBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = cmo_batch)]
 pub fn cmo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: CmoBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2029,7 +1958,7 @@ pub fn cmo_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cmo_batch_into(
     in_ptr: *const f64,

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::epma::{
     epma_batch_with_kernel, EpmaBatchRange, EpmaBuilder, EpmaParams,
 };

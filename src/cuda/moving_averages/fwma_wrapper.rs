@@ -1,18 +1,3 @@
-//! CUDA wrapper for FWMA (Fibonacci Weighted Moving Average) kernels.
-//!
-//! Aligned with the ALMA wrapper API/policy:
-//! - PTX loaded with target-from-context and JIT O2→fallbacks
-//! - Policy-driven kernel selection (Plain only for FWMA today)
-//! - VRAM estimates + headroom checks; grid.y chunking (<= 65_535)
-//! - Warmup/NaN semantics identical to scalar reference
-//!
-//! Kernels expected (present minimal set):
-//! - "fwma_batch_f32"                          
-//! - "fwma_multi_series_one_param_f32"        
-//!
-//! Optional symbols may be added in the future (tiled/2x/on-device weights),
-//! but the wrapper preserves the public API and selection fields today.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -28,11 +13,9 @@ use cust::stream::{Stream, StreamFlags};
 use cust::sys as cuda_sys;
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -61,8 +44,6 @@ impl Default for CudaFwmaPolicy {
     }
 }
 
-
-
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -81,12 +62,25 @@ pub enum CudaFwmaError {
     InvalidInput(String),
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error("Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    #[error(
+        "Out of memory: required={required} bytes, free={free} bytes, headroom={headroom} bytes"
+    )]
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("arithmetic overflow while computing {context}")]
     ArithmeticOverflow { context: &'static str },
     #[error("Device mismatch: buffer device {buf}, current {current}")]
@@ -108,10 +102,8 @@ pub struct CudaFwma {
 }
 
 impl CudaFwma {
-    // ---- Keep these aligned with the kernel compile-time macros ----
-    // Must equal FWMA_TILE_T used when compiling the PTX (default 256 in .cu).
     const FWMA_TILE_T_HOST: u32 = 256;
-    // Must equal FWMA_TIME_STEPS_PER_BLOCK used by the many-series kernel (default 4 in .cu).
+
     const FWMA_TIME_STEPS_PER_BLOCK_HOST: u32 = 4;
 
     #[inline]
@@ -120,9 +112,8 @@ impl CudaFwma {
         func: &mut cust::function::Function,
         smem_bytes: usize,
     ) -> Result<(), CudaFwmaError> {
-        // Prefer shared memory over L1 (hint; driver may choose otherwise)
         let _ = func.set_cache_config(CacheConfig::PreferShared);
-        // Opt-in to larger dynamic shared memory and prefer SMEM carveout when supported
+
         unsafe {
             let raw = func.to_raw();
             let _ = cuda_sys::cuFuncSetAttribute(
@@ -144,7 +135,7 @@ impl CudaFwma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/fwma_kernel.ptx"));
-        // Try with target-from-context and O2, then relax progressively
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -152,7 +143,8 @@ impl CudaFwma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -195,9 +187,13 @@ impl CudaFwma {
         self.last_many
     }
     #[inline]
-    pub fn context_arc_clone(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc_clone(&self) -> Arc<Context> {
+        self._context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn synchronize(&self) -> Result<(), CudaFwmaError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -214,14 +210,25 @@ impl CudaFwma {
         mem_get_info().ok()
     }
     #[inline]
-    fn will_fit_required(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaFwmaError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+    fn will_fit_required(
+        required_bytes: usize,
+        headroom_bytes: usize,
+    ) -> Result<(), CudaFwmaError> {
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _)) = Self::device_mem_info() {
-            let need = required_bytes
-                .checked_add(headroom_bytes)
-                .ok_or(CudaFwmaError::ArithmeticOverflow { context: "required+headroom (bytes)" })?;
+            let need = required_bytes.checked_add(headroom_bytes).ok_or(
+                CudaFwmaError::ArithmeticOverflow {
+                    context: "required+headroom (bytes)",
+                },
+            )?;
             if need > free {
-                return Err(CudaFwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes });
+                return Err(CudaFwmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
             }
         }
         Ok(())
@@ -276,7 +283,11 @@ impl CudaFwma {
             if step == 0 || start == end {
                 return vec![start];
             }
-            let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+            let (lo, hi) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
             (lo..=hi).step_by(step).collect()
         }
         let periods = axis(range.period);
@@ -391,14 +402,15 @@ impl CudaFwma {
                 "series_len, n_combos, or max_period exceed i32::MAX".into(),
             ));
         }
-        // Select plain batch kernel (only variant available today)
-        let mut func = self
-            .module
-            .get_function("fwma_batch_f32")
-            .map_err(|_| CudaFwmaError::MissingKernelSymbol { name: "fwma_batch_f32" })?;
+
+        let mut func = self.module.get_function("fwma_batch_f32").map_err(|_| {
+            CudaFwmaError::MissingKernelSymbol {
+                name: "fwma_batch_f32",
+            }
+        })?;
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => Self::FWMA_TILE_T_HOST, // match device tile width
+            _ => Self::FWMA_TILE_T_HOST,
         };
         if block_x < Self::FWMA_TILE_T_HOST {
             return Err(CudaFwmaError::InvalidInput(format!(
@@ -407,21 +419,26 @@ impl CudaFwma {
                 Self::FWMA_TILE_T_HOST
             )));
         }
-        // Guard block size with device attribute (max threads per block)
+
         let dev = Device::get_device(self.device_id)?;
-        let max_tpb = dev
-            .get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        let max_tpb = dev.get_attribute(cust::device::DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if block_x > max_tpb {
-            return Err(CudaFwmaError::LaunchConfigTooLarge { gx: ((series_len as u32) + block_x - 1) / block_x, gy: n_combos as u32, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaFwmaError::LaunchConfigTooLarge {
+                gx: ((series_len as u32) + block_x - 1) / block_x,
+                gy: n_combos as u32,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
         let block: BlockSize = (block_x, 1, 1).into();
-        // Dynamic SMEM: weights (max_period) + input tile (block_x + max_period - 1)
+
         let shared_bytes = ((max_period + (block_x as usize + max_period - 1))
             * std::mem::size_of::<f32>()) as u32;
         self.set_kernel_smem_prefs(&mut func, shared_bytes as usize)?;
 
-        // Chunk grid.y and offset pointers for each slice
         for (start, len) in Self::grid_y_chunks(n_combos) {
             let grid: GridSize = (grid_x.max(1), len as u32, 1).into();
             unsafe {
@@ -446,7 +463,7 @@ impl CudaFwma {
                 self.stream.launch(&func, grid, block, shared_bytes, args)?;
             }
         }
-        // Introspection/logging once per scenario
+
         unsafe {
             let this = self as *const _ as *mut CudaFwma;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
@@ -480,36 +497,65 @@ impl CudaFwma {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = combos.len();
 
-        // VRAM estimate and headroom (64MB)
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
-        let prices_bytes = series_len
-            .checked_mul(sz_f32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "series_len*sizeof(f32)" })?;
-        let weights_elems = n_combos
-            .checked_mul(max_period)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "n_combos*max_period" })?;
-        let weights_bytes = weights_elems
-            .checked_mul(sz_f32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "weights_elems*sizeof(f32)" })?;
-        let periods_bytes = n_combos
-            .checked_mul(sz_i32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "n_combos*sizeof(i32)" })?;
-        let warms_bytes = n_combos
-            .checked_mul(sz_i32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "n_combos*sizeof(i32)" })?;
-        let out_elems = n_combos
-            .checked_mul(series_len)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "n_combos*series_len" })?;
+        let prices_bytes =
+            series_len
+                .checked_mul(sz_f32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "series_len*sizeof(f32)",
+                })?;
+        let weights_elems =
+            n_combos
+                .checked_mul(max_period)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "n_combos*max_period",
+                })?;
+        let weights_bytes =
+            weights_elems
+                .checked_mul(sz_f32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "weights_elems*sizeof(f32)",
+                })?;
+        let periods_bytes =
+            n_combos
+                .checked_mul(sz_i32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "n_combos*sizeof(i32)",
+                })?;
+        let warms_bytes =
+            n_combos
+                .checked_mul(sz_i32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "n_combos*sizeof(i32)",
+                })?;
+        let out_elems =
+            n_combos
+                .checked_mul(series_len)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "n_combos*series_len",
+                })?;
         let out_bytes = out_elems
             .checked_mul(sz_f32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "out_elems*sizeof(f32)" })?;
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "out_elems*sizeof(f32)",
+            })?;
         let required = prices_bytes
-            .checked_add(weights_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "prices+weights" })?
-            .checked_add(periods_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+periods" })?
-            .checked_add(warms_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+warms" })?
-            .checked_add(out_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+out" })?;
-        let headroom = 64 * 1024 * 1024; // ~64MB
+            .checked_add(weights_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "prices+weights",
+            })?
+            .checked_add(periods_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "…+periods",
+            })?
+            .checked_add(warms_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "…+warms"
+            })?
+            .checked_add(out_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+out" })?;
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_required(required, headroom)?;
 
         let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap() as i32).collect();
@@ -522,7 +568,8 @@ impl CudaFwma {
         let d_weights = DeviceBuffer::from_slice(&weights_flat)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_warms = DeviceBuffer::from_slice(&warms_i32)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(n_combos * series_len) }?;
 
         self.launch_batch_kernel(
             &d_prices, &d_weights, &d_periods, &d_warms, series_len, n_combos, max_period,
@@ -628,8 +675,10 @@ impl CudaFwma {
         let mut func = self
             .module
             .get_function("fwma_multi_series_one_param_f32")
-            .map_err(|_| CudaFwmaError::MissingKernelSymbol { name: "fwma_multi_series_one_param_f32" })?;
-        // Threads map across series (y), time tiles in x.
+            .map_err(|_| CudaFwmaError::MissingKernelSymbol {
+                name: "fwma_multi_series_one_param_f32",
+            })?;
+
         let block_x: u32 = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => 256,
@@ -639,11 +688,18 @@ impl CudaFwma {
         let grid_y = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Conservative launch validation (optional): ensure dims are non-zero and within typical limits
+
         if grid_x == 0 || grid_y == 0 || block_x == 0 {
-            return Err(CudaFwmaError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaFwmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
-        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32; // weights only
+        let shared_bytes = (period * std::mem::size_of::<f32>()) as u32;
         self.set_kernel_smem_prefs(&mut func, shared_bytes as usize)?;
 
         unsafe {
@@ -666,7 +722,6 @@ impl CudaFwma {
             self.stream.launch(&func, grid, block, shared_bytes, args)?;
         }
 
-        // Introspection/logging
         unsafe {
             let this = self as *const _ as *mut CudaFwma;
             (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x });
@@ -712,28 +767,47 @@ impl CudaFwma {
         let (first_valids, weights, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        // VRAM estimate
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let prices_elems = cols
             .checked_mul(rows)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "cols*rows" })?;
-        let prices_bytes = prices_elems
-            .checked_mul(sz_f32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "prices_elems*sizeof(f32)" })?;
-        let weights_bytes = period
-            .checked_mul(sz_f32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "period*sizeof(f32)" })?;
-        let first_valid_bytes = cols
-            .checked_mul(sz_i32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "cols*sizeof(i32)" })?;
-        let out_bytes = prices_elems
-            .checked_mul(sz_f32)
-            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "out_elems*sizeof(f32)" })?;
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "cols*rows",
+            })?;
+        let prices_bytes =
+            prices_elems
+                .checked_mul(sz_f32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "prices_elems*sizeof(f32)",
+                })?;
+        let weights_bytes =
+            period
+                .checked_mul(sz_f32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "period*sizeof(f32)",
+                })?;
+        let first_valid_bytes =
+            cols.checked_mul(sz_i32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "cols*sizeof(i32)",
+                })?;
+        let out_bytes =
+            prices_elems
+                .checked_mul(sz_f32)
+                .ok_or(CudaFwmaError::ArithmeticOverflow {
+                    context: "out_elems*sizeof(f32)",
+                })?;
         let required = prices_bytes
-            .checked_add(weights_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "prices+weights" })?
-            .checked_add(first_valid_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+first_valids" })?
-            .checked_add(out_bytes).ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+out" })?;
+            .checked_add(weights_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "prices+weights",
+            })?
+            .checked_add(first_valid_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow {
+                context: "…+first_valids",
+            })?
+            .checked_add(out_bytes)
+            .ok_or(CudaFwmaError::ArithmeticOverflow { context: "…+out" })?;
         let headroom = 32 * 1024 * 1024;
         Self::will_fit_required(required, headroom)?;
 
@@ -793,15 +867,12 @@ impl CudaFwma {
         )?;
         self.stream.synchronize()?;
 
-        // Use pinned buffer for potentially large copies
         let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(cols * rows)? };
         d_out_tm.copy_to(out_tm)?;
 
         Ok(())
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;

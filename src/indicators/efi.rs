@@ -1,33 +1,3 @@
-//! # Elder's Force Index (EFI)
-//!
-//! The Elder's Force Index (EFI) measures the power behind a price move using both price change and volume.
-//! EFI is typically calculated by taking the difference in price (current - previous) multiplied by volume,
-//! and then applying an EMA to that result.
-//!
-//! ## Parameters
-//! - **period**: Window size for the EMA (defaults to 13)
-//!
-//! ## Inputs
-//! - **price**: Price data (typically close prices)
-//! - **volume**: Volume data
-//!
-//! ## Returns
-//! - **`Ok(EfiOutput)`** containing values (Vec<f64>) representing force index
-//! - Output length matches input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - Decision log: SIMD stubs delegate to scalar; CUDA present; scalar is fastest for single-series today (>5%); outputs unchanged.
-//! - SIMD: AVX2/AVX512 are intentionally stubs that delegate to the optimized scalar path.
-//!   EFI uses an EMA recurrence with a strict loop-carried dependency; single-series
-//!   wide vectorization underperforms a tuned scalar loop. Runtime selection keeps
-//!   scalar as the fastest path today (documented decision).
-//! - Streaming: ✅ EfiStream uses error-form EMA + FMA and branchless NaN
-//!   checks; semantics match batch exactly with O(1) updates.
-//! - Memory optimization: ✅ Uses alloc_with_nan_prefix (zero-copy) when allocating.
-//! - Batch operations: ✅ Implemented with parallel processing support; CUDA wrapper
-//!   returns VRAM handles with CAI v3 + DLPack v1.x for Python interop.
-//! - Row-specific batch: ✅ Precomputes raw diffs once and shares across rows.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -50,12 +20,12 @@ use aligned_vec::{AVec, CACHELINE_ALIGN};
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -69,13 +39,12 @@ use std::sync::Arc;
 fn first_valid_diff_index(price: &[f64], volume: &[f64], first_valid_idx: usize) -> usize {
     let mut i = first_valid_idx.saturating_add(1);
     while i < price.len() {
-        
         if !price[i].is_nan() && !price[i - 1].is_nan() && !volume[i].is_nan() {
             return i;
         }
         i += 1;
     }
-    price.len() 
+    price.len()
 }
 
 impl<'a> AsRef<[f64]> for EfiInput<'a> {
@@ -106,7 +75,10 @@ pub struct EfiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct EfiParams {
     pub period: Option<usize>,
 }
@@ -222,7 +194,11 @@ pub enum EfiError {
     #[error("efi: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("efi: Invalid range expansion: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("efi: Invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
@@ -264,9 +240,8 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
         });
     }
 
-    let warm = first_valid_diff_index(price, volume, first); 
+    let warm = first_valid_diff_index(price, volume, first);
     let chosen = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -290,17 +265,11 @@ pub fn efi_with_kernel(input: &EfiInput, kernel: Kernel) -> Result<EfiOutput, Ef
     Ok(EfiOutput { values: out })
 }
 
-/// Writes EFI values into the provided output slice without allocating.
-///
-/// - Preserves NaN warmup prefixes exactly as the Vec-returning API.
-/// - The `out` slice length must equal the input length.
-/// - Uses `Kernel::Auto` for runtime dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn efi_into(input: &EfiInput, out: &mut [f64]) -> Result<(), EfiError> {
     efi_into_slice(out, input, Kernel::Auto)
 }
 
-/// Write EFI directly to output slice - no allocations
 pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result<(), EfiError> {
     let (price, volume): (&[f64], &[f64]) = match &input.data {
         EfiData::Candles { candles, source } => (source_type(candles, source), &candles.volume),
@@ -312,7 +281,10 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
     }
     let len = price.len();
     if dst.len() != len {
-        return Err(EfiError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(EfiError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let period = input.get_period();
@@ -338,7 +310,6 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
 
     let warm = first_valid_diff_index(price, volume, first);
     let chosen = match kern {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -354,7 +325,6 @@ pub fn efi_into_slice(dst: &mut [f64], input: &EfiInput, kern: Kernel) -> Result
         }
     }
 
-    
     for v in &mut dst[..warm] {
         *v = f64::NAN;
     }
@@ -374,22 +344,19 @@ pub fn efi_scalar(
         return;
     }
 
-    
     let start = first_valid_diff_index(price, volume, first_valid_idx);
     if start >= len {
-        return; 
+        return;
     }
 
     let alpha = 2.0 / (period as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    
     unsafe {
         let p_ptr = price.as_ptr();
         let v_ptr = volume.as_ptr();
         let o_ptr = out.as_mut_ptr();
 
-        
         let p_cur = *p_ptr.add(start);
         let p_prev = *p_ptr.add(start - 1);
         let v_cur = *v_ptr.add(start);
@@ -397,17 +364,15 @@ pub fn efi_scalar(
         *o_ptr.add(start) = prev;
         let mut prev_price = p_cur;
 
-        
         let mut i = start + 1;
         while i < len {
             let pc = *p_ptr.add(i);
             let vc = *v_ptr.add(i);
 
-            
             let valid = (pc == pc) & (prev_price == prev_price) & (vc == vc);
             if valid {
                 let diff = (pc - prev_price) * vc;
-                
+
                 prev = alpha.mul_add(diff, one_minus_alpha * prev);
             }
             *o_ptr.add(i) = prev;
@@ -500,34 +465,27 @@ impl EfiStream {
 
     #[inline(always)]
     pub fn update(&mut self, price: f64, volume: f64) -> Option<f64> {
-        
         if !self.has_last {
             self.last_price = price;
             self.has_last = true;
             return None;
         }
 
-        
-        
         let valid = (price == price) & (self.last_price == self.last_price) & (volume == volume);
 
-        
         if !valid {
             let out = if self.filled { self.prev } else { f64::NAN };
-            self.last_price = price; 
+            self.last_price = price;
             return Some(out);
         }
 
-        
         let diff = (price - self.last_price) * volume;
 
-        
         let out = if !self.filled {
             self.prev = diff;
             self.filled = true;
             diff
         } else {
-            
             self.prev = self.alpha.mul_add(diff - self.prev, self.prev);
             self.prev
         };
@@ -607,7 +565,6 @@ pub fn efi_batch_with_kernel(
     k: Kernel,
 ) -> Result<EfiBatchOutput, EfiError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(EfiError::InvalidKernelForBatch(other)),
@@ -646,32 +603,35 @@ impl EfiBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &EfiBatchRange) -> Vec<EfiParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        
         if step == 0 || start == end {
             return vec![start];
         }
         let mut out = Vec::new();
         if start < end {
-            
             let mut v = start;
             while v <= end {
                 out.push(v);
                 match v.checked_add(step) {
                     Some(n) => {
-                        if n == v { break; }
+                        if n == v {
+                            break;
+                        }
                         v = n;
                     }
                     None => break,
                 }
             }
         } else {
-            
             let mut v = start;
             loop {
                 out.push(v);
-                if v <= end { break; }
+                if v <= end {
+                    break;
+                }
                 let next = v.saturating_sub(step);
-                if next == v { break; }
+                if next == v {
+                    break;
+                }
                 v = next;
             }
         }
@@ -715,7 +675,11 @@ fn efi_batch_inner(
 ) -> Result<EfiBatchOutput, EfiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(EfiError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     let first = price
@@ -733,17 +697,18 @@ fn efi_batch_inner(
 
     let rows = combos.len();
     let cols = price.len();
-    
-    let _cap = rows
-        .checked_mul(cols)
-        .ok_or(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+
+    let _cap = rows.checked_mul(cols).ok_or(EfiError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     let warm = first_valid_diff_index(price, volume, first);
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm_prefixes = vec![warm; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm_prefixes);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
@@ -830,7 +795,6 @@ unsafe fn efi_row_avx512_long(
     efi_scalar(price, volume, period, first, out);
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "efi")]
 #[pyo3(signature = (price, volume, period, kernel=None))]
@@ -883,7 +847,6 @@ impl EfiStreamPy {
     }
 }
 
-// Helper function for batch operations to write directly to output slice
 #[inline(always)]
 fn efi_batch_inner_into(
     price: &[f64],
@@ -895,7 +858,11 @@ fn efi_batch_inner_into(
 ) -> Result<Vec<EfiParams>, EfiError> {
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        return Err(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 });
+        return Err(EfiError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
+        });
     }
 
     let first = price
@@ -914,14 +881,18 @@ fn efi_batch_inner_into(
     let cols = price.len();
     let warm = first_valid_diff_index(price, volume, first);
 
-    // Validate destination length and initialize NaN prefixes per row based on warmup period
     let rows = combos.len();
     let cols = price.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(EfiError::InvalidRange { start: sweep.period.0, end: sweep.period.1, step: sweep.period.2 })?;
+    let expected = rows.checked_mul(cols).ok_or(EfiError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
     if out.len() != expected {
-        return Err(EfiError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(EfiError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
     for row in 0..rows {
         let row_start = row * cols;
@@ -930,7 +901,6 @@ fn efi_batch_inner_into(
         }
     }
 
-    // treat destination as uninitialized to avoid redundant writes (after setting prefixes)
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -938,9 +908,6 @@ fn efi_batch_inner_into(
         )
     };
 
-    // Precompute raw diffs once for all rows into MaybeUninit buffer.
-    // We only write indices that are valid; others remain uninitialized and will be
-    // treated as "carry prev" in the row EMA stage (using price/volume to check validity).
     let mut fi_raw_mu: Vec<std::mem::MaybeUninit<f64>> = Vec::with_capacity(cols);
     unsafe {
         fi_raw_mu.set_len(cols);
@@ -962,7 +929,6 @@ fn efi_batch_inner_into(
         }
     }
 
-    // Row compute using precomputed diffs. AVX* variants remain stubs delegating to this path.
     let row_fn = |row: usize, dst_row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
         let dst: &mut [f64] =
@@ -1011,7 +977,7 @@ fn efi_row_from_precomputed(
     unsafe {
         let r_ptr = fi_raw.as_ptr();
         let o_ptr = out.as_mut_ptr();
-        // `start` is guaranteed valid by construction of `warm`
+
         let mut prev = (*r_ptr.add(start)).assume_init();
         *o_ptr.add(start) = prev;
         let mut i = start + 1;
@@ -1054,9 +1020,9 @@ pub fn efi_batch_py<'py>(
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = price_slice.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or_else(|| PyValueError::new_err("efi: Invalid range expansion (rows*cols overflow)"))?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        PyValueError::new_err("efi: Invalid range expansion (rows*cols overflow)")
+    })?;
 
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
@@ -1091,7 +1057,7 @@ pub fn efi_batch_py<'py>(
     Ok(dict)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn efi_js(price: &[f64], volume: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = EfiParams {
@@ -1099,14 +1065,14 @@ pub fn efi_js(price: &[f64], volume: &[f64], period: usize) -> Result<Vec<f64>, 
     };
     let input = EfiInput::from_slices(price, volume, params);
 
-    let mut output = vec![0.0; price.len()]; 
+    let mut output = vec![0.0; price.len()];
     efi_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn efi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1115,7 +1081,7 @@ pub fn efi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn efi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1125,7 +1091,7 @@ pub fn efi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn efi_into(
     in_price_ptr: *const f64,
@@ -1146,7 +1112,6 @@ pub fn efi_into(
         };
         let input = EfiInput::from_slices(price, volume, params);
 
-        
         if in_price_ptr == out_ptr || in_volume_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             efi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1162,13 +1127,13 @@ pub fn efi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EfiBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EfiBatchJsOutput {
     pub values: Vec<f64>,
@@ -1177,7 +1142,7 @@ pub struct EfiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = efi_batch)]
 pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: EfiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1200,8 +1165,6 @@ pub fn efi_batch_js(price: &[f64], volume: &[f64], config: JsValue) -> Result<Js
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
-
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -1231,7 +1194,7 @@ impl EfiDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Producer stream is synchronized before returning, so no "stream" key is required.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1249,8 +1212,7 @@ impl EfiDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1270,7 +1232,6 @@ impl EfiDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let inner = self
             .inner
             .take()
@@ -1318,8 +1279,7 @@ pub fn efi_cuda_batch_dev_py(
         period: period_range,
     };
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaEfi::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id() as i32;
         let arr = cuda
@@ -1364,8 +1324,7 @@ pub fn efi_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaEfi::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda = CudaEfi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id() as i32;
         let arr = cuda
@@ -1380,7 +1339,7 @@ pub fn efi_cuda_many_series_one_param_dev_py(
     })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn efi_batch_into(
     in_price_ptr: *const f64,
@@ -1412,7 +1371,6 @@ pub fn efi_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Find first valid index and calculate warmup
         let first = price
             .iter()
             .zip(volume.iter())
@@ -1421,7 +1379,6 @@ pub fn efi_batch_into(
 
         let warm = first_valid_diff_index(price, volume, first);
 
-        // Initialize NaN prefixes for each row (matching efi_batch_inner pattern)
         for row in 0..rows {
             let row_start = row * cols;
             for i in 0..warm.min(cols) {
@@ -1465,7 +1422,7 @@ mod tests {
             -39811.02321812391,
             -36599.9671820205,
             -29903.28014503471,
-            -55406.382981, // Updated to match actual calculation
+            -55406.382981,
         ];
         let start = result.values.len().saturating_sub(5);
         for (i, &val) in result.values[start..].iter().enumerate() {
@@ -1574,19 +1531,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            EfiParams::default(),            // period: 13
-            EfiParams { period: Some(2) },   // minimum viable
-            EfiParams { period: Some(5) },   // small
-            EfiParams { period: Some(7) },   // small
-            EfiParams { period: Some(10) },  // small-medium
-            EfiParams { period: Some(20) },  // medium
-            EfiParams { period: Some(30) },  // medium-large
-            EfiParams { period: Some(50) },  // large
-            EfiParams { period: Some(100) }, // very large
-            EfiParams { period: Some(200) }, // extremely large
-            EfiParams { period: Some(500) }, // maximum reasonable
+            EfiParams::default(),
+            EfiParams { period: Some(2) },
+            EfiParams { period: Some(5) },
+            EfiParams { period: Some(7) },
+            EfiParams { period: Some(10) },
+            EfiParams { period: Some(20) },
+            EfiParams { period: Some(30) },
+            EfiParams { period: Some(50) },
+            EfiParams { period: Some(100) },
+            EfiParams { period: Some(200) },
+            EfiParams { period: Some(500) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1595,12 +1551,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1632,7 +1587,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_efi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1644,13 +1599,10 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy for generating realistic price and volume data
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                // Generate base price, volatility, and data length
                 (100f64..10000f64, 0.01f64..0.05f64, period + 10..400)
                     .prop_flat_map(move |(base_price, volatility, data_len)| {
-                        // Generate random changes for price movement and volume variations
                         (
                             Just(base_price),
                             Just(volatility),
@@ -1667,19 +1619,16 @@ mod tests {
                             price_changes,
                             volume_multipliers,
                         )| {
-                            // Generate synthetic price data with realistic movement
                             let mut price = Vec::with_capacity(data_len);
                             let mut volume = Vec::with_capacity(data_len);
                             let mut current_price = base_price;
-                            let base_volume = 1000000.0; // Base volume of 1M
+                            let base_volume = 1000000.0;
 
                             for i in 0..data_len {
-                                // Random walk for price with volatility
                                 let change = price_changes[i] * volatility * current_price;
-                                current_price = (current_price + change).max(10.0); // Prevent negative prices
+                                current_price = (current_price + change).max(10.0);
                                 price.push(current_price);
 
-                                // Generate volume with some variation
                                 let daily_volume = base_volume * volume_multipliers[i];
                                 volume.push(daily_volume);
                             }
@@ -1700,20 +1649,15 @@ mod tests {
             let EfiOutput { values: out } = efi_with_kernel(&input, kernel).unwrap();
             let EfiOutput { values: ref_out } = efi_with_kernel(&input, Kernel::Scalar).unwrap();
 
-            // Property 1: Output length matches input
             prop_assert_eq!(out.len(), price.len(), "Output length mismatch");
 
-            // Property 2: First value should be NaN (warmup period)
             prop_assert!(out[0].is_nan(), "First value should be NaN");
 
-            // Property 3: When price is constant (no changes), EFI should approach 0
-            // Check if we have any periods of constant price
             let constant_start = price
                 .windows(3)
                 .position(|w| w.iter().all(|&p| (p - w[0]).abs() < 1e-9));
 
             if let Some(start) = constant_start {
-                // Find how long the constant period lasts
                 let mut constant_end = start + 3;
                 while constant_end < price.len()
                     && (price[constant_end] - price[start]).abs() < 1e-9
@@ -1721,8 +1665,6 @@ mod tests {
                     constant_end += 1;
                 }
 
-                // After a few periods of constant price, EFI should be very close to 0
-                // (price_change = 0, so EFI = EMA of 0 = approaches 0)
                 if constant_end - start >= period && constant_end < price.len() {
                     let check_idx = constant_end - 1;
                     if out[check_idx].is_finite() {
@@ -1736,7 +1678,6 @@ mod tests {
                 }
             }
 
-            // Property 4: Kernel consistency - compare with scalar reference
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
@@ -1744,7 +1685,6 @@ mod tests {
                 let y_bits = y.to_bits();
                 let r_bits = r.to_bits();
 
-                // Handle NaN/infinite values
                 if !y.is_finite() || !r.is_finite() {
                     prop_assert_eq!(
                         y_bits,
@@ -1757,7 +1697,6 @@ mod tests {
                     continue;
                 }
 
-                // Use ULP comparison for finite values
                 let ulp_diff: u64 = y_bits.abs_diff(r_bits);
                 prop_assert!(
                     (y - r).abs() <= 1e-9 || ulp_diff <= 4,
@@ -1769,9 +1708,6 @@ mod tests {
                 );
             }
 
-            // Property 5: EMA smoothing behavior
-            // Verify that EFI exhibits proper exponential smoothing
-            // The change between consecutive EFI values should be proportional to alpha
             let alpha = 2.0 / (period as f64 + 1.0);
             for i in 2..out.len() {
                 if out[i].is_finite()
@@ -1780,16 +1716,11 @@ mod tests {
                     && price[i - 1].is_finite()
                     && volume[i].is_finite()
                 {
-                    // Calculate the raw force index for this point
                     let raw_fi = (price[i] - price[i - 1]) * volume[i];
 
-                    // EFI[i] should be: alpha * raw_fi + (1 - alpha) * EFI[i-1]
-                    // So the expected value is:
                     let expected = alpha * raw_fi + (1.0 - alpha) * out[i - 1];
 
-                    // Allow for small numerical errors
                     if (out[i] - expected).abs() > 1e-9 {
-                        // Only check if we're past the initial warmup fluctuations
                         if i > period + 1 {
                             prop_assert!(
                                 (out[i] - expected).abs() < 1e-6,
@@ -1868,15 +1799,15 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),     
-            (5, 25, 5),     
-            (30, 100, 10),  
-            (2, 5, 1),      
-            (10, 10, 0),    
-            (13, 13, 0),    
-            (50, 50, 0),    
-            (7, 21, 7),     
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 100, 10),
+            (2, 5, 1),
+            (10, 10, 0),
+            (13, 13, 0),
+            (50, 50, 0),
+            (7, 21, 7),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1973,16 +1904,14 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_efi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let len = 256usize;
         let mut price = vec![0.0; len];
         let mut volume = vec![0.0; len];
 
-        price[0] = f64::NAN; 
+        price[0] = f64::NAN;
         volume[0] = 1_000.0;
         for i in 1..len {
             price[i] = 100.0 + (i as f64) * 0.5;
@@ -1991,10 +1920,8 @@ mod tests {
 
         let input = EfiInput::from_slices(&price, &volume, EfiParams::default());
 
-        
         let baseline = efi(&input)?.values;
 
-        
         let mut out = vec![0.0; len];
         efi_into(&input, &mut out)?;
 

@@ -1,22 +1,3 @@
-//! # Awesome Oscillator (AO)
-//!
-//! A momentum indicator by Bill Williams, showing market momentum by comparing short and long period SMAs of median price (hl2).
-//!
-//! ## Parameters
-//! - **short_period**: Window for short SMA (default: 5)
-//! - **long_period**: Window for long SMA (default: 34)
-//!
-//! ## Returns
-//! - **`Ok(AoOutput)`** with Vec<f64> of same length as input, leading values are NaN
-//! - **`Err(AoError)`** otherwise
-//!
-//! ## Developer Status
-//! - **SIMD**: Implemented (prefix-sum engine), but disabled at runtime for this indicator due to strict ULP tolerance in property tests. AVX2/AVX512 entry points currently delegate to scalar for correctness.
-//! - **Scalar**: Optimized streaming loop with preloaded rolling sums and `mul_add` for FMA.
-//! - **Streaming update**: O(1) - Efficient rolling sums for both SMAs.
-//! - **CUDA**: Enabled with VRAM-backed handles; host builds DS prefixes and checks launch/memory limits for safety.
-//! - **Memory**: Uses zero-copy helpers for outputs; SIMD path builds a per-call prefix array.
-//! - **Note**: SIMD shows benefits at 10k–1M sizes; scalar kept as reference path.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -26,12 +7,14 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -39,8 +22,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
@@ -83,7 +64,10 @@ pub struct AoOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AoParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -221,7 +205,11 @@ pub enum AoError {
     #[error("ao: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("ao: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("ao: invalid input: {0}")]
     InvalidInput(String),
 }
@@ -231,13 +219,7 @@ pub fn ao(input: &AoInput) -> Result<AoOutput, AoError> {
     ao_with_kernel(input, Kernel::Auto)
 }
 
-/// Compute Awesome Oscillator (AO) into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly like `ao()` (quiet NaN prefix using the same pattern as
-///   `alloc_with_nan_prefix`).
-/// - The output slice length must equal the input length; returns `AoError::OutputLenMismatch`
-///   on mismatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
     let (data, short, long, first, len) = ao_prepare(input)?;
     if out.len() != len {
@@ -247,14 +229,12 @@ pub fn ao_into(input: &AoInput, out: &mut [f64]) -> Result<(), AoError> {
         });
     }
 
-    
     let warmup_end = first + long - 1;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     for v in &mut out[..warmup_end.min(len)] {
         *v = qnan;
     }
 
-    
     let chosen = detect_best_kernel();
     unsafe {
         match chosen {
@@ -341,10 +321,8 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
         other => other,
     };
 
-    // Calculate warmup period
     let warmup_period = first + long - 1;
 
-    // Use zero-copy allocation helper
     let mut out = alloc_with_nan_prefix(len, warmup_period);
 
     unsafe {
@@ -361,7 +339,6 @@ pub fn ao_with_kernel(input: &AoInput, kernel: Kernel) -> Result<AoOutput, AoErr
     Ok(AoOutput { values: out })
 }
 
-// Helper function to compute hl2 from high/low arrays with zero-copy allocation
 #[inline]
 pub fn compute_hl2(high: &[f64], low: &[f64]) -> Result<Vec<f64>, AoError> {
     if high.len() != low.len() {
@@ -375,9 +352,8 @@ pub fn compute_hl2(high: &[f64], low: &[f64]) -> Result<Vec<f64>, AoError> {
     }
 
     let mut out = alloc_with_nan_prefix(high.len(), 0);
-    // Safe: we write every element before any read.
+
     for i in 0..high.len() {
-        // unchecked to avoid bounds checks in tight loop
         unsafe {
             *out.get_unchecked_mut(i) = (*high.get_unchecked(i) + *low.get_unchecked(i)) * 0.5;
         }
@@ -385,7 +361,6 @@ pub fn compute_hl2(high: &[f64], low: &[f64]) -> Result<Vec<f64>, AoError> {
     Ok(out)
 }
 
-// Scalar implementation — optimized single streaming loop with preloaded sums
 #[inline(always)]
 pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
     let len = data.len();
@@ -403,8 +378,6 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
     unsafe {
         let base = data.as_ptr();
 
-        // Preload rolling sums right up to (but not including) the first write index `warm`.
-        // long_sum covers [first .. warm-1] (long-1 elements)
         let mut long_sum = 0.0f64;
         let mut p = base.add(first);
         for _ in 0..(long - 1) {
@@ -412,7 +385,6 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
             p = p.add(1);
         }
 
-        // short_sum covers the last (short-1) elements of that long window prefix
         let mut short_sum = 0.0f64;
         let mut ps = base.add(first + long - short);
         for _ in 0..(short - 1) {
@@ -420,16 +392,14 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
             ps = ps.add(1);
         }
 
-        // Set up pointers for a tight streaming loop
         let mut head = base.add(warm);
         let mut tail_long = base.add(first);
         let mut tail_short = base.add(first + long - short);
         let mut outp = out.as_mut_ptr().add(warm);
 
         let mut i = warm;
-        // Unroll by 2 for reduced loop overhead
+
         while i + 1 < len {
-            // iteration i
             let v0 = *head;
             long_sum += v0;
             short_sum += v0;
@@ -442,7 +412,6 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
             outp = outp.add(1);
             i += 1;
 
-            // iteration i+1
             let v1 = *head;
             long_sum += v1;
             short_sum += v1;
@@ -456,7 +425,6 @@ pub fn ao_scalar(data: &[f64], short: usize, long: usize, first: usize, out: &mu
             i += 1;
         }
 
-        // tail for odd count
         while i < len {
             let v = *head;
             long_sum += v;
@@ -486,7 +454,6 @@ pub fn ao_avx512(data: &[f64], short: usize, long: usize, first: usize, out: &mu
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub fn ao_avx2(data: &[f64], short: usize, long: usize, first: usize, out: &mut [f64]) {
-    // Disabled due to strict ULP tolerance in property tests; delegate to scalar
     unsafe { ao_scalar(data, short, long, first, out) }
 }
 
@@ -499,7 +466,6 @@ pub unsafe fn ao_avx512_short(
     first: usize,
     out: &mut [f64],
 ) {
-    // Disabled due to strict ULP tolerance in property tests; delegate to scalar
     ao_scalar(data, short, long, first, out)
 }
 
@@ -512,7 +478,6 @@ pub unsafe fn ao_avx512_long(
     first: usize,
     out: &mut [f64],
 ) {
-    // Disabled due to strict ULP tolerance in property tests; delegate to scalar
     ao_scalar(data, short, long, first, out)
 }
 
@@ -536,7 +501,6 @@ unsafe fn ao_avx2_prefixsum(
         return;
     }
 
-    // Build prefix sums over data[first..]
     let suffix_len = len - first;
     let mut pref = Vec::<f64>::with_capacity(suffix_len + 1);
     pref.push(0.0);
@@ -548,13 +512,12 @@ unsafe fn ao_avx2_prefixsum(
     }
     let pref_ptr = pref.as_ptr();
 
-    let n_out = len - warm; // number of outputs written
+    let n_out = len - warm;
     let out_base = out.as_mut_ptr().add(warm);
 
     let inv_s = _mm256_set1_pd(1.0 / (short as f64));
     let inv_l = _mm256_set1_pd(1.0 / (long as f64));
 
-    // For output index warm (= first + long - 1), pref index is i_cur = long
     let cur0 = pref_ptr.add(long);
     let mut cur = cur0;
     let mut prev_s = cur0.sub(short);
@@ -581,7 +544,6 @@ unsafe fn ao_avx2_prefixsum(
         dst = dst.add(4);
     }
 
-    // Tail (0..3)
     let tail = n_out & 3;
     for t in 0..tail {
         let i_cur = long + (vec_chunks * 4 + t);
@@ -614,7 +576,6 @@ unsafe fn ao_avx512_prefixsum(
         return;
     }
 
-    // Build prefix over data[first..]
     let suffix_len = len - first;
     let mut pref = Vec::<f64>::with_capacity(suffix_len + 1);
     pref.push(0.0);
@@ -669,21 +630,20 @@ unsafe fn ao_avx512_prefixsum(
         *dst.add(t) = y.mul_add(1.0 / (short as f64), -(z * (1.0 / (long as f64))));
     }
 }
-// Streaming AO — single-ring, modulo-free O(1) updates.
-// Decision: Switched to one circular buffer (size = long), no modulo or NaN sentinels; identical outputs, faster hot path.
+
 #[derive(Debug, Clone)]
 pub struct AoStream {
     short: usize,
     long: usize,
     inv_short: f64,
     inv_long: f64,
-    // Circular buffer of last `long` values
+
     buf: Vec<f64>,
-    // Next write position in `buf`
+
     head: usize,
-    // Number of valid elements currently in the buffer (<= long)
+
     filled: usize,
-    // Running sums
+
     short_sum: f64,
     long_sum: f64,
 }
@@ -711,17 +671,14 @@ impl AoStream {
         })
     }
 
-    /// Push one hl2 value. Returns AO after warmup (when `filled == long`), else `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        // Value leaving the long window (valid once buffer is full)
         let old_long = if self.filled == self.long {
             self.buf[self.head]
         } else {
             0.0
         };
 
-        // Value leaving the short window (valid once we have at least `short` samples)
         let old_short = if self.filled >= self.short {
             let idx = if self.head >= self.short {
                 self.head - self.short
@@ -733,25 +690,20 @@ impl AoStream {
             0.0
         };
 
-        // Write the new sample
         self.buf[self.head] = value;
 
-        // Advance head with predictable wrap (avoid `%`)
         self.head += 1;
         if self.head == self.long {
             self.head = 0;
         }
 
-        // Update counts
         if self.filled < self.long {
             self.filled += 1;
         }
 
-        // Update rolling sums in O(1)
         self.long_sum += value - old_long;
         self.short_sum += value - old_short;
 
-        // Emit AO when long window is ready
         if self.filled == self.long {
             Some(
                 self.short_sum
@@ -762,7 +714,6 @@ impl AoStream {
         }
     }
 
-    /// Optional: reset internal state without reallocating the buffer
     #[inline(always)]
     pub fn reset(&mut self) {
         self.head = 0;
@@ -775,7 +726,6 @@ impl AoStream {
     }
 }
 
-// Batch/grid support
 #[derive(Clone, Debug)]
 pub struct AoBatchRange {
     pub short_period: (usize, usize, usize),
@@ -895,7 +845,9 @@ fn expand_grid_checked(r: &AoBatchRange) -> Result<Vec<AoParams>, AoError> {
                 out.push(v);
                 match v.checked_add(step) {
                     Some(next) => {
-                        if next == v { break; }
+                        if next == v {
+                            break;
+                        }
                         v = next;
                     }
                     None => break,
@@ -905,9 +857,13 @@ fn expand_grid_checked(r: &AoBatchRange) -> Result<Vec<AoParams>, AoError> {
             let mut v = start;
             while v >= end {
                 out.push(v);
-                if v < end + step { break; }
+                if v < end + step {
+                    break;
+                }
                 v -= step;
-                if v == 0 { break; }
+                if v == 0 {
+                    break;
+                }
             }
         }
         if out.is_empty() {
@@ -934,7 +890,9 @@ fn expand_grid_checked(r: &AoBatchRange) -> Result<Vec<AoParams>, AoError> {
         }
     }
     if out.is_empty() {
-        return Err(AoError::InvalidInput("no valid parameter combinations".into()));
+        return Err(AoError::InvalidInput(
+            "no valid parameter combinations".into(),
+        ));
     }
     Ok(out)
 }
@@ -1011,7 +969,6 @@ fn ao_batch_inner_into(
     Ok(combos)
 }
 
-// Original batch function that allocates its own storage
 #[inline(always)]
 fn ao_batch_inner(
     data: &[f64],
@@ -1027,7 +984,6 @@ fn ao_batch_inner(
         return Err(AoError::EmptyInputData);
     }
 
-    // Validate BEFORE allocation to prevent memory leaks
     let first = data
         .iter()
         .position(|x| !x.is_nan())
@@ -1040,38 +996,29 @@ fn ao_batch_inner(
         });
     }
 
-    // Guard rows*cols overflow before allocation
     let _total = rows
         .checked_mul(cols)
         .ok_or_else(|| AoError::InvalidInput("rows*cols overflow".into()))?;
 
-    // Now safe to allocate - we've validated all error conditions
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warm: Vec<usize> = combos
         .iter()
         .map(|c| first + c.long_period.unwrap() - 1)
         .collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values_ptr = buf_guard.as_mut_ptr() as *mut f64;
     let values_len = buf_guard.len();
     let values_cap = buf_guard.capacity();
 
     let values = unsafe {
-        
         let slice = std::slice::from_raw_parts_mut(values_ptr, values_len);
 
-        
-        
         ao_batch_inner_into(data, sweep, kern, parallel, slice)?;
 
-        
         Vec::from_raw_parts(values_ptr, values_len, values_cap)
     };
 
@@ -1138,27 +1085,22 @@ mod tests {
 
     #[test]
     fn test_ao_into_matches_api() {
-        
         let len = 256;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
-            
             let x = i as f64;
             data.push((x * 0.01).mul_add(1.0, (x * 0.0314159).sin()));
         }
 
         let input = AoInput::from_slice(&data, AoParams::default());
 
-        
         let base = ao(&input).expect("ao() should succeed");
 
-        
         let mut out = vec![0.0f64; len];
         ao_into(&input, &mut out).expect("ao_into() should succeed");
 
         assert_eq!(base.values.len(), out.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1318,7 +1260,7 @@ mod tests {
         }
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_ao_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1326,44 +1268,41 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            AoParams::default(), 
+            AoParams::default(),
             AoParams {
                 short_period: Some(2),
                 long_period: Some(10),
-            }, 
+            },
             AoParams {
                 short_period: Some(3),
                 long_period: Some(20),
-            }, 
+            },
             AoParams {
                 short_period: Some(10),
                 long_period: Some(50),
-            }, 
+            },
             AoParams {
                 short_period: Some(20),
                 long_period: Some(100),
-            }, 
+            },
             AoParams {
                 short_period: Some(5),
                 long_period: Some(200),
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
             let input = AoInput::from_candles(&candles, "hl2", params.clone());
             let result = ao_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in result.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1413,7 +1352,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_ao_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1425,10 +1364,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
-        
-        
         let strat = (1usize..=50).prop_flat_map(|short_period| {
             ((short_period + 1)..=100).prop_flat_map(move |long_period| {
                 (
@@ -1450,12 +1385,10 @@ mod tests {
                 };
                 let input = AoInput::from_slice(&data, params);
 
-                
                 let AoOutput { values: out } = ao_with_kernel(&input, kernel).unwrap();
-                
+
                 let AoOutput { values: ref_out } = ao_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 0..(long_period - 1) {
                     prop_assert!(
                         out[i].is_nan(),
@@ -1465,7 +1398,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in (long_period - 1)..data.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1475,10 +1407,8 @@ mod tests {
                     );
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() >= long_period
                 {
-                    
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
                             out[i].abs() < 1e-9,
@@ -1489,16 +1419,11 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 if data.len() >= long_period {
                     for i in (long_period - 1)..data.len() {
-                        
                         let short_start = i + 1 - short_period;
                         let long_start = i + 1 - long_period;
 
-                        
                         let long_window = &data[long_start..=i];
                         let window_min = long_window.iter().cloned().fold(f64::INFINITY, f64::min);
                         let window_max = long_window
@@ -1506,8 +1431,6 @@ mod tests {
                             .cloned()
                             .fold(f64::NEG_INFINITY, f64::max);
 
-                        
-                        
                         let theoretical_max = window_max - window_min;
 
                         prop_assert!(
@@ -1520,11 +1443,7 @@ mod tests {
                     }
                 }
 
-                
                 if short_period == 1 && long_period == 2 && data.len() >= 2 {
-                    
-                    
-                    
                     for i in 1..data.len() {
                         let expected = data[i] - (data[i] + data[i - 1]) / 2.0;
                         let actual = out[i];
@@ -1538,13 +1457,10 @@ mod tests {
                     }
                 }
 
-                
-                
                 let is_increasing = data.windows(2).all(|w| w[1] > w[0] + 1e-10);
                 let is_decreasing = data.windows(2).all(|w| w[1] < w[0] - 1e-10);
 
                 if is_increasing && data.len() >= long_period {
-                    
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
 							out[i] > -1e-9,
@@ -1556,7 +1472,6 @@ mod tests {
                 }
 
                 if is_decreasing && data.len() >= long_period {
-                    
                     for i in (long_period - 1)..data.len() {
                         prop_assert!(
 							out[i] < 1e-9,
@@ -1567,15 +1482,11 @@ mod tests {
                     }
                 }
 
-                
-                
                 if data.len() >= 3 {
                     let diffs: Vec<f64> = data.windows(2).map(|w| w[1] - w[0]).collect();
                     let is_linear = diffs.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
 
                     if is_linear && data.len() >= long_period + 10 {
-                        
-                        
                         let stable_start = long_period + 5;
                         if stable_start < data.len() - 1 {
                             let stable_values = &out[stable_start..];
@@ -1595,12 +1506,10 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_nan() || r.is_nan() {
                         prop_assert!(
                             y.is_nan() && r.is_nan(),
@@ -1613,7 +1522,6 @@ mod tests {
                         continue;
                     }
 
-                    
                     let y_bits = y.to_bits();
                     let r_bits = r.to_bits();
                     let ulp_diff: u64 = y_bits.abs_diff(r_bits);
@@ -1685,8 +1593,7 @@ mod tests {
         };
         let input = AoInput::from_slice(&data, params);
 
-        
-        let mut wrong_sized_buf = vec![0.0; 10]; 
+        let mut wrong_sized_buf = vec![0.0; 10];
 
         let result = ao_into_slice(&mut wrong_sized_buf, &input, Kernel::Auto);
         assert!(result.is_err());
@@ -1704,7 +1611,6 @@ mod tests {
         let data = vec![10.0, 20.0, 30.0, 40.0, 50.0];
         let sweep = AoBatchRange::default();
 
-        
         let result = ao_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(result.is_err());
 
@@ -1735,7 +1641,7 @@ mod tests {
         }
         Ok(())
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1743,14 +1649,12 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 15, 40, 5),     
-            (5, 20, 5, 30, 60, 10),    
-            (10, 30, 10, 40, 100, 20), 
-            (3, 3, 0, 10, 50, 10),     
-            (5, 15, 5, 34, 34, 0),     
+            (2, 10, 2, 15, 40, 5),
+            (5, 20, 5, 30, 60, 10),
+            (10, 30, 10, 40, 100, 20),
+            (3, 3, 0, 10, 50, 10),
+            (5, 15, 5, 34, 34, 0),
         ];
 
         for (cfg_idx, &(short_start, short_end, short_step, long_start, long_end, long_step)) in
@@ -1763,7 +1667,6 @@ mod tests {
 
             let output = ao_batch_with_kernel(source_type(&c, "hl2"), &sweep, kernel)?;
 
-            
             for (row, combo) in output.combos.iter().enumerate() {
                 let row_start = row * output.cols;
                 let row_end = row_start + output.cols;
@@ -1771,13 +1674,12 @@ mod tests {
 
                 for (col, &val) in row_values.iter().enumerate() {
                     if val.is_nan() {
-                        continue; 
+                        continue;
                     }
 
                     let bits = val.to_bits();
                     let idx = row * output.cols + col;
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
 							"[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1834,7 +1736,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
@@ -1876,28 +1778,22 @@ pub fn ao_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Use kernel validation for safety
     let kern = validate_kernel(kernel, false)?;
 
-    // Heavy lifting without the GIL
     let result_vec: Vec<f64> = py
         .allow_threads(|| -> Result<Vec<f64>, AoError> {
-            // Compute hl2 using zero-copy allocation
             let hl2 = compute_hl2(high_slice, low_slice)?;
 
-            // Build input struct
             let params = AoParams {
                 short_period: Some(short_period),
                 long_period: Some(long_period),
             };
             let ao_in = AoInput::from_slice(&hl2, params);
 
-            // Compute AO
             ao_with_kernel(&ao_in, kern).map(|o| o.values)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1920,8 +1816,6 @@ impl AoStreamPy {
         Ok(AoStreamPy { stream })
     }
 
-    /// Updates the stream with a new high and low value and returns the calculated AO value.
-    /// Returns `None` if the buffer is not yet full.
     fn update(&mut self, high: f64, low: f64) -> Option<f64> {
         let hl2 = (high + low) / 2.0;
         self.stream.update(hl2)
@@ -1945,7 +1839,6 @@ pub fn ao_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    
     let kern = validate_kernel(kernel, true)?;
 
     let sweep = AoBatchRange {
@@ -1953,33 +1846,26 @@ pub fn ao_batch_py<'py>(
         long_period: long_period_range,
     };
 
-    
     let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = high_slice.len();
 
-    
-    
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let combos = py
         .allow_threads(|| -> Result<Vec<AoParams>, AoError> {
-            
             let hl2 = compute_hl2(high_slice, low_slice)?;
 
-            
             let first = hl2.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warm: Vec<usize> = combos
                 .iter()
                 .map(|c| first + c.long_period.unwrap() - 1)
                 .collect();
 
-            
             let slice_mu = unsafe {
                 std::slice::from_raw_parts_mut(
                     slice_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -1987,10 +1873,8 @@ pub fn ao_batch_py<'py>(
                 )
             };
 
-            
             init_matrix_prefixes(slice_mu, cols, &warm);
 
-            
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2002,12 +1886,10 @@ pub fn ao_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            
             ao_batch_inner_into(&hl2, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2029,7 +1911,6 @@ pub fn ao_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -2063,13 +1944,12 @@ impl DeviceArrayF32AoPy {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Stream omitted: producing stream is synchronized before return
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA per DLPack
         (2, self.device_id as i32)
     }
 
@@ -2082,8 +1962,7 @@ impl DeviceArrayF32AoPy {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Determine allocation device and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2102,7 +1981,6 @@ impl DeviceArrayF32AoPy {
             }
         }
 
-        // Producer synchronizes its CUDA stream before returning; reject explicit stream==0 for CUDA.
         if let Some(obj) = stream.as_ref() {
             if let Ok(i) = obj.extract::<i64>(py) {
                 if i == 0 {
@@ -2113,7 +1991,6 @@ impl DeviceArrayF32AoPy {
             }
         }
 
-        // Move DeviceBuffer into shared DLPack helper so the consumer owns it.
         let buf = self
             .buf
             .take()
@@ -2163,7 +2040,13 @@ pub fn ao_cuda_batch_dev_py(
         cuda.ao_batch_dev(&hl2_f32, &sweep)
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let crate::cuda::oscillators::ao_wrapper::DeviceArrayF32Ao { buf, rows, cols, ctx, device_id: dev_id } = inner;
+    let crate::cuda::oscillators::ao_wrapper::DeviceArrayF32Ao {
+        buf,
+        rows,
+        cols,
+        ctx,
+        device_id: dev_id,
+    } = inner;
     Ok(DeviceArrayF32AoPy {
         buf: Some(buf),
         rows,
@@ -2213,7 +2096,13 @@ pub fn ao_cuda_many_series_one_param_dev_py(
         )
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    let crate::cuda::oscillators::ao_wrapper::DeviceArrayF32Ao { buf, rows, cols, ctx, device_id: dev_id } = inner;
+    let crate::cuda::oscillators::ao_wrapper::DeviceArrayF32Ao {
+        buf,
+        rows,
+        cols,
+        ctx,
+        device_id: dev_id,
+    } = inner;
     Ok(DeviceArrayF32AoPy {
         buf: Some(buf),
         rows,
@@ -2223,7 +2112,7 @@ pub fn ao_cuda_many_series_one_param_dev_py(
     })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_js(
     high: &[f64],
@@ -2231,7 +2120,6 @@ pub fn ao_js(
     short_period: usize,
     long_period: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    // Compute hl2 using zero-copy allocation
     let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let params = AoParams {
@@ -2240,13 +2128,12 @@ pub fn ao_js(
     };
     let input = AoInput::from_slice(&hl2, params);
 
-    // Compute AO using the optimal kernel
     ao_with_kernel(&input, Kernel::Auto)
         .map(|o| o.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_batch_js(
     high: &[f64],
@@ -2258,7 +2145,6 @@ pub fn ao_batch_js(
     long_end: usize,
     long_step: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    // Compute hl2 using zero-copy allocation
     let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let sweep = AoBatchRange {
@@ -2266,13 +2152,12 @@ pub fn ao_batch_js(
         long_period: (long_start, long_end, long_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     ao_batch_inner(&hl2, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_batch_metadata_js(
     short_start: usize,
@@ -2298,15 +2183,14 @@ pub fn ao_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AoBatchConfig {
     pub short_period_range: (usize, usize, usize),
     pub long_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AoBatchJsOutput {
     pub values: Vec<f64>,
@@ -2315,14 +2199,12 @@ pub struct AoBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ao_batch)]
 pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
-    // 1. Deserialize the configuration object from JavaScript
     let config: AoBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-    // Compute hl2 using zero-copy allocation
     let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     let sweep = AoBatchRange {
@@ -2330,11 +2212,9 @@ pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
         long_period: config.long_period_range,
     };
 
-    // 2. Run the existing core logic
     let output = ao_batch_inner(&hl2, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // 3. Create the structured output
     let js_output = AoBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2342,12 +2222,11 @@ pub fn ao_batch_unified_js(high: &[f64], low: &[f64], config: JsValue) -> Result
         cols: output.cols,
     };
 
-    // 4. Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2356,7 +2235,7 @@ pub fn ao_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2366,7 +2245,7 @@ pub fn ao_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_into(
     in_high_ptr: *const f64,
@@ -2417,7 +2296,7 @@ pub fn ao_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ao_batch_into(
     in_high_ptr: *const f64,
@@ -2451,10 +2330,8 @@ pub fn ao_batch_into(
             .ok_or_else(|| JsValue::from_str("rows*len overflow"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-        // Compute hl2 using zero-copy allocation
         let hl2 = compute_hl2(high, low).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Compute batch directly into output
         ao_batch_inner_into(&hl2, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 

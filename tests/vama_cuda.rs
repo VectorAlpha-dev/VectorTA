@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::volatility_adjusted_ma::{
     vama_batch_with_kernel, VamaBatchRange,
 };
@@ -53,8 +51,7 @@ fn vama_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let cuda = CudaVama::new(0).expect("CudaVama::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
-    
-    
+
     let data32_as_f64: Vec<f64> = data_f32.iter().map(|&v| v as f64).collect();
     let cpu = vama_batch_with_kernel(&data32_as_f64, &sweep, Kernel::ScalarBatch)?;
     let gpu_handle = cuda
@@ -114,7 +111,6 @@ fn vama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         smooth_period: Some(5),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for series in 0..num_series {
         let mut series_data = vec![f64::NAN; series_len];
@@ -128,7 +124,6 @@ fn vama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaVama::new(0).expect("CudaVama::new");
     let handle = cuda

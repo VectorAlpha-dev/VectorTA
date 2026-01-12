@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::lrsi::{
     lrsi, lrsi_batch_with_kernel, LrsiBatchRange, LrsiData, LrsiInput, LrsiParams,
 };
@@ -58,9 +56,6 @@ fn lrsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    
-    
-    
     let tol = 1e-1;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
@@ -99,7 +94,6 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let alpha = 0.2;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut high = vec![f64::NAN; rows];
@@ -133,7 +127,6 @@ fn lrsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    
     let tol = 8e-4;
     for i in 0..host.len() {
         assert!(

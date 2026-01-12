@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::alma::{
     alma_batch_with_kernel, AlmaBatchRange, AlmaBuilder, AlmaParams,
 };
@@ -14,7 +12,9 @@ use vector_ta::cuda::moving_averages::CudaAlma;
 
 #[cfg(feature = "cuda")]
 fn should_force_skip_cuda() -> bool {
-    std::env::var("SKIP_CUDA_TESTS").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false)
+    std::env::var("SKIP_CUDA_TESTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
@@ -29,7 +29,6 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
 
 #[test]
 fn cuda_feature_off_noop() {
-    
     #[cfg(not(feature = "cuda"))]
     {
         assert!(true);
@@ -44,7 +43,6 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         return Ok(());
     }
 
-    
     let series_len = 2048usize;
     let mut data = vec![f64::NAN; series_len];
     for i in 3..series_len {
@@ -58,13 +56,11 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         sigma: (6.0, 6.0, 0.0),
     };
 
-    
     let cpu = match alma_batch_with_kernel(&data, &sweep, Kernel::ScalarBatch) {
         Ok(v) => v,
         Err(e) => return Err(Box::new(e)),
     };
 
-    
     let cuda = CudaAlma::new(0).expect("CudaAlma::new");
     let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
@@ -80,7 +76,6 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
         .copy_to(&mut gpu_host)
         .expect("copy cuda alma batch result to host");
 
-    
     let tol = 5e-6;
     for i in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[i];
@@ -97,8 +92,6 @@ fn alma_cuda_one_series_many_params_matches_cpu() -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-
-
 #[cfg(feature = "cuda")]
 #[test]
 fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
@@ -111,7 +104,6 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let series_len = 1024usize;
     let mut data_tm = vec![f64::NAN; num_series * series_len];
 
-    
     for j in 0..num_series {
         for t in (j)..series_len {
             let x = (t as f64) + (j as f64) * 0.1;
@@ -125,7 +117,6 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         sigma: Some(6.0),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for j in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
@@ -146,7 +137,6 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         }
     }
 
-    
     let cuda = CudaAlma::new(0).expect("CudaAlma::new");
     let data_tm_f32: Vec<f32> = data_tm.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
@@ -162,7 +152,6 @@ fn alma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         .copy_to(&mut gpu_tm)
         .expect("copy many-series result to host");
 
-    
     let tol = 3e-4;
     for i in 0..(num_series * series_len) {
         let a = cpu_tm[i];

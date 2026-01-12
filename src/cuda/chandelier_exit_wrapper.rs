@@ -1,11 +1,3 @@
-//! CUDA scaffolding for the Chandelier Exit (CE) indicator.
-//!
-//! Math category: recurrence/time-scan per parameter (ATR + rolling
-//! extremums + trailing logic). We parallelize across rows (batch) or
-//! across series (many-series) and scan time within each thread to
-//! preserve scalar semantics. No sizable row-shared precompute beyond
-//! ATR; use_close is static across a batch sweep.
-
 #![cfg(feature = "cuda")]
 
 use cust::context::Context;
@@ -27,7 +19,11 @@ pub enum CudaCeError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -35,7 +31,14 @@ pub enum CudaCeError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -90,7 +93,8 @@ impl CudaChandelierExit {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -112,9 +116,15 @@ impl CudaChandelierExit {
         })
     }
 
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
-    pub fn stream(&self) -> &Stream { &self.stream }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
+    pub fn stream(&self) -> &Stream {
+        &self.stream
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -132,7 +142,11 @@ impl CudaChandelierExit {
             if required_bytes.saturating_add(headroom) <= free {
                 Ok(())
             } else {
-                Err(CudaCeError::OutOfMemory { required: required_bytes, free, headroom })
+                Err(CudaCeError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom,
+                })
             }
         } else {
             Ok(())
@@ -140,35 +154,75 @@ impl CudaChandelierExit {
     }
 
     fn expand_grid(range: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, CudaCeError> {
-        
         fn axis_usize(t: (usize, usize, usize)) -> Result<Vec<usize>, CudaCeError> {
-            if t.2 == 0 || t.0 == t.1 { return Ok(vec![t.0]); }
+            if t.2 == 0 || t.0 == t.1 {
+                return Ok(vec![t.0]);
+            }
             let (start, end, step) = (t.0, t.1, t.2);
             let mut v = Vec::new();
             if start <= end {
                 let mut x = start;
-                while x <= end { v.push(x); x = match x.checked_add(step) { Some(nx)=>nx, None=> return Err(CudaCeError::InvalidInput("period range overflow".into())) }; }
+                while x <= end {
+                    v.push(x);
+                    x = match x.checked_add(step) {
+                        Some(nx) => nx,
+                        None => {
+                            return Err(CudaCeError::InvalidInput("period range overflow".into()))
+                        }
+                    };
+                }
             } else {
                 let mut x = start;
-                while x >= end { v.push(x); if x < step { break; } x -= step; }
+                while x >= end {
+                    v.push(x);
+                    if x < step {
+                        break;
+                    }
+                    x -= step;
+                }
             }
-            if v.is_empty() { return Err(CudaCeError::InvalidInput("invalid period range".into())); }
+            if v.is_empty() {
+                return Err(CudaCeError::InvalidInput("invalid period range".into()));
+            }
             Ok(v)
         }
         fn axis_f64(t: (f64, f64, f64)) -> Result<Vec<f64>, CudaCeError> {
-            if t.2.abs() < 1e-12 || (t.0 - t.1).abs() < 1e-12 { return Ok(vec![t.0]); }
+            if t.2.abs() < 1e-12 || (t.0 - t.1).abs() < 1e-12 {
+                return Ok(vec![t.0]);
+            }
             let (start, end, step) = (t.0, t.1, t.2);
-            let s = if step > 0.0 { if start <= end { step } else { -step } } else { step };
+            let s = if step > 0.0 {
+                if start <= end {
+                    step
+                } else {
+                    -step
+                }
+            } else {
+                step
+            };
             let mut v = Vec::new();
-            let mut x = start; let mut it=0usize;
-            while it < 1_000_000 { if (s>0.0 && x> end+1e-12) || (s<0.0 && x< end-1e-12) { break; } v.push(x); x += s; it+=1; }
-            if v.is_empty() { return Err(CudaCeError::InvalidInput("invalid mult range".into())); }
+            let mut x = start;
+            let mut it = 0usize;
+            while it < 1_000_000 {
+                if (s > 0.0 && x > end + 1e-12) || (s < 0.0 && x < end - 1e-12) {
+                    break;
+                }
+                v.push(x);
+                x += s;
+                it += 1;
+            }
+            if v.is_empty() {
+                return Err(CudaCeError::InvalidInput("invalid mult range".into()));
+            }
             Ok(v)
         }
         let periods = axis_usize(range.period)?;
         let mults = axis_f64(range.mult)?;
         let use_close = range.use_close.0;
-        let cap = periods.len().checked_mul(mults.len()).ok_or_else(|| CudaCeError::InvalidInput("range size overflow".into()))?;
+        let cap = periods
+            .len()
+            .checked_mul(mults.len())
+            .ok_or_else(|| CudaCeError::InvalidInput("range size overflow".into()))?;
         let mut out = Vec::with_capacity(cap);
         for &p in &periods {
             for &m in &mults {
@@ -222,7 +276,6 @@ impl CudaChandelierExit {
         }
     }
 
-    
     pub fn set_batch_policy(&mut self, p: BatchKernelPolicy) {
         self.policy_batch = p;
     }
@@ -270,8 +323,10 @@ impl CudaChandelierExit {
         let func = self
             .module
             .get_function("chandelier_exit_batch_f32")
-            .map_err(|_| CudaCeError::MissingKernelSymbol { name: "chandelier_exit_batch_f32" })?;
-        
+            .map_err(|_| CudaCeError::MissingKernelSymbol {
+                name: "chandelier_exit_batch_f32",
+            })?;
+
         let block_x_env = std::env::var("CE_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
@@ -284,7 +339,14 @@ impl CudaChandelierExit {
             .max(32);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         if grid_x > 65_535 || block_x > 1024 {
-            return Err(CudaCeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaCeError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -311,9 +373,8 @@ impl CudaChandelierExit {
                 &mut u as *mut _ as *mut c_void,
                 &mut o as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)?;
-            
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
+
             (*(self as *const _ as *mut CudaChandelierExit)).last_batch =
                 Some(BatchKernelSelected::Plain { block_x });
         }
@@ -335,7 +396,7 @@ impl CudaChandelierExit {
         let combos = Self::expand_grid(sweep)?;
         let use_close = sweep.use_close.0;
         let first_valid = Self::first_valid(use_close, high, low, close)?;
-        
+
         for prm in &combos {
             let p = prm.period.unwrap_or(22);
             if p == 0 {
@@ -350,7 +411,6 @@ impl CudaChandelierExit {
             }
         }
 
-        
         let rows = combos.len();
         let in_bytes = (3usize)
             .checked_mul(len)
@@ -374,7 +434,6 @@ impl CudaChandelierExit {
             .unwrap_or(64 * 1024 * 1024);
         Self::ensure_fit(req, headroom)?;
 
-        
         let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &self.stream) }?;
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &self.stream) }?;
         let d_close = unsafe { DeviceBuffer::from_slice_async(&close[..len], &self.stream) }?;
@@ -428,7 +487,9 @@ impl CudaChandelierExit {
         let func = self
             .module
             .get_function("chandelier_exit_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaCeError::MissingKernelSymbol { name: "chandelier_exit_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaCeError::MissingKernelSymbol {
+                name: "chandelier_exit_many_series_one_param_time_major_f32",
+            })?;
         let block_x_env = std::env::var("CE_MANY_BLOCK_X")
             .ok()
             .and_then(|v| v.parse::<u32>().ok());
@@ -441,7 +502,14 @@ impl CudaChandelierExit {
             .max(32);
         let grid_x = ((cols as u32) + block_x - 1) / block_x;
         if grid_x > 65_535 || block_x > 1024 {
-            return Err(CudaCeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaCeError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -469,7 +537,7 @@ impl CudaChandelierExit {
                 &mut o as *mut _ as *mut c_void,
             ];
             self.stream.launch(&func, grid, block, 0, &mut args)?;
-            
+
             (*(self as *const _ as *mut CudaChandelierExit)).last_many =
                 Some(ManySeriesKernelSelected::OneD { block_x });
         }
@@ -488,16 +556,19 @@ impl CudaChandelierExit {
         mult: f32,
         use_close: bool,
     ) -> Result<DeviceArrayF32, CudaCeError> {
-        if cols == 0 || rows == 0 { return Err(CudaCeError::InvalidInput("empty matrix".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaCeError::InvalidInput("empty matrix".into()));
+        }
         if high_tm.len() != cols * rows
             || low_tm.len() != cols * rows
             || close_tm.len() != cols * rows
         {
             return Err(CudaCeError::InvalidInput("matrix shape mismatch".into()));
         }
-        if period == 0 { return Err(CudaCeError::InvalidInput("period must be >=1".into())); }
+        if period == 0 {
+            return Err(CudaCeError::InvalidInput("period must be >=1".into()));
+        }
 
-        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -523,7 +594,6 @@ impl CudaChandelierExit {
             }
         }
 
-        
         let triple = 3usize
             .checked_mul(cols)
             .and_then(|x| x.checked_mul(rows))
@@ -565,7 +635,6 @@ impl CudaChandelierExit {
         })
     }
 
-    
     pub fn chandelier_exit_batch_from_device_dev(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -583,7 +652,6 @@ impl CudaChandelierExit {
             ));
         }
 
-        
         let rows = periods.len();
         let param_bytes = rows
             .checked_mul(std::mem::size_of::<i32>() + std::mem::size_of::<f32>())
@@ -602,11 +670,11 @@ impl CudaChandelierExit {
             .unwrap_or(64 * 1024 * 1024);
         Self::ensure_fit(req, headroom)?;
 
-        
-        let d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::from_slice_async(periods, &self.stream) }?;
-        let d_mults: DeviceBuffer<f32> = unsafe { DeviceBuffer::from_slice_async(mults, &self.stream) }?;
+        let d_periods: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(periods, &self.stream) }?;
+        let d_mults: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(mults, &self.stream) }?;
 
-        
         let elems_out = rows
             .checked_mul(len)
             .and_then(|x| x.checked_mul(2))
@@ -614,7 +682,6 @@ impl CudaChandelierExit {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems_out, &self.stream) }?;
 
-        
         self.launch_batch(
             d_high,
             d_low,
@@ -636,8 +703,6 @@ impl CudaChandelierExit {
         })
     }
 
-    /// Device-to-device batch launch (no allocations). Output layout is identical
-    /// to `chandelier_exit_batch_dev`: `(2*rows) x len` (row-major).
     pub fn chandelier_exit_batch_device_inplace(
         &self,
         d_high: &DeviceBuffer<f32>,
@@ -672,7 +737,6 @@ impl CudaChandelierExit {
         )
     }
 
-    
     pub fn chandelier_exit_many_series_one_param_time_major_from_device_dev(
         &self,
         d_high_tm: &DeviceBuffer<f32>,
@@ -685,10 +749,13 @@ impl CudaChandelierExit {
         d_first_valids: &DeviceBuffer<i32>,
         use_close: bool,
     ) -> Result<DeviceArrayF32, CudaCeError> {
-        if cols == 0 || rows == 0 { return Err(CudaCeError::InvalidInput("empty matrix".into())); }
-        if period == 0 { return Err(CudaCeError::InvalidInput("period must be >=1".into())); }
+        if cols == 0 || rows == 0 {
+            return Err(CudaCeError::InvalidInput("empty matrix".into()));
+        }
+        if period == 0 {
+            return Err(CudaCeError::InvalidInput("period must be >=1".into()));
+        }
 
-        
         let req = 2usize
             .checked_mul(cols)
             .and_then(|x| x.checked_mul(rows))
@@ -728,7 +795,6 @@ impl CudaChandelierExit {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -817,7 +883,10 @@ pub mod benches {
                     &mut self.d_out_tm,
                 )
                 .expect("ce many-series kernel");
-            self.cuda.stream().synchronize().expect("ce many-series sync");
+            self.cuda
+                .stream()
+                .synchronize()
+                .expect("ce many-series sync");
         }
     }
 
@@ -842,11 +911,15 @@ pub mod benches {
             .checked_mul(rows)
             .and_then(|x| x.checked_mul(ONE_SERIES_LEN))
             .expect("size overflow");
-        let d_high = unsafe { DeviceBuffer::from_slice_async(&high, cuda.stream()) }.expect("d_high");
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(&high, cuda.stream()) }.expect("d_high");
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low, cuda.stream()) }.expect("d_low");
-        let d_close = unsafe { DeviceBuffer::from_slice_async(&close, cuda.stream()) }.expect("d_close");
-        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, cuda.stream()) }.expect("d_periods");
-        let d_mults = unsafe { DeviceBuffer::from_slice_async(&mults_host, cuda.stream()) }.expect("d_mults");
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(&close, cuda.stream()) }.expect("d_close");
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_host, cuda.stream()) }
+            .expect("d_periods");
+        let d_mults =
+            unsafe { DeviceBuffer::from_slice_async(&mults_host, cuda.stream()) }.expect("d_mults");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems_out, cuda.stream()) }.expect("d_out");
         cuda.stream().synchronize().expect("ce sync");
@@ -923,8 +996,7 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        
-        let combos = 15usize; 
+        let combos = 15usize;
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let param_bytes = combos * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = 2 * combos * ONE_SERIES_LEN * std::mem::size_of::<f32>();

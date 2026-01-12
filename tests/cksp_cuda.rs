@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::cksp::{CkspBatchBuilder, CkspBatchRange, CkspParams};
 use vector_ta::utilities::enums::Kernel;
 
@@ -76,7 +74,7 @@ fn cksp_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_pair.long.buf.copy_to(&mut long_host).unwrap();
     dev_pair.short.buf.copy_to(&mut short_host).unwrap();
 
-    let tol = 5e-4; 
+    let tol = 5e-4;
     for idx in 0..(cpu.rows * cpu.cols) {
         let cpu_l = cpu.long_values[idx];
         let cpu_s = cpu.short_values[idx];
@@ -120,8 +118,6 @@ fn cksp_cuda_large_p_sweep_smoke() -> Result<(), Box<dyn std::error::Error>> {
         close[i] = base;
     }
 
-    
-    
     let sweep = CkspBatchRange {
         p: (10, 137, 1),
         x: (1.0, 1.0, 0.0),
@@ -204,7 +200,6 @@ fn cksp_cuda_single_combo_smoke() -> Result<(), Box<dyn std::error::Error>> {
         close[i] = base;
     }
 
-    
     let sweep = CkspBatchRange {
         p: (10, 10, 0),
         x: (1.0, 1.0, 0.0),

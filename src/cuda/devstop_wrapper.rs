@@ -1,12 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for the DevStop (Deviation Stop) indicator.
-//!
-//! Decision: CUDA enabled for FP32 classic path (SMA/EMA + stddev).
-//! Typed errors, VRAM checks, and symbol resolution mirror ALMA wrapper patterns.
-//! Warmup/NaN semantics match scalar; outputs unchanged. Stream is synchronized
-//! before returning VRAM handles to callers (e.g., Python CAI/DLPack).
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::devstop::DevStopBatchRange;
 use cust::context::Context;
@@ -26,7 +19,11 @@ pub enum CudaDevStopError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -34,7 +31,14 @@ pub enum CudaDevStopError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -56,7 +60,10 @@ pub struct CudaDevStop {
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
-struct Float2 { x: f32, y: f32 }
+struct Float2 {
+    x: f32,
+    y: f32,
+}
 unsafe impl cust::memory::DeviceCopy for Float2 {}
 
 impl CudaDevStop {
@@ -68,30 +75,51 @@ impl CudaDevStop {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/devstop_kernel.ptx"));
         let module = match Module::from_ptx(
             ptx,
-            &[ModuleJitOption::DetermineTargetFromContext, ModuleJitOption::OptLevel(OptLevel::O2)],
+            &[
+                ModuleJitOption::DetermineTargetFromContext,
+                ModuleJitOption::OptLevel(OptLevel::O2),
+            ],
         ) {
             Ok(m) => m,
             Err(_) => Module::from_ptx(ptx, &[])?,
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        Ok(Self { module, stream, context, device_id: device_id as u32 })
+        Ok(Self {
+            module,
+            stream,
+            context,
+            device_id: device_id as u32,
+        })
     }
 
     #[inline]
     fn mem_check_enabled() -> bool {
-        match std::env::var("CUDA_MEM_CHECK") { Ok(v) => v != "0" && v.to_lowercase() != "false", Err(_) => true }
+        match std::env::var("CUDA_MEM_CHECK") {
+            Ok(v) => v != "0" && v.to_lowercase() != "false",
+            Err(_) => true,
+        }
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaDevStopError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             let need = required_bytes.saturating_add(headroom_bytes);
-            if need > free { return Err(CudaDevStopError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes }); }
+            if need > free {
+                return Err(CudaDevStopError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                });
+            }
         }
         Ok(())
     }
@@ -100,20 +128,45 @@ impl CudaDevStop {
     fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaDevStopError> {
         let (gx, gy, gz) = (grid.x, grid.y, grid.z);
         let (bx, by, bz) = (block.x, block.y, block.z);
-        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 { 
-            return Err(CudaDevStopError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
+            return Err(CudaDevStopError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
-        if bx.saturating_mul(by).saturating_mul(bz) > 1024 { 
-            return Err(CudaDevStopError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        if bx.saturating_mul(by).saturating_mul(bz) > 1024 {
+            return Err(CudaDevStopError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
-        if gx > 65_535 || gy > 65_535 || gz > 65_535 { 
-            return Err(CudaDevStopError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        if gx > 65_535 || gy > 65_535 || gz > 65_535 {
+            return Err(CudaDevStopError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
 
-    fn expand_grid(range: &DevStopBatchRange) -> Result<Vec<(usize, f32, usize)>, CudaDevStopError> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaDevStopError> {
+    fn expand_grid(
+        range: &DevStopBatchRange,
+    ) -> Result<Vec<(usize, f32, usize)>, CudaDevStopError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaDevStopError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
             }
@@ -204,33 +257,44 @@ impl CudaDevStop {
         }
     }
 
-    fn build_range_prefixes(high: &[f32], low: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>, usize) {
+    fn build_range_prefixes(
+        high: &[f32],
+        low: &[f32],
+    ) -> (Vec<Float2>, Vec<Float2>, Vec<i32>, usize) {
         let len = high.len().min(low.len());
         let first = Self::first_valid_hl(high, low).unwrap_or(0);
-        
+
         let mut p1 = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
         let mut p2 = vec![Float2 { x: 0.0, y: 0.0 }; len + 1];
-        let mut pc = vec![0i32;  len + 1];
-        
-        let mut s1_hi = 0.0f32; let mut s1_lo = 0.0f32;
-        let mut s2_hi = 0.0f32; let mut s2_lo = 0.0f32;
+        let mut pc = vec![0i32; len + 1];
+
+        let mut s1_hi = 0.0f32;
+        let mut s1_lo = 0.0f32;
+        let mut s2_hi = 0.0f32;
+        let mut s2_lo = 0.0f32;
         let mut accc = 0i32;
         let mut prev_h = if first < len { high[first] } else { f32::NAN };
-        let mut prev_l = if first < len { low[first]  } else { f32::NAN };
+        let mut prev_l = if first < len { low[first] } else { f32::NAN };
 
         #[inline(always)]
         fn two_sum(a: f32, b: f32) -> (f32, f32) {
-            let s = a + b; let bb = s - a; let e = (a - (s - bb)) + (b - bb); (s, e)
+            let s = a + b;
+            let bb = s - a;
+            let e = (a - (s - bb)) + (b - bb);
+            (s, e)
         }
         #[inline(always)]
         fn quick_two_sum(a: f32, b: f32) -> (f32, f32) {
-            let s = a + b; let e = b - (s - a); (s, e)
+            let s = a + b;
+            let e = b - (s - a);
+            (s, e)
         }
         #[inline(always)]
         fn ds_add_host(hi: &mut f32, lo: &mut f32, x: f32) {
             let (s, e) = two_sum(*hi, x);
             let (hh, ll) = quick_two_sum(s, *lo + e);
-            *hi = hh; *lo = ll;
+            *hi = hh;
+            *lo = ll;
         }
 
         for i in 0..len {
@@ -240,7 +304,8 @@ impl CudaDevStop {
                 if !h.is_nan() && !l.is_nan() && !prev_h.is_nan() && !prev_l.is_nan() {
                     let hi2 = if h > prev_h { h } else { prev_h };
                     let lo2 = if l < prev_l { l } else { prev_l };
-                    let r = hi2 - lo2; let r2 = r * r;
+                    let r = hi2 - lo2;
+                    let r2 = r * r;
                     ds_add_host(&mut s1_hi, &mut s1_lo, r);
                     ds_add_host(&mut s2_hi, &mut s2_lo, r2);
                     accc += 1;
@@ -270,7 +335,7 @@ impl CudaDevStop {
             .ok_or_else(|| CudaDevStopError::InvalidInput("all values are NaN".into()))?;
 
         let combos_raw = Self::expand_grid(sweep)?;
-        
+
         for &(_, _, dt) in &combos_raw {
             if dt != 0 {
                 return Err(CudaDevStopError::InvalidInput(
@@ -279,14 +344,13 @@ impl CudaDevStop {
             }
         }
 
-        
         let mut groups: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
-        for (p, m, _dt) in combos_raw { groups.entry(p).or_default().push(m); }
+        for (p, m, _dt) in combos_raw {
+            groups.entry(p).or_default().push(m);
+        }
 
-        
         let (p1, p2, pc, first_valid) = Self::build_range_prefixes(high, low);
 
-        
         let mut d_high: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_low: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
         let mut d_p1: DeviceBuffer<Float2> = unsafe { DeviceBuffer::uninitialized(p1.len()) }?;
@@ -300,7 +364,6 @@ impl CudaDevStop {
             d_pc.async_copy_from(&pc, &self.stream)?;
         }
 
-        
         let mut total_rows: usize = 0;
         for v in groups.values() {
             total_rows = total_rows
@@ -351,7 +414,9 @@ impl CudaDevStop {
         let func = self
             .module
             .get_function("devstop_batch_grouped_f32")
-            .map_err(|_| CudaDevStopError::MissingKernelSymbol { name: "devstop_batch_grouped_f32" })?;
+            .map_err(|_| CudaDevStopError::MissingKernelSymbol {
+                name: "devstop_batch_grouped_f32",
+            })?;
 
         let mut out_row_base = 0usize;
         let mut meta_launch_order: Vec<(usize, f32)> = Vec::with_capacity(total_rows);
@@ -371,17 +436,16 @@ impl CudaDevStop {
             let n = mults_host.len();
             let d_mults = DeviceBuffer::from_slice(&mults_host)?;
 
-            
-            for &m in &mults_host { meta_launch_order.push((period, m)); }
+            for &m in &mults_host {
+                meta_launch_order.push((period, m));
+            }
 
-            
             let block_x: u32 = 64;
             let grid_x: u32 = (n as u32).max(1);
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
             Self::validate_launch(grid, block)?;
 
-            
             let per_block = std::mem::size_of::<f32>() + std::mem::size_of::<i32>();
             let shmem_bytes_usize = period
                 .checked_mul(per_block)
@@ -430,7 +494,14 @@ impl CudaDevStop {
 
         self.stream.synchronize()?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows: total_rows, cols: len }, meta_launch_order))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: total_rows,
+                cols: len,
+            },
+            meta_launch_order,
+        ))
     }
 
     pub fn devstop_many_series_one_param_time_major_dev(
@@ -460,7 +531,6 @@ impl CudaDevStop {
             return Err(CudaDevStopError::InvalidInput("invalid period".into()));
         }
 
-        
         let mut firsts = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -493,12 +563,14 @@ impl CudaDevStop {
         let func = self
             .module
             .get_function("devstop_many_series_one_param_f32")
-            .map_err(|_| CudaDevStopError::MissingKernelSymbol { name: "devstop_many_series_one_param_f32" })?;
+            .map_err(|_| CudaDevStopError::MissingKernelSymbol {
+                name: "devstop_many_series_one_param_f32",
+            })?;
 
         let grid: GridSize = ((cols as u32).max(1), 1, 1).into();
         let block: BlockSize = (64, 1, 1).into();
         Self::validate_launch(grid, block)?;
-        
+
         let per_block = 2 * std::mem::size_of::<f32>() + std::mem::size_of::<i32>();
         let shmem_bytes_usize = period
             .checked_mul(per_block)
@@ -536,10 +608,13 @@ impl CudaDevStop {
         }
 
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -650,16 +725,17 @@ pub mod benches {
         }
 
         let rows = mults.len();
-        let elems_out = rows
-            .checked_mul(len)
-            .expect("devstop bench size overflow");
+        let elems_out = rows.checked_mul(len).expect("devstop bench size overflow");
 
-        let d_high = unsafe { DeviceBuffer::from_slice_async(&high[..len], &cuda.stream) }.expect("d_high");
-        let d_low = unsafe { DeviceBuffer::from_slice_async(&low[..len], &cuda.stream) }.expect("d_low");
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(&high[..len], &cuda.stream) }.expect("d_high");
+        let d_low =
+            unsafe { DeviceBuffer::from_slice_async(&low[..len], &cuda.stream) }.expect("d_low");
         let d_p1 = unsafe { DeviceBuffer::from_slice_async(&p1, &cuda.stream) }.expect("d_p1");
         let d_p2 = unsafe { DeviceBuffer::from_slice_async(&p2, &cuda.stream) }.expect("d_p2");
         let d_pc = unsafe { DeviceBuffer::from_slice_async(&pc, &cuda.stream) }.expect("d_pc");
-        let d_mults = unsafe { DeviceBuffer::from_slice_async(&mults, &cuda.stream) }.expect("d_mults");
+        let d_mults =
+            unsafe { DeviceBuffer::from_slice_async(&mults, &cuda.stream) }.expect("d_mults");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems_out, &cuda.stream) }.expect("d_out");
         cuda.stream.synchronize().expect("devstop sync");
@@ -737,7 +813,7 @@ pub mod benches {
         let cols = 128usize;
         let rows = 1_000_000usize / cols;
         let close = gen_series(cols * rows);
-        
+
         let mut high_tm = close.clone();
         let mut low_tm = close.clone();
         for s in 0..cols {
@@ -753,7 +829,7 @@ pub mod benches {
                 low_tm[idx] = v - off;
             }
         }
-        
+
         let mut first_valids: Vec<i32> = vec![0; cols];
         for s in 0..cols {
             let mut fv = 0i32;

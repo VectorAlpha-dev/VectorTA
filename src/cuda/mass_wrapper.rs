@@ -1,20 +1,3 @@
-//! CUDA support for the Mass Index (MASS) indicator.
-//!
-//! Mirrors ALMA-class wrappers for policy, PTX load, NON_BLOCKING stream,
-//! VRAM checks, chunking, and bench registration. The math follows the scalar
-//! path in `indicators::mass` exactly: two nested EMA(9) filters on (high-low)
-//! to form `ratio = ema1/ema2`, then a rolling sum over `period` bars.
-//!
-//! One-series × many-params (batch): we precompute the ratio and its
-//! double-single (float2) prefix sums on the host and upload them, enabling each
-//! row (period) to evaluate O(1) per timestamp via prefix differences. We also
-//! upload a prefix count of NaNs so any window containing a NaN yields NaN.
-//!
-//! Many-series × one-param (time-major): DS path proved numerically tricky with
-//! the existing time-major prefix layout. For now, we compute the scalar CPU
-//! result per series and upload it (preserves correctness and test parity).
-//! The batch (one-series × many-params) CUDA path is fully FP32/DS-enabled.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -23,7 +6,7 @@ use crate::utilities::enums::Kernel;
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer, AsyncCopyDestination};
+use cust::memory::{mem_get_info, AsyncCopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
@@ -38,7 +21,11 @@ pub enum CudaMassError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("mass: out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("mass: missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("mass: invalid input: {0}")]
@@ -46,7 +33,14 @@ pub enum CudaMassError {
     #[error("mass: invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("mass: launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("mass: device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("mass: not implemented")]
@@ -92,10 +86,12 @@ pub struct CudaMass {
     debug_logged: bool,
 }
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Default, DeviceCopy)]
-pub struct F2 { pub x: f32, pub y: f32 }
+pub struct F2 {
+    pub x: f32,
+    pub y: f32,
+}
 
 #[inline(always)]
 fn two_sum_f32(a: f32, b: f32) -> (f32, f32) {
@@ -125,9 +121,7 @@ impl CudaMass {
             ModuleJitOption::OptLevel(OptLevel::O2),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
-            .or_else(|_| {
-                Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
-            })
+            .or_else(|_| Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]))
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
@@ -193,8 +187,6 @@ impl CudaMass {
         }
     }
 
-    
-    
     fn first_valid_hilo(high: &[f32], low: &[f32]) -> Option<usize> {
         high.iter()
             .zip(low.iter())
@@ -214,33 +206,34 @@ impl CudaMass {
         let first = Self::first_valid_hilo(high, low)
             .ok_or_else(|| CudaMassError::InvalidInput("all values are NaN".into()))?;
 
-        
-        let mut prefix_ratio_ds = vec!(F2::default(); n + 1);
+        let mut prefix_ratio_ds = vec![F2::default(); n + 1];
         let mut prefix_nan = vec![0i32; n + 1];
 
-        
         let alpha: f32 = 2.0f32 / 10.0f32;
         let inv_alpha: f32 = 1.0f32 - alpha;
 
-        
         let mut ema1: f32 = high[first] - low[first];
         let mut ema2: f32 = ema1;
         let start_ema2 = first + 8;
         let start_ratio = first + 16;
 
-        
         let mut acc_hi: f32 = 0.0;
         let mut acc_lo: f32 = 0.0;
 
         for i in 0..n {
             if i < first {
-                prefix_ratio_ds[i + 1] = F2 { x: acc_hi, y: acc_lo };
+                prefix_ratio_ds[i + 1] = F2 {
+                    x: acc_hi,
+                    y: acc_lo,
+                };
                 prefix_nan[i + 1] = prefix_nan[i];
                 continue;
             }
             let hl: f32 = high[i] - low[i];
             ema1 = inv_alpha.mul_add(ema1, alpha * hl);
-            if i == start_ema2 { ema2 = ema1; }
+            if i == start_ema2 {
+                ema2 = ema1;
+            }
             let mut ratio: f32 = f32::NAN;
             if i >= start_ema2 {
                 ema2 = inv_alpha.mul_add(ema2, alpha * ema1);
@@ -255,7 +248,10 @@ impl CudaMass {
             } else {
                 prefix_nan[i + 1] = prefix_nan[i] + 1;
             }
-            prefix_ratio_ds[i + 1] = F2 { x: acc_hi, y: acc_lo };
+            prefix_ratio_ds[i + 1] = F2 {
+                x: acc_hi,
+                y: acc_lo,
+            };
         }
 
         Ok((prefix_ratio_ds, prefix_nan, first))
@@ -279,7 +275,7 @@ impl CudaMass {
                 "time-major inputs wrong length".into(),
             ));
         }
-        let mut prefix_ratio_tm_ds = vec!(F2::default(); total + 1);
+        let mut prefix_ratio_tm_ds = vec![F2::default(); total + 1];
         let mut prefix_nan_tm = vec![0i32; total + 1];
         let mut first_valids = vec![0i32; cols];
 
@@ -287,7 +283,6 @@ impl CudaMass {
         let inv_alpha: f32 = 1.0f32 - alpha;
 
         for s in 0..cols {
-            
             let fv = (0..rows)
                 .find(|&t| high_tm[t * cols + s].is_finite() && low_tm[t * cols + s].is_finite())
                 .unwrap_or(rows);
@@ -312,7 +307,9 @@ impl CudaMass {
                 if t >= fv {
                     let hl = high_tm[idx] - low_tm[idx];
                     ema1 = inv_alpha.mul_add(ema1, alpha * hl);
-                    if t == start_ema2 { ema2 = ema1; }
+                    if t == start_ema2 {
+                        ema2 = ema1;
+                    }
                     if t >= start_ema2 {
                         ema2 = inv_alpha.mul_add(ema2, alpha * ema1);
                         if t >= start_ratio {
@@ -325,7 +322,10 @@ impl CudaMass {
                 } else {
                     nan_cnt += 1;
                 }
-                prefix_ratio_tm_ds[idx + 1] = F2 { x: acc_hi, y: acc_lo };
+                prefix_ratio_tm_ds[idx + 1] = F2 {
+                    x: acc_hi,
+                    y: acc_lo,
+                };
                 prefix_nan_tm[idx + 1] = nan_cnt;
             }
         }
@@ -353,13 +353,11 @@ impl CudaMass {
         let mut prefix_nan_tm = vec![0i32; total + 1];
         let mut first_valids = vec![0i32; cols];
 
-        
         let mut prefix_ratio_tm_f64 = vec![0.0f64; total + 1];
         let alpha = 2.0f64 / 10.0f64;
         let inv_alpha = 1.0f64 - alpha;
 
         for s in 0..cols {
-            
             let mut fv: Option<usize> = None;
             for t in 0..rows {
                 let h = high_tm[t * cols + s];
@@ -410,15 +408,14 @@ impl CudaMass {
                     }
                 }
                 let is_nan = !ratio.is_finite();
-                prefix_ratio_tm_f64[idx + 1] = prefix_ratio_tm_f64[idx] + if is_nan { 0.0 } else { ratio };
+                prefix_ratio_tm_f64[idx + 1] =
+                    prefix_ratio_tm_f64[idx] + if is_nan { 0.0 } else { ratio };
                 prefix_nan_tm[idx + 1] = prefix_nan_tm[idx] + if is_nan { 1 } else { 0 };
             }
         }
 
         Ok((prefix_ratio_tm_f64, prefix_nan_tm, first_valids))
     }
-
-    
 
     pub fn mass_batch_dev(
         &mut self,
@@ -432,7 +429,6 @@ impl CudaMass {
             ));
         }
 
-        
         let combos = expand_mass_combos(sweep)?;
         if combos.is_empty() {
             return Err(CudaMassError::InvalidInput(
@@ -456,7 +452,6 @@ impl CudaMass {
             )));
         }
 
-        
         let size_f2 = std::mem::size_of::<F2>();
         let size_i32 = std::mem::size_of::<i32>();
         let size_f32 = std::mem::size_of::<f32>();
@@ -486,10 +481,9 @@ impl CudaMass {
             .and_then(|v| v.checked_add(out_bytes))
             .ok_or_else(|| CudaMassError::InvalidInput("total VRAM size overflow".into()))?;
 
-        let headroom = 64usize << 20; 
+        let headroom = 64usize << 20;
         Self::will_fit(bytes_needed, headroom)?;
 
-        
         let d_prefix_ratio = DeviceBuffer::from_slice(&prefix_ratio_ds)?;
         let d_prefix_nan = DeviceBuffer::from_slice(&prefix_nan)?;
         let periods_i32: Vec<i32> = combos
@@ -499,7 +493,6 @@ impl CudaMass {
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let mut d_out: DeviceBuffer<f32> = DeviceBuffer::zeroed(out_elems)?;
 
-        
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
             _ => 256,
@@ -509,15 +502,15 @@ impl CudaMass {
         let block: BlockSize = (block_x, 1, 1).into();
         let stream = &self.stream;
 
-        
         let mut launched = 0usize;
         const MAX_GRID_Y: usize = 65_535;
         while launched < combos.len() {
             let chunk = (combos.len() - launched).min(MAX_GRID_Y);
-            let func = self
-                .module
-                .get_function("mass_batch_f32")
-                .map_err(|_| CudaMassError::MissingKernelSymbol { name: "mass_batch_f32" })?;
+            let func = self.module.get_function("mass_batch_f32").map_err(|_| {
+                CudaMassError::MissingKernelSymbol {
+                    name: "mass_batch_f32",
+                }
+            })?;
             let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
             unsafe {
                 launch!(
@@ -530,8 +523,7 @@ impl CudaMass {
                         chunk as i32,
                         d_out.as_device_ptr().offset((launched * len) as isize)
                     )
-                )
-                ?;
+                )?;
             }
             launched += chunk;
         }
@@ -567,13 +559,11 @@ impl CudaMass {
             ));
         }
 
-        
         let bytes_out = total
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaMassError::InvalidInput("output bytes overflow".into()))?;
         Self::will_fit(bytes_out, 64usize << 20)?;
 
-        
         let mut host_tm = vec![0f32; total];
         for s in 0..cols {
             let mut h = vec![f64::NAN; rows];
@@ -582,8 +572,13 @@ impl CudaMass {
                 h[t] = high_tm[t * cols + s] as f64;
                 l[t] = low_tm[t * cols + s] as f64;
             }
-            let p = MassParams { period: Some(period) };
-            let input = MassInput { data: MassData::Slices { high: &h, low: &l }, params: p };
+            let p = MassParams {
+                period: Some(period),
+            };
+            let input = MassInput {
+                data: MassData::Slices { high: &h, low: &l },
+                params: p,
+            };
             let out = mass_with_kernel(&input, Kernel::Scalar)
                 .map_err(|e| CudaMassError::InvalidInput(format!("cpu mass error: {}", e)))?;
             for t in 0..rows {
@@ -591,24 +586,22 @@ impl CudaMass {
             }
         }
 
-        let mut d_out_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(total) }?;
+        let mut d_out_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total) }?;
         unsafe {
-            d_out_tm
-                .async_copy_from(host_tm.as_slice(), &self.stream)?;
+            d_out_tm.async_copy_from(host_tm.as_slice(), &self.stream)?;
         }
         self.stream.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 }
 
-
-
 fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassError> {
     #[inline]
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, CudaMassError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaMassError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -621,7 +614,6 @@ fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassErr
             }
             Ok(v)
         } else {
-            
             let mut v = Vec::new();
             let mut cur = start;
             loop {
@@ -658,8 +650,6 @@ fn expand_mass_combos(r: &MassBatchRange) -> Result<Vec<MassParams>, CudaMassErr
     }
     Ok(v)
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -704,11 +694,10 @@ pub mod benches {
                         .as_raw()
                         .wrapping_add((launched * std::mem::size_of::<i32>()) as u64);
                     let mut combos_i = chunk as i32;
-                    let mut out_ptr = self
-                        .d_out
-                        .as_device_ptr()
-                        .as_raw()
-                        .wrapping_add(((launched * self.len) * std::mem::size_of::<f32>()) as u64);
+                    let mut out_ptr =
+                        self.d_out.as_device_ptr().as_raw().wrapping_add(
+                            ((launched * self.len) * std::mem::size_of::<f32>()) as u64,
+                        );
                     let args: &mut [*mut c_void] = &mut [
                         &mut prefix_ptr as *mut _ as *mut c_void,
                         &mut nan_ptr as *mut _ as *mut c_void,
@@ -768,15 +757,13 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![
-            CudaBenchScenario::new(
-                "mass",
-                "batch_dev",
-                "mass_cuda_batch_dev",
-                "120k_x_16combos",
-                prep_mass_batch,
-            )
-            .with_inner_iters(4),
-        ]
+        vec![CudaBenchScenario::new(
+            "mass",
+            "batch_dev",
+            "mass_cuda_batch_dev",
+            "120k_x_16combos",
+            prep_mass_batch,
+        )
+        .with_inner_iters(4)]
     }
 }

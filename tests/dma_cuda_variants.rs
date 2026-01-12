@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::dma::{
     dma_batch_with_kernel, DmaBatchRange, DmaBuilder, DmaParams,
 };
@@ -58,11 +56,11 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
     }
 
     let data = gen_series_f64(series_len, 5);
-    
+
     let sweep = DmaBatchRange {
-        hull_length: (hull_len, hull_len + 6, 3), 
-        ema_length: (ema_len, ema_len + 8, 4),    
-        ema_gain_limit: (10, 30, 10),             
+        hull_length: (hull_len, hull_len + 6, 3),
+        ema_length: (ema_len, ema_len + 8, 4),
+        ema_gain_limit: (10, 30, 10),
         hull_ma_type: "WMA".to_string(),
     };
 
@@ -79,8 +77,6 @@ fn compare_batch(policy: CudaDmaPolicy, series_len: usize, hull_len: usize, ema_
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host).expect("copy D2H");
 
-    
-    
     let (atol, rtol) = (5e-3, 6e-4);
     for i in 0..host.len() {
         let a = cpu.values[i];
@@ -116,7 +112,6 @@ fn compare_many_series(
         hull_ma_type: Some("WMA".to_string()),
     };
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for j in 0..cols {
         let mut s = vec![f64::NAN; rows];
@@ -159,8 +154,6 @@ fn compare_many_series(
     }
 }
 
-
-
 #[cfg(feature = "cuda")]
 #[test]
 fn dma_batch_plain_matches_cpu() {
@@ -168,7 +161,7 @@ fn dma_batch_plain_matches_cpu() {
         batch: BatchKernelPolicy::Plain { block_x: 256 },
         many_series: ManySeriesKernelPolicy::Auto,
     };
-    
+
     compare_batch(policy, 32768, 12, 16);
 }
 
@@ -182,7 +175,7 @@ fn dma_batch_tiled_matches_cpu() {
         },
         many_series: ManySeriesKernelPolicy::Auto,
     };
-    
+
     compare_batch(policy, 131072, 12, 24);
 }
 

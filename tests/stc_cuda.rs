@@ -1,8 +1,4 @@
-
-
-use vector_ta::indicators::stc::{
-    StcBatchRange, StcParams,
-};
+use vector_ta::indicators::stc::{StcBatchRange, StcParams};
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -79,7 +75,6 @@ fn stc_series_f32(
     let slow_a = 2.0f32 / (slow as f32 + 1.0f32);
     let d_a = 2.0f32 / (d as f32 + 1.0f32);
 
-    
     let mut fast_acc = KahanF32::new();
     let mut slow_acc = KahanF32::new();
     let mut fast_seed_nan = false;
@@ -183,7 +178,6 @@ fn stc_series_f32(
             f32::NAN
         };
 
-        
         let d_val = if stok.is_finite() {
             if d_seed_cnt < d {
                 d_seed_acc.add(stok);
@@ -233,7 +227,6 @@ fn stc_series_f32(
             f32::NAN
         };
 
-        
         let out_i = if kd.is_finite() {
             if final_seed_cnt < d {
                 final_seed_acc.add(kd);
@@ -296,10 +289,7 @@ fn stc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
-    let first_valid = price_f32
-        .iter()
-        .position(|v| v.is_finite())
-        .unwrap_or(len);
+    let first_valid = price_f32.iter().position(|v| v.is_finite()).unwrap_or(len);
     let cuda = CudaStc::new(0).expect("CudaStc::new");
     let (dev, combos) = cuda
         .stc_batch_dev(&price_f32, &sweep)
@@ -344,8 +334,8 @@ fn stc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 2048usize; 
+    let cols = 8usize;
+    let rows = 2048usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in 40..rows {
@@ -354,7 +344,6 @@ fn stc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         }
     }
 
-    
     let params = StcParams {
         fast_period: Some(23),
         slow_period: Some(50),
@@ -399,7 +388,11 @@ fn stc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
 
     let tol = 2e-3f32;
     for idx in 0..g_tm.len() {
-        assert!(approx_eq_f32(cpu_tm[idx], g_tm[idx], tol), "mismatch at {}", idx);
+        assert!(
+            approx_eq_f32(cpu_tm[idx], g_tm[idx], tol),
+            "mismatch at {}",
+            idx
+        );
     }
 
     Ok(())

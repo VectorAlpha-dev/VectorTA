@@ -1,14 +1,3 @@
-//! CUDA scaffolding for the Hull Moving Average (HMA).
-//!
-//! Aligns with the ALMA CUDA wrapper patterns:
-//! - Stream: NON_BLOCKING; PTX JIT with DetermineTargetFromContext and O2→fallback.
-//! - Policy enums and introspection (batch and many-series), with BENCH_DEBUG logging.
-//! - VRAM estimation and early failure if insufficient; grid.y chunking (<= 65_535).
-//! - Public device entry points mirror ALMA naming and return `DeviceArrayF32`.
-//!
-//! Kernels implement a sequential (recurrence-style) update per-thread; we keep
-//! the simple 1D kernels and rely on host-side chunking for large sweeps.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -24,10 +13,9 @@ use cust::stream::{Stream, StreamFlags};
 use std::env;
 use std::ffi::c_void;
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
-
 
 use super::cwma_wrapper::{BatchKernelPolicy, BatchThreadsPerOutput, ManySeriesKernelPolicy};
 
@@ -38,11 +26,22 @@ pub enum CudaHmaError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("arithmetic overflow when computing {what}")]
     ArithmeticOverflow { what: &'static str },
     #[error("invalid policy: {0}")]
@@ -53,7 +52,6 @@ pub enum CudaHmaError {
     NotImplemented,
 }
 
-/// Selected kernel variants (introspection only)
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
     Plain { block_x: u32 },
@@ -112,7 +110,8 @@ impl CudaHma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -146,9 +145,13 @@ impl CudaHma {
         &self.policy
     }
     #[inline]
-    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    pub fn ctx(&self) -> Arc<Context> {
+        Arc::clone(&self.ctx)
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -221,17 +224,23 @@ impl CudaHma {
             Some(v) => v,
             None => return Ok(()),
         };
-        let need = required_bytes
-            .checked_add(headroom_bytes)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "required_bytes + headroom_bytes" })?;
+        let need =
+            required_bytes
+                .checked_add(headroom_bytes)
+                .ok_or(CudaHmaError::ArithmeticOverflow {
+                    what: "required_bytes + headroom_bytes",
+                })?;
         if need <= free {
             Ok(())
         } else {
-            Err(CudaHmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            Err(CudaHmaError::OutOfMemory {
+                required: required_bytes,
+                free,
+                headroom: headroom_bytes,
+            })
         }
     }
 
-    /// Expose the producing stream handle for CUDA Array Interface (v3) interop.
     pub fn stream_handle_u64(&self) -> u64 {
         self.stream.as_inner() as u64
     }
@@ -247,20 +256,26 @@ impl CudaHma {
 
     fn expand_range(range: &HmaBatchRange) -> Vec<HmaParams> {
         let (start, end, step) = range.period;
-        // zero step or identical bounds => singleton
+
         if step == 0 || start == end {
-            return vec![HmaParams { period: Some(start) }];
+            return vec![HmaParams {
+                period: Some(start),
+            }];
         }
         let s = step.max(1);
-        // support reversed bounds
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let mut out = Vec::new();
         let mut x = lo;
         while x <= hi {
             out.push(HmaParams { period: Some(x) });
             match x.checked_add(s) {
                 Some(nx) => x = nx,
-                None => break, // stop on overflow; accumulated values are valid
+                None => break,
             }
         }
         out
@@ -337,21 +352,29 @@ impl CudaHma {
         block_x: u32,
         shared_bytes: usize,
     ) -> Result<(), CudaHmaError> {
-        let func = self
-            .module
-            .get_function("hma_batch_f32")
-            .map_err(|_| CudaHmaError::MissingKernelSymbol { name: "hma_batch_f32" })?;
+        let func = self.module.get_function("hma_batch_f32").map_err(|_| {
+            CudaHmaError::MissingKernelSymbol {
+                name: "hma_batch_f32",
+            }
+        })?;
 
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        // Light-weight guard using device limits
+
         {
             let dev = Device::get_device(self.device_id)?;
             let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
             let max_tpb = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
             if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_tpb {
-                return Err(CudaHmaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+                return Err(CudaHmaError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
             }
         }
 
@@ -376,7 +399,8 @@ impl CudaHma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
+            self.stream
+                .launch(&func, grid, block, shared_bytes as u32, args)?;
         }
 
         Ok(())
@@ -390,35 +414,49 @@ impl CudaHma {
         len: usize,
         max_sqrt_len: usize,
     ) -> Result<DeviceArrayF32, CudaHmaError> {
-        // VRAM estimate: prices + periods + ring + output (with overflow guards)
         let n = combos.len();
         let sz_f32 = std::mem::size_of::<f32>();
         let prices_bytes = len
             .checked_mul(sz_f32)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "len * sizeof(f32)" })?;
-        let periods_bytes = n
-            .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "n * sizeof(i32)" })?;
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "len * sizeof(f32)",
+            })?;
+        let periods_bytes =
+            n.checked_mul(std::mem::size_of::<i32>())
+                .ok_or(CudaHmaError::ArithmeticOverflow {
+                    what: "n * sizeof(i32)",
+                })?;
         let ring_elems = n
             .checked_mul(max_sqrt_len)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "n * max_sqrt_len" })?;
-        let ring_bytes = ring_elems
-            .checked_mul(sz_f32)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "ring_elems * sizeof(f32)" })?;
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "n * max_sqrt_len",
+            })?;
+        let ring_bytes =
+            ring_elems
+                .checked_mul(sz_f32)
+                .ok_or(CudaHmaError::ArithmeticOverflow {
+                    what: "ring_elems * sizeof(f32)",
+                })?;
         let out_elems = n
             .checked_mul(len)
             .ok_or(CudaHmaError::ArithmeticOverflow { what: "n * len" })?;
         let out_bytes = out_elems
             .checked_mul(sz_f32)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "out_elems * sizeof(f32)" })?;
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "out_elems * sizeof(f32)",
+            })?;
         let required = prices_bytes
-            .checked_add(periods_bytes).ok_or(CudaHmaError::ArithmeticOverflow { what: "prices+periods" })?
-            .checked_add(ring_bytes).ok_or(CudaHmaError::ArithmeticOverflow { what: "prev+ring" })?
-            .checked_add(out_bytes).ok_or(CudaHmaError::ArithmeticOverflow { what: "prev+out" })?;
-        let headroom = 64 * 1024 * 1024; // 64MB
+            .checked_add(periods_bytes)
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "prices+periods",
+            })?
+            .checked_add(ring_bytes)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "prev+ring" })?
+            .checked_add(out_bytes)
+            .ok_or(CudaHmaError::ArithmeticOverflow { what: "prev+out" })?;
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit_checked(required, headroom)?;
 
-        // Async HtoD
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods, &self.stream) }?;
@@ -429,7 +467,6 @@ impl CudaHma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        // Policy: currently only Plain batch kernel; allow user override of block_x
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             _ => match std::env::var("HMA_BLOCK_X")
@@ -446,7 +483,6 @@ impl CudaHma {
         }
         self.maybe_log_batch_debug();
 
-        // Single grid-stride launch
         let periods_ptr = unsafe { d_periods.as_device_ptr().as_raw() };
         let ring_ptr = unsafe { d_ring.as_device_ptr().as_raw() };
         let out_ptr = unsafe { d_out.as_device_ptr().as_raw() };
@@ -504,16 +540,19 @@ impl CudaHma {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len, max_sqrt_len)?;
-        // Async D2H with optional pinned staging for large outputs
+
         let n_elems = out.len();
         if n_elems >= (1 << 20) {
-            let mut pinned: LockedBuffer<f32> =
-                unsafe { LockedBuffer::uninitialized(n_elems)? };
-            unsafe { dev.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+            let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(n_elems)? };
+            unsafe {
+                dev.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
+            }
             self.stream.synchronize()?;
             out.copy_from_slice(pinned.as_slice());
         } else {
-            unsafe { dev.buf.async_copy_to(out, &self.stream)?; }
+            unsafe {
+                dev.buf.async_copy_to(out, &self.stream)?;
+            }
             self.stream.synchronize()?;
         }
         Ok((combos.len(), len, combos))
@@ -532,7 +571,9 @@ impl CudaHma {
         }
         let expected = cols
             .checked_mul(rows)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "cols * rows" })?;
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "cols * rows",
+            })?;
         if data_tm_f32.len() != expected {
             return Err(CudaHmaError::InvalidInput(format!(
                 "data length mismatch: expected {}, got {}",
@@ -606,7 +647,9 @@ impl CudaHma {
         let func = self
             .module
             .get_function("hma_many_series_one_param_f32")
-            .map_err(|_| CudaHmaError::MissingKernelSymbol { name: "hma_many_series_one_param_f32" })?;
+            .map_err(|_| CudaHmaError::MissingKernelSymbol {
+                name: "hma_many_series_one_param_f32",
+            })?;
 
         let grid_x = ((num_series as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -633,7 +676,8 @@ impl CudaHma {
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
 
-            self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
+            self.stream
+                .launch(&func, grid, block, shared_bytes as u32, args)?;
         }
 
         Ok(())
@@ -654,13 +698,14 @@ impl CudaHma {
         let elems = cols * rows;
         let ring_elems = cols
             .checked_mul(sqrt_len)
-            .ok_or(CudaHmaError::ArithmeticOverflow { what: "cols * sqrt_len" })?;
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "cols * sqrt_len",
+            })?;
         let mut d_ring: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(ring_elems, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream) }?;
 
-        // Policy: currently only 1D many-series kernel; allow override of block_x
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => block_x,
             _ => match std::env::var("HMA_MS_BLOCK_X")
@@ -738,23 +783,24 @@ impl CudaHma {
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev =
             self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period, sqrt_len)?;
-        // Async D2H with optional pinned staging
+
         let n_elems = out_tm.len();
         if n_elems >= (1 << 20) {
-            let mut pinned: LockedBuffer<f32> =
-                unsafe { LockedBuffer::uninitialized(n_elems)? };
-            unsafe { dev.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?; }
+            let mut pinned: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(n_elems)? };
+            unsafe {
+                dev.buf.async_copy_to(pinned.as_mut_slice(), &self.stream)?;
+            }
             self.stream.synchronize()?;
             out_tm.copy_from_slice(pinned.as_slice());
         } else {
-            unsafe { dev.buf.async_copy_to(out_tm, &self.stream)?; }
+            unsafe {
+                dev.buf.async_copy_to(out_tm, &self.stream)?;
+            }
             self.stream.synchronize()?;
         }
         Ok(())
     }
 }
-
-// ---------- Bench profiles ----------
 
 pub mod benches {
     use super::*;
@@ -837,8 +883,8 @@ pub mod benches {
             .expect("ring elems overflow");
         let d_ring: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(ring_elems) }.expect("d_ring");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }
-            .expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(series_len * n_combos) }.expect("d_out");
 
         let block_x = match cuda.policy().batch {
             BatchKernelPolicy::Plain { block_x } => block_x,

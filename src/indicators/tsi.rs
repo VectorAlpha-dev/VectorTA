@@ -1,25 +1,3 @@
-//! # True Strength Index (TSI)
-//!
-//! TSI is a momentum oscillator that applies double exponential smoothing to price momentum
-//! and its absolute value, providing a normalized measure of trend strength and direction.
-//!
-//! ## Parameters
-//! - **long_period**: Long EMA smoothing period. Defaults to 25.
-//! - **short_period**: Short EMA smoothing period. Defaults to 13.
-//!
-//! ## Returns
-//! - **`Ok(TsiOutput)`** containing a `Vec<f64>` of TSI values (-100 to +100) matching input length.
-//! - **`Err(TsiError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes / Decision Log
-//! - SIMD: AVX2/AVX512 are present as stubs and short‑circuit to the scalar path. TSI is inherently sequential (EMA recursion), so scalar remains the reference implementation.
-//! - CUDA: Single‑precision batch + many‑series kernels are available behind the `cuda` feature; wrappers return VRAM handles with CAI v3 + DLPack v1.x interop and explicit VRAM checks, but numerical outputs match the scalar path.
-//! - Scalar: Inlined double‑EMA kernel with robust NaN handling and no O(N) temporaries; warmup semantics and NaN propagation are the ground truth for all other paths.
-//! - Memory: Uses `alloc_with_nan_prefix` / matrix helpers for zero‑copy prefixes.
-//! - Batch: Parallel per‑row evaluation; rows use the scalar kernel. Row‑specific
-//!   batch kernels (shared precompute across rows) not implemented yet; expected gains
-//!   require additional complexity and are deferred. Runtime selection short‑circuits
-//!   to scalar batch.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -28,29 +6,27 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::indicators::ema::{EmaError, EmaParams, EmaStream};
-use crate::utilities::data_loader::{source_type, Candles};
-use crate::utilities::enums::Kernel;
-use crate::utilities::helpers::{
-    alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix,
-};
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+use crate::indicators::ema::{EmaError, EmaParams, EmaStream};
+use crate::utilities::data_loader::{source_type, Candles};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+use crate::utilities::enums::Kernel;
+use crate::utilities::helpers::{alloc_with_nan_prefix, init_matrix_prefixes, make_uninit_matrix};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
+#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
+use core::arch::x86_64::*;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
-use core::arch::x86_64::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
@@ -83,7 +59,10 @@ pub struct TsiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct TsiParams {
     pub long_period: Option<usize>,
     pub short_period: Option<usize>,
@@ -223,7 +202,11 @@ pub enum TsiError {
     #[error("tsi: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("tsi: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("tsi: size overflow computing rows*cols")]
     SizeOverflow,
     #[error("tsi: EMA sub-error: {0}")]
@@ -287,7 +270,6 @@ fn tsi_compute_into_streaming(
         });
     }
 
-    // keep prefix NaNs; start from first+1 because mom needs previous
     if first + 1 >= data.len() {
         return Ok(());
     }
@@ -297,13 +279,12 @@ fn tsi_compute_into_streaming(
         let cur = data[i];
         if !cur.is_finite() {
             out[i] = f64::NAN;
-            continue; // skip NaN/inf without poisoning prev
+            continue;
         }
 
         let m = cur - prev;
         prev = cur;
 
-        // numerator path
         let n1 = match ema_long_num.update(m) {
             Some(v) => v,
             None => {
@@ -319,7 +300,6 @@ fn tsi_compute_into_streaming(
             }
         };
 
-        // denominator path
         let d1 = match ema_long_den.update(m.abs()) {
             Some(v) => v,
             None => {
@@ -335,7 +315,6 @@ fn tsi_compute_into_streaming(
             }
         };
 
-        // Always compute TSI when we have both EMAs, but respect warmup
         if i >= warmup_end {
             out[i] = if d2 == 0.0 {
                 f64::NAN
@@ -345,16 +324,9 @@ fn tsi_compute_into_streaming(
         }
     }
 
-    // NaNs already set by alloc_with_nan_prefix or by caller
     Ok(())
 }
 
-/// Optimized scalar kernel for arbitrary periods.
-///
-/// This implementation inlines the double-EMA updates for numerator/denominator
-/// and handles NaNs robustly. It preserves warmup semantics: indices before
-/// `first + long + short` remain NaN (caller sets the prefix), and gaps in the
-/// input (NaN/inf) produce NaNs without poisoning EMA state.
 #[inline(always)]
 fn tsi_compute_into_inline(
     data: &[f64],
@@ -368,7 +340,6 @@ fn tsi_compute_into_inline(
         return Ok(());
     }
 
-    // Precompute coefficients
     let long_alpha = 2.0 / (long as f64 + 1.0);
     let short_alpha = 2.0 / (short as f64 + 1.0);
     let long_1minus = 1.0 - long_alpha;
@@ -376,17 +347,14 @@ fn tsi_compute_into_inline(
 
     let warmup_end = first + long + short;
 
-    // Previous finite value (by contract, data[first] is finite)
     let mut prev = data[first];
 
-    // Find the first finite value after `first` to seed momentum/EMAs
     let mut i = first + 1;
     while i < n {
         let cur = data[i];
         if cur.is_finite() {
             break;
         } else {
-            // Preserve NaN gaps; prefix before warmup is already NaN-initialized
             if i >= warmup_end {
                 out[i] = f64::NAN;
             }
@@ -397,7 +365,6 @@ fn tsi_compute_into_inline(
         return Ok(());
     }
 
-    // Seed all EMA chains with the first valid momentum
     let mut momentum = data[i] - prev;
     prev = data[i];
 
@@ -406,7 +373,6 @@ fn tsi_compute_into_inline(
     let mut ema_long_den = momentum.abs();
     let mut ema_short_den = ema_long_den;
 
-    // Warmup phase (no writes beyond caller's NaN prefix)
     let mut idx = i + 1;
     let end_warm = warmup_end.min(n);
     while idx < end_warm {
@@ -417,18 +383,16 @@ fn tsi_compute_into_inline(
 
             let am = momentum.abs();
 
-            
             ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
             ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
 
             ema_long_den = long_alpha * am + long_1minus * ema_long_den;
             ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
         }
-        
+
         idx += 1;
     }
 
-    
     while idx < n {
         let cur = data[idx];
         if cur.is_finite() {
@@ -437,14 +401,12 @@ fn tsi_compute_into_inline(
 
             let am = momentum.abs();
 
-            
             ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
             ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
 
             ema_long_den = long_alpha * am + long_1minus * ema_long_den;
             ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
 
-            
             let den = ema_short_den;
             let val = if den == 0.0 {
                 f64::NAN
@@ -453,7 +415,7 @@ fn tsi_compute_into_inline(
             };
             out[idx] = val;
         } else {
-            out[idx] = f64::NAN; 
+            out[idx] = f64::NAN;
         }
         idx += 1;
     }
@@ -471,20 +433,16 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
     let warmup_end = first + long + short;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
 
-    
     let resolved_kernel = match kernel {
-        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
     if resolved_kernel == Kernel::Scalar && long == 25 && short == 13 {
-        
         unsafe {
             tsi_scalar_classic(data, long, short, first, &mut out)?;
         }
     } else {
-        
         tsi_compute_into_inline(data, long, short, first, &mut out)?;
     }
     Ok(TsiOutput { values: out })
@@ -494,40 +452,30 @@ pub fn tsi_with_kernel(input: &TsiInput, kernel: Kernel) -> Result<TsiOutput, Ts
 pub fn tsi_into_slice(dst: &mut [f64], input: &TsiInput, kern: Kernel) -> Result<(), TsiError> {
     let (data, long, short, first) = tsi_prepare(input)?;
     let warmup_end = first + long + short;
-    
+
     let end = warmup_end.min(dst.len());
     for v in &mut dst[..end] {
         *v = f64::NAN;
     }
 
-    
     let resolved_kernel = match kern {
-        
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
 
     if resolved_kernel == Kernel::Scalar && long == 25 && short == 13 {
-        
         unsafe {
             tsi_scalar_classic(data, long, short, first, dst)?;
         }
     } else {
-        
         tsi_compute_into_inline(data, long, short, first, dst)?;
     }
     Ok(())
 }
 
-/// Zero-allocation native API that writes results into a caller-provided buffer.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns an error on mismatch.
-/// - Uses `Kernel::Auto` for dispatch (same as `tsi()`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn tsi_into(input: &TsiInput, out: &mut [f64]) -> Result<(), TsiError> {
-    
     let data_len = input.as_ref().len();
     if out.len() != data_len {
         return Err(TsiError::OutputLengthMismatch {
@@ -538,7 +486,6 @@ pub fn tsi_into(input: &TsiInput, out: &mut [f64]) -> Result<(), TsiError> {
     tsi_into_slice(out, input, Kernel::Auto)
 }
 
-
 #[inline]
 pub unsafe fn tsi_scalar(
     data: &[f64],
@@ -548,7 +495,7 @@ pub unsafe fn tsi_scalar(
 ) -> Result<TsiOutput, TsiError> {
     let warmup_end = first + long + short;
     let mut out = alloc_with_nan_prefix(data.len(), warmup_end);
-    
+
     if long == 25 && short == 13 {
         tsi_scalar_classic(data, long, short, first, &mut out)?;
     } else {
@@ -557,8 +504,6 @@ pub unsafe fn tsi_scalar(
     Ok(TsiOutput { values: out })
 }
 
-/// Classic kernel optimization for TSI with inline double EMA calculations
-/// Eliminates function call overhead for all 4 EMA operations
 #[inline]
 pub unsafe fn tsi_scalar_classic(
     data: &[f64],
@@ -570,23 +515,17 @@ pub unsafe fn tsi_scalar_classic(
     let n = data.len();
     let warmup_end = first + long + short;
 
-    
-    
-
     if first + 1 >= n {
         return Ok(());
     }
 
-    
     let long_alpha = 2.0 / (long as f64 + 1.0);
     let short_alpha = 2.0 / (short as f64 + 1.0);
     let long_1minus = 1.0 - long_alpha;
     let short_1minus = 1.0 - short_alpha;
 
-    
     let mut prev = data[first];
 
-    
     if first + 1 >= n || !data[first + 1].is_finite() {
         return Ok(());
     }
@@ -594,13 +533,11 @@ pub unsafe fn tsi_scalar_classic(
     let first_momentum = data[first + 1] - prev;
     prev = data[first + 1];
 
-    
     let mut ema_long_num = first_momentum;
     let mut ema_short_num = first_momentum;
     let mut ema_long_den = first_momentum.abs();
     let mut ema_short_den = first_momentum.abs();
 
-    
     for i in (first + 2)..n {
         let cur = data[i];
         if !cur.is_finite() {
@@ -611,19 +548,14 @@ pub unsafe fn tsi_scalar_classic(
         let momentum = cur - prev;
         prev = cur;
 
-        
         ema_long_num = long_alpha * momentum + long_1minus * ema_long_num;
 
-        
         ema_short_num = short_alpha * ema_long_num + short_1minus * ema_short_num;
 
-        
         ema_long_den = long_alpha * momentum.abs() + long_1minus * ema_long_den;
 
-        
         ema_short_den = short_alpha * ema_long_den + short_1minus * ema_short_den;
 
-        
         if i >= warmup_end {
             out[i] = if ema_short_den == 0.0 {
                 f64::NAN
@@ -644,7 +576,6 @@ pub unsafe fn tsi_avx2(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    
     tsi_scalar(data, long, short, first)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -655,7 +586,6 @@ pub unsafe fn tsi_avx512(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    
     if long <= 32 && short <= 32 {
         tsi_avx512_short(data, long, short, first)
     } else {
@@ -670,7 +600,6 @@ pub unsafe fn tsi_avx512_short(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    
     tsi_scalar(data, long, short, first)
 }
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -681,40 +610,29 @@ pub unsafe fn tsi_avx512_long(
     short: usize,
     first: usize,
 ) -> Result<TsiOutput, TsiError> {
-    
     tsi_scalar(data, long, short, first)
 }
 
-
-
-
 #[derive(Debug, Clone)]
 pub struct TsiStream {
-    
     long: usize,
     short: usize,
 
-    
     alpha_l: f64,
     alpha_s: f64,
 
-    
-    
     ema_long_num: f64,
     ema_short_num: f64,
     ema_long_den: f64,
     ema_short_den: f64,
 
-    
     prev_price: f64,
     have_prev: bool,
 
-    
     seeded: bool,
 
-    
     warmup_ctr: usize,
-    warmup_needed: usize, 
+    warmup_needed: usize,
 }
 impl TsiStream {
     #[inline]
@@ -730,7 +648,6 @@ impl TsiStream {
             });
         }
 
-        
         let alpha_l = 2.0 / (long as f64 + 1.0);
         let alpha_s = 2.0 / (short as f64 + 1.0);
 
@@ -751,57 +668,44 @@ impl TsiStream {
         })
     }
 
-    /// O(1) per tick. Returns:
-    /// - `None` during warmup or when `value` is non-finite.
-    /// - `Some(NaN)` when denominator becomes zero after warmup.
-    /// - `Some(tsi)` otherwise, clamped to [-100, 100].
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !value.is_finite() {
             return None;
         }
 
-        
         if !self.have_prev {
             self.prev_price = value;
             self.have_prev = true;
             return None;
         }
 
-        
         let m = value - self.prev_price;
         self.prev_price = value;
         let am = m.abs();
 
         if !self.seeded {
-            
             self.ema_long_num = m;
             self.ema_short_num = m;
             self.ema_long_den = am;
             self.ema_short_den = am;
             self.seeded = true;
             self.warmup_ctr = 1;
-            return None; 
+            return None;
         }
 
-        
-        
         self.ema_long_num += self.alpha_l * (m - self.ema_long_num);
         self.ema_short_num += self.alpha_s * (self.ema_long_num - self.ema_short_num);
 
-        
         self.ema_long_den += self.alpha_l * (am - self.ema_long_den);
         self.ema_short_den += self.alpha_s * (self.ema_long_den - self.ema_short_den);
 
         self.warmup_ctr += 1;
 
-        
         if self.warmup_ctr < self.warmup_needed {
             return None;
         }
 
-        
         let den = self.ema_short_den;
         if den == 0.0 {
             return Some(f64::NAN);
@@ -811,7 +715,6 @@ impl TsiStream {
         Some(tsi.clamp(-100.0, 100.0))
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct TsiBatchRange {
@@ -879,7 +782,6 @@ pub fn tsi_batch_with_kernel(
     k: Kernel,
 ) -> Result<TsiBatchOutput, TsiError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         _ => {
@@ -921,11 +823,6 @@ impl TsiBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, TsiError> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, TsiError> {
-        
-        
-        
-        
-        
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -936,7 +833,7 @@ fn expand_grid(r: &TsiBatchRange) -> Result<Vec<TsiParams>, TsiError> {
             }
             return Ok(vals);
         }
-        
+
         let mut v = start;
         let mut out = Vec::new();
         loop {
@@ -1036,10 +933,8 @@ fn tsi_batch_inner(
         return Err(TsiError::SizeOverflow);
     }
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos
         .iter()
         .map(|c| first + 1 + c.long_period.unwrap() + c.short_period.unwrap() - 1)
@@ -1087,7 +982,6 @@ fn tsi_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1134,9 +1028,7 @@ fn tsi_batch_inner_into(
 
     let rows = combos.len();
     let cols = data.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(TsiError::SizeOverflow)?;
+    let expected = rows.checked_mul(cols).ok_or(TsiError::SizeOverflow)?;
     if out.len() != expected {
         return Err(TsiError::OutputLengthMismatch {
             expected,
@@ -1189,7 +1081,6 @@ pub unsafe fn tsi_row_scalar_into(
     first: usize,
     out_row: &mut [f64],
 ) -> Result<(), TsiError> {
-    
     tsi_compute_into_inline(data, long, short, first, out_row)
 }
 
@@ -1417,23 +1308,19 @@ mod tests {
 
     #[test]
     fn test_tsi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = TsiInput::from_candles(&candles, "close", TsiParams::default());
 
-        
         let baseline = tsi(&input)?.values;
 
-        
         let mut out = vec![0.0; candles.close.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             tsi_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             tsi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1503,7 +1390,6 @@ mod tests {
                 long_period: Some(200),
                 short_period: Some(100),
             },
-            
             TsiParams {
                 long_period: Some(50),
                 short_period: Some(2),
@@ -1575,16 +1461,13 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50).prop_flat_map(|long_period| {
             (
-                
                 prop::collection::vec(
                     (1.0f64..10000.0f64).prop_filter("finite", |x| x.is_finite()),
                     (long_period + 30)..400,
                 ),
                 Just(long_period),
-                
                 2usize..=long_period.min(25),
             )
         });
@@ -1601,7 +1484,6 @@ mod tests {
                 let TsiOutput { values: ref_out } =
                     tsi_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for (i, &val) in out.iter().enumerate() {
                     if !val.is_nan() {
                         prop_assert!(
@@ -1613,39 +1495,29 @@ mod tests {
                     }
                 }
 
-                
                 let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-                
                 prop_assert!(
                     out[0].is_nan(),
                     "Property 2: First value should always be NaN, got {}",
                     out[0]
                 );
 
-                
                 let has_variation = data.windows(2).any(|w| (w[0] - w[1]).abs() > 1e-10);
 
                 if has_variation {
-                    
-                    
                     let first_non_nan = out.iter().position(|x| !x.is_nan());
 
                     if let Some(idx) = first_non_nan {
-                        
                         prop_assert!(
-                            idx >= 1, 
+                            idx >= 1,
                             "Property 2: First non-NaN too early at idx {}",
                             idx
                         );
 
-                        
-                        
-                        
                         let sufficient_data =
                             (first_valid + long_period + short_period).min(out.len());
                         if sufficient_data < out.len() {
-                            
                             let mut has_movement = false;
                             for i in 1..data.len() {
                                 if (data[i] - data[i - 1]).abs() > 1e-10 {
@@ -1654,10 +1526,9 @@ mod tests {
                                 }
                             }
 
-                            
                             if has_movement {
                                 let last_quarter_start = out.len() - (out.len() / 4).max(1);
-                                
+
                                 let nan_count = out[last_quarter_start..]
                                     .iter()
                                     .filter(|v| v.is_nan())
@@ -1673,7 +1544,6 @@ mod tests {
                     }
                 }
 
-                
                 for (i, (&val, &ref_val)) in out.iter().zip(ref_out.iter()).enumerate() {
                     if val.is_nan() && ref_val.is_nan() {
                         continue;
@@ -1698,8 +1568,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let constant_data = vec![100.0; 50];
                 let const_params = TsiParams {
                     long_period: Some(10),
@@ -1707,7 +1575,6 @@ mod tests {
                 };
                 let const_input = TsiInput::from_slice(&constant_data, const_params);
                 if let Ok(TsiOutput { values: const_out }) = tsi_with_kernel(&const_input, kernel) {
-                    
                     for (i, &val) in const_out.iter().enumerate() {
                         prop_assert!(
                             val.is_nan(),
@@ -1718,12 +1585,9 @@ mod tests {
                     }
                 }
 
-                
-                
                 let uptrend: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 20.0).collect();
                 let uptrend_input = TsiInput::from_slice(&uptrend, params.clone());
 
-                
                 let downtrend: Vec<f64> = (0..100).map(|i| 2100.0 - i as f64 * 20.0).collect();
                 let downtrend_input = TsiInput::from_slice(&downtrend, params.clone());
 
@@ -1733,7 +1597,6 @@ mod tests {
                 ) {
                     let test_warmup = 1 + long_period + short_period - 1;
                     if test_warmup + 10 < up_out.len() {
-                        
                         let up_vals: Vec<f64> = up_out[up_out.len() - 10..]
                             .iter()
                             .filter(|&&x| !x.is_nan())
@@ -1749,7 +1612,6 @@ mod tests {
                             let up_avg = up_vals.iter().sum::<f64>() / up_vals.len() as f64;
                             let down_avg = down_vals.iter().sum::<f64>() / down_vals.len() as f64;
 
-                            
                             let tolerance = if long_period > 20 { 10.0 } else { 0.0 };
 
                             prop_assert!(
@@ -1766,8 +1628,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 let extreme_up: Vec<f64> = (0..100).map(|i| 100.0 + i as f64 * 50.0).collect();
                 let extreme_params = TsiParams {
                     long_period: Some(5),
@@ -1778,7 +1638,6 @@ mod tests {
                     values: extreme_out,
                 }) = tsi_with_kernel(&extreme_input, kernel)
                 {
-                    
                     let last_valid = extreme_out.iter().rposition(|x| !x.is_nan());
                     if let Some(idx) = last_valid {
                         if idx >= 20 {
@@ -1796,7 +1655,6 @@ mod tests {
                     }
                 }
 
-                
                 let extreme_down: Vec<f64> = (0..100).map(|i| 5100.0 - i as f64 * 50.0).collect();
                 let extreme_down_input = TsiInput::from_slice(&extreme_down, extreme_params);
                 if let Ok(TsiOutput {
@@ -1820,14 +1678,10 @@ mod tests {
                     }
                 }
 
-                
-                
                 if data.len() >= 20 {
-                    
                     let increasing_count = data.windows(2).filter(|w| w[1] > w[0]).count();
                     let decreasing_count = data.windows(2).filter(|w| w[1] < w[0]).count();
 
-                    
                     let valid_tsi: Vec<f64> = out
                         .iter()
                         .rev()
@@ -1839,16 +1693,13 @@ mod tests {
                     if !valid_tsi.is_empty() {
                         let avg_tsi = valid_tsi.iter().sum::<f64>() / valid_tsi.len() as f64;
 
-                        
                         if increasing_count > decreasing_count * 2 {
                             prop_assert!(
 								avg_tsi > -20.0,
 								"Property 7: Mostly increasing prices should have TSI > -20, got: {}",
 								avg_tsi
 							);
-                        }
-                        
-                        else if decreasing_count > increasing_count * 2 {
+                        } else if decreasing_count > increasing_count * 2 {
                             prop_assert!(
 								avg_tsi < 20.0,
 								"Property 7: Mostly decreasing prices should have TSI < 20, got: {}",
@@ -1858,7 +1709,6 @@ mod tests {
                     }
                 }
 
-                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out.iter().enumerate() {
@@ -1877,30 +1727,23 @@ mod tests {
                     }
                 }
 
-                
-                
                 if data.len() >= 50 && has_variation {
-                    
                     let start_idx = (1 + long_period + short_period).max(20);
                     if start_idx + 20 < out.len() {
-                        
                         let mut momentum_changes = 0;
                         let mut tsi_follows = 0;
 
                         for i in start_idx..out.len() - 10 {
                             if !out[i].is_nan() && !out[i + 5].is_nan() && !out[i + 10].is_nan() {
-                                
                                 let price_change1 = data[i + 5] - data[i];
                                 let price_change2 = data[i + 10] - data[i + 5];
 
-                                
                                 let tsi_change1 = out[i + 5] - out[i];
                                 let tsi_change2 = out[i + 10] - out[i + 5];
 
-                                
                                 if price_change1 * price_change2 < 0.0 {
                                     momentum_changes += 1;
-                                    
+
                                     if tsi_change1 * tsi_change2 < 0.0
                                         || (price_change2 > 0.0 && tsi_change2 > tsi_change1)
                                         || (price_change2 < 0.0 && tsi_change2 < tsi_change1)
@@ -1911,11 +1754,10 @@ mod tests {
                             }
                         }
 
-                        
                         if momentum_changes > 0 {
                             let follow_rate = tsi_follows as f64 / momentum_changes as f64;
                             prop_assert!(
-								follow_rate >= 0.3,  
+								follow_rate >= 0.3,
 								"Property 9: TSI should respond to momentum changes, follow rate: {:.2}",
 								follow_rate
 							);
@@ -2006,16 +1848,15 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            
-            (5, 10, 1, 2, 5, 1),         
-            (10, 30, 5, 5, 15, 5),       
-            (25, 50, 5, 10, 25, 5),      
-            (50, 100, 10, 25, 50, 5),    
-            (25, 25, 0, 2, 20, 2),       
-            (10, 50, 10, 13, 13, 0),     
-            (100, 200, 50, 50, 100, 25), 
-            (2, 5, 1, 2, 5, 1),          
-            (30, 30, 0, 5, 25, 5),       
+            (5, 10, 1, 2, 5, 1),
+            (10, 30, 5, 5, 15, 5),
+            (25, 50, 5, 10, 25, 5),
+            (50, 100, 10, 25, 50, 5),
+            (25, 25, 0, 2, 20, 2),
+            (10, 50, 10, 13, 13, 0),
+            (100, 200, 50, 50, 100, 25),
+            (2, 5, 1, 2, 5, 1),
+            (30, 30, 0, 5, 25, 5),
         ];
 
         for (cfg_idx, &(l_start, l_end, l_step, s_start, s_end, s_step)) in
@@ -2098,7 +1939,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "tsi")]
 #[pyo3(signature = (data, long_period=25, short_period=13, kernel=None))]
@@ -2155,20 +1995,18 @@ pub fn tsi_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("tsi_batch: size overflow"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
                 Kernel::Auto => Kernel::ScalarBatch,
                 k => k,
             };
-            
+
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -2179,11 +2017,9 @@ pub fn tsi_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    
     dict.set_item(
         "long_periods",
         combos
@@ -2204,7 +2040,6 @@ pub fn tsi_batch_py<'py>(
 
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
@@ -2231,7 +2066,7 @@ impl TsiDeviceArrayF32Py {
         d.set_item("typestr", "<f4")?;
         d.set_item("strides", (inner.cols * itemsize, itemsize))?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        // Producing stream is synchronized before return; no pending work.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2251,8 +2086,7 @@ impl TsiDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use cust::memory::DeviceBuffer;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__()?; // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2272,9 +2106,8 @@ impl TsiDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -2296,11 +2129,7 @@ impl TsiDeviceArrayF32Py {
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 impl TsiDeviceArrayF32Py {
-    pub fn new_from_rust(
-        inner: DeviceArrayF32,
-        ctx_guard: Arc<Context>,
-        device_id: u32,
-    ) -> Self {
+    pub fn new_from_rust(inner: DeviceArrayF32, ctx_guard: Arc<Context>, device_id: u32) -> Self {
         Self {
             inner,
             ctx_guard,
@@ -2328,8 +2157,7 @@ pub fn tsi_cuda_batch_dev_py<'py>(
         short_period: short_period_range,
     };
     let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
-        let mut cuda =
-            CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let (arr, combos) = cuda
@@ -2376,8 +2204,7 @@ pub fn tsi_cuda_many_series_one_param_dev_py<'py>(
     }
     let slice_in = data_tm_f32.as_slice()?;
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let mut cuda =
-            CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut cuda = CudaTsi::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         let arr = cuda
@@ -2418,9 +2245,7 @@ impl TsiStreamPy {
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tsi_js(data: &[f64], long_period: usize, short_period: usize) -> Result<Vec<f64>, JsValue> {
     let params = TsiParams {
@@ -2437,7 +2262,7 @@ pub fn tsi_js(data: &[f64], long_period: usize, short_period: usize) -> Result<V
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tsi_into(
     in_ptr: *const f64,
@@ -2459,7 +2284,6 @@ pub fn tsi_into(
         let input = TsiInput::from_slice(data, params);
 
         if in_ptr == out_ptr as *const f64 {
-            
             let mut temp = vec![0.0; len];
             tsi_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2474,7 +2298,7 @@ pub fn tsi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tsi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2483,7 +2307,7 @@ pub fn tsi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tsi_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2493,14 +2317,14 @@ pub fn tsi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TsiBatchConfig {
     pub long_period_range: (usize, usize, usize),
     pub short_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct TsiBatchJsOutput {
     pub values: Vec<f64>,
@@ -2509,7 +2333,7 @@ pub struct TsiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = tsi_batch)]
 pub fn tsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: TsiBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2534,7 +2358,7 @@ pub fn tsi_batch_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("Failed to serialize output: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn tsi_batch_into(
     in_ptr: *const f64,
@@ -2559,8 +2383,7 @@ pub fn tsi_batch_into(
             short_period: (short_period_start, short_period_end, short_period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total_size = rows
@@ -2569,7 +2392,6 @@ pub fn tsi_batch_into(
 
         let out_slice = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        
         match tsi_batch_inner_into(data, &sweep, Kernel::Scalar, false, out_slice) {
             Ok(_) => Ok(rows),
             Err(e) => Err(JsValue::from_str(&e.to_string())),

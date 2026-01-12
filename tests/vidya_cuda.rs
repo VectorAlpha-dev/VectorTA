@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::vidya::{
     vidya_batch_with_kernel, vidya_with_kernel, VidyaBatchRange, VidyaData, VidyaInput, VidyaParams,
 };
@@ -96,7 +94,6 @@ fn vidya_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let lp = 21usize;
     let alpha = 0.2f64;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

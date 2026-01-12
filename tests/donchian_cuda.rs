@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::donchian::{
     donchian_batch_with_kernel, donchian_with_kernel, DonchianBatchRange, DonchianData,
     DonchianInput, DonchianParams,
@@ -46,7 +44,6 @@ fn donchian_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = DonchianBatchRange { period: (5, 48, 1) };
 
-    
     let high_f32: Vec<f32> = high.iter().map(|&v| v as f32).collect();
     let low_f32: Vec<f32> = low.iter().map(|&v| v as f32).collect();
     let high_q: Vec<f64> = high_f32.iter().map(|&v| v as f64).collect();
@@ -110,7 +107,6 @@ fn donchian_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
     }
     let period = 21usize;
 
-    
     let mut up_tm = vec![f64::NAN; rows * cols];
     let mut mid_tm = vec![f64::NAN; rows * cols];
     let mut lo_tm = vec![f64::NAN; rows * cols];
@@ -136,7 +132,6 @@ fn donchian_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::
         }
     }
 
-    
     let high_tm_f32: Vec<f32> = high_tm.iter().map(|&v| v as f32).collect();
     let low_tm_f32: Vec<f32> = low_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaDonchian::new(0).expect("CudaDonchian::new");

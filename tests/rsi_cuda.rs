@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::rsi::{
     rsi_batch_with_kernel, rsi_with_kernel, RsiBatchRange, RsiInput, RsiParams,
 };
@@ -43,7 +41,6 @@ fn rsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
     let sweep = RsiBatchRange { period: (2, 60, 2) };
 
-    
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let price_cpu_f64: Vec<f64> = price_f32.iter().map(|&v| v as f64).collect();
     let cpu = rsi_batch_with_kernel(&price_cpu_f64, &sweep, Kernel::ScalarBatch)?;
@@ -93,14 +90,13 @@ fn rsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
         for t in 0..rows {
             series[t] = price_tm[t * cols + s];
         }
-        
+
         let series_f32: Vec<f32> = series.iter().map(|&v| v as f32).collect();
         let series_cpu_f64: Vec<f64> = series_f32.iter().map(|&v| v as f64).collect();
         let params = RsiParams {

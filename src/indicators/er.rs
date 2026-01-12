@@ -1,22 +1,3 @@
-//! # Kaufman Efficiency Ratio (ER)
-//!
-//! Compares absolute price change over a period to the sum of incremental absolute changes.
-//! Returns values between 0.0 and 1.0 (high = efficient trend, low = choppy/noisy).
-//!
-//! ## Parameters
-//! - **period**: Window size (default: 5)
-//!
-//! ## Returns
-//! - **`Ok(ErOutput)`** on success (`values: Vec<f64>` of length matching input)
-//! - **`Err(ErError)`** on failure
-//!
-//! ## Developer Status
-//! - SIMD enabled: AVX2/AVX512 accelerate initial denominator build; streaming body remains scalar for exactness. >5% faster vs scalar at 100k on AVX2/AVX512.
-//! - Scalar path: O(n) rolling-sum kernel with no extra allocations; writes only computed region.
-//! - Batch (row): Scalar batch uses shared prefix sums of |Δ| for O(1) denominators per step; warmup prefixes preserved.
-//! - Streaming: O(1) update via rolling sum of |Δ|; exact and matches batch outputs.
-//! - Decision log: SIMD enabled; CUDA wrapper present with typed errors; Python interop exposes CAI v3 and DLPack. Outputs unchanged.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -25,9 +6,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyAny, PyDict, PyList};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -73,7 +54,10 @@ pub struct ErOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ErParams {
     pub period: Option<usize>,
 }
@@ -186,12 +170,16 @@ pub enum ErError {
     #[error("er: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("er: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("er: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl From<ErError> for JsValue {
     fn from(err: ErError) -> Self {
         JsValue::from_str(&err.to_string())
@@ -203,12 +191,7 @@ pub fn er(input: &ErInput) -> Result<ErOutput, ErError> {
     er_with_kernel(input, Kernel::Auto)
 }
 
-/// Write ER values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmup prefix exactly as the Vec-returning API.
-/// - `out.len()` must equal the input length; otherwise returns `OutputLenMismatch`.
-/// - Uses `Kernel::Auto` for runtime selection (same as `er()`), and writes results in-place.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn er_into(input: &ErInput, out: &mut [f64]) -> Result<(), ErError> {
     er_into_slice(out, input, Kernel::Auto)
@@ -250,7 +233,7 @@ pub fn er_with_kernel(input: &ErInput, kernel: Kernel) -> Result<ErOutput, ErErr
             Kernel::Scalar | Kernel::ScalarBatch => er_scalar(data, period, first, &mut out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => er_avx2(data, period, first, &mut out),
-            
+
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => er_scalar(data, period, first, &mut out),
             _ => unreachable!(),
@@ -284,7 +267,10 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
         });
     }
     if dst.len() != len {
-        return Err(ErError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(ErError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
 
     let chosen = match kern {
@@ -297,14 +283,13 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
             Kernel::Scalar | Kernel::ScalarBatch => er_scalar(data, period, first, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 | Kernel::Avx2Batch => er_avx2(data, period, first, dst),
-            
+
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => er_scalar(data, period, first, dst),
             _ => unreachable!(),
         }
     }
 
-    
     let warm_end = first + period - 1;
     for v in &mut dst[..warm_end] {
         *v = f64::NAN;
@@ -315,25 +300,20 @@ pub fn er_into_slice(dst: &mut [f64], input: &ErInput, kern: Kernel) -> Result<(
 
 #[inline]
 pub fn er_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
-    
     let n = data.len();
     let warm = first + period - 1;
     if warm >= n {
         return;
     }
 
-    
     let mut roll = 0.0f64;
     let mut j = first;
     while j < warm {
-        
         roll += (data[j + 1] - data[j]).abs();
         j += 1;
     }
 
-    
-    let mut start = first; 
+    let mut start = first;
     let mut i = warm;
     while i < n {
         let delta = (data[i] - data[start]).abs();
@@ -343,7 +323,6 @@ pub fn er_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
             0.0
         };
 
-        
         if i + 1 == n {
             break;
         }
@@ -392,12 +371,10 @@ pub unsafe fn er_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
         return;
     }
 
-    
     let ptr = data.as_ptr();
     let mut acc = unsafe { _mm256_setzero_pd() };
     let mut j = first;
     while j + 4 <= warm {
-        
         let a = unsafe { _mm256_loadu_pd(ptr.add(j)) };
         let b = unsafe { _mm256_loadu_pd(ptr.add(j + 1)) };
         acc = unsafe { _mm256_add_pd(acc, vabs(_mm256_sub_pd(b, a))) };
@@ -409,7 +386,6 @@ pub unsafe fn er_avx2(data: &[f64], period: usize, first: usize, out: &mut [f64]
         j += 1;
     }
 
-    
     let mut start = first;
     let mut i = warm;
     while i < n {
@@ -437,7 +413,6 @@ pub unsafe fn er_avx512_short(data: &[f64], period: usize, first: usize, out: &m
     use core::arch::x86_64::*;
     #[inline(always)]
     unsafe fn hsum512(x: __m512d) -> f64 {
-        
         let v1 = _mm512_add_pd(x, _mm512_shuffle_f64x2(x, x, 0b11_10_01_00));
         let v2 = _mm512_add_pd(v1, _mm512_shuffle_f64x2(v1, v1, 0b00_00_11_10));
         let lo = _mm512_castpd512_pd128(v2);
@@ -458,7 +433,6 @@ pub unsafe fn er_avx512_short(data: &[f64], period: usize, first: usize, out: &m
         return;
     }
 
-    
     let ptr = data.as_ptr();
     let mut acc = _mm512_setzero_pd();
     let mut j = first;
@@ -474,7 +448,6 @@ pub unsafe fn er_avx512_short(data: &[f64], period: usize, first: usize, out: &m
         j += 1;
     }
 
-    
     let mut start = first;
     let mut i = warm;
     while i < n {
@@ -499,18 +472,17 @@ pub unsafe fn er_avx512_short(data: &[f64], period: usize, first: usize, out: &m
 #[inline]
 #[target_feature(enable = "avx512f")]
 pub unsafe fn er_avx512_long(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     er_avx512_short(data, period, first, out)
 }
 
 #[derive(Debug, Clone)]
 pub struct ErStream {
     period: usize,
-    buffer: Vec<f64>, 
-    head: usize,      
-    filled: bool,     
-    len: usize,       
-    denom: f64,       
+    buffer: Vec<f64>,
+    head: usize,
+    filled: bool,
+    len: usize,
+    denom: f64,
 }
 
 impl ErStream {
@@ -532,32 +504,24 @@ impl ErStream {
         })
     }
 
-    /// O(1) update:
-    /// - Grow: build denom by adding |new - prev| as samples arrive.
-    /// - Steady state: denom += |new - newest| - |second_oldest - oldest|.
-    /// - Numerator is |new - oldest|.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if self.period == 1 {
             self.buffer[0] = value;
-            self.head = 0; 
+            self.head = 0;
             self.filled = true;
             self.len = 1;
             self.denom = 0.0;
             return Some(0.0);
         }
 
-        
         if !self.filled {
             if self.len == 0 {
-                
                 self.buffer[self.head] = value;
                 self.head = (self.head + 1) % self.period;
                 self.len = 1;
                 return None;
             } else {
-                
                 let prev_idx = if self.head == 0 {
                     self.period - 1
                 } else {
@@ -573,11 +537,9 @@ impl ErStream {
                     return None;
                 }
 
-                
                 self.filled = true;
 
-                
-                let start = self.head; 
+                let start = self.head;
                 let end = if start == 0 {
                     self.period - 1
                 } else {
@@ -587,7 +549,6 @@ impl ErStream {
 
                 let delta = (self.buffer[end] - self.buffer[start]).abs();
                 if self.denom > 0.0 {
-                    
                     return Some(if delta >= self.denom {
                         1.0
                     } else {
@@ -599,9 +560,7 @@ impl ErStream {
             }
         }
 
-        
-        
-        let start = self.head; 
+        let start = self.head;
         let second = if start + 1 == self.period {
             0
         } else {
@@ -611,22 +570,17 @@ impl ErStream {
             self.period - 1
         } else {
             start - 1
-        }; 
+        };
 
-        
-        
         let sub = (self.buffer[second] - self.buffer[start]).abs();
         let add = (value - self.buffer[end_prev]).abs();
         let new_denom = self.denom + add - sub;
 
-        
-        
         let delta = (value - self.buffer[second]).abs();
 
-        
         self.denom = new_denom;
         self.buffer[start] = value;
-        self.head = second; 
+        self.head = second;
 
         if self.denom > 0.0 {
             Some(if delta >= self.denom {
@@ -647,7 +601,9 @@ pub struct ErBatchRange {
 
 impl Default for ErBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -742,7 +698,6 @@ fn expand_grid(r: &ErBatchRange) -> Vec<ErParams> {
         if start < end {
             (start..=end).step_by(st).collect()
         } else {
-            
             let mut v = Vec::new();
             let mut x = start as isize;
             let end_i = end as isize;
@@ -813,7 +768,6 @@ fn er_batch_inner_into(
         });
     }
 
-    
     let rows = combos.len();
     let out_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
@@ -826,7 +780,10 @@ fn er_batch_inner_into(
             step: "*".into(),
         })?;
     if out.len() != expected {
-        return Err(ErError::OutputLengthMismatch { expected, got: out.len() });
+        return Err(ErError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
     }
     let warm: Vec<usize> = combos
         .iter()
@@ -834,8 +791,6 @@ fn er_batch_inner_into(
         .collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
-    
     let mut prefix = vec![0.0f64; cols];
     if first < cols {
         let mut j = first;
@@ -849,7 +804,6 @@ fn er_batch_inner_into(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
-            
             Kernel::Scalar => er_row_scalar_with_prefix(data, &prefix, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx2 => er_row_avx2(data, first, period, out_row),
@@ -930,7 +884,6 @@ fn er_batch_inner(
         .collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -969,7 +922,6 @@ fn er_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1046,7 +998,6 @@ unsafe fn er_row_avx512_long(data: &[f64], first: usize, period: usize, out: &mu
     er_avx512_long(data, period, first, out)
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "er")]
 #[pyo3(signature = (data, period, kernel=None))]
@@ -1119,20 +1070,15 @@ pub fn er_batch_py<'py>(
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
     let combos = py
         .allow_threads(|| {
-            
-            
-            
             let simd = match kern {
                 Kernel::Auto => {
                     let base = detect_best_kernel();
                     match base {
-                        
                         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
                         Kernel::Avx512 => Kernel::Scalar,
                         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -1168,8 +1114,7 @@ pub fn er_batch_py<'py>(
     Ok(dict)
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn er_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = ErParams {
@@ -1185,7 +1130,7 @@ pub fn er_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn er_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1194,7 +1139,7 @@ pub fn er_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn er_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1204,7 +1149,7 @@ pub fn er_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn er_into(
     in_ptr: *const f64,
@@ -1228,7 +1173,6 @@ pub fn er_into(
         };
         let input = ErInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             er_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1245,13 +1189,13 @@ pub fn er_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ErBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ErBatchJsOutput {
     pub values: Vec<f64>,
@@ -1260,7 +1204,7 @@ pub struct ErBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = er_batch)]
 pub fn er_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: ErBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1283,7 +1227,7 @@ pub fn er_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsV
     serde_wasm_bindgen::to_value(&js_output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn er_batch_into(
     in_ptr: *const f64,
@@ -1307,7 +1251,7 @@ pub fn er_batch_into(
         let cols = len;
         if rows * cols > 0 {
             let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
-            
+
             let batch_kernel = detect_best_batch_kernel();
             let simd = match batch_kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
@@ -1322,17 +1266,15 @@ pub fn er_batch_into(
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::er_wrapper::{CudaEr, DeviceArrayF32Er};
 #[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
+#[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyReadonlyArray1;
 #[cfg(all(feature = "python", feature = "cuda"))]
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use pyo3::prelude::*;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "er_cuda_batch_dev")]
@@ -1409,7 +1351,9 @@ impl DeviceArrayF32ErPy {
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -1424,7 +1368,6 @@ impl DeviceArrayF32ErPy {
         use pyo3::types::PyAny;
         use pyo3::Bound;
 
-        // Validate dl_device (if provided) using the reported allocation device.
         let (dev_ty, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((want_ty, want_dev)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1440,15 +1383,11 @@ impl DeviceArrayF32ErPy {
             }
         }
 
-        // ER kernels synchronize their CUDA stream before returning DeviceArrayF32Er, so there is
-        // no pending producer work. We accept `stream` and `copy` for API compatibility but do
-        // not need to synchronize with a consumer stream here.
         let _ = stream;
         let _ = copy;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let rows = self.inner.rows;
         let cols = self.inner.cols;
         let ctx = self.inner.ctx.clone();
@@ -1492,7 +1431,6 @@ mod tests {
 
     #[test]
     fn test_er_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let n = 256usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
@@ -1506,13 +1444,11 @@ mod tests {
 
         let input = ErInput::from_slice(&data, ErParams::default());
 
-        
         let base = er(&input)?.values;
 
-        
         let mut out = vec![0.0; n];
-        
-        #[cfg(not(feature = "wasm"))]
+
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             er_into(&input, &mut out)?;
         }
@@ -1820,7 +1756,6 @@ mod tests {
         let row = output.values_for(&def).expect("default row missing");
         assert_eq!(row.len(), c.close.len());
 
-        
         Ok(())
     }
 
@@ -1946,23 +1881,17 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=50)
             .prop_flat_map(|period| {
-                let min_len = period * 2; 
+                let min_len = period * 2;
                 (
-                    
                     (100.0f64..5000.0f64, 0.01f64..0.1f64),
-                    
                     -0.02f64..0.02f64,
-                    
                     Just(period),
                     min_len..400,
                 )
             })
             .prop_flat_map(|((base_price, volatility), trend, period, len)| {
-                
                 let price_changes = prop::collection::vec((-1.0f64..1.0f64), len);
 
                 (
@@ -1974,16 +1903,14 @@ mod tests {
                 )
             })
             .prop_map(|(base_price, volatility, trend, period, changes)| {
-                
                 let mut data = Vec::with_capacity(changes.len());
                 let mut price = base_price;
 
                 for (i, &noise) in changes.iter().enumerate() {
-                    
                     price *= 1.0 + trend;
-                    
+
                     price *= 1.0 + (noise * volatility);
-                    
+
                     price = price.max(1.0);
                     data.push(price);
                 }
@@ -2001,10 +1928,8 @@ mod tests {
                 let ErOutput { values: out } = er_with_kernel(&input, kernel).unwrap();
                 let ErOutput { values: ref_out } = er_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(out.len(), data.len());
 
-                
                 let warmup = period - 1;
                 for i in 0..warmup {
                     prop_assert!(
@@ -2015,7 +1940,6 @@ mod tests {
                     );
                 }
 
-                
                 for i in warmup..data.len() {
                     let val = out[i];
                     if !val.is_nan() {
@@ -2028,7 +1952,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
@@ -2057,11 +1980,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 if data.len() >= period + 10 {
-                    
-                    
                     for i in (warmup + 1)..data.len() {
                         if i < period {
                             continue;
@@ -2069,15 +1988,12 @@ mod tests {
                         let window_start = i + 1 - period;
                         let window_end = i;
 
-                        
                         let window = &data[window_start..=window_end];
                         let is_monotonic_up = window.windows(2).all(|w| w[1] >= w[0] - 1e-10);
                         let is_monotonic_down = window.windows(2).all(|w| w[1] <= w[0] + 1e-10);
                         let is_constant = window.windows(2).all(|w| (w[1] - w[0]).abs() < 1e-10);
 
-                        
                         if !is_constant && (is_monotonic_up || is_monotonic_down) {
-                            
                             let er_val = out[i];
                             let net_change = (window[window.len() - 1] - window[0]).abs();
                             if !er_val.is_nan() && net_change > 1e-6 {
@@ -2092,9 +2008,6 @@ mod tests {
                     }
                 }
 
-                
-                
-                
                 for i in (warmup + 1)..data.len() {
                     if i < period {
                         continue;
@@ -2106,8 +2019,7 @@ mod tests {
 
                     if is_constant {
                         let er_val = out[i];
-                        
-                        
+
                         prop_assert!(
                             er_val.is_nan() || er_val.abs() < 1e-10,
                             "Constant prices should yield NaN or 0, got {} at index {}",
@@ -2117,7 +2029,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in warmup..data.len() {
                     let val = out[i];
                     if !val.is_nan() {
@@ -2130,10 +2041,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 if period >= 4 && data.len() >= period * 3 {
-                    
                     for i in (warmup + 1)..data.len() {
                         if i < period {
                             continue;
@@ -2147,11 +2055,9 @@ mod tests {
                             total_movement += (data[j + 1] - data[j]).abs();
                         }
 
-                        
                         if total_movement > 0.0 && net_change / total_movement < 0.3 {
                             let er_val = out[i];
                             if !er_val.is_nan() {
-                                
                                 prop_assert!(
                                     er_val <= 0.35,
                                     "Expected low ER (<0.35) for choppy market at index {}, got {}",

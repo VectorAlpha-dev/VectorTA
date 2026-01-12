@@ -1,7 +1,16 @@
-#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(stdarch_x86_avx512))]
-#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(avx512_target_feature))]
+#![cfg_attr(
+    all(feature = "nightly-avx", rustc_is_nightly),
+    feature(stdarch_x86_avx512)
+)]
+#![cfg_attr(
+    all(feature = "nightly-avx", rustc_is_nightly),
+    feature(avx512_target_feature)
+)]
 #![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(portable_simd))]
-#![cfg_attr(all(feature = "nightly-avx", rustc_is_nightly), feature(likely_unlikely))]
+#![cfg_attr(
+    all(feature = "nightly-avx", rustc_is_nightly),
+    feature(likely_unlikely)
+)]
 #![allow(warnings)]
 #![allow(clippy::needless_range_loop)]
 
@@ -29,15 +38,14 @@ pub mod bindings {
     #[cfg(feature = "python")]
     pub mod python;
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     pub mod wasm;
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn allocate_f64_array(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -46,20 +54,17 @@ pub fn allocate_f64_array(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
-pub fn deallocate_f64_array(ptr: *mut f64) {
-    
-    
-}
+pub fn deallocate_f64_array(ptr: *mut f64) {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn read_f64_array(ptr: *const f64, len: usize) -> Vec<f64> {
     unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn allocate_f64_matrix(rows: usize, cols: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(rows * cols);
@@ -68,14 +73,11 @@ pub fn allocate_f64_matrix(rows: usize, cols: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
-pub fn deallocate_f64_matrix(ptr: *mut f64) {
-    
-    
-}
+pub fn deallocate_f64_matrix(ptr: *mut f64) {}
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn read_f64_matrix(ptr: *const f64, rows: usize, cols: usize) -> js_sys::Array {
     unsafe {

@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA scaffolding for the OBV (On-Balance Volume) indicator.
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX load with DetermineTargetFromContext + OptLevel O2 (and graceful fallback)
-//! - Non-blocking stream
-//! - VRAM checks with headroom and grid.y chunking
-//! - Public device entry points for batch and many-series (time-major)
-//! - Bench profiles exposed via `benches::bench_profiles()`
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -23,15 +14,11 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
 
-
-
 const OBV_BLOCK_X: u32 = 256;
 const OBV_ITEMS_PER_THREAD: u32 = 8;
 const OBV_TILE: usize = (OBV_BLOCK_X as usize) * (OBV_ITEMS_PER_THREAD as usize);
 
-
 const FAST_MIN_LEN: usize = 4096;
-
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -80,11 +67,22 @@ pub enum CudaObvError {
     #[error("Invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("Out of memory on device: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch config too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch for buffer (buf={buf}, current={current})")]
     DeviceMismatch { buf: i32, current: i32 },
     #[error("not implemented")]
@@ -156,13 +154,11 @@ impl CudaObv {
             return Ok(());
         }
         if let Some((free, _total)) = Self::device_mem_info() {
-            let need = required_bytes
-                .checked_add(headroom_bytes)
-                .ok_or_else(|| {
-                    CudaObvError::InvalidInput(
-                        "size overflow when adding headroom to required bytes".into(),
-                    )
-                })?;
+            let need = required_bytes.checked_add(headroom_bytes).ok_or_else(|| {
+                CudaObvError::InvalidInput(
+                    "size overflow when adding headroom to required bytes".into(),
+                )
+            })?;
             if need <= free {
                 Ok(())
             } else {
@@ -178,7 +174,11 @@ impl CudaObv {
     }
 
     #[inline]
-    fn validate_launch(&self, grid: (u32, u32, u32), block: (u32, u32, u32)) -> Result<(), CudaObvError> {
+    fn validate_launch(
+        &self,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+    ) -> Result<(), CudaObvError> {
         let dev = Device::get_device(self.device_id)?;
         let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX)? as u32;
         let max_by = dev.get_attribute(DeviceAttribute::MaxBlockDimY)? as u32;
@@ -190,12 +190,17 @@ impl CudaObv {
         let (gx, gy, gz) = grid;
         let (bx, by, bz) = block;
         if bx > max_bx || by > max_by || bz > max_bz || gx > max_gx || gy > max_gy || gz > max_gz {
-            return Err(CudaObvError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaObvError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
-
-    
 
     pub fn obv_batch_dev(
         &self,
@@ -215,29 +220,31 @@ impl CudaObv {
             .find(|&i| !close[i].is_nan() && !volume[i].is_nan())
             .ok_or_else(|| CudaObvError::InvalidInput("all values are NaN".into()))?;
 
-        
         let tiles = (series_len + OBV_TILE - 1) / OBV_TILE;
         let sz_pair = std::mem::size_of::<FPair>();
         let sz_f32 = std::mem::size_of::<f32>();
         let workspace_bytes = tiles
             .checked_mul(sz_pair)
             .and_then(|b| b.checked_mul(2))
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing workspace_bytes".into()))?;
+            .ok_or_else(|| {
+                CudaObvError::InvalidInput("size overflow computing workspace_bytes".into())
+            })?;
         let in_elems = close
             .len()
             .checked_add(volume.len())
             .and_then(|n| n.checked_add(series_len))
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing input elements".into()))?;
-        let in_bytes = in_elems
-            .checked_mul(sz_f32)
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing input bytes".into()))?;
-        let bytes = in_bytes
-            .checked_add(workspace_bytes)
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing total bytes".into()))?;
-        let headroom = 64 * 1024 * 1024; 
+            .ok_or_else(|| {
+                CudaObvError::InvalidInput("size overflow computing input elements".into())
+            })?;
+        let in_bytes = in_elems.checked_mul(sz_f32).ok_or_else(|| {
+            CudaObvError::InvalidInput("size overflow computing input bytes".into())
+        })?;
+        let bytes = in_bytes.checked_add(workspace_bytes).ok_or_else(|| {
+            CudaObvError::InvalidInput("size overflow computing total bytes".into())
+        })?;
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
-        
         let d_close = DeviceBuffer::from_slice(close)?;
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(series_len) }?;
@@ -262,18 +269,21 @@ impl CudaObv {
         first_valid: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaObvError> {
-        
         if series_len < FAST_MIN_LEN {
             let func = self
                 .module
                 .get_function("obv_batch_f32_serial_ref")
-                .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_serial_ref" })?;
+                .map_err(|_| CudaObvError::MissingKernelSymbol {
+                    name: "obv_batch_f32_serial_ref",
+                })?;
 
-            
             let grid_x = ((series_len as u32) + OBV_BLOCK_X - 1) / OBV_BLOCK_X;
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
             let grid: GridSize = (grid_x.max(1), (n_combos as u32).max(1), 1).into();
-            self.validate_launch((grid_x.max(1), (n_combos as u32).max(1), 1), (OBV_BLOCK_X, 1, 1))?;
+            self.validate_launch(
+                (grid_x.max(1), (n_combos as u32).max(1), 1),
+                (OBV_BLOCK_X, 1, 1),
+            )?;
 
             unsafe {
                 let mut p_close = d_close.as_device_ptr().as_raw();
@@ -295,34 +305,35 @@ impl CudaObv {
             return Ok(());
         }
 
-        
         let pass1 = self
             .module
             .get_function("obv_batch_f32_pass1_tilescan")
-            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_pass1_tilescan" })?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol {
+                name: "obv_batch_f32_pass1_tilescan",
+            })?;
         let pass2 = self
             .module
             .get_function("obv_batch_f32_pass2_scan_block_sums")
-            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_pass2_scan_block_sums" })?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol {
+                name: "obv_batch_f32_pass2_scan_block_sums",
+            })?;
         let pass3 = self
             .module
             .get_function("obv_batch_f32_pass3_add_offsets")
-            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_batch_f32_pass3_add_offsets" })?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol {
+                name: "obv_batch_f32_pass3_add_offsets",
+            })?;
         let repl = self
             .module
             .get_function("obv_batch_f32_replicate_rows")
-            .ok(); 
+            .ok();
 
-        
         let tiles = ((series_len + OBV_TILE - 1) / OBV_TILE).max(1);
 
-        
-        let mut d_block_sums: DeviceBuffer<FPair> =
-            unsafe { DeviceBuffer::uninitialized(tiles) }?;
+        let mut d_block_sums: DeviceBuffer<FPair> = unsafe { DeviceBuffer::uninitialized(tiles) }?;
         let mut d_block_offsets: DeviceBuffer<FPair> =
             unsafe { DeviceBuffer::uninitialized(tiles) }?;
 
-        
         {
             let grid: GridSize = (tiles as u32, 1, 1).into();
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
@@ -350,7 +361,6 @@ impl CudaObv {
             }
         }
 
-        
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (32, 1, 1).into();
@@ -368,7 +378,6 @@ impl CudaObv {
             }
         }
 
-        
         {
             let grid: GridSize = (tiles as u32, 1, 1).into();
             let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
@@ -392,7 +401,6 @@ impl CudaObv {
             }
         }
 
-        
         if n_combos > 1 {
             if let Some(func) = repl {
                 let threads = 256u32;
@@ -419,8 +427,6 @@ impl CudaObv {
         Ok(())
     }
 
-    
-
     pub fn obv_many_series_one_param_time_major_dev(
         &self,
         close_tm: &[f32],
@@ -431,15 +437,15 @@ impl CudaObv {
         if cols == 0 || rows == 0 {
             return Err(CudaObvError::InvalidInput("empty dims".into()));
         }
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing cols*rows".into()))?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| {
+            CudaObvError::InvalidInput("size overflow computing cols*rows".into())
+        })?;
         if close_tm.len() != volume_tm.len() || close_tm.len() != elems {
             return Err(CudaObvError::InvalidInput(
                 "mismatched input sizes for time-major matrix".into(),
             ));
         }
-        
+
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             let mut fv = rows as i32;
@@ -459,19 +465,20 @@ impl CudaObv {
             first_valids[s] = fv;
         }
 
-        
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
         let inputs_bytes = elems
             .checked_mul(3)
             .and_then(|n| n.checked_mul(sz_f32))
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing input bytes".into()))?;
-        let first_bytes = cols
-            .checked_mul(sz_i32)
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing first_valid bytes".into()))?;
-        let bytes = inputs_bytes
-            .checked_add(first_bytes)
-            .ok_or_else(|| CudaObvError::InvalidInput("size overflow computing total bytes".into()))?;
+            .ok_or_else(|| {
+                CudaObvError::InvalidInput("size overflow computing input bytes".into())
+            })?;
+        let first_bytes = cols.checked_mul(sz_i32).ok_or_else(|| {
+            CudaObvError::InvalidInput("size overflow computing first_valid bytes".into())
+        })?;
+        let bytes = inputs_bytes.checked_add(first_bytes).ok_or_else(|| {
+            CudaObvError::InvalidInput("size overflow computing total bytes".into())
+        })?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(bytes, headroom)?;
 
@@ -502,7 +509,9 @@ impl CudaObv {
         let func = self
             .module
             .get_function("obv_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaObvError::MissingKernelSymbol { name: "obv_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaObvError::MissingKernelSymbol {
+                name: "obv_many_series_one_param_time_major_f32",
+            })?;
 
         let block_x = match self.policy.many_series {
             ObvManySeriesKernelPolicy::OneD { block_x } => block_x,
@@ -538,8 +547,6 @@ impl CudaObv {
     }
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -551,7 +558,6 @@ pub mod benches {
     const MANY_COLS: usize = 128;
 
     fn bytes_one_series() -> usize {
-        
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let tile = (OBV_BLOCK_X as usize) * (OBV_ITEMS_PER_THREAD as usize);
@@ -562,7 +568,7 @@ pub mod benches {
 
     fn bytes_many_series() -> usize {
         let elems = MANY_ROWS * MANY_COLS;
-        
+
         (2 * elems + elems) * std::mem::size_of::<f32>()
             + MANY_COLS * std::mem::size_of::<i32>()
             + 32 * 1024 * 1024
@@ -608,7 +614,6 @@ pub mod benches {
 
             let stream = &self.cuda.stream;
 
-            
             {
                 let grid: GridSize = (self.tiles as u32, 1, 1).into();
                 let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();
@@ -635,7 +640,6 @@ pub mod benches {
                 }
             }
 
-            
             {
                 let grid: GridSize = (1, 1, 1).into();
                 let block: BlockSize = (32, 1, 1).into();
@@ -652,7 +656,6 @@ pub mod benches {
                 }
             }
 
-            
             {
                 let grid: GridSize = (self.tiles as u32, 1, 1).into();
                 let block: BlockSize = (OBV_BLOCK_X, 1, 1).into();

@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Money Flow Index (MFI)
-//!
-//! Parity goals (Agents Guide):
-//! - ALMA-style PTX load with DetermineTargetFromContext + O2 fallback
-//! - NON_BLOCKING stream
-//! - VRAM estimation + ~64MB headroom; grid-y chunking <= 65_535
-//! - Batch: device-built double-single (float2) prefixes (3-stage scan) + O(1) per-period via prefix diffs
-//! - Many-series×one-param: time-major sequential scan with double-single (float2) ring buffer via dynamic shared mem
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::mfi::{MfiBatchRange, MfiParams};
 use cust::context::Context;
@@ -29,7 +20,11 @@ pub enum CudaMfiError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -37,7 +32,14 @@ pub enum CudaMfiError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -119,12 +121,24 @@ impl CudaMfi {
         })
     }
 
-    pub fn set_policy(&mut self, policy: CudaMfiPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaMfiPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn set_policy(&mut self, policy: CudaMfiPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaMfiPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -153,13 +167,17 @@ impl CudaMfi {
     fn maybe_log_batch_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_batch_logged { return; }
+        if self.debug_batch_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_batch {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] mfi batch selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMfi)).debug_batch_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMfi)).debug_batch_logged = true;
+                }
             }
         }
     }
@@ -167,19 +185,25 @@ impl CudaMfi {
     fn maybe_log_many_debug(&self) {
         use std::sync::atomic::{AtomicBool, Ordering};
         static ONCE: AtomicBool = AtomicBool::new(false);
-        if self.debug_many_logged { return; }
+        if self.debug_many_logged {
+            return;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if let Some(sel) = self.last_many {
                 if !ONCE.swap(true, Ordering::Relaxed) {
                     eprintln!("[DEBUG] mfi many-series selected kernel: {:?}", sel);
                 }
-                unsafe { (*(self as *const _ as *mut CudaMfi)).debug_many_logged = true; }
+                unsafe {
+                    (*(self as *const _ as *mut CudaMfi)).debug_many_logged = true;
+                }
             }
         }
     }
 
     fn expand_grid(r: &MfiBatchRange) -> Result<Vec<MfiParams>, CudaMfiError> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaMfiError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaMfiError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
             }
@@ -253,16 +277,15 @@ impl CudaMfi {
     ) -> Result<(DeviceArrayF32, Vec<MfiParams>), CudaMfiError> {
         use std::mem::size_of;
 
-        let (combos, first_valid, len) = Self::prepare_batch_inputs(typical_f32, volume_f32, sweep)?;
+        let (combos, first_valid, len) =
+            Self::prepare_batch_inputs(typical_f32, volume_f32, sweep)?;
 
-        
         let block_x_scan: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
         let nb = ((len as u32 + block_x_scan - 1) / block_x_scan) as usize;
 
-        
         let rows = combos.len();
         let cols = len;
         let bytes_inputs = 2usize
@@ -293,7 +316,11 @@ impl CudaMfi {
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaMfiError::OutOfMemory { required, free, headroom });
+                return Err(CudaMfiError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
                 return Err(CudaMfiError::InvalidInput(
                     "insufficient device memory for MFI batch".into(),
@@ -301,7 +328,6 @@ impl CudaMfi {
             }
         }
 
-        
         let d_tp = unsafe { DeviceBuffer::from_slice_async(typical_f32, &self.stream) }?;
         let d_vol = unsafe { DeviceBuffer::from_slice_async(volume_f32, &self.stream) }?;
 
@@ -311,7 +337,6 @@ impl CudaMfi {
             .collect();
         let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream) }?;
 
-        
         let mut d_pos_ps: DeviceBuffer<[f32; 2]> =
             unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
         let mut d_neg_ps: DeviceBuffer<[f32; 2]> =
@@ -331,7 +356,6 @@ impl CudaMfi {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total_out, &self.stream)? };
 
-        
         let k1 = self
             .module
             .get_function("mfi_prefix_stage1_transform_scan_ds")
@@ -357,19 +381,22 @@ impl CudaMfi {
                 name: "mfi_batch_from_prefix_ds_f32",
             })?;
 
-        unsafe { (*(self as *const _ as *mut CudaMfi)).last_batch = Some(BatchKernelSelected::Plain { block_x: block_x_scan }); }
+        unsafe {
+            (*(self as *const _ as *mut CudaMfi)).last_batch = Some(BatchKernelSelected::Plain {
+                block_x: block_x_scan,
+            });
+        }
 
-        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
             unsafe {
-                let mut tp_ptr    = d_tp.as_device_ptr().as_raw();
-                let mut vol_ptr   = d_vol.as_device_ptr().as_raw();
-                let mut len_i     = len as i32;
-                let mut first_i   = first_valid as i32;
-                let mut pos_ps    = d_pos_ps.as_device_ptr().as_raw();
-                let mut neg_ps    = d_neg_ps.as_device_ptr().as_raw();
+                let mut tp_ptr = d_tp.as_device_ptr().as_raw();
+                let mut vol_ptr = d_vol.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut pos_ps = d_pos_ps.as_device_ptr().as_raw();
+                let mut neg_ps = d_neg_ps.as_device_ptr().as_raw();
                 let mut blk_tot_p = d_blk_tot_pos.as_device_ptr().as_raw();
                 let mut blk_tot_n = d_blk_tot_neg.as_device_ptr().as_raw();
                 let args: &mut [*mut c_void] = &mut [
@@ -386,7 +413,6 @@ impl CudaMfi {
             }
         }
 
-        
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (1, 1, 1).into();
@@ -395,7 +421,7 @@ impl CudaMfi {
                 let mut blk_tot_n = d_blk_tot_neg.as_device_ptr().as_raw();
                 let mut blk_off_p = d_blk_off_pos.as_device_ptr().as_raw();
                 let mut blk_off_n = d_blk_off_neg.as_device_ptr().as_raw();
-                let mut nb_i      = nb as i32;
+                let mut nb_i = nb as i32;
                 let args: &mut [*mut c_void] = &mut [
                     &mut blk_tot_p as *mut _ as *mut c_void,
                     &mut blk_tot_n as *mut _ as *mut c_void,
@@ -407,16 +433,15 @@ impl CudaMfi {
             }
         }
 
-        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
             unsafe {
-                let mut pos_ps    = d_pos_ps.as_device_ptr().as_raw();
-                let mut neg_ps    = d_neg_ps.as_device_ptr().as_raw();
+                let mut pos_ps = d_pos_ps.as_device_ptr().as_raw();
+                let mut neg_ps = d_neg_ps.as_device_ptr().as_raw();
                 let mut blk_off_p = d_blk_off_pos.as_device_ptr().as_raw();
                 let mut blk_off_n = d_blk_off_neg.as_device_ptr().as_raw();
-                let mut len_i     = len as i32;
+                let mut len_i = len as i32;
                 let args: &mut [*mut c_void] = &mut [
                     &mut pos_ps as *mut _ as *mut c_void,
                     &mut neg_ps as *mut _ as *mut c_void,
@@ -428,7 +453,6 @@ impl CudaMfi {
             }
         }
 
-        
         let block_x_out: u32 = 128;
         let grid_x_out: u32 = ((len as u32) + block_x_out - 1) / block_x_out;
         let mut launched = 0usize;
@@ -439,13 +463,13 @@ impl CudaMfi {
             let grid: GridSize = (grid_x_out.max(1), chunk as u32, 1).into();
             let block: BlockSize = (block_x_out, 1, 1).into();
             unsafe {
-                let mut pos_ps  = d_pos_ps.as_device_ptr().as_raw();
-                let mut neg_ps  = d_neg_ps.as_device_ptr().as_raw();
-                let mut len_i   = len as i32;
+                let mut pos_ps = d_pos_ps.as_device_ptr().as_raw();
+                let mut neg_ps = d_neg_ps.as_device_ptr().as_raw();
+                let mut len_i = len as i32;
                 let mut first_i = first_valid as i32;
                 let mut periods_ptr = d_periods.as_device_ptr().as_raw() + (periods_off as u64);
-                let mut n_chunk_i   = chunk as i32; 
-                let mut out_ptr     = d_out.as_device_ptr().as_raw() + (out_off as u64);
+                let mut n_chunk_i = chunk as i32;
+                let mut out_ptr = d_out.as_device_ptr().as_raw() + (out_off as u64);
                 let args: &mut [*mut c_void] = &mut [
                     &mut pos_ps as *mut _ as *mut c_void,
                     &mut neg_ps as *mut _ as *mut c_void,
@@ -463,7 +487,11 @@ impl CudaMfi {
         self.stream.synchronize()?;
         self.maybe_log_batch_debug();
         Ok((
-            DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len },
+            DeviceArrayF32 {
+                buf: d_out,
+                rows: combos.len(),
+                cols: len,
+            },
             combos,
         ))
     }
@@ -490,7 +518,6 @@ impl CudaMfi {
             return Err(CudaMfiError::InvalidInput("period must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -528,8 +555,11 @@ impl CudaMfi {
         };
         let grid: GridSize = (cols as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        let shared_bytes = (2 * period * std::mem::size_of::<[f32; 2]>()) as u32; 
-        unsafe { (*(self as *const _ as *mut CudaMfi)).last_many = Some(ManySeriesKernelSelected::OneD { block_x }); }
+        let shared_bytes = (2 * period * std::mem::size_of::<[f32; 2]>()) as u32;
+        unsafe {
+            (*(self as *const _ as *mut CudaMfi)).last_many =
+                Some(ManySeriesKernelSelected::OneD { block_x });
+        }
         unsafe {
             let mut tp_ptr = d_tp.as_device_ptr().as_raw();
             let mut vol_ptr = d_vol.as_device_ptr().as_raw();
@@ -552,10 +582,13 @@ impl CudaMfi {
 
         self.stream.synchronize()?;
         self.maybe_log_many_debug();
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -575,10 +608,10 @@ pub mod benches {
         use std::mem::size_of;
         const BS: usize = 256;
         let nb = (ONE_SERIES_LEN + BS - 1) / BS;
-        let in_bytes     = 2 * ONE_SERIES_LEN * size_of::<f32>();
-        let prefix_bytes = 2 * ONE_SERIES_LEN * size_of::<[f32; 2]>(); 
-        let blk_bytes    = 4 * nb * size_of::<[f32; 2]>();              
-        let out_bytes    = ONE_SERIES_LEN * PARAM_SWEEP * size_of::<f32>();
+        let in_bytes = 2 * ONE_SERIES_LEN * size_of::<f32>();
+        let prefix_bytes = 2 * ONE_SERIES_LEN * size_of::<[f32; 2]>();
+        let blk_bytes = 4 * nb * size_of::<[f32; 2]>();
+        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * size_of::<f32>();
         in_bytes + prefix_bytes + blk_bytes + out_bytes + 64 * 1024 * 1024
     }
 
@@ -603,7 +636,6 @@ pub mod benches {
     }
     impl CudaBenchState for MfiBatchDeviceState {
         fn launch(&mut self) {
-            // Stage 4 only: compute MFI for each period using the precomputed prefix sums.
             let block_x_out: u32 = 128;
             let grid_x_out: u32 = ((self.len as u32) + block_x_out - 1) / block_x_out;
             let combos_per_launch = 65_535usize;
@@ -652,7 +684,7 @@ pub mod benches {
         let cuda = CudaMfi::new(0).expect("CudaMfi");
         let mut tp = gen_series(ONE_SERIES_LEN);
         let mut vol = gen_volume(ONE_SERIES_LEN);
-        // Early NaNs (warmup region)
+
         for i in 0..16 {
             tp[i] = f32::NAN;
             vol[i] = f32::NAN;
@@ -671,21 +703,19 @@ pub mod benches {
         };
         let nb = ((len as u32 + block_x_scan - 1) / block_x_scan) as usize;
 
-        // Upload base inputs (only needed for stage 1)
         let d_tp: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::from_slice_async(&tp, &cuda.stream) }.expect("d_tp");
         let d_vol: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::from_slice_async(&vol, &cuda.stream) }.expect("d_vol");
 
-        // Periods for stage 4
         let periods_i32: Vec<i32> = combos
             .iter()
             .map(|c| c.period.unwrap_or(14) as i32)
             .collect();
         let d_periods: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }.expect("d_periods");
+            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }
+                .expect("d_periods");
 
-        // Prefix workspace (float2) + block workspace
         let mut d_pos_ps: DeviceBuffer<[f32; 2]> =
             unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }.expect("d_pos_ps");
         let mut d_neg_ps: DeviceBuffer<[f32; 2]> =
@@ -720,7 +750,6 @@ pub mod benches {
             .expect("mfi_batch_from_prefix_ds_f32");
         let func: Function<'static> = unsafe { std::mem::transmute(func) };
 
-        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
@@ -743,11 +772,12 @@ pub mod benches {
                     &mut blk_tot_p as *mut _ as *mut c_void,
                     &mut blk_tot_n as *mut _ as *mut c_void,
                 ];
-                cuda.stream.launch(&k1, grid, block, 0, args).expect("mfi stage1");
+                cuda.stream
+                    .launch(&k1, grid, block, 0, args)
+                    .expect("mfi stage1");
             }
         }
 
-        
         {
             let grid: GridSize = (1, 1, 1).into();
             let block: BlockSize = (1, 1, 1).into();
@@ -764,11 +794,12 @@ pub mod benches {
                     &mut blk_off_n as *mut _ as *mut c_void,
                     &mut nb_i as *mut _ as *mut c_void,
                 ];
-                cuda.stream.launch(&k2, grid, block, 0, args).expect("mfi stage2");
+                cuda.stream
+                    .launch(&k2, grid, block, 0, args)
+                    .expect("mfi stage2");
             }
         }
 
-        
         {
             let grid: GridSize = ((nb as u32).max(1), 1, 1).into();
             let block: BlockSize = (block_x_scan, 1, 1).into();
@@ -785,7 +816,9 @@ pub mod benches {
                     &mut blk_off_n as *mut _ as *mut c_void,
                     &mut len_i as *mut _ as *mut c_void,
                 ];
-                cuda.stream.launch(&k3, grid, block, 0, args).expect("mfi stage3");
+                cuda.stream
+                    .launch(&k3, grid, block, 0, args)
+                    .expect("mfi stage3");
             }
         }
 
@@ -843,7 +876,10 @@ pub mod benches {
                     .launch(&self.func, grid, block, self.shared_bytes, args)
                     .expect("mfi many-series launch");
             }
-            self.cuda.stream.synchronize().expect("mfi many-series sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("mfi many-series sync");
         }
     }
 

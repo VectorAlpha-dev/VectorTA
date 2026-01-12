@@ -1,36 +1,11 @@
-//! # Relative Strength Index (RSI)
-//!
-//! Momentum oscillator measuring price change speed/magnitude, ranging 0-100.
-//!
-//! ## Parameters
-//! - **data**: Input price data
-//! - **period**: Window size (default: 14)
-//!
-//! ## Returns
-//! - `Vec<f64>` - RSI values (0-100 scale) matching input length
-//!
-//! ## Developer Status
-//! **AVX2**: Stub (row functions delegate to scalar)
-//! **AVX512**: Short/long variants present but delegate to scalar
-//!
-//! Decision: SIMD disabled by default for RSI. The core update is a
-//! sequential Wilder-style recursion with little ILP; scalar outperforms naive
-//! AVX variants. Runtime selection short-circuits to scalar.
-//! Scalar path tightened with 2× unrolling + `mul_add`; batch reuses
-//! rectified deltas via prefix sums to avoid per-row recomputation.
-//! **Streaming**: O(1) - Exponential smoothing with state
-//! **Memory**: Good - Uses `alloc_with_nan_prefix` and `make_uninit_matrix`
-//! **CUDA/Python**: CUDA wrapper with typed errors + VRAM/launch checks; Python GPU handles reuse
-//! ALMA `DeviceArrayF32Py` for CAI v3 and DLPack v1.x without changing numerical outputs.
-
 use crate::utilities::data_loader::{source_type, Candles};
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
     make_uninit_matrix,
 };
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 use aligned_vec::{AVec, CACHELINE_ALIGN};
@@ -47,13 +22,13 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 impl<'a> AsRef<[f64]> for RsiInput<'a> {
@@ -81,7 +56,10 @@ pub struct RsiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct RsiParams {
     pub period: Option<usize>,
 }
@@ -194,7 +172,11 @@ pub enum RsiError {
     #[error("rsi: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("rsi: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("rsi: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -244,18 +226,10 @@ pub fn rsi_with_kernel(input: &RsiInput, kernel: Kernel) -> Result<RsiOutput, Rs
     Ok(RsiOutput { values: out })
 }
 
-/// Write RSI results into a caller-provided buffer without allocating.
-///
-/// - Preserves the NaN warmup prefix exactly like the Vec-returning API.
-/// - The output slice length must equal the input length.
-/// - Uses `Kernel::Auto` for dispatch.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn rsi_into(input: &RsiInput, out: &mut [f64]) -> Result<(), RsiError> {
-    
     rsi_into_slice(out, input, Kernel::Auto)?;
 
-    
-    
     let data: &[f64] = match &input.data {
         RsiData::Candles { candles, source } => source_type(candles, source),
         RsiData::Slice(sl) => sl,
@@ -341,7 +315,6 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
 
     rsi_compute_into(data, period, first, chosen, dst);
 
-    
     let warmup_end = first + period;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -352,12 +325,10 @@ pub fn rsi_into_slice(dst: &mut [f64], input: &RsiInput, kern: Kernel) -> Result
 
 #[inline(always)]
 unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64]) {
-    
     let len = data.len();
     let inv_p = 1.0 / (period as f64);
     let beta = 1.0 - inv_p;
 
-    
     let mut avg_gain = 0.0f64;
     let mut avg_loss = 0.0f64;
     let mut has_nan = false;
@@ -373,12 +344,11 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         if delta > 0.0 {
             avg_gain += delta;
         } else if delta < 0.0 {
-            avg_loss -= delta; 
+            avg_loss -= delta;
         }
         i += 1;
     }
 
-    
     let idx0 = first + period;
     if has_nan {
         avg_gain = f64::NAN;
@@ -399,10 +369,8 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         }
     }
 
-    
     let mut j = idx0 + 1;
     while j + 1 < len {
-        
         let d1 = data[j] - data[j - 1];
         let g1 = if d1 > 0.0 { d1 } else { 0.0 };
         let l1 = if d1 < 0.0 { -d1 } else { 0.0 };
@@ -415,7 +383,6 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
             100.0 * avg_gain / denom1
         };
 
-        
         let d2 = data[j + 1] - data[j];
         let g2 = if d2 > 0.0 { d2 } else { 0.0 };
         let l2 = if d2 < 0.0 { -d2 } else { 0.0 };
@@ -431,7 +398,6 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         j += 2;
     }
 
-    
     if j < len {
         let d = data[j] - data[j - 1];
         let g = if d > 0.0 { d } else { 0.0 };
@@ -446,8 +412,6 @@ unsafe fn rsi_compute_into_scalar(data: &[f64], period: usize, first: usize, out
         };
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct RsiBatchRange {
@@ -551,7 +515,11 @@ fn expand_grid(r: &RsiBatchRange) -> Result<Vec<RsiParams>, RsiError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let mut out = Vec::new();
         let mut v = lo;
         loop {
@@ -561,24 +529,14 @@ fn expand_grid(r: &RsiBatchRange) -> Result<Vec<RsiParams>, RsiError> {
             }
             v = match v.checked_add(step) {
                 Some(next) => next,
-                None => {
-                    return Err(RsiError::InvalidRange {
-                        start,
-                        end,
-                        step,
-                    })
-                }
+                None => return Err(RsiError::InvalidRange { start, end, step }),
             };
             if v > hi {
                 break;
             }
         }
         if out.is_empty() {
-            return Err(RsiError::InvalidRange {
-                start,
-                end,
-                step,
-            });
+            return Err(RsiError::InvalidRange { start, end, step });
         }
         Ok(out)
     }
@@ -631,28 +589,22 @@ fn rsi_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    let _expected = rows
-        .checked_mul(cols)
-        .ok_or(RsiError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 1,
-        })?;
+    let _expected = rows.checked_mul(cols).ok_or(RsiError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 1,
+    })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let warmup_periods: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warmup_periods);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     let mut gains = vec![0.0f64; cols];
     let mut losses = vec![0.0f64; cols];
     for i in (first + 1)..cols {
@@ -678,7 +630,6 @@ fn rsi_batch_inner(
     let do_row = |row: usize, out_row: &mut [f64]| unsafe {
         let period = combos[row].period.unwrap();
         match kern {
-            
             Kernel::Scalar | Kernel::Avx2 | Kernel::Avx512 => {
                 let inv_p = 1.0 / (period as f64);
                 let beta = 1.0 - inv_p;
@@ -702,7 +653,6 @@ fn rsi_batch_inner(
                     }
                     let mut j = idx0 + 1;
                     while j + 1 < cols {
-                        
                         let g1 = gains[j];
                         let l1 = losses[j];
                         avg_g = avg_g.mul_add(beta, inv_p * g1);
@@ -714,7 +664,6 @@ fn rsi_batch_inner(
                             100.0 * avg_g / denom1
                         };
 
-                        
                         let g2 = gains[j + 1];
                         let l2 = losses[j + 1];
                         avg_g = avg_g.mul_add(beta, inv_p * g2);
@@ -770,7 +719,6 @@ fn rsi_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -813,13 +761,11 @@ pub fn rsi_batch_inner_into(
             valid: cols - first,
         });
     }
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(RsiError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 1,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(RsiError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 1,
+    })?;
     if out.len() != expected {
         return Err(RsiError::OutputLengthMismatch {
             expected,
@@ -827,18 +773,15 @@ pub fn rsi_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [MaybeUninit<f64>] = unsafe {
         core::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(out_mu, cols, &warm);
 
-    
     let values: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(out_mu.as_mut_ptr() as *mut f64, out_mu.len()) };
 
-    
     let mut gains = vec![0.0f64; cols];
     let mut losses = vec![0.0f64; cols];
     for i in (first + 1)..cols {
@@ -887,7 +830,6 @@ pub fn rsi_batch_inner_into(
                     }
                     let mut j = idx0 + 1;
                     while j + 1 < cols {
-                        
                         let g1 = gains[j];
                         let l1 = losses[j];
                         avg_g = avg_g.mul_add(beta, inv_p * g1);
@@ -899,7 +841,6 @@ pub fn rsi_batch_inner_into(
                             100.0 * avg_g / denom1
                         };
 
-                        
                         let g2 = gains[j + 1];
                         let l2 = losses[j + 1];
                         avg_g = avg_g.mul_add(beta, inv_p * g2);
@@ -1006,7 +947,6 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
 
     let mut j = idx0 + 1;
     while j + 1 < len {
-        
         let d1 = data[j] - data[j - 1];
         let g1 = if d1 > 0.0 { d1 } else { 0.0 };
         let l1 = if d1 < 0.0 { -d1 } else { 0.0 };
@@ -1019,7 +959,6 @@ unsafe fn rsi_row_scalar(data: &[f64], first: usize, period: usize, out: &mut [f
             100.0 * avg_gain / denom1
         };
 
-        
         let d2 = data[j + 1] - data[j];
         let g2 = if d2 > 0.0 { d2 } else { 0.0 };
         let l2 = if d2 < 0.0 { -d2 } else { 0.0 };
@@ -1073,26 +1012,20 @@ unsafe fn rsi_row_avx512_long(data: &[f64], first: usize, period: usize, out: &m
     rsi_row_scalar(data, first, period, out)
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct RsiStream {
-    
     period: usize,
     inv_p: f64,
     beta: f64,
 
-    
     has_prev: bool,
     prev: f64,
 
-    
     seed_count: usize,
     sum_gain: f64,
     sum_loss: f64,
     poisoned: bool,
 
-    
     avg_gain: f64,
     avg_loss: f64,
     seeded: bool,
@@ -1127,13 +1060,8 @@ impl RsiStream {
         })
     }
 
-    /// Push a new price. Returns Some(RSI) once enough data is seen, else None.
-    /// Semantics match batch scalar:
-    /// - any non-finite during warm-up yields NaN at the first RSI sample and NaNs after.
-    /// - non-finite deltas after warm-up have zero effect (treated as 0 change).
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if !self.has_prev {
             self.prev = value;
             self.has_prev = true;
@@ -1143,13 +1071,11 @@ impl RsiStream {
         let delta = value - self.prev;
         self.prev = value;
 
-        
         if !self.seeded {
             if !delta.is_finite() {
                 self.poisoned = true;
             }
 
-            
             let gain = delta.max(0.0);
             let loss = (-delta).max(0.0);
 
@@ -1179,7 +1105,6 @@ impl RsiStream {
             }
         }
 
-        
         let gain = delta.max(0.0);
         let loss = (-delta).max(0.0);
 
@@ -1193,8 +1118,6 @@ impl RsiStream {
         })
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -1382,16 +1305,16 @@ mod tests {
 
         let test_params = vec![
             RsiParams::default(),
-            RsiParams { period: Some(2) },   
-            RsiParams { period: Some(5) },   
-            RsiParams { period: Some(7) },   
-            RsiParams { period: Some(10) },  
-            RsiParams { period: Some(14) },  
-            RsiParams { period: Some(20) },  
-            RsiParams { period: Some(30) },  
-            RsiParams { period: Some(50) },  
-            RsiParams { period: Some(100) }, 
-            RsiParams { period: Some(200) }, 
+            RsiParams { period: Some(2) },
+            RsiParams { period: Some(5) },
+            RsiParams { period: Some(7) },
+            RsiParams { period: Some(10) },
+            RsiParams { period: Some(14) },
+            RsiParams { period: Some(20) },
+            RsiParams { period: Some(30) },
+            RsiParams { period: Some(50) },
+            RsiParams { period: Some(100) },
+            RsiParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1463,10 +1386,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
-                
                 prop::collection::vec(
                     (-1e6f64..1e6f64)
                         .prop_filter("finite price", |x| x.is_finite() && x.abs() > 1e-10),
@@ -1482,17 +1403,13 @@ mod tests {
             };
             let input = RsiInput::from_slice(&data, params);
 
-            
             let RsiOutput { values: out } = rsi_with_kernel(&input, kernel)?;
 
-            
             let RsiOutput { values: ref_out } = rsi_with_kernel(&input, Kernel::Scalar)?;
 
-            
             let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_end = first_valid + period;
 
-            
             for (i, &val) in out.iter().enumerate() {
                 if !val.is_nan() {
                     prop_assert!(
@@ -1505,7 +1422,6 @@ mod tests {
                 }
             }
 
-            
             for i in 0..warmup_end.min(out.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -1516,7 +1432,6 @@ mod tests {
                 );
             }
 
-            
             if warmup_end < out.len() {
                 prop_assert!(
                     !out[warmup_end].is_nan(),
@@ -1526,7 +1441,6 @@ mod tests {
                 );
             }
 
-            
             for i in 0..out.len() {
                 let y = out[i];
                 let r = ref_out[i];
@@ -1546,7 +1460,6 @@ mod tests {
                 );
             }
 
-            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && warmup_end < out.len() {
                 for i in warmup_end..out.len() {
                     prop_assert!(
@@ -1559,8 +1472,6 @@ mod tests {
                 }
             }
 
-            
-            
             let strictly_increasing = data.windows(2).all(|w| w[1] > w[0] + 1e-10);
             if strictly_increasing && out.len() > warmup_end + 10 {
                 let last_rsi = out[out.len() - 1];
@@ -1581,8 +1492,6 @@ mod tests {
                 );
             }
 
-            
-            
             let strictly_decreasing = data.windows(2).all(|w| w[1] < w[0] - 1e-10);
             if strictly_decreasing && out.len() > warmup_end + 10 {
                 let last_rsi = out[out.len() - 1];
@@ -1603,7 +1512,6 @@ mod tests {
                 );
             }
 
-            
             #[cfg(debug_assertions)]
             {
                 for (i, &val) in out.iter().enumerate() {
@@ -1625,14 +1533,11 @@ mod tests {
                 }
             }
 
-            
-            
             let mut oscillating = true;
             let mut prev_delta = 0.0;
             for window in data.windows(2) {
                 let delta = window[1] - window[0];
                 if prev_delta != 0.0 && delta != 0.0 {
-                    
                     if (delta > 0.0 && prev_delta > 0.0) || (delta < 0.0 && prev_delta < 0.0) {
                         oscillating = false;
                         break;
@@ -1641,9 +1546,7 @@ mod tests {
                 prev_delta = delta;
             }
 
-            
             if oscillating && out.len() > warmup_end + 10 && prev_delta != 0.0 {
-                
                 let last_quarter_start = out.len() - (out.len() - warmup_end) / 4;
                 for i in last_quarter_start..out.len() {
                     if !out[i].is_nan() {
@@ -1656,14 +1559,11 @@ mod tests {
                 }
             }
 
-            
             if warmup_end + 5 < out.len() {
-                
                 let idx = warmup_end + 3;
                 let mut avg_gain = 0.0;
                 let mut avg_loss = 0.0;
 
-                
                 for j in (first_valid + 1)..=(first_valid + period) {
                     let delta = data[j] - data[j - 1];
                     if delta > 0.0 {
@@ -1675,7 +1575,6 @@ mod tests {
                 avg_gain /= period as f64;
                 avg_loss /= period as f64;
 
-                
                 let inv_period = 1.0 / period as f64;
                 let beta = 1.0 - inv_period;
                 for j in (first_valid + period + 1)..=idx {
@@ -1735,30 +1634,27 @@ mod tests {
     fn check_rsi_error_variants(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let mut dst = vec![0.0; 3]; 
+        let mut dst = vec![0.0; 3];
         let params = RsiParams { period: Some(2) };
         let input = RsiInput::from_slice(&data, params);
 
         match rsi_into_slice(&mut dst, &input, kernel) {
-            Err(RsiError::OutputLengthMismatch { expected: 5, got: 3 }) => {
-                
-            }
+            Err(RsiError::OutputLengthMismatch {
+                expected: 5,
+                got: 3,
+            }) => {}
             other => panic!(
                 "[{}] Expected OutputLengthMismatch error, got {:?}",
                 test_name, other
             ),
         }
 
-        
         let sweep = RsiBatchRange {
             period: (14, 14, 0),
         };
         match rsi_batch_with_kernel(&data, &sweep, Kernel::Scalar) {
-            Err(RsiError::InvalidKernelForBatch(Kernel::Scalar)) => {
-                
-            }
+            Err(RsiError::InvalidKernelForBatch(Kernel::Scalar)) => {}
             other => panic!(
                 "[{}] Expected InvalidKernelForBatch error, got {:?}",
                 test_name, other
@@ -1814,13 +1710,13 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let test_configs = vec![
-            (2, 10, 2),   
-            (5, 25, 5),   
-            (30, 60, 15), 
-            (2, 5, 1),    
-            (7, 21, 7),   
-            (10, 50, 10), 
-            (14, 28, 14), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (7, 21, 7),
+            (10, 50, 10),
+            (14, 28, 14),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1918,13 +1814,12 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
 #[cfg(test)]
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 mod into_parity_tests {
     use super::*;
-    use std::error::Error;
     use crate::utilities::data_loader::read_candles_from_csv;
+    use std::error::Error;
 
     #[inline]
     fn eq_or_both_nan(a: f64, b: f64) -> bool {
@@ -1933,16 +1828,13 @@ mod into_parity_tests {
 
     #[test]
     fn test_rsi_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = RsiInput::from_candles(&candles, "close", RsiParams::default());
 
-        
         let baseline = rsi(&input)?.values;
 
-        
         let mut out = vec![0.0; candles.close.len()];
         rsi_into(&input, &mut out)?;
 
@@ -1960,8 +1852,6 @@ mod into_parity_tests {
         Ok(())
     }
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "rsi")]
@@ -2032,8 +1922,7 @@ pub fn rsi_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2147,7 +2036,7 @@ pub fn rsi_cuda_many_series_one_param_dev_py(
     make_device_array_py(device_id, inner)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = RsiParams {
@@ -2163,7 +2052,7 @@ pub fn rsi_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2172,7 +2061,7 @@ pub fn rsi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsi_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2180,7 +2069,7 @@ pub fn rsi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn rsi_into(
     in_ptr: *const f64,
@@ -2220,13 +2109,13 @@ pub fn rsi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsiBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct RsiBatchJsOutput {
     pub values: Vec<f64>,
@@ -2235,7 +2124,7 @@ pub struct RsiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = rsi_batch)]
 pub fn rsi_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: RsiBatchConfig = serde_wasm_bindgen::from_value(config)

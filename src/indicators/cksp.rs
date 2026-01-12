@@ -1,29 +1,3 @@
-//! # Chande Kroll Stop (CKSP)
-//!
-//! Computes two stop lines (long and short) using ATR and rolling maxima/minima.
-//! Its parameters (`p`, `x`, `q`) control the ATR period, ATR multiplier, and rolling window size.
-//!
-//! ## Decision log
-//! SIMD kernels remain stubs (scalar is fastest for CKSP); CUDA wrapper is enabled with FP32 kernels and returns VRAM handles; Python interop uses CUDA Array Interface v3 and DLPack v1.x while keeping scalar CPU outputs as the reference path.
-//!
-//! ## Parameters
-//! - **p**: ATR period (default: 10)
-//! - **x**: ATR multiplier (default: 1.0)
-//! - **q**: Rolling window (default: 9)
-//!
-//! ## Returns
-//! - **`Ok(CkspOutput)`** on success, containing two `Vec<f64>` (long_values and short_values) of length matching the input
-//! - **`Err(CkspError)`** otherwise
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: STUB - calls scalar implementation
-//! - **AVX512 kernel**: STUB - calls scalar implementation
-//! - Decision: SIMD kept as stubs — ATR recurrence and deque updates are sequential/branchy; scalar is fastest.
-//!   Bench (100k, target-cpu=native): scalar ~3.20 ms → 2.80 ms after scalar optimization (~12% faster).
-//!   Batch optimized by precomputing ATR per p and high/low windows per q, then per-row final rolling.
-//! - **Streaming**: Implemented with power-of-two ring buffers (monotonic queues) for O(1) updates; matches scalar/batch outputs bit-for-bit and avoids VecDeque overhead.
-//! - **Memory optimization**: ✅ Uses alloc_with_nan_prefix (zero-copy) for both output arrays
-//! - **Batch operations**: ✅ Implemented with parallel processing support
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -54,12 +28,10 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
-
 
 #[derive(Debug, Clone)]
 pub enum CkspData<'a> {
@@ -74,7 +46,10 @@ pub enum CkspData<'a> {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct CkspParams {
     pub p: Option<usize>,
     pub x: Option<f64>,
@@ -145,19 +120,14 @@ impl<'a> AsRef<[f64]> for CkspInput<'a> {
     }
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct CkspOutput {
     pub long_values: Vec<f64>,
     pub short_values: Vec<f64>,
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum CkspError {
-    
     #[error("cksp: Data is empty")]
     EmptyInputData,
     #[error("cksp: No data (all values are NaN)")]
@@ -171,26 +141,21 @@ pub enum CkspError {
     #[error("cksp: Inconsistent input lengths")]
     InconsistentLengths,
 
-    
     #[error("cksp: Invalid param x={x}")]
     InvalidMultiplier { x: f64 },
     #[error("cksp: Invalid param {param}")]
     InvalidParam { param: &'static str },
 
-    // Batch / ranges
     #[error("cksp: invalid range: start={start} end={end} step={step}")]
     InvalidRange { start: i128, end: i128, step: i128 },
     #[error("cksp: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 
-    // Misc
     #[error("cksp: candle field error: {0}")]
     CandleFieldError(String),
     #[error("cksp: invalid input: {0}")]
     InvalidInput(String),
 }
-
-// ========================= Builder Struct =========================
 
 #[derive(Copy, Clone, Debug)]
 pub struct CkspBuilder {
@@ -272,19 +237,12 @@ impl CkspBuilder {
     }
 }
 
-// ========================= Main Indicator Functions =========================
-
 #[inline]
 pub fn cksp(input: &CkspInput) -> Result<CkspOutput, CkspError> {
     cksp_with_kernel(input, Kernel::Auto)
 }
 
-/// Write CKSP outputs into caller-provided buffers without allocations.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API.
-/// - `out_long.len()` and `out_short.len()` must equal the input length.
-/// - Uses `Kernel::Auto` runtime selection (same as `cksp()`).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn cksp_into(
     input: &CkspInput,
@@ -319,7 +277,6 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
     let x = input.get_x();
     let q = input.get_q();
 
-    // Validate parameters first (before data checks)
     if p == 0 || q == 0 {
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
@@ -327,7 +284,6 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
         return Err(CkspError::InvalidMultiplier { x });
     }
 
-    // Now check data
     let size = close.len();
     if size == 0 {
         return Err(CkspError::EmptyInputData);
@@ -344,7 +300,6 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
         .and_then(|v| v.checked_sub(1))
         .ok_or_else(|| CkspError::InvalidInput("warmup overflow (p+q too large)".into()))?;
     if valid <= warmup {
-        // need at least warmup+1 valid points after first_valid_idx
         let needed = warmup
             .checked_add(1)
             .ok_or_else(|| CkspError::InvalidInput("warmup+1 overflow".into()))?;
@@ -363,7 +318,6 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch => {
-                // Fallback to scalar when AVX2 not compiled in
                 cksp_scalar(high, low, close, p, x, q, first_valid_idx)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -372,7 +326,6 @@ pub fn cksp_with_kernel(input: &CkspInput, kernel: Kernel) -> Result<CkspOutput,
             }
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx512 | Kernel::Avx512Batch => {
-                // Fallback to scalar when AVX512 not compiled in
                 cksp_scalar(high, low, close, p, x, q, first_valid_idx)
             }
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -391,7 +344,6 @@ pub fn cksp_into_slices(
     input: &CkspInput,
     kern: Kernel,
 ) -> Result<(), CkspError> {
-    // Resolve inputs
     let (high, low, close) = match &input.data {
         CkspData::Candles { candles } => (
             candles
@@ -410,10 +362,16 @@ pub fn cksp_into_slices(
         return Err(CkspError::InconsistentLengths);
     }
     if out_long.len() != close.len() {
-        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: out_long.len() });
+        return Err(CkspError::OutputLengthMismatch {
+            expected: close.len(),
+            got: out_long.len(),
+        });
     }
     if out_short.len() != close.len() {
-        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: out_short.len() });
+        return Err(CkspError::OutputLengthMismatch {
+            expected: close.len(),
+            got: out_short.len(),
+        });
     }
 
     let p = input.get_p();
@@ -466,8 +424,6 @@ pub fn cksp_into_slices(
     Ok(())
 }
 
-// ========================= Scalar Logic =========================
-
 #[inline]
 pub unsafe fn cksp_scalar(
     high: &[f64],
@@ -481,7 +437,6 @@ pub unsafe fn cksp_scalar(
     let size = close.len();
     let warmup = first_valid_idx + p + q - 1;
 
-    // Allocate outputs with warmup NaN prefix
     let mut long_values = alloc_with_nan_prefix(size, warmup);
     let mut short_values = alloc_with_nan_prefix(size, warmup);
 
@@ -492,22 +447,18 @@ pub unsafe fn cksp_scalar(
         });
     }
 
-    // Monotonic ring buffers (indices and/or values)
-    let cap = q + 1; // capacity q+1 to distinguish full/empty
+    let cap = q + 1;
 
-    // Rolling max of HIGH
     let mut h_idx: Vec<usize> = Vec::with_capacity(cap);
     h_idx.set_len(cap);
     let mut h_head: usize = 0;
     let mut h_tail: usize = 0;
 
-    // Rolling min of LOW
     let mut l_idx: Vec<usize> = Vec::with_capacity(cap);
     l_idx.set_len(cap);
     let mut l_head: usize = 0;
     let mut l_tail: usize = 0;
 
-    // Rolling max of ls0
     let mut ls_idx: Vec<usize> = Vec::with_capacity(cap);
     let mut ls_val: Vec<f64> = Vec::with_capacity(cap);
     ls_idx.set_len(cap);
@@ -515,7 +466,6 @@ pub unsafe fn cksp_scalar(
     let mut ls_head: usize = 0;
     let mut ls_tail: usize = 0;
 
-    // Rolling min of ss0
     let mut ss_idx: Vec<usize> = Vec::with_capacity(cap);
     let mut ss_val: Vec<f64> = Vec::with_capacity(cap);
     ss_idx.set_len(cap);
@@ -523,7 +473,6 @@ pub unsafe fn cksp_scalar(
     let mut ss_head: usize = 0;
     let mut ss_tail: usize = 0;
 
-    // ATR (RMA) state
     let mut sum_tr: f64 = 0.0;
     let mut rma: f64 = 0.0;
     let alpha: f64 = 1.0 / (p as f64);
@@ -550,7 +499,6 @@ pub unsafe fn cksp_scalar(
             continue;
         }
 
-        // True Range
         let hi = *high.get_unchecked(i);
         let lo = *low.get_unchecked(i);
         let tr = if i == first_valid_idx {
@@ -575,7 +523,6 @@ pub unsafe fn cksp_scalar(
             }
         };
 
-        // ATR (RMA)
         let k = i - first_valid_idx;
         if k < p {
             sum_tr += tr;
@@ -586,7 +533,6 @@ pub unsafe fn cksp_scalar(
             rma = alpha.mul_add(tr - rma, rma);
         }
 
-        // Rolling MAX of HIGH over q
         while h_head != h_tail {
             let last = rb_dec(h_tail, cap);
             let last_i = *h_idx.get_unchecked(last);
@@ -596,7 +542,7 @@ pub unsafe fn cksp_scalar(
                 break;
             }
         }
-        // Prevent full condition: advance head if next tail would collide
+
         let mut next_tail = rb_inc(h_tail, cap);
         if next_tail == h_head {
             h_head = rb_inc(h_head, cap);
@@ -613,7 +559,6 @@ pub unsafe fn cksp_scalar(
         }
         let mh = *high.get_unchecked(*h_idx.get_unchecked(h_head));
 
-        // Rolling MIN of LOW over q
         while l_head != l_tail {
             let last = rb_dec(l_tail, cap);
             let last_i = *l_idx.get_unchecked(last);
@@ -639,12 +584,10 @@ pub unsafe fn cksp_scalar(
         }
         let ml = *low.get_unchecked(*l_idx.get_unchecked(l_head));
 
-        // Emit outputs after warmup
         if i >= warmup {
             let ls0 = (-x).mul_add(rma, mh);
             let ss0 = x.mul_add(rma, ml);
 
-            // Rolling MAX over ls0
             while ls_head != ls_tail {
                 let last = rb_dec(ls_tail, cap);
                 if *ls_val.get_unchecked(last) <= ls0 {
@@ -671,7 +614,6 @@ pub unsafe fn cksp_scalar(
             let mx = *ls_val.get_unchecked(ls_head);
             *long_values.get_unchecked_mut(i) = mx;
 
-            // Rolling MIN over ss0
             while ss_head != ss_tail {
                 let last = rb_dec(ss_tail, cap);
                 if *ss_val.get_unchecked(last) >= ss0 {
@@ -706,8 +648,6 @@ pub unsafe fn cksp_scalar(
     })
 }
 
-// ========================= AVX2/AVX512 Stubs =========================
-
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn cksp_avx2(
@@ -719,7 +659,6 @@ pub unsafe fn cksp_avx2(
     q: usize,
     first_valid_idx: usize,
 ) -> Result<CkspOutput, CkspError> {
-    // For API parity, fallback to scalar
     cksp_scalar(high, low, close, p, x, q, first_valid_idx)
 }
 
@@ -734,7 +673,6 @@ pub unsafe fn cksp_avx512(
     q: usize,
     first_valid_idx: usize,
 ) -> Result<CkspOutput, CkspError> {
-    // For API parity, fallback to scalar
     cksp_scalar(high, low, close, p, x, q, first_valid_idx)
 }
 
@@ -766,9 +704,6 @@ pub unsafe fn cksp_avx512_long(
     cksp_avx512(high, low, close, p, x, q, first_valid_idx)
 }
 
-// ========================= Row/Batched API =========================
-
-// Helper function that computes directly into output slices
 #[inline(always)]
 pub unsafe fn cksp_compute_into(
     high: &[f64],
@@ -784,13 +719,11 @@ pub unsafe fn cksp_compute_into(
     let size = close.len();
     let warmup = first_valid_idx + p + q - 1;
 
-    // Initialize NaN values for warmup period
     for i in 0..warmup.min(size) {
         *out_long.get_unchecked_mut(i) = f64::NAN;
         *out_short.get_unchecked_mut(i) = f64::NAN;
     }
 
-    // Monotonic ring buffers
     let cap = q + 1;
     let mut h_idx: Vec<usize> = Vec::with_capacity(cap);
     h_idx.set_len(cap);
@@ -876,7 +809,6 @@ pub unsafe fn cksp_compute_into(
             rma = alpha.mul_add(tr - rma, rma);
         }
 
-        // Rolling MAX high
         while h_head != h_tail {
             let last = rb_dec(h_tail, cap);
             let last_i = *h_idx.get_unchecked(last);
@@ -902,7 +834,6 @@ pub unsafe fn cksp_compute_into(
         }
         let mh = *high.get_unchecked(*h_idx.get_unchecked(h_head));
 
-        // Rolling MIN low
         while l_head != l_tail {
             let last = rb_dec(l_tail, cap);
             let last_i = *l_idx.get_unchecked(last);
@@ -1025,7 +956,6 @@ pub unsafe fn cksp_row_avx2(
     out_long: &mut [f64],
     out_short: &mut [f64],
 ) {
-    // Since AVX2 implementation is a stub, use compute_into directly
     cksp_compute_into(
         high,
         low,
@@ -1052,7 +982,6 @@ pub unsafe fn cksp_row_avx512(
     out_long: &mut [f64],
     out_short: &mut [f64],
 ) {
-    // Since AVX512 implementation is a stub, use compute_into directly
     cksp_compute_into(
         high,
         low,
@@ -1078,7 +1007,6 @@ pub unsafe fn cksp_row_avx512_short(
     out_long: &mut [f64],
     out_short: &mut [f64],
 ) {
-    // Since AVX512 implementation is a stub, use compute_into directly
     cksp_compute_into(
         high,
         low,
@@ -1104,7 +1032,6 @@ pub unsafe fn cksp_row_avx512_long(
     out_long: &mut [f64],
     out_short: &mut [f64],
 ) {
-    // Since AVX512 implementation is a stub, use compute_into directly
     cksp_compute_into(
         high,
         low,
@@ -1118,46 +1045,37 @@ pub unsafe fn cksp_row_avx512_long(
     )
 }
 
-// ========================= Stream API =========================
-
 #[derive(Debug, Clone)]
 pub struct CkspStream {
-    // Params
     p: usize,
     x: f64,
     q: usize,
 
-    // Precomputed constants/state
-    warmup: usize,   // p + q - 1
-    alpha: f64,      // 1.0 / p
-    sum_tr: f64,     // warmup accumulator for TR
-    rma: f64,        // ATR (RMA) state
-    prev_close: f64, // for TR
-    i: usize,        // current index (0-based)
+    warmup: usize,
+    alpha: f64,
+    sum_tr: f64,
+    rma: f64,
+    prev_close: f64,
+    i: usize,
 
-    // Ring buffer capacity (next power-of-two of q+1) and mask for fast wrap
     cap: usize,
     mask: usize,
 
-    // Rolling MAX over high
     h_idx: Vec<usize>,
     h_val: Vec<f64>,
     h_head: usize,
     h_tail: usize,
 
-    // Rolling MIN over low
     l_idx: Vec<usize>,
     l_val: Vec<f64>,
     l_head: usize,
     l_tail: usize,
 
-    // Rolling MAX over ls0 = maxHigh - x*ATR
     ls_idx: Vec<usize>,
     ls_val: Vec<f64>,
     ls_head: usize,
     ls_tail: usize,
 
-    // Rolling MIN over ss0 = minLow + x*ATR
     ss_idx: Vec<usize>,
     ss_val: Vec<f64>,
     ss_head: usize,
@@ -1190,7 +1108,6 @@ impl CkspStream {
             return Err(CkspError::InvalidParam { param: "x" });
         }
 
-        // Power-of-two capacity for fast ring ops. We allow at most q+1 elements.
         let cap = Self::next_pow2(q + 1);
         let mask = cap - 1;
 
@@ -1230,11 +1147,8 @@ impl CkspStream {
         })
     }
 
-    /// O(1) amortized update. Returns (long, short) once warmup is satisfied, else None.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        // ---- True Range & ATR (RMA) ----
-        // TR = max( high-low, |high-prevClose|, |low-prevClose| )
         let tr = if self.prev_close.is_nan() {
             high - low
         } else {
@@ -1245,7 +1159,6 @@ impl CkspStream {
         };
         self.prev_close = close;
 
-        // ATR warmup then RMA recursion with α = 1/p
         let atr_ready = if self.i < self.p {
             self.sum_tr += tr;
             if self.i == self.p - 1 {
@@ -1255,31 +1168,26 @@ impl CkspStream {
                 false
             }
         } else {
-            // rma = rma + α * (tr - rma)  (use FMA for precision/speed)
             self.rma = self.alpha.mul_add(tr - self.rma, self.rma);
             true
         };
 
-        // ---- Sliding windows stage 1: max(high) over q, min(low) over q ----
-        // Monotonic MAX queue for highs
         while self.h_head != self.h_tail {
             let last = Self::dec(self.h_tail, self.mask);
             if self.h_val[last] <= high {
-                self.h_tail = last; // pop_back
+                self.h_tail = last;
             } else {
                 break;
             }
         }
         let mut nt = Self::inc(self.h_tail, self.mask);
         if nt == self.h_head {
-            // full: drop oldest from front
             self.h_head = Self::inc(self.h_head, self.mask);
         }
         self.h_idx[self.h_tail] = self.i;
         self.h_val[self.h_tail] = high;
         self.h_tail = nt;
 
-        // Evict out-of-window (older than q-1 bars)
         while self.h_head != self.h_tail {
             let front_i = self.h_idx[self.h_head];
             if front_i + self.q <= self.i {
@@ -1290,11 +1198,10 @@ impl CkspStream {
         }
         let max_high = self.h_val[self.h_head];
 
-        // Monotonic MIN queue for lows
         while self.l_head != self.l_tail {
             let last = Self::dec(self.l_tail, self.mask);
             if self.l_val[last] >= low {
-                self.l_tail = last; // pop_back
+                self.l_tail = last;
             } else {
                 break;
             }
@@ -1317,20 +1224,14 @@ impl CkspStream {
         }
         let min_low = self.l_val[self.l_head];
 
-        // Still warming up? (need both ATR warmup & q windows established)
         if self.i < self.warmup || !atr_ready {
             self.i += 1;
             return None;
         }
 
-        // ---- Stage 2: prelim stops + second rolling ----
-        // Keep your established semantics (matches your scalar/batch):
-        //   ls0 = maxHigh - x*ATR  -> roll MAX over last q -> long
-        //   ss0 = minLow  + x*ATR  -> roll MIN over last q -> short
-        let ls0 = (-self.x).mul_add(self.rma, max_high); // maxHigh - x*ATR
-        let ss0 = self.x.mul_add(self.rma, min_low); // minLow  + x*ATR
+        let ls0 = (-self.x).mul_add(self.rma, max_high);
+        let ss0 = self.x.mul_add(self.rma, min_low);
 
-        // Rolling MAX over ls0
         while self.ls_head != self.ls_tail {
             let last = Self::dec(self.ls_tail, self.mask);
             if self.ls_val[last] <= ls0 {
@@ -1357,7 +1258,6 @@ impl CkspStream {
         }
         let long = self.ls_val[self.ls_head];
 
-        // Rolling MIN over ss0
         while self.ss_head != self.ss_tail {
             let last = Self::dec(self.ss_tail, self.mask);
             if self.ss_val[last] >= ss0 {
@@ -1388,8 +1288,6 @@ impl CkspStream {
         Some((long, short))
     }
 }
-
-// ========================= Batch/Range Builder & Output =========================
 
 #[derive(Clone, Debug)]
 pub struct CkspBatchRange {
@@ -1531,19 +1429,37 @@ fn expand_grid(r: &CkspBatchRange) -> Result<Vec<CkspParams>, CkspError> {
             let mut cur = start;
             while cur <= end {
                 v.push(cur);
-                cur = match cur.checked_add(stp) { Some(n) => n, None => break };
+                cur = match cur.checked_add(stp) {
+                    Some(n) => n,
+                    None => break,
+                };
             }
         } else {
             let stp = step.max(1);
             let mut cur = start;
             loop {
                 v.push(cur);
-                if cur <= end { break; }
-                cur = match cur.checked_sub(stp) { Some(n) => n, None => break };
-                if cur < end { break; }
+                if cur <= end {
+                    break;
+                }
+                cur = match cur.checked_sub(stp) {
+                    Some(n) => n,
+                    None => break,
+                };
+                if cur < end {
+                    break;
+                }
             }
         }
-        if v.is_empty() { Err(CkspError::InvalidRange { start: s, end: e, step: st }) } else { Ok(v) }
+        if v.is_empty() {
+            Err(CkspError::InvalidRange {
+                start: s,
+                end: e,
+                step: st,
+            })
+        } else {
+            Ok(v)
+        }
     }
     fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CkspError> {
         let s = start as f64;
@@ -1566,7 +1482,15 @@ fn expand_grid(r: &CkspBatchRange) -> Result<Vec<CkspParams>, CkspError> {
                 x = x - step.abs();
             }
         }
-        if v.is_empty() { Err(CkspError::InvalidRange { start: s as i128, end: e as i128, step: st as i128 }) } else { Ok(v) }
+        if v.is_empty() {
+            Err(CkspError::InvalidRange {
+                start: s as i128,
+                end: e as i128,
+                step: st as i128,
+            })
+        } else {
+            Ok(v)
+        }
     }
 
     let ps = axis_usize(r.p)?;
@@ -1583,7 +1507,11 @@ fn expand_grid(r: &CkspBatchRange) -> Result<Vec<CkspParams>, CkspError> {
     for &p in &ps {
         for &x in &xs {
             for &q in &qs {
-                out.push(CkspParams { p: Some(p), x: Some(x), q: Some(q) });
+                out.push(CkspParams {
+                    p: Some(p),
+                    x: Some(x),
+                    q: Some(q),
+                });
             }
         }
     }
@@ -1643,7 +1571,7 @@ fn cksp_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<CkspBatchOutput, CkspError> {
-    let _ = kern; // runtime kernel currently unused (precomputed scalar path)
+    let _ = kern;
     let combos = expand_grid(sweep)?;
     if combos.is_empty() {
         return Err(CkspError::InvalidParam { param: "combos" });
@@ -1684,15 +1612,12 @@ fn cksp_batch_inner(
         warm.push(warm_idx);
     }
 
-    // Step 1: Allocate uninitialized matrices
     let mut long_buf_mu = make_uninit_matrix(rows, cols);
     let mut short_buf_mu = make_uninit_matrix(rows, cols);
 
-    // Step 2: Initialize NaN prefixes for each row
     init_matrix_prefixes(&mut long_buf_mu, cols, &warm);
     init_matrix_prefixes(&mut short_buf_mu, cols, &warm);
 
-    // Step 4: Convert to mutable slices for computation
     let mut long_guard = ManuallyDrop::new(long_buf_mu);
     let mut short_guard = ManuallyDrop::new(short_buf_mu);
 
@@ -1704,7 +1629,6 @@ fn cksp_batch_inner(
         core::slice::from_raw_parts_mut(short_guard.as_mut_ptr() as *mut f64, short_guard.len())
     };
 
-    // Row-specific batch optimization: precompute ATR per unique p, and mh/ml per unique q
     use std::collections::{BTreeSet, HashMap};
 
     #[inline]
@@ -1872,7 +1796,6 @@ fn cksp_batch_inner(
         out
     }
 
-    // Collect unique p and q values
     let mut ps: BTreeSet<usize> = BTreeSet::new();
     let mut qs: BTreeSet<usize> = BTreeSet::new();
     for prm in &combos {
@@ -1880,12 +1803,11 @@ fn cksp_batch_inner(
         qs.insert(prm.q.unwrap());
     }
 
-    // Precompute ATR per unique p
     let mut atr_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(ps.len());
     for &p in &ps {
         atr_map.insert(p, precompute_atr_series(high, low, close, p, first_valid));
     }
-    // Precompute mh/ml per unique q
+
     let mut mh_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(qs.len());
     let mut ml_map: HashMap<usize, Vec<f64>> = HashMap::with_capacity(qs.len());
     for &qv in &qs {
@@ -1897,13 +1819,11 @@ fn cksp_batch_inner(
         let prm = &combos[row];
         let (p, x, q) = (prm.p.unwrap(), prm.x.unwrap(), prm.q.unwrap());
 
-        // Fast path: use precomputed series and only do the final rolling over ls0/ss0
         let warmup = first_valid + p + q - 1;
         let atr = atr_map.get(&p).expect("atr precompute");
         let mh = mh_map.get(&q).expect("mh precompute");
         let ml = ml_map.get(&q).expect("ml precompute");
 
-        // Final rolling for ls0 (max) and ss0 (min)
         let cap = q + 1;
         let mut ls_idx: Vec<usize> = Vec::with_capacity(cap);
         let mut ls_val: Vec<f64> = Vec::with_capacity(cap);
@@ -2026,7 +1946,6 @@ fn cksp_batch_inner(
         }
     }
 
-    // Step 5: Reclaim as Vec<f64>
     let long_values = unsafe {
         Vec::from_raw_parts(
             long_guard.as_mut_ptr() as *mut f64,
@@ -2354,7 +2273,6 @@ mod tests {
         Ok(())
     }
 
-    // Check for poison values in single output - only runs in debug mode
     #[cfg(debug_assertions)]
     fn check_cksp_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -2362,20 +2280,16 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with default parameters
         let input = CkspInput::from_candles(&candles, CkspParams::default());
         let output = cksp_with_kernel(&input, kernel)?;
 
-        // Check every value for poison patterns in long_values
         for (i, &val) in output.long_values.iter().enumerate() {
-            // Skip NaN values as they're expected in the warmup period
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in long_values",
@@ -2383,7 +2297,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in long_values",
@@ -2391,7 +2304,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in long_values",
@@ -2400,16 +2312,13 @@ mod tests {
             }
         }
 
-        
         for (i, &val) in output.short_values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
 
             let bits = val.to_bits();
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
 					"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in short_values",
@@ -2417,7 +2326,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
 					"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} in short_values",
@@ -2425,7 +2333,6 @@ mod tests {
 				);
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
 					"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} in short_values",
@@ -2434,7 +2341,6 @@ mod tests {
             }
         }
 
-        
         let param_combos = vec![
             CkspParams {
                 p: Some(5),
@@ -2457,7 +2363,6 @@ mod tests {
             let input = CkspInput::from_candles(&candles, params.clone());
             let output = cksp_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.long_values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2475,7 +2380,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.short_values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2497,7 +2401,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_cksp_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2508,17 +2411,15 @@ mod tests {
     fn check_cksp_property(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=64).prop_flat_map(|p| {
             (1usize..=20).prop_flat_map(move |q| {
                 (
-                    
                     prop::collection::vec(
                         (10.0f64..1000.0f64).prop_filter("finite", |x| x.is_finite()),
-                        (p + q)..400, 
+                        (p + q)..400,
                     ),
                     Just(p),
-                    (0.1f64..10.0f64).prop_filter("finite", |x| x.is_finite()), 
+                    (0.1f64..10.0f64).prop_filter("finite", |x| x.is_finite()),
                     Just(q),
                 )
             })
@@ -2526,20 +2427,18 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(base_prices, p, x, q)| {
-                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
                 let mut close = Vec::with_capacity(base_prices.len());
 
                 for (i, price) in base_prices.iter().enumerate() {
-                    let volatility = price * 0.02; 
+                    let volatility = price * 0.02;
                     let h = price + volatility;
                     let l = price - volatility;
                     high.push(h);
                     low.push(l);
-                    
-                    
-                    let close_factor = 0.3 + 0.4 * ((i % 3) as f64 / 2.0); 
+
+                    let close_factor = 0.3 + 0.4 * ((i % 3) as f64 / 2.0);
                     close.push(l + (h - l) * close_factor);
                 }
 
@@ -2550,7 +2449,6 @@ mod tests {
                 };
                 let input = CkspInput::from_slices(&high, &low, &close, params);
 
-                
                 let result = cksp_with_kernel(&input, kernel)?;
                 let CkspOutput {
                     long_values,
@@ -2568,12 +2466,9 @@ mod tests {
                     "Short values length mismatch"
                 );
 
-                
-                
                 let first_long_valid = long_values.iter().position(|&v| v.is_finite());
                 let first_short_valid = short_values.iter().position(|&v| v.is_finite());
 
-                
                 if let (Some(long_idx), Some(short_idx)) = (first_long_valid, first_short_valid) {
                     prop_assert_eq!(
                         long_idx,
@@ -2583,7 +2478,6 @@ mod tests {
                         short_idx
                     );
 
-                    
                     for i in 0..long_idx {
                         prop_assert!(
                             long_values[i].is_nan(),
@@ -2601,15 +2495,13 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     prop_assert!(
                         long_idx >= p - 1,
                         "Warmup period {} should be at least p - 1 = {}",
                         long_idx,
                         p - 1
                     );
-                    
+
                     let max_warmup = p + q - 1;
                     prop_assert!(
                         long_idx <= max_warmup,
@@ -2619,7 +2511,6 @@ mod tests {
                     );
                 }
 
-                
                 if let Some(first_valid) = first_long_valid {
                     for i in first_valid..close.len() {
                         prop_assert!(
@@ -2637,7 +2528,6 @@ mod tests {
                     }
                 }
 
-                
                 if kernel != Kernel::Scalar {
                     let scalar_result = cksp_with_kernel(&input, Kernel::Scalar)?;
                     let CkspOutput {
@@ -2652,7 +2542,6 @@ mod tests {
                         let short_val = short_values[i];
                         let scalar_short_val = scalar_short[i];
 
-                        
                         if long_val.is_finite() && scalar_long_val.is_finite() {
                             let long_bits = long_val.to_bits();
                             let scalar_long_bits = scalar_long_val.to_bits();
@@ -2668,7 +2557,6 @@ mod tests {
                             );
                         }
 
-                        
                         if short_val.is_finite() && scalar_short_val.is_finite() {
                             let short_bits = short_val.to_bits();
                             let scalar_short_bits = scalar_short_val.to_bits();
@@ -2686,10 +2574,8 @@ mod tests {
                     }
                 }
 
-                
                 let start_idx = first_long_valid.unwrap_or(0);
                 if start_idx < close.len() {
-                    
                     let mut max_tr: f64 = 0.0;
                     for j in start_idx.saturating_sub(p)..start_idx {
                         if j < high.len() {
@@ -2698,12 +2584,10 @@ mod tests {
                         }
                     }
 
-                    
                     let price_max = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let price_min = low.iter().cloned().fold(f64::INFINITY, f64::min);
 
                     for i in start_idx..close.len() {
-                        
                         prop_assert!(
                             long_values[i].is_finite(),
                             "Long stop should be finite at idx {}: {}",
@@ -2717,10 +2601,8 @@ mod tests {
                             short_values[i]
                         );
 
-                        
-                        
                         let price_range = price_max - price_min;
-                        let margin = price_range * 2.0; 
+                        let margin = price_range * 2.0;
 
                         prop_assert!(
                             long_values[i] <= price_max + margin,
@@ -2742,12 +2624,9 @@ mod tests {
                     }
                 }
 
-                
                 if p == 1 && q == 1 {
-                    
                     let start_check = first_long_valid.unwrap_or(0).saturating_add(1);
                     for i in start_check..close.len() {
-                        
                         prop_assert!(
                             long_values[i].is_finite(),
                             "Long stop should be finite with p=1,q=1 at idx {}: {}",
@@ -2761,13 +2640,10 @@ mod tests {
                             short_values[i]
                         );
 
-                        
-                        
                         let recent_high = high[i];
                         let recent_low = low[i];
                         let recent_range = recent_high - recent_low;
 
-                        
                         prop_assert!(
                             long_values[i] <= recent_high,
                             "With p=1,q=1: Long stop {} should be <= recent high {} at idx {}",
@@ -2776,7 +2652,6 @@ mod tests {
                             i
                         );
 
-                        
                         prop_assert!(
                             short_values[i] >= recent_low,
                             "With p=1,q=1: Short stop {} should be >= recent low {} at idx {}",
@@ -2784,15 +2659,9 @@ mod tests {
                             recent_low,
                             i
                         );
-
-                        
-                        
-                        
                     }
                 }
 
-                
-                
                 if x > 1.0 {
                     let smaller_x = x * 0.5;
                     let params_small = CkspParams {
@@ -2807,7 +2676,6 @@ mod tests {
                             short_values: short_small,
                         } = result_small;
 
-                        
                         if let Some(start) = first_long_valid {
                             let sample_points = 5.min((close.len() - start) / 2);
                             for offset in 0..sample_points {
@@ -2816,11 +2684,7 @@ mod tests {
                                     let spread_large = (short_values[idx] - long_values[idx]).abs();
                                     let spread_small = (short_small[idx] - long_small[idx]).abs();
 
-                                    
-                                    
-                                    
                                     if spread_small > 0.0 {
-                                        
                                         prop_assert!(
 											spread_large > 0.0 && spread_small > 0.0,
 											"At idx {}: Both spreads should be positive: large={}, small={}",
@@ -2835,8 +2699,6 @@ mod tests {
                     }
                 }
 
-                
-                
                 if q > 2 && p < 10 {
                     let smaller_q = 1;
                     let params_small_q = CkspParams {
@@ -2851,7 +2713,6 @@ mod tests {
                             short_values: short_small_q,
                         } = result_small_q;
 
-                        
                         let start = (p + q).max(p + smaller_q);
                         if start + 10 < close.len() {
                             let mut volatility_large_q = 0.0;
@@ -2866,8 +2727,6 @@ mod tests {
                                 }
                             }
 
-                            
-                            
                             prop_assert!(
                                 volatility_large_q.is_finite() && volatility_small_q.is_finite(),
                                 "Volatilities should be finite: large_q={}, small_q={}",
@@ -2878,29 +2737,21 @@ mod tests {
                     }
                 }
 
-                
                 if base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) {
-                    
                     let last_idx = close.len() - 1;
-                    let min_converge_idx = first_long_valid.unwrap_or(0) + p * 2; 
+                    let min_converge_idx = first_long_valid.unwrap_or(0) + p * 2;
                     if last_idx > min_converge_idx {
                         let constant_price = base_prices[0];
-                        let constant_volatility = constant_price * 0.02; 
-
-                        
-                        
-                        
+                        let constant_volatility = constant_price * 0.02;
 
                         let expected_long =
                             constant_price + constant_volatility - x * (2.0 * constant_volatility);
                         let expected_short =
                             constant_price - constant_volatility + x * (2.0 * constant_volatility);
 
-                        
                         let long_val = long_values[last_idx];
                         let short_val = short_values[last_idx];
 
-                        
                         let tolerance = constant_price * 0.2;
 
                         prop_assert!(
@@ -2921,7 +2772,6 @@ mod tests {
 							tolerance
 						);
 
-                        
                         if last_idx >= 3 {
                             let long_stable = (long_values[last_idx] - long_values[last_idx - 1])
                                 .abs()
@@ -3012,7 +2862,7 @@ mod tests {
         let params = CkspParams {
             p: Some(2),
             x: Some(1.0),
-            q: Some(0), 
+            q: Some(0),
         };
         let input = CkspInput::from_slices(&high, &low, &close, params);
         let res = cksp_with_kernel(&input, kernel);
@@ -3088,7 +2938,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -3096,17 +2945,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let output = CkspBatchBuilder::new()
             .kernel(kernel)
-            .p_range(5, 25, 5) 
-            .x_range(0.5, 2.5, 0.5) 
-            .q_range(5, 20, 5) 
+            .p_range(5, 25, 5)
+            .x_range(0.5, 2.5, 0.5)
+            .q_range(5, 20, 5)
             .apply_candles(&c)?;
 
-        
         for (idx, &val) in output.long_values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -3115,7 +2961,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
@@ -3123,7 +2968,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
@@ -3131,7 +2975,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in long_values",
@@ -3140,9 +2983,7 @@ mod tests {
             }
         }
 
-        
         for (idx, &val) in output.short_values.iter().enumerate() {
-            
             if val.is_nan() {
                 continue;
             }
@@ -3151,7 +2992,6 @@ mod tests {
             let row = idx / output.cols;
             let col = idx % output.cols;
 
-            
             if bits == 0x11111111_11111111 {
                 panic!(
                     "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
@@ -3159,7 +2999,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x22222222_22222222 {
                 panic!(
                     "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
@@ -3167,7 +3006,6 @@ mod tests {
                 );
             }
 
-            
             if bits == 0x33333333_33333333 {
                 panic!(
                     "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) in short_values",
@@ -3179,7 +3017,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -3210,29 +3047,23 @@ mod tests {
 
     #[test]
     fn test_cksp_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let input = CkspInput::from_candles(&candles, CkspParams::default());
 
-        
         let baseline = cksp(&input)?;
 
-        
         let n = candles.close.len();
         let mut out_long = vec![0.0; n];
         let mut out_short = vec![0.0; n];
 
-        
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             cksp_into(&input, &mut out_long, &mut out_short)?;
         }
 
-        
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
             cksp_into_slices(&mut out_long, &mut out_short, &input, Kernel::Auto)?;
         }
@@ -3265,8 +3096,6 @@ mod tests {
     }
 }
 
-
-
 #[cfg(feature = "python")]
 #[inline(always)]
 fn cksp_prepare(
@@ -3278,7 +3107,6 @@ fn cksp_prepare(
     q: usize,
     kernel: Kernel,
 ) -> Result<(usize, Kernel), CkspError> {
-    
     if p == 0 || q == 0 {
         return Err(CkspError::InvalidParam { param: "p/q" });
     }
@@ -3286,7 +3114,6 @@ fn cksp_prepare(
         return Err(CkspError::InvalidMultiplier { x });
     }
 
-    
     let size = close.len();
     if size == 0 {
         return Err(CkspError::EmptyInputData);
@@ -3338,11 +3165,9 @@ pub fn cksp_py<'py>(
     let close_slice = close.as_slice()?;
     let kern = validate_kernel(kernel, false)?;
 
-    // Use cksp_prepare for validation
     let (first_valid_idx, chosen) = cksp_prepare(high_slice, low_slice, close_slice, p, x, q, kern)
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Get result vectors from Rust function
     let result = py
         .allow_threads(|| unsafe {
             match chosen {
@@ -3362,7 +3187,6 @@ pub fn cksp_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Zero-copy transfer to NumPy
     Ok((
         result.long_values.into_pyarray(py),
         result.short_values.into_pyarray(py),
@@ -3425,10 +3249,16 @@ fn cksp_batch_inner_into(
         .checked_mul(cols)
         .ok_or_else(|| CkspError::InvalidInput("rows*cols overflow".into()))?;
     if long_out.len() != expected {
-        return Err(CkspError::OutputLengthMismatch { expected, got: long_out.len() });
+        return Err(CkspError::OutputLengthMismatch {
+            expected,
+            got: long_out.len(),
+        });
     }
     if short_out.len() != expected {
-        return Err(CkspError::OutputLengthMismatch { expected, got: short_out.len() });
+        return Err(CkspError::OutputLengthMismatch {
+            expected,
+            got: short_out.len(),
+        });
     }
     let valid = size - first_valid;
     let mut warm: Vec<usize> = Vec::with_capacity(rows);
@@ -3451,7 +3281,6 @@ fn cksp_batch_inner_into(
         warm.push(warm_idx);
     }
 
-    // Initialize warm prefixes in-place via MaybeUninit view (debug poison supported)
     unsafe {
         let mut long_mu = core::slice::from_raw_parts_mut(
             long_out.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -3543,7 +3372,6 @@ pub fn cksp_batch_py<'py>(
         q: q_range,
     };
 
-    // Calculate dimensions
     let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = close_slice.len();
@@ -3551,22 +3379,18 @@ pub fn cksp_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
 
-    // Pre-allocate output arrays
     let long_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let short_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let long_slice = unsafe { long_arr.as_slice_mut()? };
     let short_slice = unsafe { short_arr.as_slice_mut()? };
 
-    // Compute without GIL
     let combos = py
         .allow_threads(|| {
-            // Handle kernel selection for batch operations
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
             };
 
-            // Map batch kernels to regular kernels
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -3587,12 +3411,10 @@ pub fn cksp_batch_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build result dictionary
     let dict = PyDict::new(py);
     dict.set_item("long_values", long_arr.reshape((rows, cols))?)?;
     dict.set_item("short_values", short_arr.reshape((rows, cols))?)?;
 
-    // Add parameter arrays
     dict.set_item(
         "p",
         combos
@@ -3621,7 +3443,6 @@ pub fn cksp_batch_py<'py>(
     Ok(dict)
 }
 
-// ========================= Python CUDA Bindings =========================
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "cksp_cuda_batch_dev")]
 #[pyo3(signature = (high, low, close, p_range=(10,10,0), x_range=(1.0,1.0,0.0), q_range=(9,9,0), device_id=0))]
@@ -3738,9 +3559,6 @@ pub fn cksp_cuda_many_series_one_param_dev_py<'py>(
     Ok(dict)
 }
 
-// ========================= WASM Bindings =========================
-
-/// Helper function that writes directly to output slices - no allocations
 #[inline]
 pub fn cksp_into_slice(
     long_dst: &mut [f64],
@@ -3753,15 +3571,20 @@ pub fn cksp_into_slice(
     q: usize,
     kern: Kernel,
 ) -> Result<(), CkspError> {
-    // Validate inputs
     if high.len() != low.len() || low.len() != close.len() {
         return Err(CkspError::InconsistentLengths);
     }
     if long_dst.len() != close.len() {
-        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: long_dst.len() });
+        return Err(CkspError::OutputLengthMismatch {
+            expected: close.len(),
+            got: long_dst.len(),
+        });
     }
     if short_dst.len() != close.len() {
-        return Err(CkspError::OutputLengthMismatch { expected: close.len(), got: short_dst.len() });
+        return Err(CkspError::OutputLengthMismatch {
+            expected: close.len(),
+            got: short_dst.len(),
+        });
     }
     if close.is_empty() {
         return Err(CkspError::EmptyInputData);
@@ -3794,7 +3617,6 @@ pub fn cksp_into_slice(
         other => other,
     };
 
-    // Use the compute_into helper to write directly to output slices
     unsafe {
         cksp_compute_into(
             high,
@@ -3812,7 +3634,7 @@ pub fn cksp_into_slice(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cksp_js(
     high: &[f64],
@@ -3832,8 +3654,8 @@ pub fn cksp_js(
             q: Some(q),
         },
     );
-    let out = cksp_with_kernel(&input, Kernel::Auto)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let out =
+        cksp_with_kernel(&input, Kernel::Auto).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let cols = close.len();
     let mut values = Vec::with_capacity(2 * cols);
     values.extend_from_slice(&out.long_values);
@@ -3841,7 +3663,7 @@ pub fn cksp_js(
     Ok(values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cksp_into(
     high: &[f64],
@@ -3863,22 +3685,19 @@ pub fn cksp_into(
     }
 
     unsafe {
-        // Get pointers from slices for aliasing check
         let high_ptr = high.as_ptr();
         let low_ptr = low.as_ptr();
         let close_ptr = close.as_ptr();
 
-        // Check for any aliasing between inputs and outputs
         let has_aliasing = (high_ptr as *const f64 == long_ptr as *const f64)
             || (high_ptr as *const f64 == short_ptr as *const f64)
             || (low_ptr as *const f64 == long_ptr as *const f64)
             || (low_ptr as *const f64 == short_ptr as *const f64)
             || (close_ptr as *const f64 == long_ptr as *const f64)
             || (close_ptr as *const f64 == short_ptr as *const f64)
-            || (long_ptr == short_ptr); // Also check if output pointers alias each other
+            || (long_ptr == short_ptr);
 
         if has_aliasing {
-            // Use temporary buffers if any aliasing is detected
             let mut temp_long = vec![0.0; len];
             let mut temp_short = vec![0.0; len];
 
@@ -3900,7 +3719,6 @@ pub fn cksp_into(
             long_out.copy_from_slice(&temp_long);
             short_out.copy_from_slice(&temp_short);
         } else {
-            // No aliasing - write directly to output
             let long_out = std::slice::from_raw_parts_mut(long_ptr, len);
             let short_out = std::slice::from_raw_parts_mut(short_ptr, len);
 
@@ -3912,7 +3730,7 @@ pub fn cksp_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cksp_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -3921,7 +3739,7 @@ pub fn cksp_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cksp_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -3931,15 +3749,15 @@ pub fn cksp_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CkspJsResult {
-    pub values: Vec<f64>, // [long..., short...]
-    pub rows: usize,      // 2
-    pub cols: usize,      // len
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CkspBatchConfig {
     pub p_range: (usize, usize, usize),
@@ -3947,7 +3765,7 @@ pub struct CkspBatchConfig {
     pub q_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CkspBatchJsOutput {
     pub long_values: Vec<f64>,
@@ -3957,7 +3775,7 @@ pub struct CkspBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = cksp_batch)]
 pub fn cksp_batch_js(
     high: &[f64],
@@ -3981,11 +3799,9 @@ pub fn cksp_batch_js(
         .checked_mul(cols)
         .ok_or_else(|| JsValue::from_str("rows*cols overflow"))?;
 
-    // Pre-allocate output arrays
     let mut long_values = vec![0.0; total];
     let mut short_values = vec![0.0; total];
 
-    // Compute batch results with appropriate kernel for WASM
     let kernel = detect_best_batch_kernel();
     let simd = match kernel {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -4018,7 +3834,7 @@ pub fn cksp_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn cksp_batch_into(
     high_ptr: *const f64,
@@ -4067,7 +3883,6 @@ pub fn cksp_batch_into(
         let long_out = std::slice::from_raw_parts_mut(long_ptr, total);
         let short_out = std::slice::from_raw_parts_mut(short_ptr, total);
 
-        // Use appropriate kernel for WASM
         let kernel = detect_best_batch_kernel();
         let simd = match kernel {
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

@@ -1,15 +1,3 @@
-//! CUDA support for the Deviation indicator (standard deviation path).
-//!
-//! Parity goals (mirrors ALMA/CWMA wrappers):
-//! - PTX load via DetermineTargetFromContext + OptLevel O2 with simple fallback
-//! - NON_BLOCKING stream
-//! - VRAM checks with optional headroom and grid.y chunking
-//! - Public entry points:
-//!     - one-series × many-params (batch)
-//!     - many-series × one-param (time‑major)
-//! - Numerics: warmup/NaN identical to scalar; compute windows via host-built
-//!   prefix sums in f64 to reduce drift; outputs in f32.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -32,7 +20,11 @@ pub enum CudaDeviationError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -40,20 +32,25 @@ pub enum CudaDeviationError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-
-
 #[repr(C, align(8))]
 #[derive(Clone, Copy, Default)]
 pub struct Float2 {
-    pub x: f32, 
-    pub y: f32, 
+    pub x: f32,
+    pub y: f32,
 }
 unsafe impl DeviceCopy for Float2 {}
 
@@ -145,7 +142,7 @@ impl CudaDeviation {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => Module::from_ptx(ptx, &[])?
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -187,29 +184,56 @@ impl CudaDeviation {
 
     #[inline]
     fn will_fit(bytes: usize, headroom: usize) -> Result<(), CudaDeviationError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Ok((free, _)) = mem_get_info() {
-            if bytes.saturating_add(headroom) <= free { Ok(()) } else { Err(CudaDeviationError::OutOfMemory { required: bytes, free, headroom }) }
-        } else { Ok(()) }
+            if bytes.saturating_add(headroom) <= free {
+                Ok(())
+            } else {
+                Err(CudaDeviationError::OutOfMemory {
+                    required: bytes,
+                    free,
+                    headroom,
+                })
+            }
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
     fn validate_launch(grid: GridSize, block: BlockSize) -> Result<(), CudaDeviationError> {
         let (gx, gy, gz) = (grid.x, grid.y, grid.z);
         let (bx, by, bz) = (block.x, block.y, block.z);
-        
+
         if gx == 0 || gy == 0 || gz == 0 || bx == 0 || by == 0 || bz == 0 {
-            return Err(CudaDeviationError::InvalidInput("zero grid/block dim".into()));
+            return Err(CudaDeviationError::InvalidInput(
+                "zero grid/block dim".into(),
+            ));
         }
-        if gy as usize > 65_535 { 
-            return Err(CudaDeviationError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+        if gy as usize > 65_535 {
+            return Err(CudaDeviationError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
 
-    pub fn synchronize(&self) -> Result<(), CudaDeviationError> { self.stream.synchronize().map_err(Into::into) }
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn synchronize(&self) -> Result<(), CudaDeviationError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     fn build_prefixes_1d(data_f32: &[f32]) -> (Vec<Float2>, Vec<Float2>, Vec<i32>, usize, usize) {
         let len = data_f32.len();
@@ -244,7 +268,6 @@ impl CudaDeviation {
         rows: usize,
         first_valids: &[i32],
     ) -> (Vec<Float2>, Vec<Float2>, Vec<i32>) {
-        
         let total = data_tm_f32.len();
         let mut ps: Vec<Float2> = vec![Float2::default(); total + 1];
         let mut ps2: Vec<Float2> = vec![Float2::default(); total + 1];
@@ -275,7 +298,6 @@ impl CudaDeviation {
         (ps, ps2, pn)
     }
 
-    
     pub fn deviation_batch_dev(
         &self,
         data_f32: &[f32],
@@ -286,7 +308,6 @@ impl CudaDeviation {
         }
         let (ps, ps2, pn, first_valid, len) = Self::build_prefixes_1d(data_f32);
 
-        
         let mut combos = deviation_expand_grid(sweep)
             .into_iter()
             .filter(|p| p.devtype.unwrap_or(0) == 0)
@@ -309,7 +330,6 @@ impl CudaDeviation {
             }
         }
 
-        
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
         let rows = combos.len();
         let out_elems = rows
@@ -369,14 +389,12 @@ impl CudaDeviation {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        
         let d_ps = DeviceBuffer::from_slice(&ps)?;
         let d_ps2 = DeviceBuffer::from_slice(&ps2)?;
         let d_pn = DeviceBuffer::from_slice(&pn)?;
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(out_elems) }?;
 
-        
         let chunk_rows = (rows + y_chunks - 1) / y_chunks;
         for c in 0..y_chunks {
             let start_row = c * chunk_rows;
@@ -386,11 +404,9 @@ impl CudaDeviation {
             let end_row = ((c + 1) * chunk_rows).min(rows);
             let n_rows = end_row - start_row;
 
-            let start_index = start_row
-                .checked_mul(len)
-                .ok_or_else(|| {
-                    CudaDeviationError::InvalidInput("rows*cols overflow (chunk)".into())
-                })?;
+            let start_index = start_row.checked_mul(len).ok_or_else(|| {
+                CudaDeviationError::InvalidInput("rows*cols overflow (chunk)".into())
+            })?;
 
             let periods_ptr = unsafe {
                 d_periods
@@ -418,7 +434,14 @@ impl CudaDeviation {
             .synchronize()
             .map_err(CudaDeviationError::from)?;
 
-        Ok((DeviceArrayF32 { buf: d_out, rows, cols: len }, combos))
+        Ok((
+            DeviceArrayF32 {
+                buf: d_out,
+                rows,
+                cols: len,
+            },
+            combos,
+        ))
     }
 
     fn launch_batch_kernel_ptrs(
@@ -435,7 +458,9 @@ impl CudaDeviation {
         let func = self
             .module
             .get_function("deviation_batch_f32")
-            .map_err(|_| CudaDeviationError::MissingKernelSymbol { name: "deviation_batch_f32" })?;
+            .map_err(|_| CudaDeviationError::MissingKernelSymbol {
+                name: "deviation_batch_f32",
+            })?;
 
         if len > i32::MAX as usize || n_combos > i32::MAX as usize {
             return Err(CudaDeviationError::InvalidInput(
@@ -478,7 +503,6 @@ impl CudaDeviation {
         Ok(())
     }
 
-    
     pub fn deviation_batch_into_host_f32(
         &self,
         data_f32: &[f32],
@@ -501,7 +525,6 @@ impl CudaDeviation {
         Ok((dev.rows, dev.cols, combos))
     }
 
-    
     pub fn deviation_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -535,7 +558,6 @@ impl CudaDeviation {
             ));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -572,7 +594,9 @@ impl CudaDeviation {
         let first_bytes = first_valids
             .len()
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaDeviationError::InvalidInput("first_valids bytes overflow".into()))?;
+            .ok_or_else(|| {
+                CudaDeviationError::InvalidInput("first_valids bytes overflow".into())
+            })?;
         let out_bytes = total_elems
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaDeviationError::InvalidInput("out bytes overflow".into()))?;
@@ -635,7 +659,9 @@ impl CudaDeviation {
         let func = self
             .module
             .get_function("deviation_many_series_one_param_f32")
-            .map_err(|_| CudaDeviationError::MissingKernelSymbol { name: "deviation_many_series_one_param_f32" })?;
+            .map_err(|_| CudaDeviationError::MissingKernelSymbol {
+                name: "deviation_many_series_one_param_f32",
+            })?;
         if cols > i32::MAX as usize || rows > i32::MAX as usize || period > i32::MAX as usize {
             return Err(CudaDeviationError::InvalidInput(
                 "inputs exceed kernel limits".into(),
@@ -645,7 +671,7 @@ impl CudaDeviation {
             ManySeriesKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
         };
-        let grid_x = ((rows as u32) + block_x - 1) / block_x; 
+        let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), cols as u32, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         Self::validate_launch(grid, block)?;
@@ -675,8 +701,6 @@ impl CudaDeviation {
     }
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::gen_series;
@@ -686,8 +710,8 @@ pub mod benches {
     const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
-        let prefix = (ONE_SERIES_LEN + 1)
-            * (2 * std::mem::size_of::<Float2>() + std::mem::size_of::<i32>());
+        let prefix =
+            (ONE_SERIES_LEN + 1) * (2 * std::mem::size_of::<Float2>() + std::mem::size_of::<i32>());
         let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
         prefix + out_bytes + 64 * 1024 * 1024
     }

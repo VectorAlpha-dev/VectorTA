@@ -1,29 +1,3 @@
-//! # New Adaptive Moving Average (NAMA)
-//!
-//! A dynamic moving average that adapts based on market conditions using range and effort.
-//! Developed by Franklin Moormann (cheatcountry). The indicator calculates a ratio between
-//! price movement effort and range to determine adaptive smoothing.
-//!
-//! ## Parameters
-//! - **period**: Lookback period for calculations (defaults to 30)
-//!
-//! ## Returns
-//! - **`Ok(NamaOutput)`** on success, containing a `Vec<f64>` matching input length
-//! - **`Err(NamaError)`** otherwise
-//!
-//! ## Developer Notes
-//! - SIMD status: AVX2/AVX512 precompute the True Range (TR) across the series and reuse the scalar core.
-//!   Runtime selection follows alma.rs patterns. If nightly-avx is disabled or unsupported at runtime,
-//!   selection falls back to the scalar path.
-//! - Scalar path: optimized but kept safe. Removes per-step `tr_at` recomputation by maintaining a
-//!   ring buffer of TR values and an O(1) rolling sum; hoists the OHLC vs degenerate TR branch outside
-//!   the hot loop; uses `VecDeque` monotone queues for max/min (window) to avoid O(N) output temporaries.
-//! - Batch path: optimized for slice data (degenerate TR) by precomputing TR once and reusing it across
-//!   all rows/periods via a shared core. This reduces redundant work while preserving API and warmup.
-//! - Streaming update: now O(1) amortized per update using monotone deques
-//!   for window max/min and a rolling True Range (TR) sum via a ring buffer.
-//! - Decision: Enabled O(1) streaming; outputs match batch exactly (tests unchanged).
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -31,11 +5,9 @@ use crate::cuda::moving_averages::CudaNama;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context as CudaContext;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use std::sync::Arc;
+use cust::memory::DeviceBuffer;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -46,10 +18,12 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use std::sync::Arc;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -76,7 +50,6 @@ impl<'a> AsRef<[f64]> for NamaInput<'a> {
     }
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32PyNama {
@@ -97,13 +70,19 @@ impl DeviceArrayF32PyNama {
         d.set_item("typestr", "<f4")?;
         let item = std::mem::size_of::<f32>();
         d.set_item("strides", (cols * item, item))?;
-        let ptr_int: usize = if rows == 0 || cols == 0 { 0 } else { self.inner.device_ptr() as usize };
+        let ptr_int: usize = if rows == 0 || cols == 0 {
+            0
+        } else {
+            self.inner.device_ptr() as usize
+        };
         d.set_item("data", (ptr_int, false))?;
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self._device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self._device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -116,7 +95,6 @@ impl DeviceArrayF32PyNama {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -137,12 +115,15 @@ impl DeviceArrayF32PyNama {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -170,7 +151,10 @@ pub struct NamaOutput {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct NamaParams {
     pub period: Option<usize>,
 }
@@ -289,7 +273,11 @@ pub enum NamaError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("nama: Invalid range expansion: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("nama: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
@@ -340,7 +328,7 @@ fn nama_prepare<'a>(
         Kernel::Auto => Kernel::Scalar,
         k => k,
     };
-    // Extra OHLC for TR if input is Candles
+
     let ohlc = match &input.data {
         NamaData::Candles { candles, .. } => {
             Some((&candles.high[..], &candles.low[..], &candles.close[..]))
@@ -350,7 +338,6 @@ fn nama_prepare<'a>(
     Ok((data, period, first, chosen, ohlc))
 }
 
-// SIMD kernel functions (currently all route to scalar implementation)
 #[inline]
 pub fn nama_scalar(
     data: &[f64],
@@ -389,12 +376,10 @@ pub fn nama_avx2(
         return;
     }
 
-    // Precompute TR across the entire series
     let mut tr = vec![0.0f64; n];
     unsafe {
         match ohlc {
             Some((h, l, c)) => {
-                // j == first
                 *tr.get_unchecked_mut(first) = h[first] - l[first];
 
                 let mut j = first + 1;
@@ -422,7 +407,6 @@ pub fn nama_avx2(
                 }
             }
             None => {
-                // Degenerate TR: 0 at first, |Δsource| afterwards
                 *tr.get_unchecked_mut(first) = 0.0;
                 let sp = data.as_ptr();
                 let mut j = first + 1;
@@ -443,7 +427,6 @@ pub fn nama_avx2(
         }
     }
 
-    // Consume using the shared scalar core
     nama_core_with_tr(data, period, first, &tr, out);
 }
 
@@ -540,9 +523,8 @@ fn nama_compute_into(
     let i0 = first + period - 1;
     if i0 >= n {
         return;
-    } // NaN prefix already set by allocator
+    }
 
-    // Monotone deques for max/min over the sliding window
     let mut dq_max: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_min: VecDeque<usize> = VecDeque::with_capacity(period);
 
@@ -579,14 +561,12 @@ fn nama_compute_into(
         }
     }
 
-    // TR ring buffer and rolling sum
     let mut tr_ring: Vec<f64> = vec![0.0; period];
     let mut wr: usize = 0;
     let mut eff_sum: f64 = 0.0;
 
     match ohlc {
         Some((h, l, c)) => {
-            // Warm-up window [first..=i0]
             for j in first..=i0 {
                 push_max(&mut dq_max, src, j);
                 push_min(&mut dq_min, src, j);
@@ -605,7 +585,6 @@ fn nama_compute_into(
             }
             wr = 0;
 
-            // First output at i0
             {
                 let hi = src[*dq_max.front().unwrap()];
                 let lo = src[*dq_min.front().unwrap()];
@@ -617,7 +596,6 @@ fn nama_compute_into(
                 out[i0] = alpha * src[i0];
             }
 
-            // Sliding phase
             let mut i = i0 + 1;
             while i < n {
                 let j = i;
@@ -653,7 +631,6 @@ fn nama_compute_into(
             }
         }
         None => {
-            // Degenerate TR = |Δsource| with TR[first] = 0
             for j in first..=i0 {
                 push_max(&mut dq_max, src, j);
                 push_min(&mut dq_min, src, j);
@@ -668,7 +645,6 @@ fn nama_compute_into(
             }
             wr = 0;
 
-            // First output at i0
             {
                 let hi = src[*dq_max.front().unwrap()];
                 let lo = src[*dq_min.front().unwrap()];
@@ -680,7 +656,6 @@ fn nama_compute_into(
                 out[i0] = alpha * src[i0];
             }
 
-            // Sliding phase
             let mut i = i0 + 1;
             while i < n {
                 let j = i;
@@ -714,8 +689,6 @@ fn nama_compute_into(
     }
 }
 
-/// Shared scalar core that consumes precomputed TR values and writes outputs.
-/// Assumes `out[..first+period-1]` is already NaN (alloc/init step handles warmup prefix).
 #[inline(always)]
 fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: &mut [f64]) {
     let n = src.len();
@@ -724,7 +697,6 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
         return;
     }
 
-    // Monotone deques for max/min
     let mut dq_max: VecDeque<usize> = VecDeque::with_capacity(period);
     let mut dq_min: VecDeque<usize> = VecDeque::with_capacity(period);
 
@@ -761,7 +733,6 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
         }
     }
 
-    // TR ring + rolling sum
     let mut ring: Vec<f64> = vec![0.0; period];
     let mut wr: usize = 0;
     let mut eff_sum = 0.0;
@@ -772,7 +743,6 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
     let op = out.as_mut_ptr();
     let rp = ring.as_mut_ptr();
 
-    // Warm-up
     for j in first..=i0 {
         push_max(&mut dq_max, src, j);
         push_min(&mut dq_min, src, j);
@@ -783,15 +753,17 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
     }
     wr = 0;
 
-    // First output at i0
     unsafe {
         let hi = *sp.add(*dq_max.front().unwrap_unchecked());
         let lo = *sp.add(*dq_min.front().unwrap_unchecked());
-        let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+        let alpha = if eff_sum != 0.0 {
+            (hi - lo) / eff_sum
+        } else {
+            0.0
+        };
         *op.add(i0) = alpha * *sp.add(i0);
     }
 
-    // Slide
     let mut i = i0 + 1;
     while i < n {
         let j = i;
@@ -813,7 +785,11 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
         unsafe {
             let hi = *sp.add(*dq_max.front().unwrap_unchecked());
             let lo = *sp.add(*dq_min.front().unwrap_unchecked());
-            let alpha = if eff_sum != 0.0 { (hi - lo) / eff_sum } else { 0.0 };
+            let alpha = if eff_sum != 0.0 {
+                (hi - lo) / eff_sum
+            } else {
+                0.0
+            };
             let prev_y = *op.add(i - 1);
             let x = *sp.add(j);
             *op.add(i) = (x - prev_y).mul_add(alpha, prev_y);
@@ -824,14 +800,12 @@ fn nama_core_with_tr(src: &[f64], period: usize, first: usize, tr: &[f64], out: 
 
 pub fn nama_with_kernel(input: &NamaInput, kernel: Kernel) -> Result<NamaOutput, NamaError> {
     let (src, period, first, chosen, ohlc) = nama_prepare(input, kernel)?;
-    // ALMA-compatible NaN prefix:
+
     let mut out = alloc_with_nan_prefix(src.len(), first + period - 1);
 
-    // Select kernel implementation
     match (kernel, chosen) {
-        // Stick to scalar as default when Kernel::Auto is requested
         (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, &mut out),
-        // Explicit selections honored below
+
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         (_, Kernel::Avx512) => nama_avx512(src, period, first, ohlc, &mut out),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -853,11 +827,9 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
     }
     let warmup_end = (first + period - 1).min(dst.len());
     for v in &mut dst[..warmup_end] {
-        // Match alloc_with_nan_prefix's quiet-NaN pattern for parity
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     match (k, chosen) {
         (Kernel::Auto, _) => nama_scalar(src, period, first, ohlc, dst),
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
@@ -870,40 +842,29 @@ pub fn nama_into_slice(dst: &mut [f64], input: &NamaInput, k: Kernel) -> Result<
     Ok(())
 }
 
-/// Writes NAMA outputs into the provided buffer without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API (quiet-NaN prefix).
-/// - `out.len()` must equal the input series length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn nama_into(input: &NamaInput, out: &mut [f64]) -> Result<(), NamaError> {
-    
     nama_into_slice(out, input, Kernel::Auto)
 }
-
 
 #[derive(Debug, Clone)]
 pub struct NamaStream {
     period: usize,
 
-    
     buf_src: Vec<f64>,
     buf_tr: Vec<f64>,
     head: usize,
     filled: bool,
 
-    
     last_src: f64,
     last_close: f64,
     has_last_close: bool,
     last_out: f64,
     have_out: bool,
 
-    
-    
-    
     time: usize,
     eff_sum: f64,
-    
+
     dq_max: VecDeque<(usize, f64)>,
     dq_min: VecDeque<(usize, f64)>,
 }
@@ -944,7 +905,6 @@ impl NamaStream {
         }
     }
 
-    
     #[inline(always)]
     fn dq_push_max(dq: &mut VecDeque<(usize, f64)>, idx: usize, v: f64) {
         while let Some(&(_, back_v)) = dq.back() {
@@ -978,39 +938,32 @@ impl NamaStream {
         }
     }
 
-    
     #[inline]
     pub fn update_source(&mut self, s: f64) -> Option<f64> {
-        
         let tr_new = if self.last_src.is_nan() {
             f64::NAN
         } else {
             (s - self.last_src).abs()
         };
 
-        
         let tr_old = self.buf_tr[self.head];
 
-        
         self.buf_src[self.head] = s;
         self.buf_tr[self.head] = tr_new;
         self.last_src = s;
 
-        
         let t = self.time;
         self.time = self.time.wrapping_add(1);
 
         Self::dq_push_max(&mut self.dq_max, t, s);
         Self::dq_push_min(&mut self.dq_min, t, s);
 
-        
         if self.filled {
             let win_start = t + 1 - self.period;
             Self::dq_pop_old(&mut self.dq_max, win_start);
             Self::dq_pop_old(&mut self.dq_min, win_start);
         }
 
-        
         if tr_old.is_finite() {
             self.eff_sum -= tr_old;
         }
@@ -1018,18 +971,15 @@ impl NamaStream {
             self.eff_sum += tr_new;
         }
 
-        
         self.advance();
         if !self.filled {
             return None;
         }
 
-        
         let hi = self.dq_max.front().map(|&(_, v)| v).unwrap_or(s);
         let lo = self.dq_min.front().map(|&(_, v)| v).unwrap_or(s);
         let range = hi - lo;
         let alpha = if self.eff_sum != 0.0 {
-            
             let inv = self.eff_sum.recip();
             range * inv
         } else {
@@ -1037,10 +987,8 @@ impl NamaStream {
         };
 
         let y = if self.have_out {
-            
             (s - self.last_out).mul_add(alpha, self.last_out)
         } else {
-            
             alpha * s
         };
         self.last_out = y;
@@ -1048,7 +996,6 @@ impl NamaStream {
         Some(y)
     }
 
-    
     #[inline]
     pub fn update_ohlc(
         &mut self,
@@ -1057,7 +1004,6 @@ impl NamaStream {
         low: f64,
         close_prev: Option<f64>,
     ) -> Option<f64> {
-        
         let tr_new = if self.has_last_close || close_prev.is_some() {
             let prev = close_prev.unwrap_or(self.last_close);
             let hl = high - low;
@@ -1072,15 +1018,12 @@ impl NamaStream {
             self.has_last_close = true;
         }
 
-        
         let tr_old = self.buf_tr[self.head];
 
-        
         self.buf_src[self.head] = src;
         self.buf_tr[self.head] = tr_new;
         self.last_src = src;
 
-        
         let t = self.time;
         self.time = self.time.wrapping_add(1);
 
@@ -1125,7 +1068,6 @@ impl NamaStream {
         Some(y)
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct NamaBatchRange {
@@ -1210,29 +1152,33 @@ fn expand_grid(r: &NamaBatchRange) -> Vec<NamaParams> {
             vals.push(cur);
             match cur.checked_add(t) {
                 Some(nxt) => {
-                    if nxt == cur { break; }
+                    if nxt == cur {
+                        break;
+                    }
                     cur = nxt;
                 }
                 None => break,
             }
         }
     } else {
-        
         let mut cur = s;
         while cur >= e {
             vals.push(cur);
-            if cur < t { break; }
+            if cur < t {
+                break;
+            }
             cur -= t;
-            if cur == 0 && e > 0 { break; }
-            if cur == vals.last().copied().unwrap_or(usize::MAX) { break; }
+            if cur == 0 && e > 0 {
+                break;
+            }
+            if cur == vals.last().copied().unwrap_or(usize::MAX) {
+                break;
+            }
         }
-        
-        if vals.last().copied() != Some(e) {
-            
-        }
+
+        if vals.last().copied() != Some(e) {}
     }
-    vals
-        .into_iter()
+    vals.into_iter()
         .map(|p| NamaParams { period: Some(p) })
         .collect()
 }
@@ -1242,7 +1188,6 @@ pub fn nama_batch_with_kernel(
     sweep: &NamaBatchRange,
     k: Kernel,
 ) -> Result<NamaBatchOutput, NamaError> {
-    
     match k {
         Kernel::Avx2 | Kernel::Avx512 | Kernel::Scalar => {
             return Err(NamaError::InvalidKernelForBatch(k));
@@ -1274,7 +1219,7 @@ fn nama_batch_inner(
         return Err(NamaError::EmptyInputData);
     }
     let rows = combos.len();
-    
+
     if rows == 0 {
         return Err(NamaError::InvalidRange {
             start: sweep.period.0,
@@ -1282,13 +1227,11 @@ fn nama_batch_inner(
             step: sweep.period.2,
         });
     }
-    let _total = rows
-        .checked_mul(cols)
-        .ok_or(NamaError::InvalidRange {
-            start: sweep.period.0,
-            end: sweep.period.1,
-            step: sweep.period.2,
-        })?;
+    let _total = rows.checked_mul(cols).ok_or(NamaError::InvalidRange {
+        start: sweep.period.0,
+        end: sweep.period.1,
+        step: sweep.period.2,
+    })?;
 
     let first = data
         .iter()
@@ -1313,17 +1256,14 @@ fn nama_batch_inner(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let mut tr = vec![0.0f64; cols];
     if cols > first {
-        
         tr[first] = 0.0;
         for j in (first + 1)..cols {
             tr[j] = (data[j] - data[j - 1]).abs();
         }
     }
 
-    
     #[cfg(not(target_arch = "wasm32"))]
     {
         use rayon::prelude::*;
@@ -1331,7 +1271,7 @@ fn nama_batch_inner(
             .zip(combos.par_iter())
             .try_for_each(|(row_slice, prm)| -> Result<(), NamaError> {
                 let period = prm.period.unwrap();
-                
+
                 nama_core_with_tr(data, period, first, &tr, row_slice);
                 Ok(())
             })?;
@@ -1358,7 +1298,6 @@ fn nama_batch_inner(
         cols,
     })
 }
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "nama")]
@@ -1402,11 +1341,11 @@ impl NamaStreamPy {
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(NamaStreamPy { stream: s })
     }
-    /// Single-series update
+
     fn update(&mut self, value: f64) -> Option<f64> {
         self.stream.update_source(value)
     }
-    /// OHLC update
+
     fn update_ohlc(
         &mut self,
         src: f64,
@@ -1489,7 +1428,11 @@ pub fn nama_cuda_batch_dev_py(
         Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32PyNama { inner, _ctx: ctx, _device_id: dev_id })
+    Ok(DeviceArrayF32PyNama {
+        inner,
+        _ctx: ctx,
+        _device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1525,14 +1468,16 @@ pub fn nama_cuda_many_series_one_param_dev_py(
         Ok::<_, PyErr>((out, cuda.context_arc(), cuda.device_id()))
     })?;
 
-    Ok(DeviceArrayF32PyNama { inner, _ctx: ctx, _device_id: dev_id })
+    Ok(DeviceArrayF32PyNama {
+        inner,
+        _ctx: ctx,
+        _device_id: dev_id,
+    })
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
-    
     if data.is_empty() {
         return Err(JsValue::from_str("Input data slice is empty"));
     }
@@ -1549,13 +1494,13 @@ pub fn nama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NamaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct NamaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1564,7 +1509,7 @@ pub struct NamaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = nama_batch)]
 pub fn nama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: NamaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1584,7 +1529,7 @@ pub fn nama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nama_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1593,7 +1538,7 @@ pub fn nama_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nama_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1601,7 +1546,7 @@ pub fn nama_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn nama_into(
     in_ptr: *const f64,
@@ -1635,7 +1580,7 @@ pub fn nama_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = nama_batch_into)]
 pub fn nama_batch_into(
     in_ptr: *const f64,
@@ -1666,7 +1611,6 @@ pub fn nama_batch_into(
         Ok(rows)
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1728,10 +1672,9 @@ mod tests {
         };
     }
 
-    
     fn check_nama_accuracy(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
-        
+
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
@@ -1739,16 +1682,12 @@ mod tests {
         let input = NamaInput::from_candles(&candles, "close", params);
         let result = nama_with_kernel(&input, kernel)?;
 
-        
-        
-        
-        
         let expected_last_five = [
-            59304.88975909, 
-            59283.51109653, 
-            59243.52850894, 
-            59228.86200178, 
-            59137.33546742, 
+            59304.88975909,
+            59283.51109653,
+            59243.52850894,
+            59228.86200178,
+            59137.33546742,
         ];
 
         let start = result.values.len().saturating_sub(5);
@@ -1767,27 +1706,23 @@ mod tests {
         Ok(())
     }
 
-    
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_nama_into_matches_api() {
-        
         let n = 256usize;
         let mut data = vec![0.0f64; n];
         for i in 0..n {
             let x = (i as f64 * 0.37).sin() * 10.0 + (i % 7) as f64 * 0.1;
             data[i] = x;
         }
-        
+
         data[0] = f64::NAN;
         data[1] = f64::NAN;
 
         let input = NamaInput::from_slice(&data, NamaParams::default());
 
-        
         let baseline = nama(&input).expect("baseline computation failed").values;
 
-        
         let mut out = vec![0.0f64; n];
         nama_into(&input, &mut out).expect("into computation failed");
 
@@ -1821,7 +1756,6 @@ mod tests {
         let output = nama_with_kernel(&input, kernel)?;
         assert_eq!(output.values.len(), candles.close.len());
 
-        
         let expected_last_five = [
             59304.88975909,
             59283.51109653,
@@ -1951,7 +1885,7 @@ mod tests {
         let params = NamaParams { period: Some(5) };
         let input = NamaInput::from_slice(&data, params);
         let result = nama_with_kernel(&input, kernel);
-        
+
         assert!(result.is_ok());
         Ok(())
     }
@@ -1963,12 +1897,10 @@ mod tests {
             112.0, 114.0, 113.0, 115.0,
         ];
 
-        
         let params = NamaParams { period: Some(5) };
         let input = NamaInput::from_slice(&data, params);
         let batch_result = nama_with_kernel(&input, kernel)?;
 
-        
         let mut stream = NamaStream::try_new(params)?;
         let mut stream_values = Vec::new();
 
@@ -1980,8 +1912,7 @@ mod tests {
             }
         }
 
-        
-        let warmup = 4; 
+        let warmup = 4;
         for i in warmup..data.len() {
             let batch_val = batch_result.values[i];
             let stream_val = stream_values[i];
@@ -2017,7 +1948,6 @@ mod tests {
         Ok(())
     }
 
-    
     fn check_batch_default_row(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0; 128];
@@ -2041,17 +1971,15 @@ mod tests {
             .period_range(10, 30, 5)
             .apply_candles(&c, "close")?;
 
-        assert_eq!(output.rows, 5); 
+        assert_eq!(output.rows, 5);
         assert_eq!(output.cols, c.close.len());
 
-        
         for (i, combo) in output.combos.iter().enumerate() {
             let period = combo.period.unwrap();
             let row_start = i * output.cols;
             let row = &output.values[row_start..row_start + output.cols];
 
-            
-            let warmup = period - 1; 
+            let warmup = period - 1;
             for j in 0..warmup {
                 assert!(
                     row[j].is_nan(),
@@ -2121,7 +2049,6 @@ mod tests {
         };
     }
 
-    
     generate_all_nama_tests!(
         check_nama_accuracy,
         check_nama_default_candles,
@@ -2150,7 +2077,7 @@ mod tests {
         use crate::utilities::data_loader::read_candles_from_csv;
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
-        
+
         let out = nama_with_kernel(&NamaInput::with_default_candles(&c), Kernel::Scalar)?.values;
         for (i, &v) in out.iter().enumerate() {
             if v.is_nan() {
@@ -2161,7 +2088,7 @@ mod tests {
             assert_ne!(b, 0x22222222_22222222, "matrix poison at {i}");
             assert_ne!(b, 0x33333333_33333333, "uninit poison at {i}");
         }
-        
+
         let b = NamaBatchBuilder::new()
             .period_range(5, 10, 1)
             .apply_candles(&c, "close")?;

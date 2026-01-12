@@ -1,8 +1,6 @@
-
-
+use std::collections::BTreeMap;
 use vector_ta::indicators::rsi::{rsi, RsiInput, RsiParams};
 use vector_ta::indicators::srsi::{SrsiBatchRange, SrsiParams};
-use std::collections::BTreeMap;
 
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
@@ -20,7 +18,6 @@ fn approx_eq_f32(a: f32, b: f32, tol: f32) -> bool {
 
 #[inline(always)]
 fn ftz_f32(x: f32) -> f32 {
-    
     if x.abs() < f32::MIN_POSITIVE {
         0.0f32
     } else {
@@ -77,7 +74,7 @@ fn srsi_from_rsi_f32(
             lo = lo.min(v);
         }
         let denom = hi - lo;
-        
+
         let fk = if denom >= f32::MIN_POSITIVE {
             (rv - lo) * 100.0f32 / denom
         } else {
@@ -142,7 +139,6 @@ fn rsi_wilder_f32(prices: &[f32], first_valid: usize, period: usize) -> Vec<f32>
         return out;
     }
 
-    
     let mut avg_gain = 0.0f32;
     let mut avg_loss = 0.0f32;
     let mut prev = prices[first_valid];
@@ -168,7 +164,6 @@ fn rsi_wilder_f32(prices: &[f32], first_valid: usize, period: usize) -> Vec<f32>
         100.0f32 - 100.0f32 / (1.0f32 + avg_gain / avg_loss)
     };
 
-    
     let alpha = inv_p;
     let mut prev = prices[warm];
     for i in (warm + 1)..n {
@@ -235,22 +230,20 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     dev_pair.k.buf.copy_to(&mut gk)?;
     dev_pair.d.buf.copy_to(&mut gd)?;
 
-    
-    
     let mut rsi_cache: BTreeMap<usize, Vec<f32>> = BTreeMap::new();
     for prm in &combos {
         let rp = prm.rsi_period.unwrap();
         if rsi_cache.contains_key(&rp) {
             continue;
         }
-        let rsi_out = rsi(&RsiInput::from_slice(&price_f64, RsiParams { period: Some(rp) }))?;
+        let rsi_out = rsi(&RsiInput::from_slice(
+            &price_f64,
+            RsiParams { period: Some(rp) },
+        ))?;
         if rp == 4 {
             eprintln!(
                 "[srsi_cuda_batch][debug] rsi_f64 sample: idx12={} idx20={} idx1771={} idx6874={}",
-                rsi_out.values[12],
-                rsi_out.values[20],
-                rsi_out.values[1771],
-                rsi_out.values[6874]
+                rsi_out.values[12], rsi_out.values[20], rsi_out.values[1771], rsi_out.values[6874]
             );
         }
         let rsi_f32: Vec<f32> = rsi_out.values.iter().map(|&v| v as f32).collect();
@@ -301,10 +294,7 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
                     let j = base + (ti as usize);
                     eprintln!(
                         "[srsi_cuda_batch][debug] row={} t={} cpu_k={} gpu_k={}",
-                        row,
-                        ti,
-                        cpu_k[j],
-                        gk[j]
+                        row, ti, cpu_k[j], gk[j]
                     );
                 }
             }
@@ -323,20 +313,12 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 eprintln!(
                     "[srsi_cuda_batch][debug] rsi_window={:?} hi={} lo={} rv={}",
-                    win,
-                    hi,
-                    lo,
-                    rsi_vals[t]
+                    win, hi, lo, rsi_vals[t]
                 );
             }
             panic!(
                 "K mismatch at idx={} (row={}, t={}) params={:?} cpu={} gpu={}",
-                idx,
-                row,
-                t,
-                combos[row],
-                cpu_k[idx],
-                gk[idx]
+                idx, row, t, combos[row], cpu_k[idx], gk[idx]
             );
         }
         if !approx_eq_f32(cpu_d[idx], gd[idx], tol) {
@@ -344,12 +326,7 @@ fn srsi_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
             let t = idx % len;
             panic!(
                 "D mismatch at idx={} (row={}, t={}) params={:?} cpu={} gpu={}",
-                idx,
-                row,
-                t,
-                combos[row],
-                cpu_d[idx],
-                gd[idx]
+                idx, row, t, combos[row], cpu_d[idx], gd[idx]
             );
         }
     }
@@ -378,7 +355,6 @@ fn srsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let kp = 3usize;
     let dp = 3usize;
 
-    
     let prices_tm_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let mut cpu_k = vec![f32::NAN; cols * rows];
     let mut cpu_d = vec![f32::NAN; cols * rows];
@@ -412,10 +388,14 @@ fn srsi_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         )
         .expect("srsi many-series");
 
-    assert_eq!(dev_pair.k.rows, rows); assert_eq!(dev_pair.k.cols, cols);
-    assert_eq!(dev_pair.d.rows, rows); assert_eq!(dev_pair.d.cols, cols);
-    let mut gk = vec![0f32; dev_pair.k.len()]; let mut gd = vec![0f32; dev_pair.d.len()];
-    dev_pair.k.buf.copy_to(&mut gk)?; dev_pair.d.buf.copy_to(&mut gd)?;
+    assert_eq!(dev_pair.k.rows, rows);
+    assert_eq!(dev_pair.k.cols, cols);
+    assert_eq!(dev_pair.d.rows, rows);
+    assert_eq!(dev_pair.d.cols, cols);
+    let mut gk = vec![0f32; dev_pair.k.len()];
+    let mut gd = vec![0f32; dev_pair.d.len()];
+    dev_pair.k.buf.copy_to(&mut gk)?;
+    dev_pair.d.buf.copy_to(&mut gd)?;
     let tol = 1e-2f32;
     let mut max_k = 0.0f32;
     let mut max_d = 0.0f32;

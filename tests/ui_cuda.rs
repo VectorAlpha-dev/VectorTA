@@ -91,7 +91,6 @@ fn ui_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     let period = 14usize;
     let scalar = 100.0f64;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];

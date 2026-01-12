@@ -1,12 +1,3 @@
-//! CUDA wrapper for TTM Squeeze (momentum + squeeze state).
-//!
-//! Parity with ALMA-style wrappers:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/ttm_squeeze_kernel.ptx"))
-//! - NON_BLOCKING stream
-//! - Simple policy enums (Auto/OneD) and last-selected introspection
-//! - VRAM check with ~64MB headroom and sensible grid sizing
-//! - Batch (one-series × many-params) and Many-series × one-param (time-major)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
@@ -26,7 +17,11 @@ pub enum CudaTtmSqueezeError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -34,7 +29,14 @@ pub enum CudaTtmSqueezeError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -101,10 +103,8 @@ impl CudaTtmSqueeze {
         let device = Device::get_device(device_id as u32)?;
         let context = std::sync::Arc::new(Context::new(device)?);
 
-        
-        let def = device
-            .get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
-        
+        let def = device.get_attribute(DeviceAttribute::MaxSharedMemoryPerBlock)? as usize;
+
         let smem_limit_optin = def;
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ttm_squeeze_kernel.ptx"));
@@ -131,23 +131,36 @@ impl CudaTtmSqueeze {
         })
     }
 
-    const SHMEM_ELEM_BYTES: usize =
-        2 * std::mem::size_of::<i32>() +
-        2 * std::mem::size_of::<f32>() +
-        2 * std::mem::size_of::<u8>();
+    const SHMEM_ELEM_BYTES: usize = 2 * std::mem::size_of::<i32>()
+        + 2 * std::mem::size_of::<f32>()
+        + 2 * std::mem::size_of::<u8>();
 
     #[inline(always)]
-    fn smem_bytes_for_len(len: usize) -> usize { len.saturating_mul(Self::SHMEM_ELEM_BYTES) }
+    fn smem_bytes_for_len(len: usize) -> usize {
+        len.saturating_mul(Self::SHMEM_ELEM_BYTES)
+    }
 
-    pub fn set_policy(&mut self, policy: CudaTtmSqueezePolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaTtmSqueezePolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaTtmSqueezePolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaTtmSqueezePolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
     pub fn synchronize(&self) -> Result<(), CudaTtmSqueezeError> {
         self.stream.synchronize().map_err(CudaTtmSqueezeError::from)
     }
-    pub fn context_arc(&self) -> std::sync::Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> std::sync::Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn mem_check_enabled() -> bool {
@@ -315,17 +328,28 @@ impl CudaTtmSqueeze {
 
     fn launch_batch_kernel(
         &self,
-        d_high: &DeviceBuffer<f32>, d_low: &DeviceBuffer<f32>, d_close: &DeviceBuffer<f32>,
-        d_len: &DeviceBuffer<i32>, d_bb: &DeviceBuffer<f32>, d_kh: &DeviceBuffer<f32>, d_km: &DeviceBuffer<f32>, d_kl: &DeviceBuffer<f32>,
-        len: usize, n_combos: usize, first_valid: usize,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_len: &DeviceBuffer<i32>,
+        d_bb: &DeviceBuffer<f32>,
+        d_kh: &DeviceBuffer<f32>,
+        d_km: &DeviceBuffer<f32>,
+        d_kl: &DeviceBuffer<f32>,
+        len: usize,
+        n_combos: usize,
+        first_valid: usize,
         l_max: usize,
-        d_mo: &mut DeviceBuffer<f32>, d_sq: &mut DeviceBuffer<f32>,
+        d_mo: &mut DeviceBuffer<f32>,
+        d_sq: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTtmSqueezeError> {
-        let mut func: Function = self
-            .module
-            .get_function("ttm_squeeze_batch_f32")
-            .map_err(|_| CudaTtmSqueezeError::MissingKernelSymbol { name: "ttm_squeeze_batch_f32" })?;
-        
+        let mut func: Function =
+            self.module
+                .get_function("ttm_squeeze_batch_f32")
+                .map_err(|_| CudaTtmSqueezeError::MissingKernelSymbol {
+                    name: "ttm_squeeze_batch_f32",
+                })?;
+
         let smem_bytes = Self::smem_bytes_for_len(l_max);
         if smem_bytes > self.smem_limit_optin {
             let max_L = self.smem_limit_optin / Self::SHMEM_ELEM_BYTES;
@@ -335,7 +359,10 @@ impl CudaTtmSqueeze {
             )));
         }
         let _ = func.set_cache_config(CacheConfig::PreferShared);
-        let block_x = match self.policy.batch { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::OneD { block_x } => block_x.max(32) };
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -389,33 +416,41 @@ impl CudaTtmSqueeze {
         let (combos, first_valid, len) =
             Self::prepare_batch_inputs(high_f32, low_f32, close_f32, sweep)?;
 
-        
         let elem = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(3)
             .and_then(|v| v.checked_mul(elem))
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in input bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in input bytes".into())
+            })?;
         let per_combo_bytes = std::mem::size_of::<i32>() + 4 * elem;
-        let params_bytes = combos
-            .len()
-            .checked_mul(per_combo_bytes)
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in params bytes".into()))?;
+        let params_bytes = combos.len().checked_mul(per_combo_bytes).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in params bytes".into())
+        })?;
         let out_elems = combos
             .len()
             .checked_mul(len)
             .and_then(|v| v.checked_mul(2))
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in output elements".into()))?;
-        let out_bytes = out_elems
-            .checked_mul(elem)
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in output bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in output elements".into())
+            })?;
+        let out_bytes = out_elems.checked_mul(elem).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in output bytes".into())
+        })?;
         let required = in_bytes
             .checked_add(params_bytes)
             .and_then(|v| v.checked_add(out_bytes))
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in total bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in total bytes".into())
+            })?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaTtmSqueezeError::OutOfMemory { required, free, headroom });
+                return Err(CudaTtmSqueezeError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
                 return Err(CudaTtmSqueezeError::InvalidInput(
                     "insufficient device memory".into(),
@@ -423,7 +458,6 @@ impl CudaTtmSqueeze {
             }
         }
 
-        
         let mut d_h: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaTtmSqueezeError::from)?;
         let mut d_l: DeviceBuffer<f32> =
@@ -431,55 +465,72 @@ impl CudaTtmSqueeze {
         let mut d_c: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.map_err(CudaTtmSqueezeError::from)?;
         unsafe {
-            d_h.async_copy_from(high_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_l.async_copy_from(low_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_c.async_copy_from(close_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
+            d_h.async_copy_from(high_f32, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_l.async_copy_from(low_f32, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_c.async_copy_from(close_f32, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
         }
 
-        
         let v_len: Vec<i32> = combos.iter().map(|c| c.length).collect();
-        let v_bb:  Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
-        let v_kh:  Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
-        let v_km:  Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
-        let v_kl:  Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
-        
-        let mut d_len: DeviceBuffer<i32> =
-            unsafe { DeviceBuffer::uninitialized(v_len.len()) }.map_err(CudaTtmSqueezeError::from)?;
-        let mut d_bb: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(v_bb.len()) }.map_err(CudaTtmSqueezeError::from)?;
-        let mut d_kh: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(v_kh.len()) }.map_err(CudaTtmSqueezeError::from)?;
-        let mut d_km: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(v_km.len()) }.map_err(CudaTtmSqueezeError::from)?;
-        let mut d_kl: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(v_kl.len()) }.map_err(CudaTtmSqueezeError::from)?;
+        let v_bb: Vec<f32> = combos.iter().map(|c| c.bb_mult).collect();
+        let v_kh: Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
+        let v_km: Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
+        let v_kl: Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
+
+        let mut d_len: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(v_len.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_bb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_bb.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_kh: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_kh.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_km: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_km.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
+        let mut d_kl: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(v_kl.len()) }
+            .map_err(CudaTtmSqueezeError::from)?;
         unsafe {
-            d_len.async_copy_from(&v_len, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_bb.async_copy_from(&v_bb, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_kh.async_copy_from(&v_kh, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_km.async_copy_from(&v_km, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_kl.async_copy_from(&v_kl, &self.stream).map_err(CudaTtmSqueezeError::from)?;
+            d_len
+                .async_copy_from(&v_len, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_bb.async_copy_from(&v_bb, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_kh.async_copy_from(&v_kh, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_km.async_copy_from(&v_km, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_kl.async_copy_from(&v_kl, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
         }
 
-        
-        let elems = combos
-            .len()
-            .checked_mul(len)
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in output elems".into()))?;
+        let elems = combos.len().checked_mul(len).ok_or_else(|| {
+            CudaTtmSqueezeError::InvalidInput("size overflow in output elems".into())
+        })?;
         let mut d_mo: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
         let mut d_sq: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
 
         self.launch_batch_kernel(
-            &d_h, &d_l, &d_c,
-            &d_len, &d_bb, &d_kh, &d_km, &d_kl,
-            len, combos.len(), first_valid,
+            &d_h,
+            &d_l,
+            &d_c,
+            &d_len,
+            &d_bb,
+            &d_kh,
+            &d_km,
+            &d_kl,
+            len,
+            combos.len(),
+            first_valid,
             combos.iter().map(|c| c.length as usize).max().unwrap_or(0),
-            &mut d_mo, &mut d_sq,
+            &mut d_mo,
+            &mut d_sq,
         )?;
 
-        self.stream.synchronize().map_err(CudaTtmSqueezeError::from)?;
+        self.stream
+            .synchronize()
+            .map_err(CudaTtmSqueezeError::from)?;
 
         Ok((
             DeviceArrayF32 {
@@ -497,16 +548,28 @@ impl CudaTtmSqueeze {
 
     fn launch_many_series_kernel(
         &self,
-        d_h_tm: &DeviceBuffer<f32>, d_l_tm: &DeviceBuffer<f32>, d_c_tm: &DeviceBuffer<f32>,
-        
-        d_first: &DeviceBuffer<i32>, cols: usize, rows: usize, length: usize, bb_mult: f32, kh: f32, km: f32, kl: f32,
-        d_mo_tm: &mut DeviceBuffer<f32>, d_sq_tm: &mut DeviceBuffer<f32>,
+        d_h_tm: &DeviceBuffer<f32>,
+        d_l_tm: &DeviceBuffer<f32>,
+        d_c_tm: &DeviceBuffer<f32>,
+
+        d_first: &DeviceBuffer<i32>,
+        cols: usize,
+        rows: usize,
+        length: usize,
+        bb_mult: f32,
+        kh: f32,
+        km: f32,
+        kl: f32,
+        d_mo_tm: &mut DeviceBuffer<f32>,
+        d_sq_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaTtmSqueezeError> {
         let mut func: Function = self
             .module
             .get_function("ttm_squeeze_many_series_one_param_f32")
-            .map_err(|_| CudaTtmSqueezeError::MissingKernelSymbol { name: "ttm_squeeze_many_series_one_param_f32" })?;
-        
+            .map_err(|_| CudaTtmSqueezeError::MissingKernelSymbol {
+                name: "ttm_squeeze_many_series_one_param_f32",
+            })?;
+
         let smem_bytes = Self::smem_bytes_for_len(length);
         if smem_bytes > self.smem_limit_optin {
             let max_L = self.smem_limit_optin / Self::SHMEM_ELEM_BYTES;
@@ -516,8 +579,11 @@ impl CudaTtmSqueeze {
             )));
         }
         let _ = func.set_cache_config(CacheConfig::PreferShared);
-        let block_x = match self.policy.many_series { ManySeriesKernelPolicy::Auto => 1, ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1) };
-        
+        let block_x = match self.policy.many_series {
+            ManySeriesKernelPolicy::Auto => 1,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(1),
+        };
+
         let grid: GridSize = (1u32, cols as u32, 1u32).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
@@ -525,13 +591,13 @@ impl CudaTtmSqueeze {
             let mut p_l = d_l_tm.as_device_ptr().as_raw();
             let mut p_c = d_c_tm.as_device_ptr().as_raw();
             let mut p_fv = d_first.as_device_ptr().as_raw();
-            let mut nser = cols as i32; 
-            let mut slen = rows as i32; 
-            let mut l_i  = length as i32;
-            let mut bb   = bb_mult as f32;
-            let mut khf  = kh as f32;
-            let mut kmf  = km as f32;
-            let mut klf  = kl as f32;
+            let mut nser = cols as i32;
+            let mut slen = rows as i32;
+            let mut l_i = length as i32;
+            let mut bb = bb_mult as f32;
+            let mut khf = kh as f32;
+            let mut kmf = km as f32;
+            let mut klf = kl as f32;
             let mut p_mo = d_mo_tm.as_device_ptr().as_raw();
             let mut p_sq = d_sq_tm.as_device_ptr().as_raw();
             let mut args: [*mut c_void; 14] = [
@@ -591,7 +657,6 @@ impl CudaTtmSqueeze {
             ));
         }
 
-        
         let mut first_valids: Vec<i32> = vec![0; cols];
         for s in 0..cols {
             let mut fv = -1i32;
@@ -616,28 +681,39 @@ impl CudaTtmSqueeze {
             first_valids[s] = fv;
         }
 
-        
         let elems = expected_elems;
         let elem = std::mem::size_of::<f32>();
         let in_bytes = elems
             .checked_mul(3)
             .and_then(|v| v.checked_mul(elem))
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in input bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in input bytes".into())
+            })?;
         let out_bytes = elems
             .checked_mul(2)
             .and_then(|v| v.checked_mul(elem))
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in output bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in output bytes".into())
+            })?;
         let params_bytes = cols
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in params bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in params bytes".into())
+            })?;
         let required = in_bytes
             .checked_add(out_bytes)
             .and_then(|v| v.checked_add(params_bytes))
-            .ok_or_else(|| CudaTtmSqueezeError::InvalidInput("size overflow in total bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmSqueezeError::InvalidInput("size overflow in total bytes".into())
+            })?;
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
-                return Err(CudaTtmSqueezeError::OutOfMemory { required, free, headroom });
+                return Err(CudaTtmSqueezeError::OutOfMemory {
+                    required,
+                    free,
+                    headroom,
+                });
             } else {
                 return Err(CudaTtmSqueezeError::InvalidInput(
                     "insufficient device memory".into(),
@@ -645,7 +721,6 @@ impl CudaTtmSqueeze {
             }
         }
 
-        
         let mut d_h: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
         let mut d_l: DeviceBuffer<f32> =
@@ -653,9 +728,12 @@ impl CudaTtmSqueeze {
         let mut d_c: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaTtmSqueezeError::from)?;
         unsafe {
-            d_h.async_copy_from(high_tm_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_l.async_copy_from(low_tm_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
-            d_c.async_copy_from(close_tm_f32, &self.stream).map_err(CudaTtmSqueezeError::from)?;
+            d_h.async_copy_from(high_tm_f32, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_l.async_copy_from(low_tm_f32, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
+            d_c.async_copy_from(close_tm_f32, &self.stream)
+                .map_err(CudaTtmSqueezeError::from)?;
         }
         let mut d_fv: DeviceBuffer<i32> =
             unsafe { DeviceBuffer::uninitialized(cols) }.map_err(CudaTtmSqueezeError::from)?;
@@ -673,7 +751,9 @@ impl CudaTtmSqueeze {
             &d_h, &d_l, &d_c, &d_fv, cols, rows, length, bb_mult, kc_high, kc_mid, kc_low,
             &mut d_mo, &mut d_sq,
         )?;
-        self.stream.synchronize().map_err(CudaTtmSqueezeError::from)?;
+        self.stream
+            .synchronize()
+            .map_err(CudaTtmSqueezeError::from)?;
         Ok((
             DeviceArrayF32 {
                 buf: d_mo,
@@ -688,7 +768,6 @@ impl CudaTtmSqueeze {
         ))
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -771,11 +850,7 @@ pub mod benches {
         let v_kh: Vec<f32> = combos.iter().map(|c| c.kc_high).collect();
         let v_km: Vec<f32> = combos.iter().map(|c| c.kc_mid).collect();
         let v_kl: Vec<f32> = combos.iter().map(|c| c.kc_low).collect();
-        let max_len = combos
-            .iter()
-            .map(|c| c.length as usize)
-            .max()
-            .unwrap_or(0);
+        let max_len = combos.iter().map(|c| c.length as usize).max().unwrap_or(0);
 
         let d_h = unsafe { DeviceBuffer::from_slice_async(&h, &cuda.stream) }.expect("d_h H2D");
         let d_l = unsafe { DeviceBuffer::from_slice_async(&l, &cuda.stream) }.expect("d_l H2D");

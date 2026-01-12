@@ -158,7 +158,6 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
 }
 
 pub fn source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {
-    // Hot path: avoid allocating `source.to_lowercase()` on every call.
     if source.eq_ignore_ascii_case("open") {
         &candles.open
     } else if source.eq_ignore_ascii_case("high") {

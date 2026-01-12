@@ -1,29 +1,3 @@
-//! # Vortex Indicator (VI)
-//!
-//! Measures directional movement by calculating positive and negative vortex lines that identify
-//! the relationship between closing prices and true range over a rolling period.
-//!
-//! ## Parameters
-//! - **period**: Lookback window size for vortex calculation (default: 14)
-//!
-//! ## Inputs
-//! - High, low, and close price series (or candles)
-//! - All series must have the same length
-//!
-//! ## Returns
-//! - **plus**: VI+ (positive vortex) line as `Vec<f64>` (length matches input)
-//! - **minus**: VI- (negative vortex) line as `Vec<f64>` (length matches input)
-//!
-//! ## Developer Notes
-//! - SIMD: Implementations present but short-circuited to scalar. The VI hot loop is a sliding-window
-//!   recurrence with per-step dependencies; precomputing full temporaries for SIMD regresses overall
-//!   performance and allocation, so scalar remains the reference path.
-//! - CUDA: Enabled via `CudaVi` with host-precomputed TR/VP/VM prefix sums and VRAM-resident plus/minus
-//!   outputs. Kernels synchronize their NON_BLOCKING stream before returning, and Python reuses ALMA's
-//!   `DeviceArrayF32Py` for CAI v3 and DLPack v1.x (versioned + legacy) with primary-context guards.
-//! - Batch/streaming: Row-specific batch (CPU+CUDA) shares TR/VP/VM prefix sums across periods; the
-//!   streaming API uses O(1) ring buffers with the same warmup and NaN semantics as the scalar path.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -190,7 +164,11 @@ pub enum ViError {
     #[error("vi: output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("vi: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("vi: invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("vi: invalid input: {0}")]
@@ -287,7 +265,6 @@ pub fn vi_with_kernel(input: &ViInput, kernel: Kernel) -> Result<ViOutput, ViErr
     Ok(ViOutput { plus, minus })
 }
 
-
 pub fn vi_into_slice(
     dst_plus: &mut [f64],
     dst_minus: &mut [f64],
@@ -324,18 +301,14 @@ pub unsafe fn vi_scalar(
         return;
     }
 
-    
     let warm = first + period - 1;
 
-    
     let h = high.as_ptr();
     let l = low.as_ptr();
     let c = close.as_ptr();
     let p_out = plus.as_mut_ptr();
     let m_out = minus.as_mut_ptr();
 
-    
-    
     let mut tr_buf: Vec<f64> = Vec::with_capacity(period);
     let mut vp_buf: Vec<f64> = Vec::with_capacity(period);
     let mut vm_buf: Vec<f64> = Vec::with_capacity(period);
@@ -346,38 +319,30 @@ pub unsafe fn vi_scalar(
     let vpp = vp_buf.as_mut_ptr();
     let vmp = vm_buf.as_mut_ptr();
 
-    
     let mut prev_h = *h.add(first);
     let mut prev_l = *l.add(first);
     let mut prev_c = *c.add(first);
 
-    
     let mut sum_tr = prev_h - prev_l;
     let mut sum_vp = 0.0f64;
     let mut sum_vm = 0.0f64;
 
-    
     *trp.add(0) = sum_tr;
     *vpp.add(0) = 0.0;
     *vmp.add(0) = 0.0;
 
-    
     if period == 1 {
-        *p_out.add(warm) = 0.0; 
-        *m_out.add(warm) = 0.0; 
+        *p_out.add(warm) = 0.0;
+        *m_out.add(warm) = 0.0;
     }
 
-    
     let mut r = if period == 1 { 0 } else { 1 };
 
-    
     let mut i = first + 1;
     while i < n {
         let hi = *h.add(i);
         let lo = *l.add(i);
 
-        
-        
         let hl = hi - lo;
         let hc = (hi - prev_c).abs();
         let lc = (lo - prev_c).abs();
@@ -385,12 +350,11 @@ pub unsafe fn vi_scalar(
         if lc > tr_new {
             tr_new = lc;
         }
-        
+
         let vp_new = (hi - prev_l).abs();
         let vm_new = (lo - prev_h).abs();
 
         if i <= warm {
-            
             sum_tr += tr_new;
             sum_vp += vp_new;
             sum_vm += vm_new;
@@ -400,12 +364,10 @@ pub unsafe fn vi_scalar(
             *vmp.add(r) = vm_new;
 
             if i == warm {
-                
                 *p_out.add(i) = sum_vp / sum_tr;
                 *m_out.add(i) = sum_vm / sum_tr;
             }
         } else {
-            
             let tr_old = *trp.add(r);
             let vp_old = *vpp.add(r);
             let vm_old = *vmp.add(r);
@@ -422,12 +384,10 @@ pub unsafe fn vi_scalar(
             *m_out.add(i) = sum_vm / sum_tr;
         }
 
-        
         prev_h = hi;
         prev_l = lo;
         prev_c = *c.add(i);
 
-        
         r += 1;
         if r == period {
             r = 0;
@@ -531,7 +491,7 @@ impl ViStream {
             sum_vm: 0.0,
         })
     }
-    
+
     pub fn update(
         &mut self,
         high: f64,
@@ -541,23 +501,18 @@ impl ViStream {
         prev_high: f64,
         prev_close: f64,
     ) -> Option<(f64, f64)> {
-        
         let _ = close;
 
-        
         let i = self.idx;
 
-        
         let hl = high - low;
         let hc = (high - prev_close).abs();
         let lc = (low - prev_close).abs();
         let tr_new = hl.max(hc.max(lc));
 
-        
-        let vp_new = (high - prev_low).abs(); 
-        let vm_new = (low - prev_high).abs(); 
+        let vp_new = (high - prev_low).abs();
+        let vm_new = (low - prev_high).abs();
 
-        
         let tr_old = self.tr[i];
         let vp_old = self.vp[i];
         let vm_old = self.vm[i];
@@ -566,19 +521,16 @@ impl ViStream {
         self.sum_vp += vp_new - vp_old;
         self.sum_vm += vm_new - vm_old;
 
-        
         self.tr[i] = tr_new;
         self.vp[i] = vp_new;
         self.vm[i] = vm_new;
 
-        
         self.idx += 1;
         if self.idx == self.period {
             self.idx = 0;
             self.filled = true;
         }
 
-        
         if self.filled {
             let inv_tr = 1.0 / self.sum_tr;
             let vi_p = self.sum_vp * inv_tr;
@@ -724,7 +676,6 @@ pub fn vi_batch_with_kernel(
     k: Kernel,
 ) -> Result<ViBatchOutput, ViError> {
     let kernel = match k {
-        
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx2Batch,
             other => other,
@@ -794,34 +745,31 @@ fn vi_batch_inner(
     let rows = combos.len();
     let cols = high.len();
     rows.checked_mul(cols)
-        .ok_or_else(|| {
-            ViError::InvalidRange {
-                start: sweep.period.0,
-                end: sweep.period.1,
-                step: sweep.period.2,
-            }
+        .ok_or_else(|| ViError::InvalidRange {
+            start: sweep.period.0,
+            end: sweep.period.1,
+            step: sweep.period.2,
         })?;
 
-    
     let mut plus_mu = make_uninit_matrix(rows, cols);
     let mut minus_mu = make_uninit_matrix(rows, cols);
 
-    
     let mut warm: Vec<usize> = Vec::with_capacity(combos.len());
     for c in &combos {
         let p = c.period.unwrap();
         let warm_i = first
             .checked_add(p)
             .and_then(|v| v.checked_sub(1))
-            .ok_or_else(|| ViError::InvalidPeriod { period: p, data_len: high.len() })?;
+            .ok_or_else(|| ViError::InvalidPeriod {
+                period: p,
+                data_len: high.len(),
+            })?;
         warm.push(warm_i);
     }
 
-    
     init_matrix_prefixes(&mut plus_mu, cols, &warm);
     init_matrix_prefixes(&mut minus_mu, cols, &warm);
 
-    
     let mut plus_guard = core::mem::ManuallyDrop::new(plus_mu);
     let mut minus_guard = core::mem::ManuallyDrop::new(minus_mu);
     let plus: &mut [f64] = unsafe {
@@ -830,7 +778,7 @@ fn vi_batch_inner(
     let minus: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(minus_guard.as_mut_ptr() as *mut f64, minus_guard.len())
     };
-    
+
     let mut pfx_tr = vec![0.0f64; cols];
     let mut pfx_vp = vec![0.0f64; cols];
     let mut pfx_vm = vec![0.0f64; cols];
@@ -926,22 +874,21 @@ fn vi_batch_inner(
             do_row(row, p, m);
         }
     }
-    
+
     let plus_vec = unsafe {
         Vec::from_raw_parts(
             plus_guard.as_mut_ptr() as *mut f64,
             plus_guard.len(),
-            plus_guard.capacity(), 
+            plus_guard.capacity(),
         )
     };
     let minus_vec = unsafe {
         Vec::from_raw_parts(
             minus_guard.as_mut_ptr() as *mut f64,
             minus_guard.len(),
-            minus_guard.capacity(), 
+            minus_guard.capacity(),
         )
     };
-    
 
     Ok(ViBatchOutput {
         plus: plus_vec,
@@ -1021,7 +968,6 @@ unsafe fn vi_row_avx512_long(
     vi_scalar(high, low, close, period, first, plus, minus);
 }
 
-
 fn vi_batch_inner_into(
     high: &[f64],
     low: &[f64],
@@ -1054,7 +1000,6 @@ fn vi_batch_inner_into(
         return Err(ViError::OutputLengthMismatch { expected, got });
     }
 
-    
     if high.is_empty() || low.is_empty() || close.is_empty() {
         return Err(ViError::EmptyInputData);
     }
@@ -1069,7 +1014,6 @@ fn vi_batch_inner_into(
         });
     }
 
-    
     let cols = close.len();
     let mut pfx_tr = vec![0.0f64; cols];
     let mut pfx_vp = vec![0.0f64; cols];
@@ -1113,7 +1057,7 @@ fn vi_batch_inner_into(
     let do_row = |row: usize, p_row: &mut [f64], m_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
         let warm = first + period - 1;
-        
+
         for i in 0..warm.min(cols) {
             p_row[i] = f64::NAN;
             m_row[i] = f64::NAN;
@@ -1231,7 +1175,7 @@ unsafe fn vi_prefix_avx2(
     pfx_vp[first] = 0.0;
     pfx_vm[first] = 0.0;
     let mut i = first + 1;
-    
+
     let mut carry_tr = pfx_tr[i - 1];
     let mut carry_vp = pfx_vp[i - 1];
     let mut carry_vm = pfx_vm[i - 1];
@@ -1372,23 +1316,19 @@ unsafe fn vi_prefix_avx512(
     }
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ViJsResult {
     pub plus: Vec<f64>,
     pub minus: Vec<f64>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vi_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<JsValue, JsValue> {
     let mut plus = vec![0.0; high.len()];
@@ -1410,7 +1350,7 @@ pub fn vi_js(high: &[f64], low: &[f64], close: &[f64], period: usize) -> Result<
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vi_unified_js(
     high: &[f64],
@@ -1418,13 +1358,10 @@ pub fn vi_unified_js(
     close: &[f64],
     period: usize,
 ) -> Result<Vec<f64>, JsValue> {
-    
     let mut result = vec![0.0; high.len() * 2];
 
-    
     let (plus_slice, minus_slice) = result.split_at_mut(high.len());
 
-    
     vi_into_slice_wasm(
         plus_slice,
         minus_slice,
@@ -1439,16 +1376,16 @@ pub fn vi_unified_js(
     Ok(result)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vi_alloc(len: usize) -> *mut f64 {
-    let mut vec = Vec::<f64>::with_capacity(len * 2); 
+    let mut vec = Vec::<f64>::with_capacity(len * 2);
     let ptr = vec.as_mut_ptr();
     std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vi_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1456,7 +1393,7 @@ pub fn vi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vi_into(
     high_ptr: *const f64,
@@ -1481,7 +1418,6 @@ pub fn vi_into(
         let low = std::slice::from_raw_parts(low_ptr, len);
         let close = std::slice::from_raw_parts(close_ptr, len);
 
-        
         let plus_out = std::slice::from_raw_parts_mut(plus_ptr, len);
         let minus_out = std::slice::from_raw_parts_mut(minus_ptr, len);
 
@@ -1500,13 +1436,13 @@ pub fn vi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ViBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct ViBatchJsOutput {
     pub plus: Vec<f64>,
@@ -1516,7 +1452,7 @@ pub struct ViBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = vi_batch)]
 pub fn vi_batch_js(
     high: &[f64],
@@ -1527,14 +1463,12 @@ pub fn vi_batch_js(
     let config: ViBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
-    
     let sweep = ViBatchRange {
         period: config.period_range,
     };
     let output = vi_batch_with_kernel(high, low, close, &sweep, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let periods: Vec<usize> = output
         .combos
         .iter()
@@ -1553,7 +1487,7 @@ pub fn vi_batch_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn vi_batch_into(
     high_ptr: *const f64,
@@ -1584,7 +1518,6 @@ pub fn vi_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        
         let combos = expand_grid(&sweep);
         let rows = combos.len();
         let cols = len;
@@ -1595,7 +1528,6 @@ pub fn vi_batch_into(
         let plus_out = std::slice::from_raw_parts_mut(plus_ptr, total);
         let minus_out = std::slice::from_raw_parts_mut(minus_ptr, total);
 
-        
         let _ = vi_batch_inner_into(
             high,
             low,
@@ -1612,8 +1544,7 @@ pub fn vi_batch_into(
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub fn vi_into_slice_wasm(
     dst_plus: &mut [f64],
     dst_minus: &mut [f64],
@@ -1629,7 +1560,6 @@ pub fn vi_into_slice_wasm(
     let input = ViInput::from_slices(high, low, close, params);
     vi_into_slice(dst_plus, dst_minus, &input, kern)
 }
-
 
 #[cfg(feature = "python")]
 pub fn register_vi_module(m: &Bound<'_, pyo3::types::PyModule>) -> PyResult<()> {
@@ -1782,9 +1712,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            ViParams::default(), // period: 14
+            ViParams::default(),
             ViParams { period: Some(1) },
             ViParams { period: Some(2) },
             ViParams { period: Some(5) },
@@ -1801,15 +1730,13 @@ mod tests {
             let input = ViInput::from_candles(&candles, params.clone());
             let output = vi_with_kernel(&input, kernel)?;
 
-            // Check plus array for poison values
             for (i, &val) in output.plus.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in plus array \
@@ -1850,15 +1777,13 @@ mod tests {
                 }
             }
 
-            // Check minus array for poison values
             for (i, &val) in output.minus.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in minus array \
@@ -1905,7 +1830,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_vi_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1917,24 +1842,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Strategy to generate valid OHLC data with more variability
         let strat = (2usize..=100).prop_flat_map(|period| {
-            // First generate a length for all vectors
             (period + 50..400).prop_flat_map(move |len| {
                 (
-                    // Generate base prices and volatility factors with same length
                     prop::collection::vec(
                         (50.0f64..500.0f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     ),
-                    prop::collection::vec(
-                        (0.001f64..0.05f64), // Variable volatility from 0.1% to 5%
-                        len,
-                    ),
-                    prop::collection::vec(
-                        (0.0f64..1.0f64), // Variable close position within range
-                        len,
-                    ),
+                    prop::collection::vec((0.001f64..0.05f64), len),
+                    prop::collection::vec((0.0f64..1.0f64), len),
                     Just(period),
                 )
             })
@@ -1944,12 +1860,10 @@ mod tests {
             .run(
                 &strat,
                 |(base_prices, volatilities, close_positions, period)| {
-                    // Generate more realistic OHLC data with variability
                     let mut high = Vec::with_capacity(base_prices.len());
                     let mut low = Vec::with_capacity(base_prices.len());
                     let mut close = Vec::with_capacity(base_prices.len());
 
-                    // Ensure all vectors have the same length
                     assert_eq!(base_prices.len(), volatilities.len());
                     assert_eq!(base_prices.len(), close_positions.len());
 
@@ -1958,11 +1872,10 @@ mod tests {
                         let vol = volatilities[i];
                         let close_pos = close_positions[i];
 
-                        // Variable range based on volatility
                         let range = price * vol;
-                        let h = price + range * (0.3 + vol * 2.0); // High varies with volatility
-                        let l = price - range * (0.3 + vol * 2.0); // Low varies with volatility
-                        let c = l + (h - l) * close_pos; // Close at variable position
+                        let h = price + range * (0.3 + vol * 2.0);
+                        let l = price - range * (0.3 + vol * 2.0);
+                        let c = l + (h - l) * close_pos;
 
                         high.push(h);
                         low.push(l);
@@ -1974,7 +1887,6 @@ mod tests {
                     };
                     let input = ViInput::from_slices(&high, &low, &close, params.clone());
 
-                    // Get outputs from the kernel being tested and scalar reference
                     let ViOutput {
                         plus: out_plus,
                         minus: out_minus,
@@ -1984,7 +1896,6 @@ mod tests {
                         minus: ref_minus,
                     } = vi_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                    // Property 1: VI+ and VI- must be non-negative (they're ratios of absolute values)
                     for i in 0..out_plus.len() {
                         if !out_plus[i].is_nan() {
                             prop_assert!(
@@ -2006,7 +1917,6 @@ mod tests {
                         }
                     }
 
-                    
                     let first_valid = (0..high.len())
                         .find(|&i| !high[i].is_nan() && !low[i].is_nan() && !close[i].is_nan())
                         .unwrap_or(0);
@@ -2029,7 +1939,6 @@ mod tests {
                         );
                     }
 
-                    
                     for i in warmup_end..out_plus.len() {
                         let plus_bits = out_plus[i].to_bits();
                         let ref_plus_bits = ref_plus[i].to_bits();
@@ -2081,10 +1990,7 @@ mod tests {
                         }
                     }
 
-                    
                     if period == 1 {
-                        
-                        
                         if warmup_end < out_plus.len() {
                             prop_assert!(
                                 out_plus[warmup_end].is_finite(),
@@ -2101,21 +2007,16 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     if period <= 5 && warmup_end + 5 < high.len() && warmup_end >= period {
                         let idx = warmup_end;
 
-                        
                         let mut tr_sum = 0.0;
                         let mut vp_sum = 0.0;
                         let mut vm_sum = 0.0;
 
-                        
                         let first_idx = idx + 1 - period;
                         tr_sum += high[first_idx] - low[first_idx];
 
-                        
                         for j in (first_idx + 1)..=idx {
                             let tr = (high[j] - low[j])
                                 .max((high[j] - close[j - 1]).abs())
@@ -2151,7 +2052,6 @@ mod tests {
                         }
                     }
 
-                    
                     #[cfg(debug_assertions)]
                     {
                         for i in 0..out_plus.len() {
@@ -2244,17 +2144,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),     
-            (5, 25, 5),     
-            (20, 50, 10),   
-            (2, 5, 1),      
-            (14, 14, 0),    
-            (30, 60, 15),   
-            (50, 100, 25),  
-            (100, 200, 50), 
+            (2, 10, 2),
+            (5, 25, 5),
+            (20, 50, 10),
+            (2, 5, 1),
+            (14, 14, 0),
+            (30, 60, 15),
+            (50, 100, 25),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -2263,7 +2161,6 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c)?;
 
-            
             for (idx, &val) in output.plus.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2274,7 +2171,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2321,7 +2217,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.minus.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2332,7 +2227,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2385,7 +2279,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
     macro_rules! gen_batch_tests {
         ($fn_name:ident) => {
@@ -2411,15 +2305,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
-
-
-
-
-
-
-
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "vi")]
 #[pyo3(signature = (high, low, close, period, kernel=None))]
@@ -2435,7 +2320,6 @@ pub fn vi_py<'py>(
     let l = low.as_slice()?;
     let c = close.as_slice()?;
 
-    
     if h.len() != l.len() || h.len() != c.len() {
         return Err(PyValueError::new_err(format!(
             "Input data length mismatch: high={}, low={}, close={}",
@@ -2487,7 +2371,6 @@ pub fn vi_batch_py<'py>(
     };
     let kern = validate_kernel(kernel, true)?;
 
-    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = h.len();
@@ -2512,7 +2395,7 @@ pub fn vi_batch_py<'py>(
             .to_scalar_equivalent(),
             _ => Kernel::Scalar,
         };
-        
+
         vi_batch_inner_into(h, l, c, &sweep, simd, true, slice_plus, slice_minus)
     })
     .map_err(|e| PyValueError::new_err(e.to_string()))?;
@@ -2557,9 +2440,7 @@ impl ViStreamPy {
         })
     }
 
-    
     fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64)> {
-        
         match (self.prev_high, self.prev_low, self.prev_close) {
             (Some(ph), Some(pl), Some(pc)) => {
                 let result = self.stream.update(high, low, close, pl, ph, pc);
@@ -2569,7 +2450,6 @@ impl ViStreamPy {
                 result
             }
             _ => {
-                
                 self.prev_high = Some(high);
                 self.prev_low = Some(low);
                 self.prev_close = Some(close);
@@ -2578,7 +2458,6 @@ impl ViStreamPy {
         }
     }
 }
-
 
 #[cfg(feature = "python")]
 trait BatchToScalar {
@@ -2596,7 +2475,6 @@ impl BatchToScalar for Kernel {
         }
     }
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;

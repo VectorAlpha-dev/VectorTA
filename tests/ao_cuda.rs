@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::ao::{
     ao_batch_with_kernel, ao_with_kernel, AoBatchRange, AoInput, AoParams,
 };
@@ -75,8 +73,8 @@ fn ao_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         return Ok(());
     }
 
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut hl2_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -88,7 +86,6 @@ fn ao_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
     let short = 5usize;
     let long = 34usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -106,7 +103,6 @@ fn ao_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error:
         }
     }
 
-    
     let hl2_tm_f32: Vec<f32> = hl2_tm.iter().map(|&v| v as f32).collect();
     let cuda = CudaAo::new(0).expect("CudaAo::new");
     let dev = cuda

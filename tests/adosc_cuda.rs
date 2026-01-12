@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::adosc::{
     adosc_batch_with_kernel, AdoscBatchRange, AdoscInput, AdoscParams,
 };
@@ -72,7 +70,7 @@ fn adosc_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut host = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut host)?;
 
-    let tol = 2e-3; 
+    let tol = 2e-3;
     for idx in 0..(cpu.rows * cpu.cols) {
         let c = cpu.values[idx];
         let g = host[idx] as f64;
@@ -117,7 +115,6 @@ fn adosc_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
     let short = 5usize;
     let long = 21usize;
 
-    
     let mut cpu_tm = vec![0.0f64; rows * cols];
     for s in 0..cols {
         let mut h = vec![0.0f64; rows];

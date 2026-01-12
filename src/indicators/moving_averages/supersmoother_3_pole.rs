@@ -1,35 +1,9 @@
-//! # 3-Pole SuperSmoother Filter
-//!
-//! Three-pole smoothing filter developed by John Ehlers. Provides strong noise suppression
-//! while remaining responsive to trend changes. The filter uses recursive calculations
-//! with coefficients derived from the period parameter.
-//!
-//! Decision: Streaming uses the same FMA evaluation order as the batch core for consistency;
-//! first three samples pass through unchanged. Outputs match batch (tests unchanged).
-//! CUDA wrapper present; Python VRAM handle returns implement CAI v3 + DLPack with a context guard.
-//!
-//! ## Parameters
-//! - **period**: Smoothing period (>= 1, defaults to 14)
-//!
-//! ## Returns
-//! - **Ok(SuperSmoother3PoleOutput)** on success, containing a Vec<f64> matching input length.
-//! - **Err(SuperSmoother3PoleError)** otherwise.
-//!
-//! ## Developer Notes
-//! - **AVX2 kernel**: ✅ Uses scalar core under `#[target_feature(enable = "avx2,fma")]`
-//! - **AVX512 kernel**: ✅ Uses scalar core under `#[target_feature(enable = "avx512f,fma")]`
-//! - **Streaming update**: ✅ O(1) complexity - efficient recursive calculation using only last 3 output values
-//! - **Memory optimization**: ✅ Uses zero-copy helpers (alloc_with_nan_prefix, make_uninit_matrix) for output vectors
-//! - **Note**: True wide-lane SIMD across time is limited by the IIR dependency chain.
-//!   AVX2/AVX512 variants rely on FMA and more aggressive scheduling; primary speedups come
-//!   from the optimized scalar core (loop-jammed, cached state, partial unroll, fewer bounds checks).
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaSupersmoother3Pole;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::supersmoother_3_pole_wrapper::DeviceArrayF32Py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaSupersmoother3Pole;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -45,8 +19,6 @@ use std::error::Error;
 use std::f64::consts::PI;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum SuperSmoother3PoleData<'a> {
@@ -116,8 +88,6 @@ impl<'a> SuperSmoother3PoleInput<'a> {
         self.params.period.unwrap_or(14)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct SuperSmoother3PoleBuilder {
@@ -192,12 +162,14 @@ pub enum SuperSmoother3PoleError {
     #[error("supersmoother_3_pole: Invalid kernel for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("supersmoother_3_pole: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("supersmoother_3_pole: Invalid input: {0}")]
     InvalidInput(String),
 }
-
-
 
 #[inline]
 pub fn supersmoother_3_pole(
@@ -223,7 +195,10 @@ pub fn supersmoother_3_pole_with_kernel(
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: len });
+        return Err(SuperSmoother3PoleError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
         return Err(SuperSmoother3PoleError::NotEnoughValidData {
@@ -236,7 +211,7 @@ pub fn supersmoother_3_pole_with_kernel(
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
-    
+
     let mut out = alloc_with_nan_prefix(len, first);
 
     unsafe {
@@ -259,17 +234,11 @@ pub fn supersmoother_3_pole_with_kernel(
     Ok(SuperSmoother3PoleOutput { values: out })
 }
 
-/// Writes SuperSmoother 3-Pole into the caller-provided buffer without allocations.
-///
-/// - Preserves NaN warmups exactly like `supersmoother_3_pole()`/`_with_kernel()`.
-/// - The output slice length must equal the input data length.
-/// - Uses `Kernel::Auto` dispatch for compute.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn supersmoother_3_pole_into(
     input: &SuperSmoother3PoleInput,
     out: &mut [f64],
-    
 ) -> Result<(), SuperSmoother3PoleError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
@@ -278,7 +247,10 @@ pub fn supersmoother_3_pole_into(
     }
 
     if out.len() != len {
-        return Err(SuperSmoother3PoleError::OutputLengthMismatch { expected: len, got: out.len() });
+        return Err(SuperSmoother3PoleError::OutputLengthMismatch {
+            expected: len,
+            got: out.len(),
+        });
     }
 
     let first = data
@@ -288,7 +260,10 @@ pub fn supersmoother_3_pole_into(
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: len });
+        return Err(SuperSmoother3PoleError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
         return Err(SuperSmoother3PoleError::NotEnoughValidData {
@@ -297,22 +272,19 @@ pub fn supersmoother_3_pole_into(
         });
     }
 
-    
     for v in &mut out[..first] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    
     supersmoother_3_pole_into_slice(out, input, Kernel::Auto)
 }
-
 
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_compute_into(
     data: &[f64],
     period: usize,
     first: usize,
-    _warm_end: usize, 
+    _warm_end: usize,
     out: &mut [f64],
 ) {
     let n = data.len();
@@ -320,9 +292,6 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         return;
     }
 
-    
-    
-    
     let inv_p = 1.0 / (period as f64);
     let a = (-PI * inv_p).exp();
     let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
@@ -334,7 +303,6 @@ pub unsafe fn supersmoother_3_pole_compute_into(
     let coef_prev2 = -c - b * c;
     let coef_prev3 = c2;
 
-    
     *out.get_unchecked_mut(first) = *data.get_unchecked(first);
     if first + 1 < n {
         *out.get_unchecked_mut(first + 1) = *data.get_unchecked(first + 1);
@@ -343,47 +311,39 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         *out.get_unchecked_mut(first + 2) = *data.get_unchecked(first + 2);
     }
 
-    
     let mut i = first + 3;
     if i >= n {
         return;
     }
 
-    
     let mut y0 = *out.get_unchecked(first);
     let mut y1 = *out.get_unchecked(first + 1);
     let mut y2 = *out.get_unchecked(first + 2);
 
-    
     while i + 1 < n {
-        
         let di = *data.get_unchecked(i);
         let t0 = coef_prev1.mul_add(y2, coef_source * di);
         let t1 = coef_prev2.mul_add(y1, t0);
         let y3 = coef_prev3.mul_add(y0, t1);
         *out.get_unchecked_mut(i) = y3;
 
-        
         y0 = y1;
         y1 = y2;
         y2 = y3;
         i += 1;
 
-        
         let di1 = *data.get_unchecked(i);
         let t0b = coef_prev1.mul_add(y2, coef_source * di1);
         let t1b = coef_prev2.mul_add(y1, t0b);
         let y4 = coef_prev3.mul_add(y0, t1b);
         *out.get_unchecked_mut(i) = y4;
 
-        
         y0 = y1;
         y1 = y2;
         y2 = y4;
         i += 1;
     }
 
-    
     if i < n {
         let di = *data.get_unchecked(i);
         let t0 = coef_prev1.mul_add(y2, coef_source * di);
@@ -392,7 +352,6 @@ pub unsafe fn supersmoother_3_pole_compute_into(
         *out.get_unchecked_mut(i) = y3;
     }
 }
-
 
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_scalar(
@@ -425,7 +384,6 @@ pub unsafe fn supersmoother_3_pole_avx512(
 ) {
     supersmoother_3_pole_scalar(data, period, first, out)
 }
-
 
 #[inline(always)]
 pub unsafe fn supersmoother_3_pole_row_scalar(
@@ -496,18 +454,16 @@ pub unsafe fn supersmoother_3_pole_row_avx512_long(
     supersmoother_3_pole_row_scalar(data, first, period, stride, w_ptr, inv_n, out)
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct SuperSmoother3PoleStream {
     period: usize,
-    
+
     y0: f64,
     y1: f64,
     y2: f64,
-    
+
     filled: u8,
-    
+
     coef_source: f64,
     coef_prev1: f64,
     coef_prev2: f64,
@@ -519,10 +475,12 @@ impl SuperSmoother3PoleStream {
     pub fn try_new(params: SuperSmoother3PoleParams) -> Result<Self, SuperSmoother3PoleError> {
         let period = params.period.unwrap_or(14);
         if period == 0 {
-            return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: 0 });
+            return Err(SuperSmoother3PoleError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
 
-        
         let inv_p = 1.0 / (period as f64);
         let a = (-PI * inv_p).exp();
         let b = 2.0 * a * (1.738_f64 * PI * inv_p).cos();
@@ -535,7 +493,7 @@ impl SuperSmoother3PoleStream {
             y1: f64::NAN,
             y2: f64::NAN,
             filled: 0,
-            
+
             coef_source: 1.0 - c2 - b + b * c,
             coef_prev1: b + c,
             coef_prev2: -c - b * c,
@@ -543,13 +501,10 @@ impl SuperSmoother3PoleStream {
         })
     }
 
-    /// O(1) streaming update. First three values pass through unfiltered.
-    /// Uses identical FMA ordering to the batch scalar core to minimize tiny diffs.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> f64 {
         let f = self.filled;
         if f < 3 {
-            
             match f {
                 0 => self.y0 = value,
                 1 => self.y1 = value,
@@ -559,22 +514,16 @@ impl SuperSmoother3PoleStream {
             return value;
         }
 
-        
-        
-        
-        
         let t0 = self.coef_prev1.mul_add(self.y2, self.coef_source * value);
         let t1 = self.coef_prev2.mul_add(self.y1, t0);
         let y = self.coef_prev3.mul_add(self.y0, t1);
 
-        
         self.y0 = self.y1;
         self.y1 = self.y2;
         self.y2 = y;
         y
     }
 
-    /// Reset only the running state (keeps period/coefficients).
     #[inline(always)]
     pub fn reset_state(&mut self) {
         self.y0 = f64::NAN;
@@ -583,11 +532,13 @@ impl SuperSmoother3PoleStream {
         self.filled = 0;
     }
 
-    /// Reconfigure the period and coefficients. Resets warm-up state.
     #[inline]
     pub fn reconfigure(&mut self, period: usize) -> Result<(), SuperSmoother3PoleError> {
         if period == 0 {
-            return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: 0 });
+            return Err(SuperSmoother3PoleError::InvalidPeriod {
+                period,
+                data_len: 0,
+            });
         }
         self.period = period;
 
@@ -606,9 +557,6 @@ impl SuperSmoother3PoleStream {
         Ok(())
     }
 
-    /// Faster hot-loop path once you are past warm-up.
-    /// # Safety
-    /// Caller must ensure `self.filled >= 3` before calling.
     #[inline(always)]
     pub unsafe fn update_unchecked_warm(&mut self, value: f64) -> f64 {
         debug_assert!(self.filled >= 3);
@@ -623,8 +571,6 @@ impl SuperSmoother3PoleStream {
         y
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct SuperSmoother3PoleBatchRange {
@@ -737,21 +683,22 @@ impl SuperSmoother3PoleBatchOutput {
 #[inline(always)]
 fn expand_grid(r: &SuperSmoother3PoleBatchRange) -> Vec<SuperSmoother3PoleParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
-        
         if step == 0 || start == end {
             return vec![start];
         }
         if start < end {
             return (start..=end).step_by(step).collect();
         }
-        
+
         let mut v = Vec::new();
         let mut cur = start;
         while cur >= end {
             v.push(cur);
-            
+
             if let Some(next) = cur.checked_sub(step) {
-                if next == cur { break; }
+                if next == cur {
+                    break;
+                }
                 cur = next;
             } else {
                 break;
@@ -820,7 +767,7 @@ fn supersmoother_3_pole_batch_inner(
     }
     let rows = combos.len();
     let cols = data.len();
-    
+
     let total = rows
         .checked_mul(cols)
         .ok_or_else(|| SuperSmoother3PoleError::InvalidInput("rows * cols overflow".into()))?;
@@ -828,20 +775,16 @@ fn supersmoother_3_pole_batch_inner(
         .iter()
         .map(|c| {
             let p = c.period.unwrap();
-            first
-                .checked_add(p - 1)
-                .unwrap_or(first) 
+            first.checked_add(p - 1).unwrap_or(first)
         })
         .collect();
 
     let mut raw = make_uninit_matrix(rows, cols);
     unsafe { init_matrix_prefixes(&mut raw, cols, &warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -879,7 +822,6 @@ fn supersmoother_3_pole_batch_inner(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -900,7 +842,6 @@ fn supersmoother_3_pole_batch_inner(
         }
     }
 
-    
     let values: Vec<f64> = unsafe { std::mem::transmute(raw) };
     Ok(SuperSmoother3PoleBatchOutput {
         values,
@@ -921,7 +862,6 @@ pub fn supersmoother_3_pole_batch_inner_into(
     parallel: bool,
     output: &mut [f64],
 ) {
-    
     let mut raw = unsafe {
         std::slice::from_raw_parts_mut(
             output.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -930,11 +870,9 @@ pub fn supersmoother_3_pole_batch_inner_into(
     };
     unsafe { init_matrix_prefixes(&mut raw, cols, warm) };
 
-    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -972,7 +910,6 @@ pub fn supersmoother_3_pole_batch_inner_into(
         }
     };
 
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -991,8 +928,6 @@ pub fn supersmoother_3_pole_batch_inner_into(
             do_row(row, slice);
         }
     }
-
-    
 }
 
 #[cfg(test)]
@@ -1005,16 +940,15 @@ mod tests {
 
     #[test]
     fn test_supersmoother_3_pole_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let len = 256;
         let mut data = Vec::with_capacity(len);
-        
+
         data.push(f64::NAN);
         data.push(f64::NAN);
         data.push(f64::NAN);
         data.push(f64::NAN);
         data.push(f64::NAN);
-        
+
         for i in 5..len {
             let t = i as f64 * 0.037;
             data.push((t.sin() * 100.0) + (0.3 * t).cos() * 10.0 + (i % 7) as f64);
@@ -1022,10 +956,8 @@ mod tests {
 
         let input = SuperSmoother3PoleInput::from_slice(&data, SuperSmoother3PoleParams::default());
 
-        
         let base = supersmoother_3_pole(&input)?.values;
 
-        
         let mut out = vec![0.0; len];
         supersmoother_3_pole_into(&input, &mut out)?;
 
@@ -1232,7 +1164,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (1usize..=64).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1255,14 +1186,11 @@ mod tests {
                 let SuperSmoother3PoleOutput { values: ref_out } =
                     supersmoother_3_pole_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 let first = 0;
                 let warmup = first + period;
 
-                
                 prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-                
                 if data.len() > 0 {
                     prop_assert!(
                         (out[0] - data[0]).abs() < f64::EPSILON,
@@ -1288,9 +1216,6 @@ mod tests {
                     );
                 }
 
-                
-                
-                
                 for i in 3..data.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1300,8 +1225,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 for i in 3..data.len() {
                     prop_assert!(
                         out[i].is_finite(),
@@ -1311,8 +1234,6 @@ mod tests {
                     );
                 }
 
-                
-                
                 let stable_start = (period * 2).max(10).min(data.len() - 1);
                 if data.len() > stable_start + 10 {
                     let input_variation: f64 = data[stable_start..data.len() - 1]
@@ -1324,8 +1245,6 @@ mod tests {
                         .map(|w| (w[1] - w[0]).abs())
                         .sum::<f64>();
 
-                    
-                    
                     if input_variation > 1e-9 {
                         let variation_ratio = output_variation / input_variation;
                         prop_assert!(
@@ -1338,10 +1257,9 @@ mod tests {
                     }
                 }
 
-                
                 if data.windows(2).all(|w| (w[0] - w[1]).abs() < f64::EPSILON) {
                     let constant_val = data[0];
-                    
+
                     let stable_start = period.max(3);
                     for i in stable_start..out.len() {
                         prop_assert!(
@@ -1354,9 +1272,7 @@ mod tests {
                     }
                 }
 
-                
                 if period == 1 {
-                    
                     for i in 3..data.len() {
                         prop_assert!(
                             out[i].is_finite(),
@@ -1367,7 +1283,6 @@ mod tests {
                     }
                 }
 
-                
                 for i in 0..out.len() {
                     if out[i].is_finite() && ref_out[i].is_finite() {
                         let diff = (out[i] - ref_out[i]).abs();
@@ -1422,7 +1337,6 @@ mod tests {
         }
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_supersmoother_3_pole_no_poison(
         test_name: &str,
@@ -1433,7 +1347,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_periods = vec![5, 10, 14, 20, 30, 50, 100, 200];
 
         for period in test_periods {
@@ -1442,23 +1355,19 @@ mod tests {
             };
             let input = SuperSmoother3PoleInput::from_candles(&candles, "close", params);
 
-            
             if period > candles.close.len() {
                 continue;
             }
 
             let output = supersmoother_3_pole_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1466,7 +1375,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period {}",
@@ -1474,7 +1382,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period {}",
@@ -1487,7 +1394,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_supersmoother_3_pole_no_poison(
         _test_name: &str,
@@ -1560,7 +1466,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1568,17 +1473,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            (5, 15, 5),    
-            (10, 30, 10),  
-            (20, 100, 20), 
-            (7, 7, 1),     
-            (3, 50, 1),    
+            (5, 15, 5),
+            (10, 30, 10),
+            (20, 100, 20),
+            (7, 7, 1),
+            (3, 50, 1),
         ];
 
         for (start, end, step) in batch_configs {
-            
             if end > c.close.len() {
                 continue;
             }
@@ -1588,9 +1491,7 @@ mod tests {
                 .period_range(start, end, step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1604,7 +1505,6 @@ mod tests {
                     0
                 };
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1612,7 +1512,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1620,7 +1519,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with period {} in batch ({}, {}, {})",
@@ -1633,7 +1531,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1642,7 +1539,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 }
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1658,30 +1554,7 @@ use pyo3::types::PyDict;
 #[cfg(feature = "python")]
 #[pyfunction(name = "supersmoother_3_pole")]
 #[pyo3(signature = (data, period, kernel=None))]
-/// Compute the 3-Pole SuperSmoother filter of the input data.
-///
-/// The 3-Pole SuperSmoother is a smoothing filter developed by John Ehlers
-/// that provides strong noise suppression while remaining responsive to trend changes.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period : int
-///     The smoothing period (must be >= 1).
-/// kernel : str, optional
-///     Computation kernel to use: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// np.ndarray
-///     Array of SuperSmoother3Pole values, same length as input.
-///
-/// Raises:
-/// -------
-/// ValueError
-///     If inputs are invalid (period <= 0, period > data length, all NaN data).
+
 pub fn supersmoother_3_pole_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
@@ -1691,19 +1564,17 @@ pub fn supersmoother_3_pole_py<'py>(
     use numpy::{IntoPyArray, PyArrayMethods};
 
     let slice_in = data.as_slice()?;
-    let kern = validate_kernel(kernel, false)?; 
+    let kern = validate_kernel(kernel, false)?;
 
     let params = SuperSmoother3PoleParams {
         period: Some(period),
     };
     let input = SuperSmoother3PoleInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| supersmoother_3_pole_with_kernel(&input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1726,7 +1597,6 @@ impl SuperSmoother3PoleStreamPy {
         Ok(SuperSmoother3PoleStreamPy { stream })
     }
 
-    /// Updates the stream with a new value and returns the calculated SuperSmoother3Pole value.
     fn update(&mut self, value: f64) -> f64 {
         self.stream.update(value)
     }
@@ -1735,22 +1605,7 @@ impl SuperSmoother3PoleStreamPy {
 #[cfg(feature = "python")]
 #[pyfunction(name = "supersmoother_3_pole_batch")]
 #[pyo3(signature = (data, period_range, kernel=None))]
-/// Compute SuperSmoother3Pole for multiple period combinations in a single pass.
-///
-/// Parameters:
-/// -----------
-/// data : np.ndarray
-///     Input data array (float64).
-/// period_range : tuple
-///     (start, end, step) for period values to compute.
-/// kernel : str, optional
-///     Computation kernel: 'auto', 'scalar', 'avx2', 'avx512'.
-///     Default is 'auto' which auto-detects the best available.
-///
-/// Returns:
-/// --------
-/// dict
-///     Dictionary with 'values' (2D array) and 'periods' array.
+
 pub fn supersmoother_3_pole_batch_py<'py>(
     py: Python<'py>,
     data: PyReadonlyArray1<'py, f64>,
@@ -1767,7 +1622,6 @@ pub fn supersmoother_3_pole_batch_py<'py>(
         period: period_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(PyValueError::new_err("Invalid period range"));
@@ -1797,11 +1651,9 @@ pub fn supersmoother_3_pole_batch_py<'py>(
         .map(|c| first + c.period.unwrap() - 1)
         .collect();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     py.allow_threads(|| {
         let kernel = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
@@ -1818,11 +1670,9 @@ pub fn supersmoother_3_pole_batch_py<'py>(
         );
     });
 
-    
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
 
-    
     dict.set_item(
         "periods",
         combos
@@ -1853,9 +1703,8 @@ pub fn supersmoother_3_pole_cuda_batch_dev_py(
         period: period_range,
     };
 
-    
-    let cuda = CudaSupersmoother3Pole::new(device_id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let cuda =
+        CudaSupersmoother3Pole::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let stream = cuda.stream_handle();
     let dev_id = cuda.device_id();
     let ctx_guard = cuda.context_arc();
@@ -1863,7 +1712,9 @@ pub fn supersmoother_3_pole_cuda_batch_dev_py(
         .allow_threads(|| cuda.supersmoother_3_pole_batch_dev(slice_in, &sweep))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py::new_from_rust(inner, stream, ctx_guard, dev_id))
+    Ok(DeviceArrayF32Py::new_from_rust(
+        inner, stream, ctx_guard, dev_id,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1888,20 +1739,24 @@ pub fn supersmoother_3_pole_cuda_many_series_one_param_dev_py(
         period: Some(period),
     };
 
-    let cuda = CudaSupersmoother3Pole::new(device_id)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let cuda =
+        CudaSupersmoother3Pole::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let stream = cuda.stream_handle();
     let dev_id = cuda.device_id();
     let ctx_guard = cuda.context_arc();
     let inner = py
-        .allow_threads(|| cuda.supersmoother_3_pole_many_series_one_param_time_major_dev(flat_in, cols, rows, &params))
+        .allow_threads(|| {
+            cuda.supersmoother_3_pole_many_series_one_param_time_major_dev(
+                flat_in, cols, rows, &params,
+            )
+        })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    Ok(DeviceArrayF32Py::new_from_rust(inner, stream, ctx_guard, dev_id))
+    Ok(DeviceArrayF32Py::new_from_rust(
+        inner, stream, ctx_guard, dev_id,
+    ))
 }
 
-/// Computes SuperSmoother 3-Pole directly into a provided output slice, avoiding allocation.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn supersmoother_3_pole_into_slice(
     dst: &mut [f64],
@@ -1921,7 +1776,10 @@ pub fn supersmoother_3_pole_into_slice(
     let period = input.get_period();
 
     if period == 0 || period > len {
-        return Err(SuperSmoother3PoleError::InvalidPeriod { period, data_len: len });
+        return Err(SuperSmoother3PoleError::InvalidPeriod {
+            period,
+            data_len: len,
+        });
     }
     if (len - first) < period {
         return Err(SuperSmoother3PoleError::NotEnoughValidData {
@@ -1930,9 +1788,11 @@ pub fn supersmoother_3_pole_into_slice(
         });
     }
 
-    
     if dst.len() != data.len() {
-        return Err(SuperSmoother3PoleError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(SuperSmoother3PoleError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
     let chosen = match kern {
@@ -1940,7 +1800,6 @@ pub fn supersmoother_3_pole_into_slice(
         other => other,
     };
 
-    
     unsafe {
         match chosen {
             Kernel::Scalar | Kernel::ScalarBatch => {
@@ -1959,17 +1818,16 @@ pub fn supersmoother_3_pole_into_slice(
     Ok(())
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use js_sys::{Object, Reflect};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = SuperSmoother3PoleParams {
@@ -1977,23 +1835,21 @@ pub fn supersmoother_3_pole_js(data: &[f64], period: usize) -> Result<Vec<f64>, 
     };
     let input = SuperSmoother3PoleInput::from_slice(data, params);
 
-    
     let mut output = vec![0.0; data.len()];
 
-    
     supersmoother_3_pole_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SuperSmoother3PoleBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     use serde_wasm_bindgen::{from_value, to_value};
@@ -2003,7 +1859,6 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
         period: config.period_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     if combos.is_empty() {
         return Err(JsValue::from_str("Invalid period range"));
@@ -2027,7 +1882,6 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
     let cols = data.len();
     let mut output = vec![0.0; rows * cols];
 
-    
     let chosen = detect_best_batch_kernel();
     let simd = match chosen {
         Kernel::Avx512Batch => Kernel::Avx512,
@@ -2052,7 +1906,6 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
         &mut output,
     );
 
-    
     let result = Object::new();
     Reflect::set(&result, &JsValue::from_str("values"), &to_value(&output)?)?;
     Reflect::set(
@@ -2074,7 +1927,7 @@ pub fn supersmoother_3_pole_batch(data: &[f64], config: JsValue) -> Result<JsVal
     Ok(JsValue::from(result))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_batch_js(
     data: &[f64],
@@ -2086,13 +1939,12 @@ pub fn supersmoother_3_pole_batch_js(
         period: (period_start, period_end, period_step),
     };
 
-    
     supersmoother_3_pole_batch_inner(data, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_batch_metadata_js(
     period_start: usize,
@@ -2113,22 +1965,18 @@ pub fn supersmoother_3_pole_batch_metadata_js(
     Ok(metadata)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2136,7 +1984,7 @@ pub fn supersmoother_3_pole_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_into(
     in_ptr: *const f64,
@@ -2144,31 +1992,25 @@ pub fn supersmoother_3_pole_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
         let params = SuperSmoother3PoleParams {
             period: Some(period),
         };
         let input = SuperSmoother3PoleInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             supersmoother_3_pole_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             supersmoother_3_pole_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2178,9 +2020,7 @@ pub fn supersmoother_3_pole_into(
     }
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn supersmoother_3_pole_batch_into(
     in_ptr: *const f64,
@@ -2201,7 +2041,6 @@ pub fn supersmoother_3_pole_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        
         let combos = expand_grid(&sweep);
         if combos.is_empty() {
             return Err(JsValue::from_str("Invalid period range"));
@@ -2225,10 +2064,8 @@ pub fn supersmoother_3_pole_batch_into(
         let cols = data.len();
         let total_size = rows * cols;
 
-        
         let out = std::slice::from_raw_parts_mut(out_ptr, total_size);
 
-        
         let chosen = detect_best_batch_kernel();
         let simd = match chosen {
             Kernel::Avx512Batch => Kernel::Avx512,

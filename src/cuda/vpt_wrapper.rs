@@ -1,16 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for Volume Price Trend (VPT).
-//!
-//! Parity with ALMA wrapper policy:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/vpt_kernel.ptx")) with
-//!   DetermineTargetFromContext + OptLevel O2, falling back to simpler JIT options.
-//! - NON_BLOCKING stream.
-//! - VRAM estimation with ~64MB headroom; simple chunking not required as grids are small.
-//! - Public device entry points:
-//!   - `vpt_batch_dev(&[f32], &[f32]) -> DeviceArrayF32` (one series; single row)
-//!   - `vpt_many_series_one_param_time_major_dev(&[f32], &[f32], cols, rows) -> DeviceArrayF32`
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -29,13 +18,24 @@ pub enum CudaVptError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -66,7 +66,6 @@ impl CudaVpt {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        
         let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let block_x = 256u32;
 
@@ -80,7 +79,6 @@ impl CudaVpt {
         })
     }
 
-    /// Expose context/device for Python interop and tests.
     #[inline]
     pub fn context(&self) -> Arc<Context> {
         self.ctx.clone()
@@ -126,7 +124,6 @@ impl CudaVpt {
         Ok(())
     }
 
-    /// One series (single row). Writes warmup NaNs to match scalar semantics.
     pub fn vpt_batch_dev(
         &self,
         price: &[f32],
@@ -142,7 +139,6 @@ impl CudaVpt {
 
         let first = Self::first_valid_pair(price, volume)?;
 
-        
         let el = std::mem::size_of::<f32>();
         let bytes = len
             .checked_mul(3)
@@ -154,10 +150,11 @@ impl CudaVpt {
         let d_volume = DeviceBuffer::from_slice(volume)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(len) }?;
 
-        let func = self
-            .module
-            .get_function("vpt_batch_f32")
-            .map_err(|_| CudaVptError::MissingKernelSymbol { name: "vpt_batch_f32" })?;
+        let func = self.module.get_function("vpt_batch_f32").map_err(|_| {
+            CudaVptError::MissingKernelSymbol {
+                name: "vpt_batch_f32",
+            }
+        })?;
         let stream = &self.stream;
         unsafe {
             launch!(func<<<(1, 1, 1), (1, 1, 1), 0, stream>>>(
@@ -166,8 +163,7 @@ impl CudaVpt {
                 len as i32,
                 first as i32,
                 d_out.as_device_ptr()
-            ))
-            ?
+            ))?
         }
 
         self.stream.synchronize()?;
@@ -178,7 +174,6 @@ impl CudaVpt {
         })
     }
 
-    /// Many-series × one-param (no real params for VPT). Time-major layout.
     pub fn vpt_many_series_one_param_time_major_dev(
         &self,
         price_tm: &[f32],
@@ -198,7 +193,6 @@ impl CudaVpt {
             ));
         }
 
-        
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 1..rows {
@@ -210,10 +204,8 @@ impl CudaVpt {
                     break;
                 }
             }
-            
         }
 
-        
         let el_f32 = std::mem::size_of::<f32>();
         let el_i32 = std::mem::size_of::<i32>();
         let bytes_inputs_outputs = 3usize
@@ -236,8 +228,10 @@ impl CudaVpt {
         let func = self
             .module
             .get_function("vpt_many_series_one_param_f32")
-            .map_err(|_| CudaVptError::MissingKernelSymbol { name: "vpt_many_series_one_param_f32" })?;
-        
+            .map_err(|_| CudaVptError::MissingKernelSymbol {
+                name: "vpt_many_series_one_param_f32",
+            })?;
+
         let block_x = self.block_x;
         let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
         let max_blocks = self.sm_count.saturating_mul(16);
@@ -253,8 +247,7 @@ impl CudaVpt {
                 rows as i32,
                 d_first.as_device_ptr(),
                 d_out.as_device_ptr()
-            ))
-            ?
+            ))?
         }
 
         self.stream.synchronize()?;
@@ -265,7 +258,6 @@ impl CudaVpt {
         })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -279,7 +271,6 @@ pub mod benches {
     const MANY_SERIES_ROWS: usize = 8_192;
 
     fn bytes_one_series() -> usize {
-        
         (3 * ONE_SERIES_LEN * std::mem::size_of::<f32>()) + (64 << 20)
     }
     fn bytes_many_series() -> usize {
@@ -330,7 +321,7 @@ pub mod benches {
         let cuda = CudaVpt::new(0).expect("cuda vpt");
         let mut price = gen_series(ONE_SERIES_LEN);
         let mut volume = gen_series(ONE_SERIES_LEN);
-        
+
         if !price[1].is_finite() || price[0] == 0.0 || !volume[1].is_finite() {
             price[0] = 100.0;
             price[1] = 100.1;

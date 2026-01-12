@@ -1,28 +1,3 @@
-//! # Moving Average Bands (MAB)
-//!
-//! Calculates bands based on fast and slow moving averages with standard deviation
-//! of their difference over the fast window for dynamic band width.
-//!
-//! ## Parameters
-//! - **fast_period**: Fast MA window (default: 10)
-//! - **slow_period**: Slow MA window (default: 50)
-//! - **devup**: Upper band multiplier (default: 1.0)
-//! - **devdn**: Lower band multiplier (default: 1.0)
-//! - **fast_ma_type**: Fast MA type (default: "sma")
-//! - **slow_ma_type**: Slow MA type (default: "sma")
-//!
-//! ## Returns
-//! - **`Ok(MabOutput)`** on success (`upperband`, `middleband`, `lowerband` vectors)
-//! - **`Err(MabError)`** on failure
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 enabled via runtime selection; scalar remains reference path.
-//! - **Streaming**: O(1) performance; RMS of (fast−slow) anchored at slow MA.
-//!   Matches scalar/AVX semantics; middle = fast MA; bands = slow MA ± dev·RMS.
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-//! - Note: Row-specific batch fast-path uses shared dev vector when only devup/devdn vary.
-//! - **Decision log**: SIMD enabled; CUDA wrapper uses typed errors + VRAM/overflow checks; Python CUDA handles expose CAI v3 and DLPack v1.x with unchanged numerical outputs.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -32,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -82,7 +57,10 @@ pub struct MabOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct MabParams {
     pub fast_period: Option<usize>,
     pub slow_period: Option<usize>,
@@ -200,11 +178,7 @@ pub enum MabError {
         step: usize,
     },
     #[error("mab: Invalid range (f64) (start={start}, end={end}, step={step})")]
-    InvalidRangeF64 {
-        start: f64,
-        end: f64,
-        step: f64,
-    },
+    InvalidRangeF64 { start: f64, end: f64, step: f64 },
     #[error("mab: non-batch kernel passed to batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
@@ -263,7 +237,6 @@ fn mab_prepare2<'a>(
     input: &'a MabInput,
     kernel: Kernel,
 ) -> Result<(&'a [f64], Kernel, usize, usize, usize, f64, f64), MabError> {
-    // Single pass validate + warmup
     let data = input.as_ref();
     if data.is_empty() {
         return Err(MabError::EmptyInputData);
@@ -282,7 +255,7 @@ fn mab_prepare2<'a>(
         .position(|&x| !x.is_nan())
         .ok_or(MabError::AllValuesNaN)?;
     let need = fast.max(slow);
-    // MAB needs additional fast_period samples to compute standard deviation
+
     let need_total = need + fast - 1;
     if data.len() - first < need_total {
         return Err(MabError::NotEnoughValidData {
@@ -306,8 +279,6 @@ fn mab_prepare2<'a>(
     ))
 }
 
-/// Compute MAB directly into caller-owned slices. Zero allocations for outputs.
-/// Warmup prefix is set to NaN in-place.
 pub fn mab_into_slice(
     upper_dst: &mut [f64],
     middle_dst: &mut [f64],
@@ -331,13 +302,9 @@ pub fn mab_into_slice(
         });
     }
 
-    // Classic kernel available but currently not used by default.
-
-    // Fall back to general implementation for other MA type combinations
     let fast_ma_type = input.get_fast_ma_type();
     let slow_ma_type = input.get_slow_ma_type();
 
-    // Fast MA
     let fast_ma = match fast_ma_type {
         "ema" => {
             let params = EmaParams {
@@ -363,7 +330,6 @@ pub fn mab_into_slice(
         }
     };
 
-    // Slow MA
     let slow_ma = match slow_ma_type {
         "ema" => {
             let params = EmaParams {
@@ -389,8 +355,6 @@ pub fn mab_into_slice(
         }
     };
 
-    // Set warmup prefix BEFORE computation
-    // warmup is the last NaN index, so we need to set NaN up to and including it
     let warmup_end = (warmup + 1).min(n);
     for dst in [&mut *upper_dst, &mut *middle_dst, &mut *lower_dst] {
         for v in &mut dst[..warmup_end] {
@@ -398,8 +362,6 @@ pub fn mab_into_slice(
         }
     }
 
-    // Compute directly into provided slices
-    // Pass warmup+1 as the first output index
     mab_compute_into(
         &fast_ma,
         &slow_ma,
@@ -416,12 +378,7 @@ pub fn mab_into_slice(
     Ok(())
 }
 
-/// Write MAB outputs into caller-provided buffers without allocating.
-///
-/// - Preserves the indicator's NaN warmup prefix exactly.
-/// - All output slice lengths must equal the input length.
-/// - Uses `Kernel::Auto` runtime selection for the compute path.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn mab_into(
     input: &MabInput,
     upper_dst: &mut [f64],
@@ -438,7 +395,7 @@ pub fn mab(input: &MabInput) -> Result<MabOutput, MabError> {
 
 pub fn mab_with_kernel(input: &MabInput, kernel: Kernel) -> Result<MabOutput, MabError> {
     let data = input.as_ref();
-    let (_, _, _, warmup, _, _, _) = mab_prepare2(input, kernel)?; 
+    let (_, _, _, warmup, _, _, _) = mab_prepare2(input, kernel)?;
 
     let mut upperband = alloc_with_nan_prefix(data.len(), warmup);
     let mut middleband = alloc_with_nan_prefix(data.len(), warmup);
@@ -469,7 +426,6 @@ mod into_parity_tests {
 
     #[test]
     fn test_mab_into_matches_api() {
-        
         let n = 256usize;
         let mut data = vec![f64::NAN; n];
         for i in 5..n {
@@ -478,15 +434,13 @@ mod into_parity_tests {
 
         let input = MabInput::from_slice(&data, MabParams::default());
 
-        
         let base = mab(&input).expect("mab baseline should succeed");
 
-        
         let mut up = vec![0.0; n];
         let mut mid = vec![0.0; n];
         let mut lo = vec![0.0; n];
 
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             mab_into(&input, &mut up, &mut mid, &mut lo).expect("mab_into should succeed");
         }
@@ -499,9 +453,27 @@ mod into_parity_tests {
         assert_eq!(lo.len(), n);
 
         for i in 0..n {
-            assert!(eq_or_both_nan(base.upperband[i], up[i]), "upper mismatch at {}: base={:?} into={:?}", i, base.upperband[i], up[i]);
-            assert!(eq_or_both_nan(base.middleband[i], mid[i]), "middle mismatch at {}: base={:?} into={:?}", i, base.middleband[i], mid[i]);
-            assert!(eq_or_both_nan(base.lowerband[i], lo[i]), "lower mismatch at {}: base={:?} into={:?}", i, base.lowerband[i], lo[i]);
+            assert!(
+                eq_or_both_nan(base.upperband[i], up[i]),
+                "upper mismatch at {}: base={:?} into={:?}",
+                i,
+                base.upperband[i],
+                up[i]
+            );
+            assert!(
+                eq_or_both_nan(base.middleband[i], mid[i]),
+                "middle mismatch at {}: base={:?} into={:?}",
+                i,
+                base.middleband[i],
+                mid[i]
+            );
+            assert!(
+                eq_or_both_nan(base.lowerband[i], lo[i]),
+                "lower mismatch at {}: base={:?} into={:?}",
+                i,
+                base.lowerband[i],
+                lo[i]
+            );
         }
     }
 }
@@ -573,7 +545,6 @@ pub unsafe fn mab_scalar(
     mid: &mut [f64],
     lower: &mut [f64],
 ) {
-    
     let start_idx = if first_output >= fast_period {
         first_output - fast_period + 1
     } else {
@@ -586,7 +557,6 @@ pub unsafe fn mab_scalar(
         sum_sq += diff * diff;
     }
 
-    
     if first_output < fast_ma.len() {
         let dev = (sum_sq / fast_period as f64).sqrt();
         mid[first_output] = fast_ma[first_output];
@@ -594,7 +564,6 @@ pub unsafe fn mab_scalar(
         lower[first_output] = slow_ma[first_output] - devdn * dev;
     }
 
-    
     for i in (first_output + 1)..fast_ma.len() {
         let old_idx = i - fast_period;
         let old = fast_ma[old_idx] - slow_ma[old_idx];
@@ -632,7 +601,6 @@ pub unsafe fn mab_avx2(
     let start = first_output + 1 - fast_period;
     let m = n - start;
 
-    
     let mut diffsq: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, m);
     diffsq.set_len(m);
     let mut prefix: AVec<f64> = AVec::with_capacity(CACHELINE_ALIGN, m + 1);
@@ -642,7 +610,6 @@ pub unsafe fn mab_avx2(
     let s0 = slow_ma.as_ptr().add(start);
     let dptr = diffsq.as_mut_ptr();
 
-    
     let mut k = 0usize;
     while k + 4 <= m {
         let vf = _mm256_loadu_pd(f0.add(k));
@@ -658,7 +625,6 @@ pub unsafe fn mab_avx2(
         k += 1;
     }
 
-    
     let pptr = prefix.as_mut_ptr();
     *pptr = 0.0;
     let mut acc = 0.0f64;
@@ -676,7 +642,6 @@ pub unsafe fn mab_avx2(
 
     let mut i = first_output;
 
-    
     while i < n && (i & 3) != 0 {
         let base = i - start;
         let sum = *pptr.add(base + 1) - *pptr.add(base + 1 - fast_period);
@@ -826,7 +791,6 @@ pub unsafe fn mab_avx512(
     }
 }
 
-
 pub struct MabStream {
     fast_buffer: Vec<f64>,
     slow_buffer: Vec<f64>,
@@ -848,8 +812,7 @@ pub struct MabStream {
     ema_fast: f64,
     ema_slow: f64,
     kernel: Kernel,
-    
-    
+
     sumsq_diff: f64,
     diffs_filled: usize,
     inv_fast_len: f64,
@@ -878,7 +841,7 @@ impl MabStream {
         Ok(Self {
             fast_buffer: vec![0.0; fast_period],
             slow_buffer: vec![0.0; slow_period],
-            diffs_buffer: vec![0.0; fast_period], 
+            diffs_buffer: vec![0.0; fast_period],
             fast_index: 0,
             slow_index: 0,
             diff_index: 0,
@@ -896,7 +859,7 @@ impl MabStream {
             ema_fast: 0.0,
             ema_slow: 0.0,
             kernel: detect_best_kernel(),
-            
+
             sumsq_diff: 0.0,
             diffs_filled: 0,
             inv_fast_len: 1.0 / fast_period as f64,
@@ -914,13 +877,11 @@ impl MabStream {
 
         self.count += 1;
 
-        
         match self.fast_ma_type.as_str() {
             "ema" => {
                 if self.count == 1 {
                     self.ema_fast = value;
                 } else {
-                    
                     self.ema_fast = (1.0 - self.k_fast).mul_add(self.ema_fast, self.k_fast * value);
                 }
                 self.fast_ma = self.ema_fast;
@@ -951,7 +912,6 @@ impl MabStream {
             }
         }
 
-        
         match self.slow_ma_type.as_str() {
             "ema" => {
                 if self.count == 1 {
@@ -987,18 +947,16 @@ impl MabStream {
             }
         }
 
-        
         if self.count < self.max_period {
             return None;
         }
 
-        
         let diff = self.fast_ma - self.slow_ma;
         let diff2 = diff * diff;
 
         if self.diffs_filled < self.fast_period {
             self.sumsq_diff += diff2;
-            self.diffs_buffer[self.diff_index] = diff2; 
+            self.diffs_buffer[self.diff_index] = diff2;
             self.diff_index += 1;
             if self.diff_index == self.fast_period {
                 self.diff_index = 0;
@@ -1014,15 +972,12 @@ impl MabStream {
             }
         }
 
-        
         if self.count < self.ready_threshold || self.diffs_filled < self.fast_period {
             return None;
         }
 
-        
         let dev = (self.sumsq_diff * self.inv_fast_len).sqrt();
 
-        
         let upper = dev.mul_add(self.devup, self.slow_ma);
         let middle = self.fast_ma;
         let lower = (-self.devdn * dev).mul_add(1.0, self.slow_ma);
@@ -1030,7 +985,6 @@ impl MabStream {
         Some((upper, middle, lower))
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct MabBatchRange {
@@ -1113,7 +1067,11 @@ pub(crate) fn expand_grid(p: &MabBatchRange) -> Result<Vec<MabParams>, MabError>
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         let v: Vec<usize> = (lo..=hi).step_by(step).collect();
         if v.is_empty() {
             return Err(MabError::InvalidRange { start, end, step });
@@ -1127,7 +1085,11 @@ pub(crate) fn expand_grid(p: &MabBatchRange) -> Result<Vec<MabParams>, MabError>
         if step.abs() < EPS || (start - end).abs() < EPS {
             return Ok(vec![start]);
         }
-        let step_eff = if start <= end { step.abs() } else { -step.abs() };
+        let step_eff = if start <= end {
+            step.abs()
+        } else {
+            -step.abs()
+        };
         let mut v = Vec::new();
         let mut x = start;
         if step_eff > 0.0 {
@@ -1152,12 +1114,8 @@ pub(crate) fn expand_grid(p: &MabBatchRange) -> Result<Vec<MabParams>, MabError>
     let devups = axis_f64(p.devup)?;
     let devdns = axis_f64(p.devdn)?;
 
-    let mut combos = Vec::with_capacity(
-        fast_periods.len()
-            * slow_periods.len()
-            * devups.len()
-            * devdns.len(),
-    );
+    let mut combos =
+        Vec::with_capacity(fast_periods.len() * slow_periods.len() * devups.len() * devdns.len());
 
     for &fast in &fast_periods {
         for &slow in &slow_periods {
@@ -1208,15 +1166,12 @@ fn mab_batch_inner(
     if cols == 0 {
         return Err(MabError::EmptyInputData);
     }
-    rows
-        .checked_mul(cols)
-        .ok_or(MabError::InvalidRange {
-            start: sweep.fast_period.0,
-            end: sweep.fast_period.1,
-            step: sweep.fast_period.2,
-        })?;
+    rows.checked_mul(cols).ok_or(MabError::InvalidRange {
+        start: sweep.fast_period.0,
+        end: sweep.fast_period.1,
+        step: sweep.fast_period.2,
+    })?;
 
-    
     let first_valid = input
         .iter()
         .position(|x| !x.is_nan())
@@ -1245,7 +1200,6 @@ fn mab_batch_inner(
         })
         .collect::<Result<Vec<_>, MabError>>()?;
 
-    
     let mut upper_buf = make_uninit_matrix(rows, cols);
     let mut middle_buf = make_uninit_matrix(rows, cols);
     let mut lower_buf = make_uninit_matrix(rows, cols);
@@ -1254,7 +1208,6 @@ fn mab_batch_inner(
     init_matrix_prefixes(&mut middle_buf, cols, &warmup_prefixes);
     init_matrix_prefixes(&mut lower_buf, cols, &warmup_prefixes);
 
-    
     let upper_slice =
         unsafe { std::slice::from_raw_parts_mut(upper_buf.as_mut_ptr() as *mut f64, rows * cols) };
     let middle_slice =
@@ -1272,7 +1225,6 @@ fn mab_batch_inner(
         lower_slice,
     )?;
 
-    
     let mut upper_guard = core::mem::ManuallyDrop::new(upper_buf);
     let mut middle_guard = core::mem::ManuallyDrop::new(middle_buf);
     let mut lower_guard = core::mem::ManuallyDrop::new(lower_buf);
@@ -1321,18 +1273,13 @@ fn mab_batch_inner_into(
     let combos = expand_grid(sweep)?;
     let rows = combos.len();
     let cols = input.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(MabError::InvalidRange {
-            start: sweep.fast_period.0,
-            end: sweep.fast_period.1,
-            step: sweep.fast_period.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(MabError::InvalidRange {
+        start: sweep.fast_period.0,
+        end: sweep.fast_period.1,
+        step: sweep.fast_period.2,
+    })?;
 
-    if upper_out.len() != expected
-        || middle_out.len() != expected
-        || lower_out.len() != expected
-    {
+    if upper_out.len() != expected || middle_out.len() != expected || lower_out.len() != expected {
         return Err(MabError::OutputLengthMismatch {
             upper_len: upper_out.len(),
             middle_len: middle_out.len(),
@@ -1341,8 +1288,6 @@ fn mab_batch_inner_into(
         });
     }
 
-    
-    
     if !combos.is_empty() {
         let p0 = &combos[0];
         let all_same_ma = combos.iter().all(|p| {
@@ -1353,7 +1298,6 @@ fn mab_batch_inner_into(
         });
 
         if all_same_ma {
-            
             use crate::indicators::ema::{ema, EmaInput, EmaParams};
             use crate::indicators::sma::{sma, SmaInput, SmaParams};
 
@@ -1406,7 +1350,6 @@ fn mab_batch_inner_into(
                 }
             };
 
-            
             let need_total = fast.max(slow) + fast - 1;
             let warmup = first + need_total - 1;
             let first_output = warmup + 1;
@@ -1431,10 +1374,9 @@ fn mab_batch_inner_into(
                         sum_sq += diff * diff;
                         k += 1;
                     }
-                    
+
                     *d_ptr.add(first_output) = (sum_sq / fast as f64).sqrt();
 
-                    
                     let mut i = first_output + 1;
                     while i < n {
                         let old_idx = i - fast;
@@ -1496,8 +1438,6 @@ fn mab_batch_inner_into(
 
                 return Ok(combos);
             }
-
-            
         }
     }
 
@@ -1556,7 +1496,6 @@ fn mab_batch_inner_into(
     Ok(combos)
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "mab")]
 #[pyo3(signature = (data, fast_period=10, slow_period=50, devup=1.0, devdn=1.0, fast_ma_type="sma", slow_ma_type="sma", kernel=None))]
@@ -1595,7 +1534,6 @@ pub fn mab_py<'py>(
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok((
         result.upperband.into_pyarray(py),
         result.middleband.into_pyarray(py),
@@ -1684,7 +1622,6 @@ pub fn mab_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("mab_batch: rows*cols overflow"))?;
 
-    
     let upper_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let middle_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let lower_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
@@ -1695,8 +1632,6 @@ pub fn mab_batch_py<'py>(
 
     let kern = validate_kernel(kernel, true)?;
 
-    
-    
     let first_valid = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -1726,7 +1661,6 @@ pub fn mab_batch_py<'py>(
         .collect::<Result<Vec<_>, MabError>>()
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     let mu_upper: &mut [MaybeUninit<f64>] = unsafe {
         let ptr = upper_arr.as_array_mut().as_mut_ptr();
         std::slice::from_raw_parts_mut(ptr as *mut MaybeUninit<f64>, total)
@@ -1756,7 +1690,6 @@ pub fn mab_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            
             mab_batch_inner_into(
                 slice_in,
                 &sweep,
@@ -1774,7 +1707,6 @@ pub fn mab_batch_py<'py>(
     dict.set_item("middlebands", middle_arr.reshape((rows, cols))?)?;
     dict.set_item("lowerbands", lower_arr.reshape((rows, cols))?)?;
 
-    
     dict.set_item(
         "fast_periods",
         combos
@@ -1811,17 +1743,15 @@ pub fn mab_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MabJsSingle {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "mab")]
 pub fn mab_wasm(
     data: &[f64],
@@ -1846,7 +1776,6 @@ pub fn mab_wasm(
     let mut middle = vec![0.0; data.len()];
     let mut lower = vec![0.0; data.len()];
 
-    
     mab_into_slice(
         &mut upper,
         &mut middle,
@@ -1869,7 +1798,7 @@ pub fn mab_wasm(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mab_js(
     data: &[f64],
@@ -1894,7 +1823,6 @@ pub fn mab_js(
     let mut middle = vec![0.0; data.len()];
     let mut lower = vec![0.0; data.len()];
 
-    
     mab_into_slice(
         &mut upper,
         &mut middle,
@@ -1904,7 +1832,6 @@ pub fn mab_js(
     )
     .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let mut result = Vec::with_capacity(3 * data.len());
     result.extend_from_slice(&upper);
     result.extend_from_slice(&middle);
@@ -1913,7 +1840,7 @@ pub fn mab_js(
     Ok(result)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MabBatchConfig {
     pub fast_period_range: (usize, usize, usize),
@@ -1924,7 +1851,7 @@ pub struct MabBatchConfig {
     pub slow_ma_type: String,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct MabBatchJsOutput {
     pub upperbands: Vec<f64>,
@@ -1935,7 +1862,7 @@ pub struct MabBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = mab_batch)]
 pub fn mab_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: MabBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1974,7 +1901,7 @@ pub fn mab_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mab_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1983,7 +1910,7 @@ pub fn mab_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mab_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1993,7 +1920,7 @@ pub fn mab_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mab_into(
     in_ptr: *const f64,
@@ -2024,11 +1951,9 @@ pub fn mab_into(
         };
         let input = MabInput::from_slice(data, params);
 
-        
         let need_temp = in_ptr == upper_ptr || in_ptr == middle_ptr || in_ptr == lower_ptr;
 
         if need_temp {
-            
             let mut temp_upper = vec![0.0; len];
             let mut temp_middle = vec![0.0; len];
             let mut temp_lower = vec![0.0; len];
@@ -2061,7 +1986,7 @@ pub fn mab_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn mab_batch_into(
     in_ptr: *const f64,
@@ -2118,7 +2043,6 @@ pub fn mab_batch_into(
             .checked_mul(cols)
             .ok_or_else(|| JsValue::from_str("mab_batch_into: rows*cols overflow"))?;
 
-        
         let first_valid = data
             .iter()
             .position(|x| !x.is_nan())
@@ -2149,18 +2073,12 @@ pub fn mab_batch_into(
             .collect::<Result<Vec<_>, MabError>>()
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        let mu_upper: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
-            upper_ptr as *mut MaybeUninit<f64>,
-            total,
-        );
-        let mu_middle: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
-            middle_ptr as *mut MaybeUninit<f64>,
-            total,
-        );
-        let mu_lower: &mut [MaybeUninit<f64>] = std::slice::from_raw_parts_mut(
-            lower_ptr as *mut MaybeUninit<f64>,
-            total,
-        );
+        let mu_upper: &mut [MaybeUninit<f64>] =
+            std::slice::from_raw_parts_mut(upper_ptr as *mut MaybeUninit<f64>, total);
+        let mu_middle: &mut [MaybeUninit<f64>] =
+            std::slice::from_raw_parts_mut(middle_ptr as *mut MaybeUninit<f64>, total);
+        let mu_lower: &mut [MaybeUninit<f64>] =
+            std::slice::from_raw_parts_mut(lower_ptr as *mut MaybeUninit<f64>, total);
         init_matrix_prefixes(mu_upper, cols, &warmup_prefixes);
         init_matrix_prefixes(mu_middle, cols, &warmup_prefixes);
         init_matrix_prefixes(mu_lower, cols, &warmup_prefixes);
@@ -2184,7 +2102,6 @@ pub fn mab_batch_into(
     }
 }
 
-/// Optimized MAB calculation with inline dual SMA (default configuration)
 #[inline]
 pub unsafe fn mab_scalar_classic_sma(
     data: &[f64],
@@ -2199,10 +2116,6 @@ pub unsafe fn mab_scalar_classic_sma(
 ) -> Result<(), MabError> {
     let n = data.len();
 
-    
-    
-
-    
     let mut fast_ma = vec![f64::NAN; n];
     if fast_period > 0 && first_valid_idx + fast_period <= n {
         let mut sum = 0.0;
@@ -2217,7 +2130,6 @@ pub unsafe fn mab_scalar_classic_sma(
         }
     }
 
-    
     let mut slow_ma = vec![f64::NAN; n];
     if slow_period > 0 && first_valid_idx + slow_period <= n {
         let mut sum = 0.0;
@@ -2232,12 +2144,10 @@ pub unsafe fn mab_scalar_classic_sma(
         }
     }
 
-    
     let need_total = slow_period.max(fast_period) + fast_period - 1;
     let warmup = first_valid_idx + need_total - 1;
     let first_output = warmup + 1;
 
-    
     for i in 0..first_output.min(n) {
         upper[i] = f64::NAN;
         middle[i] = f64::NAN;
@@ -2248,8 +2158,6 @@ pub unsafe fn mab_scalar_classic_sma(
         return Ok(());
     }
 
-    
-    
     let start_idx = if first_output >= fast_period {
         first_output - fast_period + 1
     } else {
@@ -2264,7 +2172,6 @@ pub unsafe fn mab_scalar_classic_sma(
         }
     }
 
-    
     if first_output < fast_ma.len() {
         let dev = (sum_sq / fast_period as f64).sqrt();
         middle[first_output] = fast_ma[first_output];
@@ -2272,7 +2179,6 @@ pub unsafe fn mab_scalar_classic_sma(
         lower[first_output] = slow_ma[first_output] - devdn * dev;
     }
 
-    
     for i in (first_output + 1)..fast_ma.len() {
         let old_idx = i - fast_period;
         let old = fast_ma[old_idx] - slow_ma[old_idx];
@@ -2290,13 +2196,11 @@ pub unsafe fn mab_scalar_classic_sma(
     Ok(())
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, moving_averages::CudaMab};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(all(feature = "python", feature = "cuda"))]
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::{PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2436,11 +2340,8 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             MabParams::default(),
-            
             MabParams {
                 fast_period: Some(2),
                 slow_period: Some(3),
@@ -2449,7 +2350,6 @@ mod tests {
                 fast_ma_type: Some("sma".to_string()),
                 slow_ma_type: Some("sma".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(5),
                 slow_period: Some(10),
@@ -2458,7 +2358,6 @@ mod tests {
                 fast_ma_type: Some("sma".to_string()),
                 slow_ma_type: Some("sma".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(15),
                 slow_period: Some(30),
@@ -2467,7 +2366,6 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(50),
                 slow_period: Some(100),
@@ -2476,7 +2374,6 @@ mod tests {
                 fast_ma_type: Some("sma".to_string()),
                 slow_ma_type: Some("sma".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(10),
                 slow_period: Some(20),
@@ -2485,7 +2382,6 @@ mod tests {
                 fast_ma_type: Some("sma".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(8),
                 slow_period: Some(21),
@@ -2494,7 +2390,6 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("sma".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(12),
                 slow_period: Some(26),
@@ -2503,7 +2398,6 @@ mod tests {
                 fast_ma_type: Some("ema".to_string()),
                 slow_ma_type: Some("ema".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(9),
                 slow_period: Some(10),
@@ -2512,7 +2406,6 @@ mod tests {
                 fast_ma_type: Some("sma".to_string()),
                 slow_ma_type: Some("sma".to_string()),
             },
-            
             MabParams {
                 fast_period: Some(30),
                 slow_period: Some(200),
@@ -2527,7 +2420,6 @@ mod tests {
             let input = MabInput::from_candles(&candles, "close", params.clone());
             let output = mab_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.upperband.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2581,7 +2473,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.middleband.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2635,7 +2526,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.lowerband.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2705,26 +2595,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
             ((2, 10, 2), (10, 20, 5), (1.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
-            
             ((5, 15, 5), (20, 40, 10), (0.5, 2.0, 0.5), (0.5, 2.0, 0.5)),
-            
             (
                 (20, 40, 10),
                 (50, 100, 25),
                 (1.0, 3.0, 1.0),
                 (1.0, 3.0, 1.0),
             ),
-            
             ((2, 5, 1), (6, 10, 1), (1.0, 2.0, 0.5), (1.0, 2.0, 0.5)),
-            
             ((10, 10, 0), (20, 50, 10), (1.0, 1.0, 0.0), (1.0, 1.0, 0.0)),
-            
             ((5, 20, 5), (50, 50, 0), (2.0, 2.0, 0.0), (2.0, 2.0, 0.0)),
-            
             ((8, 12, 2), (26, 26, 0), (1.0, 3.0, 0.5), (0.5, 2.0, 0.5)),
         ];
 
@@ -2742,7 +2624,6 @@ mod tests {
 
             let output = mab_batch_inner(c.close.as_slice(), &sweep, kernel, false)?;
 
-            
             for (idx, &val) in output.upperbands.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2790,7 +2671,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.middlebands.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2838,7 +2718,6 @@ mod tests {
                 }
             }
 
-            
             for (idx, &val) in output.lowerbands.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -2904,23 +2783,21 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50).prop_flat_map(|slow_period| {
-            (2usize..=slow_period) 
-                .prop_flat_map(move |fast_period| {
-                    (
-                        prop::collection::vec(
-                            (1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
-                            slow_period..400,
-                        ),
-                        Just(fast_period),
-                        Just(slow_period),
-                        0.5f64..3.0f64,  
-                        0.5f64..3.0f64,  
-                        prop::bool::ANY, 
-                        prop::bool::ANY, 
-                    )
-                })
+            (2usize..=slow_period).prop_flat_map(move |fast_period| {
+                (
+                    prop::collection::vec(
+                        (1f64..1000f64).prop_filter("finite", |x| x.is_finite()),
+                        slow_period..400,
+                    ),
+                    Just(fast_period),
+                    Just(slow_period),
+                    0.5f64..3.0f64,
+                    0.5f64..3.0f64,
+                    prop::bool::ANY,
+                    prop::bool::ANY,
+                )
+            })
         });
 
         proptest::test_runner::TestRunner::default()
@@ -2935,15 +2812,15 @@ mod tests {
 				};
 				let input = MabInput::from_slice(&data, params.clone());
 
-				
+
 				let result = mab_with_kernel(&input, kernel).unwrap();
 
-				
+
 				let ref_params = params.clone();
 				let ref_input = MabInput::from_slice(&data, ref_params);
 				let ref_result = mab_with_kernel(&ref_input, Kernel::Scalar).unwrap();
 
-				
+
 				let first_valid_idx = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 				let warmup_period = first_valid_idx + fast_period.max(slow_period) - 1;
 
@@ -2955,7 +2832,7 @@ mod tests {
 					let ref_middle = ref_result.middleband[i];
 					let ref_lower = ref_result.lowerband[i];
 
-					
+
 					if upper.is_nan() {
 						prop_assert!(ref_upper.is_nan(),
 							"[{}] NaN mismatch in upperband at idx {}: kernel={:?} has NaN but scalar doesn't",
@@ -2972,7 +2849,7 @@ mod tests {
 							test_name, i, kernel);
 					}
 
-					
+
 					if upper.is_finite() && ref_upper.is_finite() {
 						let ulp_diff = upper.to_bits().abs_diff(ref_upper.to_bits());
 						prop_assert!(
@@ -2999,7 +2876,7 @@ mod tests {
 					}
 				}
 
-				
+
 				for i in 0..warmup_period.min(data.len()) {
 					prop_assert!(
 						result.upperband[i].is_nan(),
@@ -3018,8 +2895,8 @@ mod tests {
 					);
 				}
 
-				
-				
+
+
 				let first_valid_output = warmup_period + fast_period - 1;
 				if first_valid_output < data.len() {
 					for i in first_valid_output..data.len() {
@@ -3041,7 +2918,7 @@ mod tests {
 					}
 				}
 
-				
+
 				for i in first_valid_output..data.len() {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
@@ -3061,9 +2938,9 @@ mod tests {
 					}
 				}
 
-				
+
 				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && data.len() > first_valid_output {
-					
+
 					for i in first_valid_output..data.len() {
 						let upper = result.upperband[i];
 						let middle = result.middleband[i];
@@ -3084,8 +2961,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				for i in first_valid_output..data.len() {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
@@ -3095,7 +2972,7 @@ mod tests {
 						let upper_spread = upper - middle;
 						let lower_spread = middle - lower;
 
-						
+
 						if upper_spread > 1e-10 && lower_spread > 1e-10 {
 							let spread_ratio = upper_spread / lower_spread;
 							let multiplier_ratio = devup / devdn;
@@ -3109,8 +2986,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				use crate::indicators::sma::{sma, SmaInput, SmaParams};
 				use crate::indicators::ema::{ema, EmaInput, EmaParams};
 
@@ -3134,8 +3011,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				for i in first_valid_output..data.len() {
 					let upper = result.upperband[i];
 					let middle = result.middleband[i];
@@ -3156,7 +3033,7 @@ mod tests {
 							test_name, i, lower_spread
 						);
 
-						
+
 						let data_range = data.iter()
 							.filter(|x| x.is_finite())
 							.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &x| {
@@ -3164,8 +3041,8 @@ mod tests {
 							});
 						let range_span = data_range.1 - data_range.0;
 
-						
-						
+
+
 						if range_span > 0.0 {
 							prop_assert!(
 								upper_spread <= range_span * devup * 10.0,
@@ -3181,8 +3058,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				let invalid_params = vec![
 					MabParams {
 						fast_period: Some(0),
@@ -3211,14 +3088,14 @@ mod tests {
 					);
 				}
 
-				
-				
-				
+
+
+
 				if fast_period == slow_period && data.len() > first_valid_output {
-					
+
 					let equal_params = MabParams {
 						fast_period: Some(fast_period),
-						slow_period: Some(fast_period), 
+						slow_period: Some(fast_period),
 						devup: Some(devup),
 						devdn: Some(devdn),
 						fast_ma_type: params.fast_ma_type.clone(),
@@ -3227,8 +3104,8 @@ mod tests {
 					let equal_input = MabInput::from_slice(&data, equal_params);
 					let equal_result = mab_with_kernel(&equal_input, kernel).unwrap();
 
-					
-					
+
+
 					if params.fast_ma_type == params.slow_ma_type {
 						for i in first_valid_output..data.len().min(first_valid_output + 10) {
 							if equal_result.upperband[i].is_finite() &&
@@ -3237,7 +3114,7 @@ mod tests {
 								let upper_spread = equal_result.upperband[i] - equal_result.middleband[i];
 								let lower_spread = equal_result.middleband[i] - equal_result.lowerband[i];
 
-								
+
 								prop_assert!(
 									upper_spread <= 1e-6 || upper_spread <= equal_result.middleband[i].abs() * 1e-6,
 									"[{}] Equal periods: upper spread too large at idx {}: {}",
@@ -3281,7 +3158,6 @@ mod tests {
         let input = MabInput::from_candles(&candles, "close", params);
         let result = mab_with_kernel(&input, kernel)?;
 
-        
         let expected_upper_last_five = [
             64002.843463352016,
             63976.62699738246,
@@ -3361,7 +3237,6 @@ mod tests {
             test_name
         );
 
-        
         let params2 = MabParams {
             fast_period: Some(5),
             slow_period: Some(0),
@@ -3424,12 +3299,10 @@ mod tests {
         let first_input = MabInput::from_candles(&candles, "close", params.clone());
         let first_result = mab_with_kernel(&first_input, kernel)?;
 
-        
         let second_input = MabInput::from_slice(&first_result.upperband, params);
         let second_result = mab_with_kernel(&second_input, kernel)?;
         assert_eq!(second_result.upperband.len(), first_result.upperband.len());
 
-        
         let non_nan_count = second_result
             .upperband
             .iter()
@@ -3451,7 +3324,6 @@ mod tests {
         let input = MabInput::from_candles(&candles, "close", MabParams::default());
         let res = mab_with_kernel(&input, kernel)?;
 
-        
         for i in 100..res.upperband.len().min(200) {
             assert!(
                 !res.upperband[i].is_nan(),
@@ -3475,12 +3347,8 @@ mod tests {
         Ok(())
     }
 
-    
-    
     #[allow(dead_code)]
     fn check_mab_streaming(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        
-        
         Ok(())
     }
 
@@ -3489,10 +3357,9 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let sweep = MabBatchRange {
-            fast_period: (10, 10, 0), 
-            slow_period: (50, 50, 0), 
+            fast_period: (10, 10, 0),
+            slow_period: (50, 50, 0),
             devup: (1.0, 1.0, 0.0),
             devdn: (1.0, 1.0, 0.0),
             fast_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
@@ -3513,7 +3380,6 @@ mod tests {
             test
         );
 
-        
         let expected_upper = [
             64002.843463352016,
             63976.62699738246,
@@ -3576,8 +3442,8 @@ mod tests {
         let c = read_candles_from_csv(file)?;
 
         let sweep = MabBatchRange {
-            fast_period: (10, 12, 1), 
-            slow_period: (50, 50, 0), 
+            fast_period: (10, 12, 1),
+            slow_period: (50, 50, 0),
             devup: (1.0, 1.0, 0.0),
             devdn: (1.0, 1.0, 0.0),
             fast_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
@@ -3586,7 +3452,6 @@ mod tests {
 
         let output = mab_batch_inner(c.close.as_slice(), &sweep, kernel, false)?;
 
-        
         assert_eq!(
             output.rows, 3,
             "[{}] Expected 3 rows for fast period 10-12",
@@ -3599,7 +3464,6 @@ mod tests {
             test
         );
 
-        
         assert_eq!(
             output.combos[0].fast_period,
             Some(10),
@@ -3619,12 +3483,10 @@ mod tests {
             test
         );
 
-        
         for row in 0..3 {
             let row_start = row * output.cols;
             let row_data = &output.upperbands[row_start..row_start + output.cols];
 
-            
             let valid_count = row_data.iter().skip(100).filter(|x| !x.is_nan()).count();
             assert!(
                 valid_count > 0,
@@ -3681,7 +3543,6 @@ mod tests {
         };
     }
 
-    
     generate_all_mab_tests!(
         check_mab_no_poison,
         check_mab_partial_params,
@@ -3697,7 +3558,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_mab_tests!(check_mab_property);
 
-    
     gen_batch_tests!(check_batch_no_poison);
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_grid_varying_fast_period);

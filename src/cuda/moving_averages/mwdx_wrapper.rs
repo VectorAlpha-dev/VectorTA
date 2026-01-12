@@ -1,10 +1,3 @@
-//! CUDA support for the Midway Weighted Exponential (MWDX) indicator.
-//!
-//! Aligns with ALMA's CUDA API and policy surface while respecting MWDX's
-//! recurrence nature (sequential over time). Exposes device entry points for
-//! both one-series × many-params ("batch") and many-series × one-param
-//! scenarios and mirrors warmup/NaN behavior of the scalar reference.
-
 #![cfg(feature = "cuda")]
 
 use super::cwma_wrapper::{BatchKernelPolicy, ManySeriesKernelPolicy};
@@ -12,17 +5,17 @@ use crate::indicators::moving_averages::mwdx::{expand_grid_mwdx, MwdxBatchRange,
 use cust::context::Context;
 use cust::device::Device;
 use cust::function::{BlockSize, GridSize};
-use cust::memory::AsyncCopyDestination; 
+use cust::memory::AsyncCopyDestination;
 use cust::memory::{mem_get_info, DeviceBuffer, LockedBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu; 
+use cust::sys as cu;
 use std::ffi::c_void;
 use std::fmt;
-use thiserror::Error;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaMwdxError {
@@ -31,22 +24,30 @@ pub enum CudaMwdxError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
-    #[error(
-        "launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})"
-    )]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array handle for MWDX with context guard and device id
 pub struct DeviceArrayF32Mwdx {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -56,9 +57,13 @@ pub struct DeviceArrayF32Mwdx {
 }
 impl DeviceArrayF32Mwdx {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }
 
 pub struct CudaMwdx {
@@ -86,10 +91,6 @@ struct PreparedMwdxManySeries {
 }
 
 impl CudaMwdx {
-    /// Best-effort: request L2 persisting set-aside and configure the stream's
-    /// Access Policy Window (APW) so that `d_prices` is treated as persisting in L2.
-    ///
-    /// Safe to call repeatedly; failures are ignored and do not affect correctness.
     unsafe fn try_enable_persisting_l2_for_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -105,7 +106,6 @@ impl CudaMwdx {
 
         let window_bytes = series_len.saturating_mul(std::mem::size_of::<f32>());
 
-        // Query device max supported APW size and clamp the request
         let mut max_window_bytes_i32: i32 = 0;
         if let Ok(dev) = CuDevice::get_device(self.device_id) {
             let _ = cuDeviceGetAttribute(
@@ -116,10 +116,8 @@ impl CudaMwdx {
         }
         let max_window_bytes = (max_window_bytes_i32.max(0) as usize).min(window_bytes);
 
-        // Best-effort L2 persisting set-aside
         let _ = cuCtxSetLimit(CULimit::CU_LIMIT_PERSISTING_L2_CACHE_SIZE, max_window_bytes);
 
-        // Configure stream APW: persisting on hit, streaming on miss
         let mut val: CUstreamAttrValue = std::mem::zeroed();
         val.accessPolicyWindow = CUaccessPolicyWindow {
             base_ptr: d_prices.as_device_ptr().as_raw() as *mut c_void,
@@ -203,7 +201,6 @@ impl CudaMwdx {
         let prepared = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = prepared.combos.len();
 
-        // VRAM estimate (+64MB headroom)
         let bytes_prices = prepared.series_len * std::mem::size_of::<f32>();
         let bytes_factors = n_combos * std::mem::size_of::<f32>();
         let bytes_out = prepared.series_len * n_combos * std::mem::size_of::<f32>();
@@ -227,9 +224,8 @@ impl CudaMwdx {
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
         let d_factors = DeviceBuffer::from_slice(&prepared.factors_f32)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(prepared.series_len * n_combos)?
-        };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(prepared.series_len * n_combos)? };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -314,20 +310,15 @@ impl CudaMwdx {
         }
         let handle = self.mwdx_batch_dev(data_f32, sweep)?;
 
-        // Use page-locked host buffer and async copy for better throughput.
-        let mut host_locked: LockedBuffer<f32> = unsafe {
-            LockedBuffer::uninitialized(out_flat.len())
-                .map_err(CudaMwdxError::from)?
-        };
+        let mut host_locked: LockedBuffer<f32> =
+            unsafe { LockedBuffer::uninitialized(out_flat.len()).map_err(CudaMwdxError::from)? };
         unsafe {
             handle
                 .buf
                 .async_copy_to(&mut host_locked, &self.stream)
                 .map_err(CudaMwdxError::from)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(CudaMwdxError::from)?;
+        self.stream.synchronize().map_err(CudaMwdxError::from)?;
         out_flat.copy_from_slice(host_locked.as_slice());
         Ok(())
     }
@@ -342,7 +333,6 @@ impl CudaMwdx {
         let prepared =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate (+64MB headroom)
         let bytes_prices = num_series * series_len * std::mem::size_of::<f32>();
         let bytes_first = num_series * std::mem::size_of::<i32>();
         let bytes_out = num_series * series_len * std::mem::size_of::<f32>();
@@ -366,9 +356,8 @@ impl CudaMwdx {
 
         let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
         let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(num_series * series_len)?
-        };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(num_series * series_len)? };
 
         self.launch_many_series_kernel(
             &d_prices,
@@ -453,7 +442,8 @@ impl CudaMwdx {
             params,
         )?;
 
-        let mut host_locked: LockedBuffer<f32> = unsafe { LockedBuffer::uninitialized(out_tm.len())? };
+        let mut host_locked: LockedBuffer<f32> =
+            unsafe { LockedBuffer::uninitialized(out_tm.len())? };
         unsafe {
             handle
                 .buf
@@ -478,31 +468,28 @@ impl CudaMwdx {
             return Ok(());
         }
 
-        // Policy: only Plain makes sense for a sequential recurrence; choose block_x
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            BatchKernelPolicy::Tiled { .. } => 256, // tiled not applicable; treat as plain
+            BatchKernelPolicy::Tiled { .. } => 256,
         };
 
-        // Introspection
         unsafe {
             let this = self as *const _ as *mut CudaMwdx;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        let func = self
-            .module
-            .get_function("mwdx_batch_f32")
-            .map_err(|_| CudaMwdxError::MissingKernelSymbol { name: "mwdx_batch_f32" })?;
+        let func = self.module.get_function("mwdx_batch_f32").map_err(|_| {
+            CudaMwdxError::MissingKernelSymbol {
+                name: "mwdx_batch_f32",
+            }
+        })?;
 
-        // Hint driver to persist `prices` in L2 across combo CTAs.
         unsafe {
             self.try_enable_persisting_l2_for_prices(d_prices, series_len);
         }
 
-        // Chunk grid.y to avoid 65k limit; shift pointers per-chunk
         for (start, len) in Self::grid_y_chunks(n_combos) {
             let grid: GridSize = (1, len as u32, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -540,7 +527,6 @@ impl CudaMwdx {
         series_len: usize,
         d_out_tm: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaMwdxError> {
-        // Pick 1D vs 2D tiled kernel based on policy and shape
         let (use_tiled, tx, ty) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => {
                 if series_len >= 4096 && num_series >= 2 {
@@ -564,14 +550,12 @@ impl CudaMwdx {
                 .get_function(func_name)
                 .map_err(|_| CudaMwdxError::MissingKernelSymbol { name: func_name })?;
 
-            // Introspection
             unsafe {
                 let this = self as *const _ as *mut CudaMwdx;
                 (*this).last_many = Some(ManySeriesKernelSelected::Tiled2D { tx, ty });
             }
             self.maybe_log_many_debug();
 
-            // Do not tile across time for a recurrence; keep grid.x = 1.
             let grid_y = ((num_series as u32) + ty - 1) / ty;
             let grid: GridSize = (1, grid_y, 1).into();
             let block: BlockSize = (tx, ty, 1).into();
@@ -596,9 +580,10 @@ impl CudaMwdx {
             let func = self
                 .module
                 .get_function("mwdx_many_series_one_param_f32")
-                .map_err(|_| CudaMwdxError::MissingKernelSymbol { name: "mwdx_many_series_one_param_f32" })?;
+                .map_err(|_| CudaMwdxError::MissingKernelSymbol {
+                    name: "mwdx_many_series_one_param_f32",
+                })?;
 
-            // Introspection
             unsafe {
                 let this = self as *const _ as *mut CudaMwdx;
                 (*this).last_many = Some(ManySeriesKernelSelected::OneD { block_x: tx });
@@ -736,8 +721,6 @@ impl CudaMwdx {
     }
 }
 
-// ---------- Bench profiles ----------
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -847,7 +830,8 @@ pub mod benches {
             CudaMwdx::prepare_many_series_inputs(&data_tm, cols, rows, &params).expect("mwdx prep");
 
         let d_prices_tm = DeviceBuffer::from_slice(&data_tm).expect("d_prices_tm");
-        let d_first_valids = DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
+        let d_first_valids =
+            DeviceBuffer::from_slice(&prepared.first_valids).expect("d_first_valids");
         let d_out_tm: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(cols * rows) }.expect("d_out_tm");
 
@@ -886,8 +870,6 @@ pub mod benches {
         ]
     }
 }
-
-// ---------------- Policy, debugging, and utilities (ALMA-style) ----------------
 
 #[derive(Clone, Copy, Debug)]
 pub struct CudaMwdxPolicy {

@@ -44,7 +44,7 @@ fn default_ma_source() -> String {
 #[derive(Debug, Serialize)]
 pub enum OptimizationModeResolved {
     Grid,
-    
+
 }
 
 #[derive(Debug, Serialize)]
@@ -311,7 +311,7 @@ fn grid_search_double_ma_gpu(
 struct PeriodMatrix {
     period_start: u16,
     period_end: u16,
-    values: Vec<f32>, // row-major: period-major rows, time-major cols
+    values: Vec<f32>,
 }
 
 #[cfg(feature = "cuda")]
@@ -411,7 +411,7 @@ fn build_ma_matrices_cuda(
                 values
             }
             Err(sweep_err) => {
-                // Fallback: compute each period independently (works for non-period-based MAs like VWAP/HWMA).
+
                 let mut host = vec![f32::NAN; expected_len];
                 for (row, period) in (start..=end).enumerate() {
                     let data = if requires_candles {
@@ -498,7 +498,7 @@ fn eval_double_ma_metrics(
         let f = fast[i] as f64;
         let s = slow[i] as f64;
         if !f.is_finite() || !s.is_finite() {
-            
+
             count += 1;
             let delta = 0.0 - mean;
             mean += delta / count as f64;
@@ -511,7 +511,7 @@ fn eval_double_ma_metrics(
         let price_prev = prices[i - 1];
         let price_cur = prices[i];
         if !price_prev.is_finite() || !price_cur.is_finite() {
-            
+
             prev_signal = signal;
             count += 1;
             let delta = 0.0 - mean;

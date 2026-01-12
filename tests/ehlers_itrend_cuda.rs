@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::ehlers_itrend::{
     ehlers_itrend_batch_with_kernel, ehlers_itrend_with_kernel, EhlersITrendBatchRange,
     EhlersITrendInput, EhlersITrendParams,

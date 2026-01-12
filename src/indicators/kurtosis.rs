@@ -1,33 +1,7 @@
-//! # Kurtosis
-//!
-//! Kurtosis is a measure of the "tailedness" of a distribution, computed over a sliding window.
-//! This indicator returns the excess kurtosis, using the uncorrected moment-based formula.
-//! Higher kurtosis indicates heavier tails and more outliers.
-//!
-//! ## Parameters
-//! - **period**: Window size for kurtosis calculation (default: 5)
-//!
-//! ## Returns
-//! - **`Ok(KurtosisOutput)`** containing a `Vec<f64>` of kurtosis values
-//!
-//! ## Developer Notes
-//! ### Implementation Status
-//! - Scalar: kept the exact two-pass central-moment calculation per window for bit-for-bit stability; micro-optimized by fusing the NaN check with the mean pass (≈8–13% faster at 100k).
-//! - SIMD (AVX2/AVX512): disabled by selection (stubs call scalar). First-window vectorization changed rounding and failed strict reference checks; steady-state remains per-window scalar by design.
-//! - Streaming: O(1) central-moment update implemented, but short-circuited to exact O(n) rebuild each tick to satisfy strict 1e-9 parity with batch. Revisit if tolerance policy loosens.
-//! - Memory: uses `alloc_with_nan_prefix` for warmup; zero-copy write into caller buffers.
-//! - Batch: parallel row execution present; row-specific kernels defer to scalar to avoid numerical drift.
-//! - CUDA: PTX wrapper enabled with typed errors and VRAM-backed handles; Python interop uses CUDA Array Interface v3 and DLPack v1.x while keeping the CUDA context alive via RAII.
-//!
-//! ### Decision Log / TODO
-//! - SIMD kernels are present but short-circuited to scalar due to strict unit-test references requiring identical rounding; revisit only if tolerance policy changes.
-//! - Row-specific batch via prefix sums would alter rounding; left disabled for now.
-//! - Further scalar wins likely require changing numerical pathways (not allowed by tests).
-
-#[cfg(feature = "python")]
-use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::{make_device_array_py, DeviceArrayF32Py};
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use numpy::PyUntypedArrayMethods;
 #[cfg(feature = "python")]
@@ -38,9 +12,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -85,7 +59,10 @@ pub struct KurtosisOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct KurtosisParams {
     pub period: Option<usize>,
 }
@@ -198,7 +175,11 @@ pub enum KurtosisError {
     #[error("kurtosis: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("kurtosis: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("kurtosis: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("kurtosis: Invalid period (zero or missing).")]
@@ -244,8 +225,6 @@ pub fn kurtosis_with_kernel(
     let mut out = alloc_with_nan_prefix(len, first + period - 1);
 
     let chosen = match kernel {
-        
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -306,15 +285,12 @@ pub fn kurtosis_into_slice(
         });
     }
 
-    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
     }
 
     let chosen = match kernel {
-        
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -337,17 +313,11 @@ pub fn kurtosis_into_slice(
     Ok(())
 }
 
-/// Writes Kurtosis results into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups like the Vec API (quiet-NaN prefix).
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn kurtosis_into(input: &KurtosisInput, out: &mut [f64]) -> Result<(), KurtosisError> {
-    
     kurtosis_into_slice(out, input, Kernel::Auto)?;
 
-    
     let data: &[f64] = input.as_ref();
     let first = data
         .iter()
@@ -368,7 +338,7 @@ pub fn kurtosis_scalar(data: &[f64], period: usize, first: usize, out: &mut [f64
     for i in (first + period - 1)..data.len() {
         let start = i + 1 - period;
         let window = &data[start..start + period];
-        
+
         let mut has_nan = false;
         let mut sum = 0.0f64;
         for &v in window {
@@ -438,7 +408,6 @@ pub fn kurtosis_batch_with_kernel(
     k: Kernel,
 ) -> Result<KurtosisBatchOutput, KurtosisError> {
     let kernel = match k {
-        
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
         other => return Err(KurtosisError::InvalidKernelForBatch(other)),
@@ -459,7 +428,9 @@ pub struct KurtosisBatchRange {
 
 impl Default for KurtosisBatchRange {
     fn default() -> Self {
-        Self { period: (5, 254, 1) }
+        Self {
+            period: (5, 254, 1),
+        }
     }
 }
 
@@ -615,11 +586,13 @@ fn kurtosis_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let _ = rows.checked_mul(cols).ok_or_else(|| KurtosisError::InvalidRange {
-        start: rows.to_string(),
-        end: cols.to_string(),
-        step: "rows*cols".into(),
-    })?;
+    let _ = rows
+        .checked_mul(cols)
+        .ok_or_else(|| KurtosisError::InvalidRange {
+            start: rows.to_string(),
+            end: cols.to_string(),
+            step: "rows*cols".into(),
+        })?;
     let mut values_mu = make_uninit_matrix(rows, cols);
 
     let warmup_periods: Vec<usize> = combos
@@ -727,7 +700,6 @@ fn kurtosis_batch_inner_into(
         });
     }
 
-    
     for (row, combo) in combos.iter().enumerate() {
         let period = combo.period.unwrap();
         let warmup = first + period - 1;
@@ -818,15 +790,14 @@ pub struct KurtosisStream {
     head: usize,
     filled: bool,
 
-    
-    nan_count: usize,    
-    mean: f64,           
-    c2: f64,             
-    c3: f64,             
-    c4: f64,             
-    inv_n: f64,          
-    moments_valid: bool, 
-    rebuild_ctr: usize,  
+    nan_count: usize,
+    mean: f64,
+    c2: f64,
+    c3: f64,
+    c4: f64,
+    inv_n: f64,
+    moments_valid: bool,
+    rebuild_ctr: usize,
 }
 
 impl KurtosisStream {
@@ -856,14 +827,12 @@ impl KurtosisStream {
 
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         let old = self.buffer[self.head];
         self.buffer[self.head] = value;
         self.head += 1;
         if self.head == self.period {
             self.head = 0;
             if !self.filled {
-                
                 self.filled = true;
                 self.nan_count = self.buffer.iter().filter(|v| v.is_nan()).count();
                 if self.nan_count > 0 {
@@ -875,12 +844,10 @@ impl KurtosisStream {
             }
         }
 
-        
         if !self.filled {
             return None;
         }
 
-        
         if old.is_nan() {
             self.nan_count = self.nan_count.saturating_sub(1);
         }
@@ -888,71 +855,58 @@ impl KurtosisStream {
             self.nan_count += 1;
         }
 
-        
         if self.nan_count > 0 {
             self.moments_valid = false;
             return Some(f64::NAN);
         }
 
-        
         if !self.moments_valid {
             self.recompute_moments_from_ring();
             return Some(self.finalize_kurtosis());
         }
 
-        
-        
         self.rebuild_ctr += 1;
         if self.rebuild_ctr >= 1 {
             self.recompute_moments_from_ring();
             return Some(self.finalize_kurtosis());
         }
 
-        
-        
         let n = self.period as f64;
         let diff = value - old;
-        let d = diff * self.inv_n; 
+        let d = diff * self.inv_n;
         let mu_new = self.mean + d;
 
-        
         let diff2 = diff * diff;
         let d2 = d * d;
         let inv_n2 = self.inv_n * self.inv_n;
         let inv_n3 = inv_n2 * self.inv_n;
-        let d3 = diff * diff2 * inv_n2; 
-        let d4 = diff2 * diff2 * inv_n3; 
+        let d3 = diff * diff2 * inv_n2;
+        let d4 = diff2 * diff2 * inv_n3;
 
-        
-        let c2s = self.c2 + diff2 * self.inv_n; 
-        let c3s = self.c3 - 3.0 * d * self.c2 - d3; 
-        let c4s = self.c4 - 4.0 * d * self.c3 + 6.0 * d2 * self.c2 + d4; 
+        let c2s = self.c2 + diff2 * self.inv_n;
+        let c3s = self.c3 - 3.0 * d * self.c2 - d3;
+        let c4s = self.c4 - 4.0 * d * self.c3 + 6.0 * d2 * self.c2 + d4;
 
-        
         let dy = old - mu_new;
         let dx = value - mu_new;
         let dy2 = dy * dy;
         let dx2 = dx * dx;
 
         self.c2 = c2s - dy2 + dx2;
-        self.c3 = c3s - dy * dy2 + dx * dx2; 
+        self.c3 = c3s - dy * dy2 + dx * dx2;
         self.c4 = c4s - (dy2 * dy2) + (dx2 * dx2);
         self.mean = mu_new;
 
         Some(self.finalize_kurtosis())
     }
 
-    
     #[inline(always)]
     fn finalize_kurtosis(&self) -> f64 {
-        
-        
-        
         let c2 = self.c2;
         let c4 = self.c4;
         let n = self.period as f64;
         if c2.abs() < f64::EPSILON * n {
-            return f64::NAN; 
+            return f64::NAN;
         }
         (c4 * n) / (c2 * c2) - 3.0
     }
@@ -963,15 +917,13 @@ impl KurtosisStream {
 
         let n = self.period as f64;
 
-        
         let mut sum = 0.0;
         for k in 0..self.period {
-            let idx = (self.head + k) % self.period; 
+            let idx = (self.head + k) % self.period;
             sum += self.buffer[idx];
         }
         let mean = sum / n;
 
-        
         let mut c2 = 0.0;
         let mut c3 = 0.0;
         let mut c4 = 0.0;
@@ -981,8 +933,8 @@ impl KurtosisStream {
             let d = v - mean;
             let d2 = d * d;
             c2 += d2;
-            c3 += d * d2; 
-            c4 += d2 * d2; 
+            c3 += d * d2;
+            c4 += d2 * d2;
         }
         self.mean = mean;
         self.c2 = c2;
@@ -1017,30 +969,26 @@ mod tests {
 
     #[test]
     fn test_kurtosis_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let len = 256usize;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
             let x = i as f64;
-            
+
             let v = (x * 0.01).sin() * 2.0 + (x * 0.007).cos() * 0.5 + x * 1e-3;
             data.push(v);
         }
 
         let input = KurtosisInput::from_slice(&data, KurtosisParams::default());
 
-        
         let baseline = kurtosis(&input)?.values;
 
-        
         let mut out = vec![0.0f64; len];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             kurtosis_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             kurtosis_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
@@ -1252,27 +1200,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             KurtosisParams::default(),
-            
             KurtosisParams { period: Some(2) },
-            
             KurtosisParams { period: Some(3) },
             KurtosisParams { period: Some(4) },
             KurtosisParams { period: Some(5) },
             KurtosisParams { period: Some(7) },
             KurtosisParams { period: Some(10) },
-            
             KurtosisParams { period: Some(14) },
             KurtosisParams { period: Some(20) },
             KurtosisParams { period: Some(30) },
-            
             KurtosisParams { period: Some(50) },
             KurtosisParams { period: Some(100) },
             KurtosisParams { period: Some(200) },
-            
             KurtosisParams { period: Some(6) },
             KurtosisParams { period: Some(25) },
             KurtosisParams { period: Some(75) },
@@ -1284,12 +1225,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1336,7 +1276,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_kurtosis_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! generate_all_kurtosis_tests {
@@ -1368,19 +1308,15 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
         let strat = (2usize..=50)
             .prop_flat_map(|period| {
-                let min_len = period * 2; 
-                let max_len = 400.min(period * 20); 
+                let min_len = period * 2;
+                let max_len = 400.min(period * 20);
                 (min_len..=max_len, Just(period))
             })
             .prop_flat_map(|(len, period)| {
                 (
-                    
                     proptest::collection::vec(
-                        
                         (50.0f64..150.0f64).prop_flat_map(move |base| {
                             let trend = (-0.01f64..0.01f64);
                             trend.prop_flat_map(move |t| {
@@ -1403,10 +1339,8 @@ mod tests {
             let result = kurtosis_with_kernel(&input, kernel)?;
             let scalar_result = kurtosis_with_kernel(&input, Kernel::Scalar)?;
 
-            
             prop_assert_eq!(result.values.len(), data.len(), "Output length mismatch");
 
-            
             let warmup_end = period - 1;
             for i in 0..warmup_end.min(data.len()) {
                 prop_assert!(
@@ -1416,7 +1350,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_end..data.len() {
                 let window_start = i + 1 - period;
                 let window = &data[window_start..=i];
@@ -1438,7 +1371,6 @@ mod tests {
                 }
             }
 
-            
             for i in warmup_end..data.len() {
                 let val = result.values[i];
                 let scalar_val = scalar_result.values[i];
@@ -1448,7 +1380,6 @@ mod tests {
                 }
 
                 if val.is_finite() && scalar_val.is_finite() {
-                    
                     let val_bits = val.to_bits();
                     let scalar_bits = scalar_val.to_bits();
                     let ulp_diff = val_bits.abs_diff(scalar_bits);
@@ -1471,7 +1402,6 @@ mod tests {
                 }
             }
 
-            
             let constant_data = vec![42.0; data.len()];
             let constant_input = KurtosisInput::from_slice(&constant_data, params.clone());
             let constant_result = kurtosis_with_kernel(&constant_input, kernel)?;
@@ -1485,11 +1415,7 @@ mod tests {
                 );
             }
 
-            
-            
-            
             if period >= 30 && data.len() >= 100 {
-                
                 let stable_start = data.len() / 4;
                 let stable_end = data.len() * 3 / 4;
                 let stable_kurtosis: Vec<f64> = result.values[stable_start..stable_end]
@@ -1501,8 +1427,7 @@ mod tests {
                 if stable_kurtosis.len() > 10 {
                     let mean_kurtosis =
                         stable_kurtosis.iter().sum::<f64>() / stable_kurtosis.len() as f64;
-                    
-                    
+
                     prop_assert!(
 							mean_kurtosis >= -0.5 && mean_kurtosis <= 0.5,
 							"Mean kurtosis {} outside expected range [-0.5, 0.5] for pseudo-normal data", mean_kurtosis
@@ -1510,13 +1435,8 @@ mod tests {
                 }
             }
 
-            
-            
-            
             for i in warmup_end..data.len() {
                 if result.values[i].is_finite() {
-                    
-                    
                     prop_assert!(
                         result.values[i] >= -2.0 - 1e-10,
                         "Kurtosis {} at index {} violates theoretical minimum of -2.0",
@@ -1526,13 +1446,10 @@ mod tests {
                 }
             }
 
-            
-            
             if data.len() > period * 2 && period >= 3 {
                 let mut outlier_data = data.clone();
                 let mid = data.len() / 2;
                 if mid >= period {
-                    
                     let window_start = mid - period + 1;
                     let window = &data[window_start..=mid];
                     let mean = window.iter().sum::<f64>() / period as f64;
@@ -1540,19 +1457,15 @@ mod tests {
                         window.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / period as f64;
                     let std_dev = variance.sqrt();
 
-                    
-                    
                     outlier_data[mid] = mean + std_dev * 10.0;
 
                     let outlier_input = KurtosisInput::from_slice(&outlier_data, params.clone());
                     let outlier_result = kurtosis_with_kernel(&outlier_input, kernel)?;
 
-                    
                     if result.values[mid].is_finite()
                         && outlier_result.values[mid].is_finite()
                         && std_dev > 0.01
                     {
-                        
                         prop_assert!(
                             outlier_result.values[mid] > result.values[mid],
                             "Outlier should increase kurtosis: original {}, with outlier {}",
@@ -1560,7 +1473,6 @@ mod tests {
                             outlier_result.values[mid]
                         );
 
-                        
                         let kurtosis_increase = outlier_result.values[mid] - result.values[mid];
                         prop_assert!(
 								kurtosis_increase > 0.5,
@@ -1571,14 +1483,11 @@ mod tests {
                 }
             }
 
-            
-            
             if period >= 4 {
-                
                 let uniform_data: Vec<f64> = (0..data.len())
                     .map(|i| {
                         let base = (i / period) as f64 * 10.0;
-                        
+
                         base + ((i % period) as f64) * 0.001
                     })
                     .collect();
@@ -1586,14 +1495,11 @@ mod tests {
                 let uniform_input = KurtosisInput::from_slice(&uniform_data, params.clone());
                 let uniform_result = kurtosis_with_kernel(&uniform_input, kernel)?;
 
-                
                 let check_start = warmup_end + period;
                 let check_end = (check_start + 5).min(uniform_data.len());
 
                 for i in check_start..check_end {
                     if uniform_result.values[i].is_finite() {
-                        
-                        
                         prop_assert!(
 								uniform_result.values[i] < 0.0,
 								"Nearly uniform distribution should have negative excess kurtosis at index {}, got {}",
@@ -1665,16 +1571,14 @@ mod tests {
         let c = read_candles_from_csv(file)?;
         let data = source_type(&c, "close");
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2),   
-            (5, 25, 5),   
-            (30, 60, 15), 
-            (2, 5, 1),    
-            (10, 20, 2),  
-            (20, 50, 10), 
-            (5, 5, 0),    
+            (2, 10, 2),
+            (5, 25, 5),
+            (30, 60, 15),
+            (2, 5, 1),
+            (10, 20, 2),
+            (20, 50, 10),
+            (5, 5, 0),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1693,7 +1597,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1772,10 +1675,6 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 }
-
-
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "kurtosis")]
@@ -1886,7 +1785,6 @@ pub fn kurtosis_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "kurtosis_cuda_batch_dev")]
 #[pyo3(signature = (data_f32, period_range, device_id=0))]
@@ -1950,11 +1848,7 @@ pub fn kurtosis_cuda_many_series_one_param_dev_py(
     Ok(handle)
 }
 
-
-
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kurtosis_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = KurtosisParams {
@@ -1970,7 +1864,7 @@ pub fn kurtosis_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kurtosis_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1979,7 +1873,7 @@ pub fn kurtosis_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kurtosis_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1989,7 +1883,7 @@ pub fn kurtosis_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kurtosis_into(
     in_ptr: *const f64,
@@ -2014,7 +1908,6 @@ pub fn kurtosis_into(
         let input = KurtosisInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             kurtosis_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2030,13 +1923,13 @@ pub fn kurtosis_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KurtosisBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KurtosisBatchJsOutput {
     pub values: Vec<f64>,
@@ -2046,7 +1939,7 @@ pub struct KurtosisBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = kurtosis_batch)]
 pub fn kurtosis_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: KurtosisBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2071,7 +1964,7 @@ pub fn kurtosis_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kurtosis_batch_into(
     in_ptr: *const f64,
@@ -2094,23 +1987,20 @@ pub fn kurtosis_batch_into(
             period: (period_start, period_end, period_step),
         };
 
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
 
-        let expected = rows
-            .checked_mul(cols)
-            .ok_or_else(|| {
-                JsValue::from_str(
-                    &KurtosisError::InvalidRange {
-                        start: rows.to_string(),
-                        end: cols.to_string(),
-                        step: "rows*cols".into(),
-                    }
-                    .to_string(),
-                )
-            })?;
+        let expected = rows.checked_mul(cols).ok_or_else(|| {
+            JsValue::from_str(
+                &KurtosisError::InvalidRange {
+                    start: rows.to_string(),
+                    end: cols.to_string(),
+                    step: "rows*cols".into(),
+                }
+                .to_string(),
+            )
+        })?;
         let out = std::slice::from_raw_parts_mut(out_ptr, expected);
 
         let kernel = detect_best_kernel();

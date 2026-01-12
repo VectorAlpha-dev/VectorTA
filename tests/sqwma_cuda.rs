@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::sqwma::{
     sqwma_batch_with_kernel, SqwmaBatchRange, SqwmaBuilder,
 };
@@ -44,10 +42,8 @@ fn sqwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
 
     let sweep = SqwmaBatchRange { period: (5, 35, 3) };
 
-    
     let cpu = sqwma_batch_with_kernel(&prices, &sweep, Kernel::ScalarBatch)?;
 
-    
     let cuda = CudaSqwma::new(0).expect("CudaSqwma::new");
     let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda
@@ -76,7 +72,6 @@ fn sqwma_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    
     let row_idx = cpu
         .combos
         .iter()
@@ -112,7 +107,6 @@ fn sqwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
 
     let period = 16usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; num_series * series_len];
     for series_idx in 0..num_series {
         let mut series = vec![f64::NAN; series_len];
@@ -128,7 +122,6 @@ fn sqwma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
         }
     }
 
-    
     let cuda = CudaSqwma::new(0).expect("CudaSqwma::new");
     let prices_f32: Vec<f32> = prices_tm.iter().map(|&v| v as f32).collect();
     let gpu_handle = cuda

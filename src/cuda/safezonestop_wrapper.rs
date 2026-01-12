@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for SafeZoneStop (recurrence-based stop levels).
-//!
-//! Parity with ALMA wrapper conventions:
-//! - PTX load via OUT_DIR, JIT opts: DetermineTargetFromContext + O2
-//! - NON_BLOCKING stream
-//! - VRAM checks + y-chunking (<= 65_535)
-//! - Public device entry points for batch and many-series (time-major)
-//! - Batch precomputes dm_raw on host (shared across rows)
-
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
 use crate::indicators::safezonestop::{SafeZoneStopBatchRange, SafeZoneStopParams};
 use cust::context::Context;
@@ -30,7 +21,11 @@ pub enum CudaSafeZoneStopError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -38,7 +33,14 @@ pub enum CudaSafeZoneStopError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -119,7 +121,14 @@ impl CudaSafeZoneStop {
             || gy > max_gy
             || gz > max_gz
         {
-            return Err(CudaSafeZoneStopError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaSafeZoneStopError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -137,8 +146,7 @@ impl CudaSafeZoneStop {
         let module = match Module::from_ptx(ptx, jit) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -167,8 +175,6 @@ impl CudaSafeZoneStop {
         &self,
         src: &[f32],
     ) -> Result<(DeviceBuffer<f32>, LockedBuffer<f32>), CudaSafeZoneStopError> {
-        
-        
         let h_pin = LockedBuffer::from_slice(src)?;
         let mut d = unsafe { DeviceBuffer::<f32>::uninitialized_async(src.len(), &self.stream) }?;
         unsafe {
@@ -190,8 +196,12 @@ impl CudaSafeZoneStop {
         None
     }
 
-    fn expand_grid(r: &SafeZoneStopBatchRange) -> Result<Vec<SafeZoneStopParams>, CudaSafeZoneStopError> {
-        fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaSafeZoneStopError> {
+    fn expand_grid(
+        r: &SafeZoneStopBatchRange,
+    ) -> Result<Vec<SafeZoneStopParams>, CudaSafeZoneStopError> {
+        fn axis_usize(
+            (start, end, step): (usize, usize, usize),
+        ) -> Result<Vec<usize>, CudaSafeZoneStopError> {
             if step == 0 || start == end {
                 return Ok(vec![start]);
             }
@@ -230,7 +240,9 @@ impl CudaSafeZoneStop {
             }
             Ok(vals)
         }
-        fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, CudaSafeZoneStopError> {
+        fn axis_f64(
+            (start, end, step): (f64, f64, f64),
+        ) -> Result<Vec<f64>, CudaSafeZoneStopError> {
             if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
                 return Ok(vec![start]);
             }
@@ -294,9 +306,17 @@ impl CudaSafeZoneStop {
             let up_pos = if up > 0.0 { up } else { 0.0 };
             let dn_pos = if dn > 0.0 { dn } else { 0.0 };
             let v = if dir_long {
-                if dn_pos > up_pos { dn_pos } else { 0.0 }
+                if dn_pos > up_pos {
+                    dn_pos
+                } else {
+                    0.0
+                }
             } else {
-                if up_pos > dn_pos { up_pos } else { 0.0 }
+                if up_pos > dn_pos {
+                    up_pos
+                } else {
+                    0.0
+                }
             };
             dm[i] = v;
             prev_h = h;
@@ -305,7 +325,6 @@ impl CudaSafeZoneStop {
         dm
     }
 
-    /// Batch (one series × many params). Returns VRAM-backed matrix and combos.
     pub fn safezonestop_batch_dev(
         &self,
         high_f32: &[f32],
@@ -328,7 +347,7 @@ impl CudaSafeZoneStop {
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("all values are NaN".into()))?;
 
         let combos = Self::expand_grid(sweep)?;
-        
+
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut mults_f32 = Vec::with_capacity(combos.len());
         let mut looks_i32 = Vec::with_capacity(combos.len());
@@ -362,13 +381,10 @@ impl CudaSafeZoneStop {
             max_look = max_look.max(lb);
         }
 
-        
         let dm_raw = Self::compute_dm_raw_f32(high_f32, low_f32, first, dir_long);
 
-        
         let need_deque = max_look > 4;
 
-        
         let out_elems = combos
             .len()
             .checked_mul(n)
@@ -384,8 +400,18 @@ impl CudaSafeZoneStop {
         let params_bytes = periods_i32
             .len()
             .checked_mul(sz_i32)
-            .and_then(|v| mults_f32.len().checked_mul(sz_f32).and_then(|m| v.checked_add(m)))
-            .and_then(|v| looks_i32.len().checked_mul(sz_i32).and_then(|l| v.checked_add(l)))
+            .and_then(|v| {
+                mults_f32
+                    .len()
+                    .checked_mul(sz_f32)
+                    .and_then(|m| v.checked_add(m))
+            })
+            .and_then(|v| {
+                looks_i32
+                    .len()
+                    .checked_mul(sz_i32)
+                    .and_then(|l| v.checked_add(l))
+            })
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("param bytes overflow".into()))?;
         let out_bytes = out_elems
             .checked_mul(sz_f32)
@@ -400,15 +426,17 @@ impl CudaSafeZoneStop {
                 .checked_mul(max_look.checked_add(1).ok_or_else(|| {
                     CudaSafeZoneStopError::InvalidInput("deque lookback overflow".into())
                 })?)
-                .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("deque elems overflow".into()))?;
-            let deque_bytes = deque_elems
-                .checked_mul(sz_f32 + sz_i32)
-                .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("deque bytes overflow".into()))?;
-            required = required
-                .checked_add(deque_bytes)
-                .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("total bytes overflow".into()))?;
+                .ok_or_else(|| {
+                    CudaSafeZoneStopError::InvalidInput("deque elems overflow".into())
+                })?;
+            let deque_bytes = deque_elems.checked_mul(sz_f32 + sz_i32).ok_or_else(|| {
+                CudaSafeZoneStopError::InvalidInput("deque bytes overflow".into())
+            })?;
+            required = required.checked_add(deque_bytes).ok_or_else(|| {
+                CudaSafeZoneStopError::InvalidInput("total bytes overflow".into())
+            })?;
         }
-        let headroom = 64 * 1024 * 1024; 
+        let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
             if let Some((free, _)) = Self::device_mem_info() {
                 return Err(CudaSafeZoneStopError::OutOfMemory {
@@ -423,20 +451,18 @@ impl CudaSafeZoneStop {
             }
         }
 
-        
         let (d_high, h_high_pin) = self.upload_pinned_f32(high_f32)?;
         let (d_low, h_low_pin) = self.upload_pinned_f32(low_f32)?;
         let (d_dm, h_dm_pin) = self.upload_pinned_f32(&dm_raw)?;
 
-        
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let d_mults = DeviceBuffer::from_slice(&mults_f32)?;
         let d_looks = DeviceBuffer::from_slice(&looks_i32)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream) }?;
 
-        
-        let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) = (None, None);
+        let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) =
+            (None, None);
         let mut lb_cap_i32 = 0i32;
         if need_deque {
             let lb_cap = (max_look + 1).max(2);
@@ -449,7 +475,6 @@ impl CudaSafeZoneStop {
             opt_q_val = Some(d_q_val);
         }
 
-        
         let func = self
             .module
             .get_function("safezonestop_batch_f32")
@@ -509,13 +534,11 @@ impl CudaSafeZoneStop {
             }
         }
 
-        
         drop(opt_q_idx);
         drop(opt_q_val);
 
         self.stream.synchronize()?;
 
-        
         drop(h_high_pin);
         drop(h_low_pin);
         drop(h_dm_pin);
@@ -530,7 +553,6 @@ impl CudaSafeZoneStop {
         ))
     }
 
-    /// Many-series × one-param (time-major)
     pub fn safezonestop_many_series_one_param_time_major_dev(
         &self,
         high_tm_f32: &[f32],
@@ -564,7 +586,6 @@ impl CudaSafeZoneStop {
             _ => true,
         };
 
-        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -592,7 +613,6 @@ impl CudaSafeZoneStop {
             }
         }
 
-        
         let need_deque = max_lookback > 4;
         let sz_f32 = std::mem::size_of::<f32>();
         let sz_i32 = std::mem::size_of::<i32>();
@@ -600,9 +620,9 @@ impl CudaSafeZoneStop {
             .checked_mul(2)
             .and_then(|v| v.checked_mul(sz_f32))
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("input bytes overflow".into()))?;
-        let first_bytes = cols
-            .checked_mul(sz_i32)
-            .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("first_valid bytes overflow".into()))?;
+        let first_bytes = cols.checked_mul(sz_i32).ok_or_else(|| {
+            CudaSafeZoneStopError::InvalidInput("first_valid bytes overflow".into())
+        })?;
         let out_bytes = n
             .checked_mul(sz_f32)
             .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("output bytes overflow".into()))?;
@@ -615,13 +635,15 @@ impl CudaSafeZoneStop {
                 .checked_mul(max_lookback.checked_add(1).ok_or_else(|| {
                     CudaSafeZoneStopError::InvalidInput("deque lookback overflow".into())
                 })?)
-                .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("deque elems overflow".into()))?;
-            let deque_bytes = deque_elems
-                .checked_mul(sz_f32 + sz_i32)
-                .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("deque bytes overflow".into()))?;
-            required = required
-                .checked_add(deque_bytes)
-                .ok_or_else(|| CudaSafeZoneStopError::InvalidInput("total bytes overflow".into()))?;
+                .ok_or_else(|| {
+                    CudaSafeZoneStopError::InvalidInput("deque elems overflow".into())
+                })?;
+            let deque_bytes = deque_elems.checked_mul(sz_f32 + sz_i32).ok_or_else(|| {
+                CudaSafeZoneStopError::InvalidInput("deque bytes overflow".into())
+            })?;
+            required = required.checked_add(deque_bytes).ok_or_else(|| {
+                CudaSafeZoneStopError::InvalidInput("total bytes overflow".into())
+            })?;
         }
         let headroom = 64 * 1024 * 1024;
         if !Self::will_fit(required, headroom) {
@@ -638,15 +660,14 @@ impl CudaSafeZoneStop {
             }
         }
 
-        
         let (d_high, h_high_pin) = self.upload_pinned_f32(high_tm_f32)?;
         let (d_low, h_low_pin) = self.upload_pinned_f32(low_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(n, &self.stream) }?;
 
-        
-        let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) = (None, None);
+        let (mut opt_q_idx, mut opt_q_val): (Option<DeviceBuffer<i32>>, Option<DeviceBuffer<f32>>) =
+            (None, None);
         let mut lb_cap_i32 = 0i32;
         if need_deque {
             let lb_cap = (max_lookback + 1).max(2);
@@ -659,7 +680,6 @@ impl CudaSafeZoneStop {
             opt_q_val = Some(d_q_val);
         }
 
-        
         let func = self
             .module
             .get_function("safezonestop_many_series_one_param_time_major_f32")
@@ -714,13 +734,12 @@ impl CudaSafeZoneStop {
                 )?;
             }
         }
-        
+
         drop(opt_q_idx);
         drop(opt_q_val);
 
         self.stream.synchronize()?;
 
-        
         drop(h_high_pin);
         drop(h_low_pin);
 
@@ -805,7 +824,10 @@ pub mod benches {
                 )
                 .expect("safezonestop batch launch");
             }
-            self.cuda.stream.synchronize().expect("safezonestop batch sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("safezonestop batch sync");
         }
     }
     fn prep_batch() -> BatchDeviceState {
@@ -937,7 +959,10 @@ pub mod benches {
                 )
                 .expect("safezonestop many launch");
             }
-            self.cuda.stream.synchronize().expect("safezonestop many sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("safezonestop many sync");
         }
     }
     fn prep_many_series() -> ManySeriesDeviceState {

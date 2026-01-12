@@ -1,9 +1,3 @@
-//! CUDA scaffolding for the Predictive Moving Average (PMA).
-//!
-//! Mirrors ALMA-style GPU surface: one-series × many-params (synthetic combos)
-//! and many-series × one-param (time-major). This PMA variant matches
-//! src/indicators/pma.rs semantics (no 1-bar lag; warmups at first+6 and first+9).
-
 #![cfg(feature = "cuda")]
 
 use super::DeviceArrayF32;
@@ -20,7 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 
 use crate::indicators::pma::PmaBatchRange;
-
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -68,7 +61,11 @@ pub enum CudaPmaError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -76,14 +73,20 @@ pub enum CudaPmaError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed pair of PMA outputs (predict + trigger)
 pub struct DevicePmaPair {
     pub predict: DeviceArrayF32,
     pub trigger: DeviceArrayF32,
@@ -115,7 +118,6 @@ pub struct CudaPma {
     debug_batch_logged: bool,
     debug_many_logged: bool,
 }
-
 
 struct BatchInputs {
     combos: usize,
@@ -298,7 +300,6 @@ impl CudaPma {
         }
     }
 
-    
     fn prepare_batch_inputs(
         prices: &[f32],
         _sweep: &PmaBatchRange,
@@ -310,14 +311,14 @@ impl CudaPma {
             .iter()
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaPmaError::InvalidInput("all values are NaN".into()))?;
-        const MIN_REQUIRED: usize = 7; 
+        const MIN_REQUIRED: usize = 7;
         if prices.len() - first_valid < MIN_REQUIRED {
             return Err(CudaPmaError::InvalidInput(format!(
                 "not enough valid data (needed >= {MIN_REQUIRED}, valid = {})",
                 prices.len() - first_valid
             )));
         }
-        
+
         Ok(BatchInputs {
             combos: 1,
             first_valid,
@@ -331,28 +332,23 @@ impl CudaPma {
         inputs: &BatchInputs,
     ) -> Result<DevicePmaPair, CudaPmaError> {
         let elem = core::mem::size_of::<f32>();
-        let prices_bytes = inputs
-            .series_len
-            .checked_mul(elem)
-            .ok_or_else(|| CudaPmaError::InvalidInput("series_len * sizeof(f32) overflow".into()))?;
+        let prices_bytes = inputs.series_len.checked_mul(elem).ok_or_else(|| {
+            CudaPmaError::InvalidInput("series_len * sizeof(f32) overflow".into())
+        })?;
         let out_elems = inputs
             .combos
             .checked_mul(inputs.series_len)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("combos * series_len overflow".into())
-            })?;
+            .ok_or_else(|| CudaPmaError::InvalidInput("combos * series_len overflow".into()))?;
         let out_bytes = out_elems
             .checked_mul(elem)
             .ok_or_else(|| CudaPmaError::InvalidInput("out_elems * sizeof(f32) overflow".into()))?;
         let two_out = out_bytes
             .checked_mul(2)
             .ok_or_else(|| CudaPmaError::InvalidInput("2 * out_bytes overflow".into()))?;
-        let required = prices_bytes
-            .checked_add(two_out)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("prices_bytes + 2*out_bytes overflow".into())
-            })?;
-        let headroom = 64 * 1024 * 1024; 
+        let required = prices_bytes.checked_add(two_out).ok_or_else(|| {
+            CudaPmaError::InvalidInput("prices_bytes + 2*out_bytes overflow".into())
+        })?;
+        let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
         let mut d_prices: DeviceBuffer<f32> = DeviceBuffer::from_slice(prices)?;
@@ -436,7 +432,6 @@ impl CudaPma {
                 )
             }
             BatchKernelPolicy::Auto => {
-                
                 let gx = n_combos as u32;
                 (
                     "pma_batch_f32",
@@ -518,7 +513,6 @@ impl CudaPma {
         Ok((pair.rows(), pair.cols()))
     }
 
-    
     fn prepare_many_series_inputs(
         prices_tm: &[f32],
         cols: usize,
@@ -529,14 +523,9 @@ impl CudaPma {
                 "num_series or series_len is zero".into(),
             ));
         }
-        let expected = cols
-            .checked_mul(rows)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput(format!(
-                    "cols * rows overflow: cols={} rows={}",
-                    cols, rows
-                ))
-            })?;
+        let expected = cols.checked_mul(rows).ok_or_else(|| {
+            CudaPmaError::InvalidInput(format!("cols * rows overflow: cols={} rows={}", cols, rows))
+        })?;
         if prices_tm.len() != expected {
             return Err(CudaPmaError::InvalidInput(format!(
                 "data length {} != cols*rows {}",
@@ -716,51 +705,37 @@ impl CudaPma {
         let first_valids = Self::prepare_many_series_inputs(prices_tm, cols, rows)?;
         let elem_f32 = core::mem::size_of::<f32>();
         let elem_i32 = core::mem::size_of::<i32>();
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput(format!(
-                    "cols * rows overflow when sizing device buffers: cols={} rows={}",
-                    cols, rows
-                ))
-            })?;
+        let elems = cols.checked_mul(rows).ok_or_else(|| {
+            CudaPmaError::InvalidInput(format!(
+                "cols * rows overflow when sizing device buffers: cols={} rows={}",
+                cols, rows
+            ))
+        })?;
         let prices_bytes = elems
             .checked_mul(elem_f32)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("cols*rows*sizeof(f32) overflow".into())
-            })?;
+            .ok_or_else(|| CudaPmaError::InvalidInput("cols*rows*sizeof(f32) overflow".into()))?;
         let first_bytes = cols
             .checked_mul(elem_i32)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("cols*sizeof(i32) overflow".into())
-            })?;
+            .ok_or_else(|| CudaPmaError::InvalidInput("cols*sizeof(i32) overflow".into()))?;
         let out_bytes = elems
             .checked_mul(elem_f32)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("output bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaPmaError::InvalidInput("output bytes overflow".into()))?;
         let two_out = out_bytes
             .checked_mul(2)
             .ok_or_else(|| CudaPmaError::InvalidInput("2*out_bytes overflow".into()))?;
-        let tmp = prices_bytes
-            .checked_add(first_bytes)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("prices_bytes + first_bytes overflow".into())
-            })?;
+        let tmp = prices_bytes.checked_add(first_bytes).ok_or_else(|| {
+            CudaPmaError::InvalidInput("prices_bytes + first_bytes overflow".into())
+        })?;
         let required = tmp
             .checked_add(two_out)
-            .ok_or_else(|| {
-                CudaPmaError::InvalidInput("total device bytes overflow".into())
-            })?;
+            .ok_or_else(|| CudaPmaError::InvalidInput("total device bytes overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
         let mut d_prices_tm: DeviceBuffer<f32> = DeviceBuffer::from_slice(prices_tm)?;
         let d_first_valids = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_predict_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
-        let mut d_trigger_tm: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_predict_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
+        let mut d_trigger_tm: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }?;
 
         self.launch_many_series_kernel_select(
             &d_prices_tm,
@@ -786,7 +761,6 @@ impl CudaPma {
     }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -798,7 +772,7 @@ pub mod benches {
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * core::mem::size_of::<f32>();
-        
+
         let out_bytes = 2 * ONE_SERIES_LEN * core::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
@@ -843,8 +817,10 @@ pub mod benches {
             .combos
             .checked_mul(inputs.series_len)
             .expect("out size");
-        let d_predict: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_predict");
-        let d_trigger: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_trigger");
+        let d_predict: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_predict");
+        let d_trigger: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_trigger");
         cuda.stream.synchronize().expect("sync after prep");
 
         Box::new(PmaBatchDevState {

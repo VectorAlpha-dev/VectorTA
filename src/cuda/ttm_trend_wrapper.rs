@@ -1,16 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for TTM Trend (close > SMA(source, period)).
-//!
-//! Parity with ALMA wrapper policy:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/ttm_trend_kernel.ptx"))
-//!   with DetermineTargetFromContext + OptLevel O2, and simpler fallbacks.
-//! - NON_BLOCKING stream.
-//! - VRAM check with ~64MB headroom and grid.y chunking kept under 65_535.
-//! - Public device entry points:
-//!   - `ttm_trend_batch_dev(&[f32], &[f32], &TtmTrendBatchRange) -> DeviceArrayF32`
-//!   - `ttm_trend_many_series_one_param_time_major_dev(&[f32], &[f32], cols, rows, period)`
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::ttm_trend::TtmTrendBatchRange;
 use cust::context::{CacheConfig, Context};
@@ -32,7 +21,11 @@ pub enum CudaTtmTrendError {
     #[error(transparent)]
     Cuda(#[from] CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -40,7 +33,14 @@ pub enum CudaTtmTrendError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -66,7 +66,7 @@ impl CudaTtmTrend {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/ttm_trend_kernel.ptx"));
-        
+
         let jit = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -133,14 +133,28 @@ impl CudaTtmTrend {
             ));
         }
         if gx > max_gx || gy > max_gy || gz > max_gz || bx > max_bx || by > max_by || bz > max_bz {
-            return Err(CudaTtmTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaTtmTrendError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         let threads = bx
             .checked_mul(by)
             .and_then(|v| v.checked_mul(bz))
             .ok_or_else(|| CudaTtmTrendError::InvalidInput("block size overflow".into()))?;
         if threads > max_threads {
-            return Err(CudaTtmTrendError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaTtmTrendError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -218,8 +232,6 @@ impl CudaTtmTrend {
         Ok((combos, first, len))
     }
 
-    
-    
     fn build_prefix_source_ff2(source_f32: &[f32], first_valid: usize) -> Vec<[f32; 2]> {
         #[inline]
         fn two_sum(a: f32, b: f32) -> (f32, f32) {
@@ -232,14 +244,14 @@ impl CudaTtmTrend {
         let n = source_f32.len();
         let mut pref = vec![[0.0f32, 0.0f32]; n];
         if first_valid < n {
-            
             let mut hi: f32 = 0.0;
             let mut lo: f32 = 0.0;
             for i in first_valid..n {
                 let (s, mut e) = two_sum(hi, source_f32[i]);
                 e += lo;
                 let (rhi, rlo) = two_sum(s, e);
-                hi = rhi; lo = rlo;
+                hi = rhi;
+                lo = rlo;
                 pref[i] = [hi, lo];
             }
         }
@@ -248,7 +260,6 @@ impl CudaTtmTrend {
 
     #[inline]
     fn chunk_rows(n_rows: usize) -> usize {
-        
         let max_grid_y = 65_000usize;
         max_grid_y.min(n_rows).max(1)
     }
@@ -265,23 +276,24 @@ impl CudaTtmTrend {
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
 
-        
-        let prefix_bytes = len
-            .checked_mul(elem_ff2)
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in prefix bytes".into()))?;
-        let close_bytes = len
-            .checked_mul(elem_f32)
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in close bytes".into()))?;
+        let prefix_bytes = len.checked_mul(elem_ff2).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in prefix bytes".into())
+        })?;
+        let close_bytes = len.checked_mul(elem_f32).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in close bytes".into())
+        })?;
         let params_bytes = n_combos
             .checked_mul(elem_i32)
             .and_then(|x| x.checked_mul(2))
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in params bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmTrendError::InvalidInput("size overflow in params bytes".into())
+            })?;
         let out_elems = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaTtmTrendError::InvalidInput("rows*cols overflow".into()))?;
-        let out_bytes = out_elems
-            .checked_mul(elem_f32)
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in output bytes".into()))?;
+        let out_bytes = out_elems.checked_mul(elem_f32).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in output bytes".into())
+        })?;
         let logical = prefix_bytes
             .checked_add(close_bytes)
             .and_then(|x| x.checked_add(params_bytes))
@@ -290,20 +302,16 @@ impl CudaTtmTrend {
         let headroom = 64usize << 20;
         Self::will_fit(logical, headroom)?;
 
-        
         let prefix_ff2 = Self::build_prefix_source_ff2(source_f32, first);
 
-        
         let d_prefix: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&prefix_ff2)?;
-        let d_close  = DeviceBuffer::from_slice(close_f32)?;
+        let d_close = DeviceBuffer::from_slice(close_f32)?;
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
         let d_periods = DeviceBuffer::from_slice(&periods)?;
         let d_warms = DeviceBuffer::from_slice(&warms)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(out_elems) }?;
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }?;
 
-        
         let mut func = self
             .module
             .get_function("ttm_trend_batch_prefix_ff2_tiled")
@@ -312,7 +320,6 @@ impl CudaTtmTrend {
             })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
-        
         const TTM_TILE_TIME: u32 = 256;
         const TTM_TILE_PARAMS: u32 = 4;
         let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;
@@ -325,11 +332,11 @@ impl CudaTtmTrend {
         unsafe {
             let mut pref_ptr = d_prefix.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            let mut per_ptr   = d_periods.as_device_ptr().as_raw();
-            let mut warm_ptr  = d_warms.as_device_ptr().as_raw();
-            let mut len_i     = len as i32;
-            let mut ncomb_i   = n_combos as i32;
-            let mut out_ptr   = d_out.as_device_ptr().as_raw();
+            let mut per_ptr = d_periods.as_device_ptr().as_raw();
+            let mut warm_ptr = d_warms.as_device_ptr().as_raw();
+            let mut len_i = len as i32;
+            let mut ncomb_i = n_combos as i32;
+            let mut out_ptr = d_out.as_device_ptr().as_raw();
             let args: &mut [*mut c_void] = &mut [
                 &mut pref_ptr as *mut _ as *mut c_void,
                 &mut close_ptr as *mut _ as *mut c_void,
@@ -376,7 +383,6 @@ impl CudaTtmTrend {
             return Err(CudaTtmTrendError::InvalidInput("invalid period".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -401,20 +407,21 @@ impl CudaTtmTrend {
             first_valids[s] = fv;
         }
 
-        
         let elem_f32 = std::mem::size_of::<f32>();
         let elem_i32 = std::mem::size_of::<i32>();
         let series_elems = expected;
         let in_bytes = series_elems
             .checked_mul(elem_f32)
             .and_then(|x| x.checked_mul(2))
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in input bytes".into()))?;
-        let fv_bytes = cols
-            .checked_mul(elem_i32)
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in first_valid bytes".into()))?;
-        let out_bytes = series_elems
-            .checked_mul(elem_f32)
-            .ok_or_else(|| CudaTtmTrendError::InvalidInput("size overflow in output bytes".into()))?;
+            .ok_or_else(|| {
+                CudaTtmTrendError::InvalidInput("size overflow in input bytes".into())
+            })?;
+        let fv_bytes = cols.checked_mul(elem_i32).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in first_valid bytes".into())
+        })?;
+        let out_bytes = series_elems.checked_mul(elem_f32).ok_or_else(|| {
+            CudaTtmTrendError::InvalidInput("size overflow in output bytes".into())
+        })?;
         let logical = in_bytes
             .checked_add(fv_bytes)
             .and_then(|x| x.checked_add(out_bytes))
@@ -422,13 +429,11 @@ impl CudaTtmTrend {
         let headroom = 64usize << 20;
         Self::will_fit(logical, headroom)?;
 
-        
         let d_src = DeviceBuffer::from_slice(source_tm_f32)?;
         let d_close = DeviceBuffer::from_slice(close_tm_f32)?;
         let d_fv = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> =
-            unsafe { DeviceBuffer::uninitialized(expected) }?;
-        
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected) }?;
+
         unsafe { d_out.set_zero_async(&self.stream) }?;
 
         let mut func = self
@@ -438,7 +443,7 @@ impl CudaTtmTrend {
                 name: "ttm_trend_many_series_one_param_time_major_f32",
             })?;
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        
+
         let auto_block = || -> u32 {
             let (_min_grid, bs) = func
                 .suggested_launch_configuration(0, (0, 0, 0).into())
@@ -487,7 +492,6 @@ impl CudaTtmTrend {
         self.stream.synchronize().map_err(Into::into)
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -544,15 +548,18 @@ pub mod benches {
                     .launch(&func, self.grid, self.block, 0, args)
                     .expect("ttm_trend batch launch");
             }
-            self.cuda.stream.synchronize().expect("ttm_trend batch sync");
+            self.cuda
+                .stream
+                .synchronize()
+                .expect("ttm_trend batch sync");
         }
     }
 
     fn prep_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaTtmTrend::new(0).expect("cuda ttm");
-        let len = 1_000_000usize; 
+        let len = 1_000_000usize;
         let src = gen_series(len);
-        
+
         let mut close = vec![f32::NAN; len];
         for i in 8..len {
             let x = i as f32;
@@ -562,21 +569,22 @@ pub mod benches {
             period: (5, 254, 1),
         };
 
-        let (combos, first, len) = CudaTtmTrend::prepare_batch_inputs(&src, &close, &sweep)
-            .expect("prepare_batch_inputs");
+        let (combos, first, len) =
+            CudaTtmTrend::prepare_batch_inputs(&src, &close, &sweep).expect("prepare_batch_inputs");
         let n_combos = combos.len();
         let prefix_ff2 = CudaTtmTrend::build_prefix_source_ff2(&src, first);
 
-        let d_prefix: DeviceBuffer<[f32; 2]> = DeviceBuffer::from_slice(&prefix_ff2).expect("d_prefix");
+        let d_prefix: DeviceBuffer<[f32; 2]> =
+            DeviceBuffer::from_slice(&prefix_ff2).expect("d_prefix");
         let d_close = DeviceBuffer::from_slice(&close).expect("d_close");
         let periods: Vec<i32> = combos.iter().map(|c| c.period).collect();
         let warms: Vec<i32> = combos.iter().map(|c| c.warm).collect();
         let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
         let d_warms = DeviceBuffer::from_slice(&warms).expect("d_warms");
         let out_elems = n_combos.checked_mul(len).expect("rows*cols overflow");
-        let d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(out_elems) }.expect("d_out");
 
-        
         const TTM_TILE_TIME: u32 = 256;
         const TTM_TILE_PARAMS: u32 = 4;
         let grid_x: u32 = ((len as u32) + TTM_TILE_TIME - 1) / TTM_TILE_TIME;

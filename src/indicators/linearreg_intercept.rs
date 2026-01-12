@@ -1,29 +1,3 @@
-//! # Linear Regression Intercept (LINEARREG_INTERCEPT)
-//!
-//! Calculates the y-value of the linear regression line at the last point
-//! of each regression window. Effectively gives the "intercept" if the last bar
-//! in each window is the reference point.
-//!
-//! ## Parameters
-//! - **period**: Window size (number of data points), default 14
-//!
-//! ## Inputs
-//! - Single data slice (typically close prices)
-//!
-//! ## Returns
-//! - **`Ok(LinearRegInterceptOutput)`** containing values (Vec<f64>) representing y-intercept values
-//! - Output length matches input data length with NaN padding for warmup period
-//!
-//! ## Developer Notes
-//! - SIMD implemented (AVX2/AVX512) to accelerate initial window reduction.
-//! - Runtime selection short-circuits to Scalar for `Kernel::Auto` because the
-//!   SIMD enabled: AVX2/AVX512 beat scalar at 100k on x86_64.
-//!   Benchmarks (target-cpu=native, 100k): scalar ≈ 104µs; AVX2/AVX512 ≈ 200µs.
-//! - Streaming: O(1) from first output; no warmup rescan.
-//! - Memory optimization: ✅ Uses `alloc_with_nan_prefix` (zero-copy) for warmup.
-//! - Batch operations: ✅ Implemented with parallel processing support.
-//! - Decision log: SIMD kernels exist but Auto short-circuits to scalar for throughput; CUDA wrapper is enabled with VRAM checks, and Python CUDA handles expose CAI v3 + DLPack v1.x with RAII context lifetime; numerical outputs match scalar reference paths.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -41,15 +15,13 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
 use std::convert::AsRef;
 use std::error::Error;
 use thiserror::Error;
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
-
-
 
 impl<'a> AsRef<[f64]> for LinearRegInterceptInput<'a> {
     #[inline(always)]
@@ -76,7 +48,10 @@ pub struct LinearRegInterceptOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct LinearRegInterceptParams {
     pub period: Option<usize>,
 }
@@ -120,8 +95,6 @@ impl<'a> LinearRegInterceptInput<'a> {
         self.params.period.unwrap_or(14)
     }
 }
-
-
 
 #[derive(Copy, Clone, Debug)]
 pub struct LinearRegInterceptBuilder {
@@ -181,8 +154,6 @@ impl LinearRegInterceptBuilder {
     }
 }
 
-
-
 #[derive(Debug, Error)]
 pub enum LinearRegInterceptError {
     #[error("linearreg_intercept: Input data slice is empty.")]
@@ -196,12 +167,14 @@ pub enum LinearRegInterceptError {
     #[error("linearreg_intercept: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("linearreg_intercept: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("linearreg_intercept: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
-
-
 
 #[inline]
 pub fn linearreg_intercept(
@@ -267,12 +240,7 @@ pub fn linearreg_intercept_with_kernel(
     Ok(LinearRegInterceptOutput { values: out })
 }
 
-/// Writes results into a caller-provided slice without allocating.
-///
-/// - Preserves the quiet-NaN warmup prefix exactly like the Vec-returning API.
-/// - `dst.len()` must equal the input length; otherwise returns `OutputLengthMismatch`.
-/// - Uses `Kernel::Auto` (short-circuited to Scalar for this indicator).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn linearreg_intercept_into(
     input: &LinearRegInterceptInput,
@@ -311,7 +279,6 @@ pub fn linearreg_intercept_into(
         });
     }
 
-    
     let warmup_end = first + period - 1;
     for v in &mut dst[..warmup_end] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
@@ -337,7 +304,6 @@ pub fn linearreg_intercept_into(
     Ok(())
 }
 
-/// Write directly to output slice - no allocations (WASM helper)
 #[inline]
 pub fn linearreg_intercept_into_slice(
     dst: &mut [f64],
@@ -407,7 +373,6 @@ pub fn linearreg_intercept_into_slice(
 
 #[inline]
 pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize, out: &mut [f64]) {
-    
     if period == 1 {
         for i in first_val..data.len() {
             out[i] = data[i];
@@ -418,12 +383,11 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
     let n = period as f64;
     let inv_n = 1.0 / n;
 
-    
-    let sum_x = 0.5_f64 * n * (n + 1.0); 
-    let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; 
+    let sum_x = 0.5_f64 * n * (n + 1.0);
+    let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0;
     let denom = n * sum_x2 - sum_x * sum_x;
-    let bd = 1.0 / denom; 
-    let k = 1.0 - sum_x * inv_n; 
+    let bd = 1.0 / denom;
+    let k = 1.0 - sum_x * inv_n;
 
     let start = first_val;
     let end = data.len();
@@ -431,7 +395,6 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
         return;
     }
 
-    
     let mut sum_y = 0.0f64;
     let mut sum_xy = 0.0f64;
     for j in 0..period {
@@ -441,18 +404,16 @@ pub fn linearreg_intercept_scalar(data: &[f64], period: usize, first_val: usize,
         sum_xy += y * x;
     }
 
-    
     let mut i = start + period - 1;
     out[i] = ((n * sum_xy - sum_x * sum_y) * bd) * k + sum_y * inv_n;
 
-    
     while i + 1 < end {
         let y_in = data[i + 1];
         let y_out = data[i + 1 - period];
 
         let prev_sum_y = sum_y;
-        sum_y = prev_sum_y + y_in - y_out; 
-        sum_xy = (sum_xy - prev_sum_y) + n * y_in; 
+        sum_y = prev_sum_y + y_in - y_out;
+        sum_xy = (sum_xy - prev_sum_y) + n * y_in;
 
         i += 1;
         out[i] = ((n * sum_xy - sum_x * sum_y) * bd) * k + sum_y * inv_n;
@@ -477,8 +438,6 @@ pub unsafe fn linearreg_intercept_avx2(
     first_val: usize,
     out: &mut [f64],
 ) {
-    
-    
     if period == 1 {
         let mut i = first_val;
         let end = data.len();
@@ -505,7 +464,6 @@ pub unsafe fn linearreg_intercept_avx2(
         return;
     }
 
-    
     let mut sum_y = 0.0f64;
     let mut sum_xy = 0.0f64;
     let base = data.as_ptr().add(start);
@@ -519,13 +477,11 @@ pub unsafe fn linearreg_intercept_avx2(
         j += 1;
     }
 
-    
     let mut i = start + period - 1;
     let outp = out.as_mut_ptr();
     let mut b = n.mul_add(sum_xy, -sum_x * sum_y) * bd;
     *outp.add(i) = b.mul_add(k, sum_y * inv_n);
 
-    
     let dptr = data.as_ptr();
     while i + 1 < end {
         let y_in = *dptr.add(i + 1);
@@ -563,8 +519,6 @@ pub unsafe fn linearreg_intercept_avx512_long(
     linearreg_intercept_avx2(data, period, first_val, out)
 }
 
-
-
 #[derive(Debug, Clone)]
 pub struct LinearRegInterceptStream {
     period: usize,
@@ -590,10 +544,9 @@ impl LinearRegInterceptStream {
             });
         }
 
-        
         let n = period as f64;
-        let sum_x = 0.5_f64 * n * (n + 1.0); 
-        let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0; 
+        let sum_x = 0.5_f64 * n * (n + 1.0);
+        let sum_x2 = (n * (n + 1.0) * (2.0 * n + 1.0)) / 6.0;
         let denom = n * sum_x2 - sum_x * sum_x;
         let bd = if period == 1 { 0.0 } else { 1.0 / denom };
 
@@ -603,7 +556,7 @@ impl LinearRegInterceptStream {
             head: 0,
             filled: false,
             sum_x,
-            sum_x2, 
+            sum_x2,
             n,
             bd,
             sum_y: 0.0,
@@ -611,19 +564,15 @@ impl LinearRegInterceptStream {
         })
     }
 
-    /// O(1) update from the very first output; no O(n) "first wrap" recompute.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if self.period == 1 {
             return Some(value);
         }
 
-        
         let tail = self.head;
         let y_out = self.buffer[tail];
 
-        
         self.buffer[tail] = value;
         self.head = if self.head + 1 == self.period {
             0
@@ -632,40 +581,31 @@ impl LinearRegInterceptStream {
         };
 
         if !self.filled {
-            
-            
-            let x = (tail as f64) + 1.0; 
+            let x = (tail as f64) + 1.0;
             self.sum_y += value;
-            self.sum_xy = value.mul_add(x, self.sum_xy); 
+            self.sum_xy = value.mul_add(x, self.sum_xy);
 
-            
             if self.head == 0 {
                 self.filled = true;
-                
             } else {
                 return None;
             }
         } else {
-            
             let sum_y_old = self.sum_y;
             self.sum_y = sum_y_old + value - y_out;
-            
+
             self.sum_xy = (self.sum_xy - sum_y_old) + self.n * value;
         }
 
-        
-        
         let inv_n = 1.0 / self.n;
         let k = 1.0 - self.sum_x * inv_n;
-        
+
         let t = self.n.mul_add(self.sum_xy, -(self.sum_x * self.sum_y));
         let b = t * self.bd;
         let y = self.sum_y.mul_add(inv_n, b * k);
         Some(y)
     }
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct LinearRegInterceptBatchRange {
@@ -775,8 +715,6 @@ impl LinearRegInterceptBatchOutput {
         })
     }
 }
-
-
 
 #[inline(always)]
 fn expand_grid(
@@ -1086,14 +1024,10 @@ fn expand_grid_reg(r: &LinearRegInterceptBatchRange) -> Vec<LinearRegInterceptPa
     expand_grid(r).unwrap_or_else(|_| Vec::new())
 }
 
-
-
-
-
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1115,7 +1049,10 @@ pub struct LinearRegInterceptDeviceArrayF32Py {
 #[pymethods]
 impl LinearRegInterceptDeviceArrayF32Py {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
         d.set_item("shape", (self.rows, self.cols))?;
         d.set_item("typestr", "<f4")?;
@@ -1133,7 +1070,7 @@ impl LinearRegInterceptDeviceArrayF32Py {
             .as_device_ptr()
             .as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producer stream is synchronized before returning the handle; omit `stream`.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1151,7 +1088,6 @@ impl LinearRegInterceptDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -1165,16 +1101,13 @@ impl LinearRegInterceptDeviceArrayF32Py {
                             "device copy not implemented for __dlpack__",
                         ));
                     } else {
-                        return Err(PyValueError::new_err(
-                            "dl_device mismatch for __dlpack__",
-                        ));
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                     }
                 }
             }
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let buf = self
             .buf
             .take()
@@ -1256,9 +1189,7 @@ pub fn linearreg_intercept_cuda_many_series_one_param_dev_py(
         let cuda = CudaLinregIntercept::new(device_id)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let dev = cuda
-            .linearreg_intercept_many_series_one_param_time_major_dev(
-                slice, cols, rows, &params,
-            )
+            .linearreg_intercept_many_series_one_param_time_major_dev(slice, cols, rows, &params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         Ok::<_, pyo3::PyErr>((dev, ctx, cuda.device_id()))
@@ -1446,19 +1377,18 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Define comprehensive parameter combinations
         let test_params = vec![
-            LinearRegInterceptParams::default(),            // period: 14
-            LinearRegInterceptParams { period: Some(2) },   // minimum viable
-            LinearRegInterceptParams { period: Some(5) },   // small
-            LinearRegInterceptParams { period: Some(7) },   // small
-            LinearRegInterceptParams { period: Some(10) },  // small
-            LinearRegInterceptParams { period: Some(20) },  // medium
-            LinearRegInterceptParams { period: Some(30) },  // medium
-            LinearRegInterceptParams { period: Some(50) },  // large
-            LinearRegInterceptParams { period: Some(100) }, // very large
-            LinearRegInterceptParams { period: Some(150) }, // very large
-            LinearRegInterceptParams { period: Some(200) }, // maximum
+            LinearRegInterceptParams::default(),
+            LinearRegInterceptParams { period: Some(2) },
+            LinearRegInterceptParams { period: Some(5) },
+            LinearRegInterceptParams { period: Some(7) },
+            LinearRegInterceptParams { period: Some(10) },
+            LinearRegInterceptParams { period: Some(20) },
+            LinearRegInterceptParams { period: Some(30) },
+            LinearRegInterceptParams { period: Some(50) },
+            LinearRegInterceptParams { period: Some(100) },
+            LinearRegInterceptParams { period: Some(150) },
+            LinearRegInterceptParams { period: Some(200) },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -1467,12 +1397,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; // NaN values are expected during warmup
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                // Check all three poison patterns
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1519,7 +1448,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_linreg_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -1530,33 +1459,22 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        // Helper function to calculate expected linear regression intercept
-        // For data following y = slope*index + intercept
         fn calculate_expected_linreg_intercept(
             window_start_idx: usize,
             period: usize,
             data_slope: f64,
             data_intercept: f64,
         ) -> f64 {
-            // For perfect linear data y[i] = data_slope*i + data_intercept
-            // When we do regression on window [start, start+period-1] with x-coords [1, period]
-            // The regression line has slope = data_slope
-            // The output is a + b where a is adjusted intercept and b is slope
-            // Mathematical derivation shows: output = y[start] = data_slope*start + data_intercept
             data_slope * window_start_idx as f64 + data_intercept
         }
 
-        // Strategy for generating test data
         let strat = (1usize..=100, 50usize..500, 0usize..5, any::<u64>()).prop_map(
             |(period, len, scenario, seed)| {
-                // Use deterministic LCG for reproducible random generation
                 let mut rng_state = seed.wrapping_mul(1664525).wrapping_add(1013904223);
                 let mut data = Vec::with_capacity(len);
 
-                // Generate data based on scenario
                 match scenario {
                     0 => {
-                        // Random data
                         for _ in 0..len {
                             rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
                             let val = (rng_state as f64 / u64::MAX as f64) * 200.0 - 100.0;
@@ -1564,24 +1482,20 @@ mod tests {
                         }
                     }
                     1 => {
-                        // Constant data
                         let constant = 42.0;
                         data.resize(len, constant);
                     }
                     2 => {
-                        // Perfect linear trend: y = 2x + 10
                         for i in 0..len {
                             data.push(2.0 * i as f64 + 10.0);
                         }
                     }
                     3 => {
-                        // Perfect downward trend: y = -1.5x + 100
                         for i in 0..len {
                             data.push(-1.5 * i as f64 + 100.0);
                         }
                     }
                     _ => {
-                        // Noisy linear trend
                         for i in 0..len {
                             rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
                             let noise = ((rng_state as f64 / u64::MAX as f64) - 0.5) * 10.0;
@@ -1600,13 +1514,10 @@ mod tests {
             };
             let input = LinearRegInterceptInput::from_slice(&data, params);
 
-            // Test with specified kernel
             let output = linearreg_intercept_with_kernel(&input, kernel)?;
 
-            // Test with scalar reference
             let ref_output = linearreg_intercept_with_kernel(&input, Kernel::Scalar)?;
 
-            // Property 1: Output length matches input
             prop_assert_eq!(
                 output.values.len(),
                 data.len(),
@@ -1614,9 +1525,7 @@ mod tests {
                 test_name
             );
 
-            // Property 2: Handle period=1 edge case
             if period == 1 {
-                // For period=1, output should equal input (no regression, just the value itself)
                 for i in 0..data.len() {
                     let expected = data[i];
                     let actual = output.values[i];
@@ -1630,7 +1539,6 @@ mod tests {
                     );
                 }
             } else {
-                // Property 3: Warmup period - first (period-1) values should be NaN
                 for i in 0..(period - 1) {
                     prop_assert!(
                         output.values[i].is_nan(),
@@ -1640,7 +1548,6 @@ mod tests {
                     );
                 }
 
-                // Property 4: First valid value should be at index (period-1)
                 if period <= data.len() {
                     prop_assert!(
                         !output.values[period - 1].is_nan(),
@@ -1651,7 +1558,6 @@ mod tests {
                 }
             }
 
-            // Property 5: For constant data, intercept should equal the constant
             if scenario == 1 && period < data.len() {
                 for i in (period - 1)..data.len() {
                     let intercept = output.values[i];
@@ -1667,15 +1573,13 @@ mod tests {
                 }
             }
 
-            // Property 6: For perfect linear trends, verify EXACT expected intercepts
             if (scenario == 2 || scenario == 3) && period > 1 && period < data.len() {
                 let (data_slope, data_intercept) = match scenario {
-                    2 => (2.0, 10.0),   // y = 2x + 10
-                    3 => (-1.5, 100.0), // y = -1.5x + 100
+                    2 => (2.0, 10.0),
+                    3 => (-1.5, 100.0),
                     _ => unreachable!(),
                 };
 
-                // Test a subset of positions for exact mathematical correctness
                 for i in (period - 1)..data.len().min(period * 5) {
                     let actual = output.values[i];
                     if !actual.is_nan() {
@@ -1694,12 +1598,10 @@ mod tests {
                 }
             }
 
-            // Property 7: Kernel consistency
             for i in 0..output.values.len() {
                 let y = output.values[i];
                 let r = ref_output.values[i];
 
-                // Check for poison values
                 let bits = y.to_bits();
                 prop_assert!(
                     bits != 0x11111111_11111111
@@ -1711,9 +1613,8 @@ mod tests {
                     bits
                 );
 
-                // Check kernel consistency
                 if y.is_nan() && r.is_nan() {
-                    continue; // Both NaN is fine
+                    continue;
                 }
 
                 if y.is_finite() && r.is_finite() {
@@ -1739,7 +1640,6 @@ mod tests {
                 }
             }
 
-            // Property 8: Values should be reasonable (not infinite)
             if period > 1 {
                 for i in (period - 1)..output.values.len() {
                     let val = output.values[i];
@@ -1800,7 +1700,6 @@ mod tests {
 
     #[test]
     fn test_linearreg_intercept_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Build a small but non-trivial input with a NaN warmup prefix
         let len = 256usize;
         let mut data = Vec::with_capacity(len);
         for i in 0..len {
@@ -1814,21 +1713,17 @@ mod tests {
 
         let input = LinearRegInterceptInput::from_slice(&data, LinearRegInterceptParams::default());
 
-        // Baseline via Vec-returning API
         let baseline = linearreg_intercept(&input)?.values;
 
-        // Preallocated output for into()
         let mut out = vec![0.0; data.len()];
         #[allow(unused_variables)]
         {
-            // Native into API is not built under wasm
-            #[cfg(not(feature = "wasm"))]
+            #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
             {
                 linearreg_intercept_into(&input, &mut out)?;
             }
-            #[cfg(feature = "wasm")]
+            #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
             {
-                // On wasm builds, ensure the helper path stays in sync
                 linearreg_intercept_into_slice(&mut out, &input, Kernel::Auto)?;
             }
         }
@@ -1891,16 +1786,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        // Test various parameter sweep configurations
         let test_configs = vec![
-            (2, 10, 2),     // Small periods
-            (5, 25, 5),     // Medium periods
-            (10, 10, 0),    // Single value (static)
-            (2, 5, 1),      // Dense small range
-            (30, 60, 15),   // Large periods
-            (2, 14, 3),     // Include default
-            (50, 100, 25),  // Very large periods
-            (100, 200, 50), // Maximum range
+            (2, 10, 2),
+            (5, 25, 5),
+            (10, 10, 0),
+            (2, 5, 1),
+            (30, 60, 15),
+            (2, 14, 3),
+            (50, 100, 25),
+            (100, 200, 50),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step)) in test_configs.iter().enumerate() {
@@ -1919,7 +1813,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                // Check all three poison patterns with detailed context
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -1972,7 +1865,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) // No-op in release builds
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2065,8 +1958,7 @@ pub fn linearreg_intercept_batch_py<'py>(
         period: period_range,
     };
 
-    let combos = expand_grid(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = slice_in.len();
 
@@ -2077,7 +1969,6 @@ pub fn linearreg_intercept_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Write warm NaNs per row only
     if !combos.is_empty() && cols > 0 {
         let first = slice_in.iter().position(|x| !x.is_nan()).unwrap_or(0);
         for (r, prm) in combos.iter().enumerate() {
@@ -2118,9 +2009,7 @@ pub fn linearreg_intercept_batch_py<'py>(
     Ok(dict)
 }
 
-// ============= WASM API =============
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_intercept_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = LinearRegInterceptParams {
@@ -2135,7 +2024,7 @@ pub fn linearreg_intercept_js(data: &[f64], period: usize) -> Result<Vec<f64>, J
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_intercept_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2144,7 +2033,7 @@ pub fn linearreg_intercept_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_intercept_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2154,7 +2043,7 @@ pub fn linearreg_intercept_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_intercept_into(
     in_ptr: *const f64,
@@ -2174,7 +2063,6 @@ pub fn linearreg_intercept_into(
         let input = LinearRegInterceptInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // CRITICAL: Aliasing check
             let mut temp = vec![0.0; len];
             linearreg_intercept_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2189,13 +2077,13 @@ pub fn linearreg_intercept_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LinearRegInterceptBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LinearRegInterceptBatchJsOutput {
     pub values: Vec<f64>,
@@ -2204,7 +2092,7 @@ pub struct LinearRegInterceptBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = linearreg_intercept_batch)]
 pub fn linearreg_intercept_batch_unified_js(
     data: &[f64],
@@ -2231,7 +2119,7 @@ pub fn linearreg_intercept_batch_unified_js(
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn linearreg_intercept_batch_into(
     in_ptr: *const f64,
@@ -2250,21 +2138,18 @@ pub fn linearreg_intercept_batch_into(
         let sweep = LinearRegInterceptBatchRange {
             period: (period_start, period_end, period_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
-        let total = rows
-            .checked_mul(cols)
-            .ok_or_else(|| JsValue::from_str("linearreg_intercept_batch_into: rows*cols overflow"))?;
+        let total = rows.checked_mul(cols).ok_or_else(|| {
+            JsValue::from_str("linearreg_intercept_batch_into: rows*cols overflow")
+        })?;
 
-        // Warmup NaNs per row
         let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
         if in_ptr == out_ptr {
             let mut temp = vec![0.0; total];
 
-            // Pre-fill warmup NaNs for each row
             for (r, prm) in combos.iter().enumerate() {
                 let warm = (first + prm.period.unwrap() - 1).min(cols);
                 temp[r * cols..r * cols + warm].fill(f64::NAN);
@@ -2277,7 +2162,6 @@ pub fn linearreg_intercept_batch_into(
         } else {
             let out = std::slice::from_raw_parts_mut(out_ptr, total);
 
-            // Pre-fill warmup NaNs for each row
             for (r, prm) in combos.iter().enumerate() {
                 let warm = (first + prm.period.unwrap() - 1).min(cols);
                 out[r * cols..r * cols + warm].fill(f64::NAN);

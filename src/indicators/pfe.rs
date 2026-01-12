@@ -1,24 +1,3 @@
-//! # Polarized Fractal Efficiency (PFE)
-//!
-//! Measures the efficiency of price movement over a period, producing signed values
-//! (positive = upward efficiency, negative = downward), then smooths with EMA.
-//!
-//! ## Parameters
-//! - **period**: Lookback window (default: 10)
-//! - **smoothing**: EMA smoothing window (default: 5)
-//!
-//! ## Inputs
-//! - **data**: Price data or any numeric series
-//!
-//! ## Returns
-//! - **values**: Vector of PFE values with NaN prefix during warmup period
-//!
-//! ## Developer Notes
-//! - **Decision**: Single-series SIMD not enabled; time dependency makes it unhelpful beyond init. Batch path uses shared prefix sums and is fastest.
-//! - **AVX2/AVX512 Kernels**: Implemented for row init; runtime selection remains but single-series uses the scalar core.
-//! - **Streaming**: Implemented with O(1) update performance (maintains running sum)
-//! - **Zero-copy Memory**: Uses alloc_with_nan_prefix and make_uninit_matrix for batch operations
-//! - **Decision log**: SIMD disabled for single-series; CUDA batch/many-series wrappers enabled and matched to scalar within FP32 tolerance; Python interop exposes CUDA Array Interface v3 and DLPack v1.x without changing numerical outputs.
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -46,9 +25,9 @@ use std::error::Error;
 use thiserror::Error;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::pfe_wrapper::CudaPfe;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::pfe_wrapper::CudaPfe;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -83,7 +62,10 @@ pub struct PfeOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct PfeParams {
     pub period: Option<usize>,
     pub smoothing: Option<usize>,
@@ -216,7 +198,11 @@ pub enum PfeError {
     #[error("pfe: Output length mismatch: expected {expected}, got {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("pfe: invalid range: start={start} end={end} step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("pfe: invalid kernel for batch path: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("pfe: invalid input: {0}")]
@@ -246,7 +232,7 @@ fn pfe_prepare<'a>(
             data_len: len,
         });
     }
-    
+
     if len - first < period + 1 {
         return Err(PfeError::NotEnoughValidData {
             needed: period + 1,
@@ -258,7 +244,6 @@ fn pfe_prepare<'a>(
     }
 
     let chosen = match k {
-        
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
@@ -271,7 +256,7 @@ fn pfe_compute_into(
     period: usize,
     smoothing: usize,
     first: usize,
-    _kernel: Kernel, 
+    _kernel: Kernel,
     out: &mut [f64],
 ) {
     let len = data.len();
@@ -279,25 +264,20 @@ fn pfe_compute_into(
         return;
     }
 
-    
     let start = first + period;
     if start >= len {
         return;
     }
 
-    
     let p = period as f64;
     let p2 = p * p;
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    
     let mut seg = vec![0.0f64; period];
-    let mut head = 0usize; 
+    let mut head = 0usize;
     let mut denom = 0.0f64;
 
-    
-    
     let base = start - period + 1;
     for j in 0..period {
         let k = base + j;
@@ -307,25 +287,20 @@ fn pfe_compute_into(
         denom += s;
     }
 
-    
     let mut ema_started = false;
     let mut ema_val = 0.0f64;
 
-    
     let last = len - 1;
     for t in start..last {
         let cur = data[t];
         let past = data[t - period];
         let diff = cur - past;
 
-        
         let long_leg = (diff.mul_add(diff, p2)).sqrt();
 
-        
         let raw = 100.0 * (long_leg / denom);
         let signed = if diff > 0.0 { raw } else { -raw };
 
-        
         let val = if !ema_started {
             ema_started = true;
             ema_val = signed;
@@ -337,10 +312,9 @@ fn pfe_compute_into(
 
         out[t] = val;
 
-        
         let old = seg[head];
         let next = data[t + 1];
-        let new_d = next - cur; 
+        let new_d = next - cur;
         let new_s = (new_d.mul_add(new_d, 1.0)).sqrt();
         denom += new_s - old;
         seg[head] = new_s;
@@ -350,7 +324,6 @@ fn pfe_compute_into(
         }
     }
 
-    
     if start <= last {
         let cur = data[last];
         let past = data[last - period];
@@ -373,20 +346,13 @@ pub fn pfe(input: &PfeInput) -> Result<PfeOutput, PfeError> {
 
 pub fn pfe_with_kernel(input: &PfeInput, kernel: Kernel) -> Result<PfeOutput, PfeError> {
     let (data, period, smoothing, first, chosen) = pfe_prepare(input, kernel)?;
-    
+
     let mut out = alloc_with_nan_prefix(data.len(), first + period);
     pfe_compute_into(data, period, smoothing, first, chosen, &mut out);
     Ok(PfeOutput { values: out })
 }
 
-/// Write PFE values into a caller-provided buffer without allocating.
-///
-/// - Preserves NaN warmups identical to the Vec-returning API
-///   (quiet NaNs for the first `first + period` slots).
-/// - The output slice length must equal the input data length.
-///
-/// Returns `Ok(())` on success or the module's error on invalid inputs.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn pfe_into(input: &PfeInput, out: &mut [f64]) -> Result<(), PfeError> {
     let (data, period, smoothing, first, chosen) = pfe_prepare(input, Kernel::Auto)?;
@@ -397,14 +363,11 @@ pub fn pfe_into(input: &PfeInput, out: &mut [f64]) -> Result<(), PfeError> {
         });
     }
 
-    // Prefill warmup prefix with the same quiet-NaN pattern used by
-    // `alloc_with_nan_prefix` to ensure exact parity of warmups.
     let warm = (first + period).min(out.len());
     for v in &mut out[..warm] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute the indicator values into the provided buffer.
     pfe_compute_into(data, period, smoothing, first, chosen, out);
     Ok(())
 }
@@ -419,14 +382,12 @@ pub fn pfe_into_slice(dst: &mut [f64], input: &PfeInput, k: Kernel) -> Result<()
         });
     }
     pfe_compute_into(data, period, smoothing, first, chosen, dst);
-    // ensure warmup prefix is NaN without bulk fills
+
     for v in &mut dst[..(first + period)] {
         *v = f64::NAN;
     }
     Ok(())
 }
-
-// Removed old pfe_scalar and AVX stubs - now using unified pfe_compute_into
 
 #[inline]
 pub fn pfe_batch_with_kernel(
@@ -557,11 +518,7 @@ fn expand_grid(r: &PfeBatchRange) -> Result<Vec<PfeParams>, PfeError> {
                 x = next;
             }
             if v.is_empty() {
-                return Err(PfeError::InvalidRange {
-                    start,
-                    end,
-                    step,
-                });
+                return Err(PfeError::InvalidRange { start, end, step });
             }
             return Ok(v);
         }
@@ -580,11 +537,7 @@ fn expand_grid(r: &PfeBatchRange) -> Result<Vec<PfeParams>, PfeError> {
             x = next;
         }
         if v.is_empty() {
-            return Err(PfeError::InvalidRange {
-                start,
-                end,
-                step,
-            });
+            return Err(PfeError::InvalidRange { start, end, step });
         }
         Ok(v)
     }
@@ -663,13 +616,11 @@ pub fn pfe_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(PfeError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 0,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(PfeError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
     if out.len() != expected {
         return Err(PfeError::OutputLengthMismatch {
             expected,
@@ -677,16 +628,13 @@ pub fn pfe_batch_inner_into(
         });
     }
 
-    // Initialize warmup NaNs for all rows efficiently
     for (row, combo) in combos.iter().enumerate() {
         let warmup = first + combo.period.unwrap();
-        let row_start = row
-            .checked_mul(cols)
-            .ok_or(PfeError::InvalidRange {
-                start: row,
-                end: cols,
-                step: 0,
-            })?;
+        let row_start = row.checked_mul(cols).ok_or(PfeError::InvalidRange {
+            start: row,
+            end: cols,
+            step: 0,
+        })?;
         let end = row_start
             .checked_add(warmup.min(cols))
             .ok_or(PfeError::InvalidRange {
@@ -699,7 +647,6 @@ pub fn pfe_batch_inner_into(
         }
     }
 
-    // Shared prefix sums: prefix[i] = sum_{k=1..i} sqrt(1 + (ΔP_k)^2)
     let mut prefix = vec![0.0f64; cols];
     for i in 1..cols {
         let d = data[i] - data[i - 1];
@@ -766,24 +713,20 @@ fn pfe_batch_inner(
 
     let rows = combos.len();
     let cols = data.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(PfeError::InvalidRange {
-            start: rows,
-            end: cols,
-            step: 0,
-        })?;
+    let total = rows.checked_mul(cols).ok_or(PfeError::InvalidRange {
+        start: rows,
+        end: cols,
+        step: 0,
+    })?;
 
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
-    let values_slice: &mut [f64] = unsafe {
-        core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, total)
-    };
+    let values_slice: &mut [f64] =
+        unsafe { core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, total) };
 
-    // Shared prefix sums across rows for batch speedup
     let mut prefix = vec![0.0f64; cols];
     for i in 1..cols {
         let d = data[i] - data[i - 1];
@@ -850,14 +793,12 @@ unsafe fn pfe_row_scalar(
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Ring buffer of short-leg segment lengths over the last `period` steps
     let mut seg = vec![0.0f64; period];
     let mut head = 0usize;
     let mut denom = 0.0f64;
 
-    // Initialize denominator at `start`
     let base = start - period + 1;
-    // Unroll by 4
+
     let mut j = 0usize;
     let stop = period & !3;
     while j < stop {
@@ -892,7 +833,6 @@ unsafe fn pfe_row_scalar(
         j += 1;
     }
 
-    // EMA state
     let mut ema_started = false;
     let mut ema_val = 0.0f64;
 
@@ -955,11 +895,9 @@ unsafe fn pfe_row_avx2(
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Allocate contiguous ring buffer for segment lengths
     let mut seg = vec![0.0f64; period];
     let mut head = 0usize;
 
-    // Vectorized initialization of denominator at `start`
     let base = start - period + 1;
     let mut denom = 0.0f64;
 
@@ -994,7 +932,6 @@ unsafe fn pfe_row_avx2(
         j += 1;
     }
 
-    // EMA state
     let mut ema_started = false;
     let mut ema_val = 0.0f64;
 
@@ -1057,11 +994,9 @@ unsafe fn pfe_row_avx512(
     let alpha = 2.0 / (smoothing as f64 + 1.0);
     let one_minus_alpha = 1.0 - alpha;
 
-    // Allocate contiguous ring buffer for segment lengths
     let mut seg = vec![0.0f64; period];
     let mut head = 0usize;
 
-    // Vectorized initialization of denominator at `start`
     let base = start - period + 1;
     let mut denom = 0.0f64;
 
@@ -1104,7 +1039,6 @@ unsafe fn pfe_row_avx512(
         j += 1;
     }
 
-    // EMA state
     let mut ema_started = false;
     let mut ema_val = 0.0f64;
 
@@ -1148,11 +1082,10 @@ unsafe fn pfe_row_avx512(
     }
 }
 
-// Batch optimization: shared prefix sums of step lengths
 #[inline(always)]
 unsafe fn pfe_row_scalar_with_prefix(
     data: &[f64],
-    prefix: &[f64], // prefix[i] = sum_{k=1..i} sqrt(1 + (ΔP)^2) with ΔP at k
+    prefix: &[f64],
     first: usize,
     period: usize,
     smoothing: usize,
@@ -1196,36 +1129,27 @@ unsafe fn pfe_row_scalar_with_prefix(
     }
 }
 
-// Decision: Streaming kernel uses contiguous Vec rings (prices, segments),
-// not VecDeque; exact math retained for test parity. O(1) per tick.
-
 #[derive(Debug, Clone)]
 pub struct PfeStream {
-    // params
     period: usize,
     smoothing: usize,
 
-    // precomputed constants
     alpha: f64,
     one_minus_alpha: f64,
-    p2: f64, // (period as f64)^2
+    p2: f64,
 
-    // ring of last (period + 1) prices
-    prices: Vec<f64>,   // capacity = period + 1 (contiguous)
-    price_pos: usize,   // index of most-recent element in `prices`
-    price_count: usize, // how many prices we have (<= period+1)
+    prices: Vec<f64>,
+    price_pos: usize,
+    price_count: usize,
 
-    // ring of last `period` short-leg step lengths: sqrt(1 + d^2)
-    seg: Vec<f64>,    // capacity = period
-    seg_pos: usize,   // next position to overwrite in `seg`
-    seg_count: usize, // how many segments we have (<= period)
-    short_sum: f64,   // running sum of `seg`
+    seg: Vec<f64>,
+    seg_pos: usize,
+    seg_count: usize,
+    short_sum: f64,
 
-    // step state
     last_price: f64,
     have_last: bool,
 
-    // EMA state
     ema_val: f64,
     started: bool,
 }
@@ -1256,7 +1180,7 @@ impl PfeStream {
             p2: (period as f64) * (period as f64),
 
             prices: vec![0.0; cap_prices],
-            price_pos: cap_prices - 1, // so first write lands at 0
+            price_pos: cap_prices - 1,
             price_count: 0,
 
             seg: if cap_seg > 0 {
@@ -1276,17 +1200,14 @@ impl PfeStream {
         })
     }
 
-    /// Push one price. Returns None until `period+1` samples have been seen.
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
-        // 1) Update short-leg with the new step (t-1 -> t)
         if self.have_last {
             let d = price - self.last_price;
-            // exact hypot-like step: sqrt(1 + d^2)
+
             let new_s = (d.mul_add(d, 1.0)).sqrt();
 
             if self.seg_count < self.period {
-                // still filling the segment ring
                 self.short_sum += new_s;
                 if self.period > 0 {
                     self.seg[self.seg_pos] = new_s;
@@ -1297,7 +1218,6 @@ impl PfeStream {
                 }
                 self.seg_count += 1;
             } else if self.period > 0 {
-                // steady state: drop oldest, add newest
                 let old = self.seg[self.seg_pos];
                 self.short_sum += new_s - old;
                 self.seg[self.seg_pos] = new_s;
@@ -1310,7 +1230,6 @@ impl PfeStream {
         self.last_price = price;
         self.have_last = true;
 
-        // 2) Insert the new price into the price ring
         let cap_prices = self.period + 1;
         self.price_pos += 1;
         if self.price_pos == cap_prices {
@@ -1321,22 +1240,17 @@ impl PfeStream {
             self.price_count += 1;
         }
 
-        // 3) Not enough samples yet? No output.
         if self.price_count < cap_prices {
             return None;
         }
 
-        // 4) Compute diff = P_t - P_{t-period}
-        //    Oldest element is the slot after the current (wrap-aware).
         let past_idx = self.price_pos + 1 - ((self.price_pos + 1) / cap_prices) * cap_prices;
         let past = self.prices[past_idx];
         let diff = price - past;
 
-        // 5) Long leg = sqrt(diff^2 + period^2); denom = rolling sum of short legs
         let long_leg = (diff.mul_add(diff, self.p2)).sqrt();
         let denom = self.short_sum;
 
-        // 6) Raw PFE (guard small denom), sign by diff>0
         let inv = if denom <= f64::EPSILON {
             0.0
         } else {
@@ -1345,7 +1259,6 @@ impl PfeStream {
         let raw = 100.0 * long_leg * inv;
         let signed = if diff > 0.0 { raw } else { -raw };
 
-        // 7) EMA smoothing
         let out = if !self.started {
             self.started = true;
             self.ema_val = signed;
@@ -1361,7 +1274,6 @@ impl PfeStream {
     }
 }
 
-// ---------------- CUDA Python device handle (CAI v3 + DLPack v1.x) ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", name = "PfeDeviceArrayF32", unsendable)]
 pub struct PfeDeviceArrayF32Py {
@@ -1399,8 +1311,7 @@ impl PfeDeviceArrayF32Py {
         dl_device: Option<PyObject>,
         copy: Option<PyObject>,
     ) -> PyResult<PyObject> {
-        
-        let (kdl, alloc_dev) = self.__dlpack_device__(); 
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1413,18 +1324,15 @@ impl PfeDeviceArrayF32Py {
                             "device copy not implemented for __dlpack__",
                         ));
                     } else {
-                        return Err(PyValueError::new_err(
-                            "dl_device mismatch for __dlpack__",
-                        ));
+                        return Err(PyValueError::new_err("dl_device mismatch for __dlpack__"));
                     }
                 }
             }
         }
         let _ = stream;
 
-        
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32 {
@@ -1551,7 +1459,6 @@ pub fn pfe_batch_py<'py>(
     Ok(dict)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "pfe_cuda_batch_dev")]
 #[pyo3(signature = (data, period_range, smoothing_range, device_id=0))]
@@ -1571,15 +1478,13 @@ pub fn pfe_cuda_batch_dev_py(
         period: period_range,
         smoothing: smoothing_range,
     };
-    let (inner, ctx, dev_id) = py
-        .allow_threads(|| {
-            let cuda =
-                CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let dev = cuda
-                .pfe_batch_dev(slice_in, &sweep)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
-        })?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev = cuda
+            .pfe_batch_dev(slice_in, &sweep)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
+    })?;
     Ok(PfeDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
@@ -1600,15 +1505,13 @@ pub fn pfe_cuda_many_series_one_param_dev_py(
         return Err(PyValueError::new_err("CUDA not available"));
     }
     let tm_slice = data_tm.as_slice()?;
-    let (inner, ctx, dev_id) = py
-        .allow_threads(|| {
-            let cuda =
-                CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
-            let dev = cuda
-                .pfe_many_series_one_param_time_major_dev(tm_slice, cols, rows, period, smoothing)
-                .map_err(|e| PyValueError::new_err(e.to_string()))?;
-            Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
-        })?;
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda = CudaPfe::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dev = cuda
+            .pfe_many_series_one_param_time_major_dev(tm_slice, cols, rows, period, smoothing)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((dev, cuda.context_arc(), cuda.device_id()))
+    })?;
     Ok(PfeDeviceArrayF32Py::new_from_rust(inner, ctx, dev_id))
 }
 
@@ -1637,12 +1540,12 @@ impl PfeStreamPy {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pfe_js(data: &[f64], period: usize, smoothing: usize) -> Result<Vec<f64>, JsValue> {
     let params = PfeParams {
@@ -1656,7 +1559,7 @@ pub fn pfe_js(data: &[f64], period: usize, smoothing: usize) -> Result<Vec<f64>,
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pfe_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -1665,7 +1568,7 @@ pub fn pfe_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pfe_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1673,7 +1576,7 @@ pub fn pfe_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pfe_into(
     in_ptr: *const f64,
@@ -1706,14 +1609,14 @@ pub fn pfe_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PfeBatchConfig {
     pub period_range: (usize, usize, usize),
     pub smoothing_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct PfeBatchJsOutput {
     pub values: Vec<f64>,
@@ -1722,7 +1625,7 @@ pub struct PfeBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = pfe_batch)]
 pub fn pfe_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: PfeBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1743,7 +1646,7 @@ pub fn pfe_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, Js
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn pfe_batch_into(
     in_ptr: *const f64,
@@ -1755,7 +1658,7 @@ pub fn pfe_batch_into(
     s_start: usize,
     s_end: usize,
     s_step: usize,
-    ) -> Result<usize, JsValue> {
+) -> Result<usize, JsValue> {
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer"));
     }
@@ -1765,8 +1668,7 @@ pub fn pfe_batch_into(
             period: (p_start, p_end, p_step),
             smoothing: (s_start, s_end, s_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let total = len
             .checked_mul(rows)
@@ -2009,7 +1911,6 @@ mod tests {
             }
         }
 
-    
         assert_eq!(batch_output.len(), stream_values.len());
         for (i, (&b, &s)) in batch_output.iter().zip(stream_values.iter()).enumerate() {
             if b.is_nan() && s.is_nan() {
@@ -2066,12 +1967,11 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            PfeParams::default(), 
+            PfeParams::default(),
             PfeParams {
-                period: Some(2),    
-                smoothing: Some(1), 
+                period: Some(2),
+                smoothing: Some(1),
             },
             PfeParams {
                 period: Some(5),
@@ -2094,16 +1994,16 @@ mod tests {
                 smoothing: Some(10),
             },
             PfeParams {
-                period: Some(50), 
+                period: Some(50),
                 smoothing: Some(15),
             },
             PfeParams {
-                period: Some(100), 
+                period: Some(100),
                 smoothing: Some(20),
             },
             PfeParams {
                 period: Some(3),
-                smoothing: Some(30), 
+                smoothing: Some(30),
             },
         ];
 
@@ -2113,12 +2013,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2168,7 +2067,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_pfe_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2180,24 +2079,19 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=64).prop_flat_map(|period| {
             (
-                
                 prop::collection::vec(
                     prop::strategy::Union::new(vec![
-                        
                         (0.01f64..10.0f64).boxed(),
-                        
                         (10.0f64..1000.0f64).boxed(),
-                        
                         (1000.0f64..100000.0f64).boxed(),
                     ])
                     .prop_filter("finite", |x| x.is_finite()),
                     period + 50..400,
                 ),
                 Just(period),
-                1usize..=20, 
+                1usize..=20,
             )
         });
 
@@ -2213,7 +2107,6 @@ mod tests {
                 let PfeOutput { values: ref_out } =
                     pfe_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 prop_assert_eq!(
                     out.len(),
                     data.len(),
@@ -2221,7 +2114,6 @@ mod tests {
                     test_name
                 );
 
-                
                 for i in 0..period {
                     prop_assert!(
                         out[i].is_nan(),
@@ -2232,12 +2124,10 @@ mod tests {
                     );
                 }
 
-                
                 for i in period..data.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_nan() != r.is_nan() {
                         prop_assert!(
                             false,
@@ -2250,7 +2140,6 @@ mod tests {
                     }
 
                     if y.is_finite() {
-                        
                         prop_assert!(
                             y >= -100.0 && y <= 100.0,
                             "[{}] PFE value {} at index {} out of bounds [-100, 100]",
@@ -2259,12 +2148,10 @@ mod tests {
                             i
                         );
 
-                        
                         let y_bits = y.to_bits();
                         let r_bits = r.to_bits();
                         let ulp_diff = y_bits.abs_diff(r_bits);
 
-                        
                         prop_assert!(
                             (y - r).abs() <= 1e-9 || ulp_diff <= 4,
                             "[{}] Kernel mismatch at index {}: {} vs {} (ULP diff: {})",
@@ -2277,16 +2164,13 @@ mod tests {
                     }
                 }
 
-                
-                
                 let straight_up: Vec<f64> = (0..100).map(|i| 100.0 + i as f64).collect();
                 let straight_params = PfeParams {
                     period: Some(10),
-                    smoothing: Some(1), 
+                    smoothing: Some(1),
                 };
                 let straight_input = PfeInput::from_slice(&straight_up, straight_params);
                 if let Ok(straight_out) = pfe_with_kernel(&straight_input, kernel) {
-                    
                     for i in 15..straight_out.values.len() {
                         if straight_out.values[i].is_finite() {
                             prop_assert!(
@@ -2300,7 +2184,6 @@ mod tests {
                     }
                 }
 
-                
                 let zigzag: Vec<f64> = (0..100)
                     .map(|i| {
                         if i % 2 == 0 {
@@ -2321,7 +2204,6 @@ mod tests {
                     pfe_with_kernel(&zigzag_input, kernel),
                     pfe_with_kernel(&straight_input2, kernel),
                 ) {
-                    
                     let zigzag_avg: f64 = zigzag_out.values[20..50]
                         .iter()
                         .filter(|x| x.is_finite())
@@ -2344,9 +2226,7 @@ mod tests {
 					);
                 }
 
-                
                 if smoothing > 1 && data.len() > period + 30 {
-                    
                     let unsmoothed_params = PfeParams {
                         period: Some(period),
                         smoothing: Some(1),
@@ -2354,19 +2234,16 @@ mod tests {
                     let unsmoothed_input = PfeInput::from_slice(&data, unsmoothed_params);
 
                     if let Ok(unsmoothed_out) = pfe_with_kernel(&unsmoothed_input, kernel) {
-                        
                         let window_start = period + 10;
                         let window_end = (period + 30).min(out.len());
 
                         if window_end > window_start {
-                            
                             let smoothed_variance =
                                 calculate_variance(&out[window_start..window_end]);
                             let unsmoothed_variance = calculate_variance(
                                 &unsmoothed_out.values[window_start..window_end],
                             );
 
-                            
                             let mut has_extreme_jumps = false;
                             for i in 1..data.len() {
                                 let ratio = if data[i - 1] != 0.0 {
@@ -2374,26 +2251,19 @@ mod tests {
                                 } else {
                                     f64::INFINITY
                                 };
-                                
+
                                 if ratio > 100.0 || ratio < 0.01 {
                                     has_extreme_jumps = true;
                                     break;
                                 }
                             }
 
-                            
-                            
-                            
-                            
-                            
                             if smoothed_variance.is_finite()
                                 && unsmoothed_variance.is_finite()
                                 && unsmoothed_variance > 1e-6
                                 && !has_extreme_jumps
                                 && smoothing <= 10
                             {
-                                
-                                
                                 prop_assert!(
 									smoothed_variance <= unsmoothed_variance * 1.5,
 									"[{}] Smoothed variance ({}) should be <= 1.5x unsmoothed variance ({})",
@@ -2406,10 +2276,7 @@ mod tests {
                     }
                 }
 
-                
                 if period == 2 {
-                    
-                    
                     for i in 2..out.len() {
                         if out[i].is_finite() {
                             prop_assert!(
@@ -2423,18 +2290,13 @@ mod tests {
                     }
                 }
 
-                
                 let constant: Vec<f64> = vec![500.0; 50];
                 let const_params = PfeParams {
                     period: Some(10),
-                    smoothing: Some(1), 
+                    smoothing: Some(1),
                 };
                 let const_input = PfeInput::from_slice(&constant, const_params);
                 if let Ok(const_out) = pfe_with_kernel(&const_input, kernel) {
-                    
-                    
-                    
-                    
                     for i in 15..const_out.values.len() {
                         if const_out.values[i].is_finite() {
                             prop_assert!(
@@ -2452,7 +2314,6 @@ mod tests {
             })
             .unwrap();
 
-        
         fn calculate_variance(values: &[f64]) -> f64 {
             let finite_values: Vec<f64> =
                 values.iter().filter(|x| x.is_finite()).copied().collect();
@@ -2552,17 +2413,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (2, 10, 2, 1, 5, 1),       
-            (5, 25, 5, 2, 10, 2),      
-            (30, 60, 15, 5, 20, 5),    
-            (2, 5, 1, 1, 3, 1),        
-            (10, 10, 0, 1, 20, 1),     
-            (2, 100, 10, 5, 5, 0),     
-            (14, 21, 7, 3, 9, 3),      
-            (50, 100, 25, 10, 30, 10), 
+            (2, 10, 2, 1, 5, 1),
+            (5, 25, 5, 2, 10, 2),
+            (30, 60, 15, 5, 20, 5),
+            (2, 5, 1, 1, 3, 1),
+            (10, 10, 0, 1, 20, 1),
+            (2, 100, 10, 5, 5, 0),
+            (14, 21, 7, 3, 9, 3),
+            (50, 100, 25, 10, 30, 10),
         ];
 
         for (cfg_idx, &(p_start, p_end, p_step, s_start, s_end, s_step)) in
@@ -2584,7 +2443,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2640,7 +2498,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {

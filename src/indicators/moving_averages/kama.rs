@@ -1,32 +1,3 @@
-//! # Kaufman Adaptive Moving Average (KAMA)
-//!
-//! An adaptive moving average that dynamically adjusts its smoothing factor
-//! based on price noise or volatility. When price movements are relatively stable,
-//! KAMA becomes smoother, filtering out minor fluctuations. Conversely, in more
-//! volatile or trending periods, KAMA becomes more reactive, aiming to catch the
-//! prevailing trend sooner.
-//!
-//! ## Parameters
-//! - **period**: Core lookback length for the KAMA calculation (defaults to 30).
-//!
-//! ## Errors
-//! - **EmptyInputData**: kama: Input data slice is empty.
-//! - **AllValuesNaN**: kama: All input data is `NaN`.
-//! - **InvalidPeriod**: kama: `period` is zero or exceeds the data length.
-//! - **NotEnoughValidData**: kama: Not enough valid data to calculate KAMA for the requested `period`.
-//!
-//! ## Returns
-//! - **`Ok(KamaOutput)`** on success, containing a `Vec<f64>` with length matching the input.
-//! - **`Err(KamaError)`** otherwise.
-//!
-//! ## Developer Notes
-//! - **Scalar path**: ✅ Safe, loop-jammed hot loop; uses `mul_add` and squares via multiply (no `powi`), reuses trailing load.
-//! - **AVX2/AVX512**: ✅ Vectorized initial Σ|Δp|; FMA; reuses `next_tail` for direction and clamps prefetch.
-//! - **Streaming update**: ✅ O(1) ring-update using fixed-size rings (no VecDeque); identical warmup behavior.
-//! - **Batch**: ✅ Shared prefix-sum precompute for Σ|Δp| seeding across rows (reduces per-row setup).
-//! - **Memory**: ✅ `alloc_with_nan_prefix` and matrix helpers; no O(N) temporaries for outputs.
-//! - **Status**: Stable; AVX2/AVX512 are modestly faster than scalar at 100k; keep enabled.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -45,9 +16,9 @@ use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaKama;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::kama_wrapper::DeviceArrayF32Kama;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaKama;
 #[derive(Debug, Clone)]
 pub enum KamaData<'a> {
     Candles {
@@ -63,7 +34,10 @@ pub struct KamaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct KamaParams {
     pub period: Option<usize>,
 }
@@ -186,7 +160,11 @@ pub enum KamaError {
     #[error("kama: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("kama: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("kama: Invalid kernel for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("kama: invalid input: {0}")]
@@ -202,19 +180,7 @@ pub fn kama(input: &KamaInput) -> Result<KamaOutput, KamaError> {
 fn kama_prepare<'a>(
     input: &'a KamaInput,
     kernel: Kernel,
-) -> Result<
-    (
-        // data
-        &'a [f64],
-        
-        usize,
-        
-        usize,
-        
-        Kernel,
-    ),
-    KamaError,
-> {
+) -> Result<(&'a [f64], usize, usize, Kernel), KamaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -256,7 +222,7 @@ fn kama_compute_into(data: &[f64], period: usize, first: usize, kernel: Kernel, 
             Kernel::Avx2 | Kernel::Avx2Batch => kama_avx2(data, period, first, out),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => kama_avx512(data, period, first, out),
-            _ => kama_scalar(data, period, first, out), 
+            _ => kama_scalar(data, period, first, out),
         }
     }
 }
@@ -272,11 +238,7 @@ pub fn kama_with_kernel(input: &KamaInput, kernel: Kernel) -> Result<KamaOutput,
     Ok(KamaOutput { values: out })
 }
 
-/// Compute KAMA into a caller-provided output buffer (no allocations).
-///
-/// - Preserves NaN warmups identical to the Vec-returning API.
-/// - The output slice length must equal the input length.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 pub fn kama_into(input: &KamaInput, out: &mut [f64]) -> Result<(), KamaError> {
     let (data, period, first, chosen) = kama_prepare(input, Kernel::Auto)?;
 
@@ -287,7 +249,6 @@ pub fn kama_into(input: &KamaInput, out: &mut [f64]) -> Result<(), KamaError> {
         });
     }
 
-    
     let warm = first + period;
     let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
     let pref = warm.min(out.len());
@@ -295,19 +256,15 @@ pub fn kama_into(input: &KamaInput, out: &mut [f64]) -> Result<(), KamaError> {
         *v = qnan;
     }
 
-    
     kama_compute_into(data, period, first, chosen, out);
 
     Ok(())
 }
 
-/// Compute KAMA directly into the provided output slice.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Result<(), KamaError> {
     let (data, period, first, chosen) = kama_prepare(input, kern)?;
 
-    
     if dst.len() != data.len() {
         return Err(KamaError::OutputLengthMismatch {
             expected: data.len(),
@@ -315,10 +272,8 @@ pub fn kama_into_slice(dst: &mut [f64], input: &KamaInput, kern: Kernel) -> Resu
         });
     }
 
-    
     kama_compute_into(data, period, first, chosen, dst);
 
-    
     let warmup_end = first + period;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -341,11 +296,9 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
     let const_max = 2.0 / (30.0 + 1.0);
     let const_diff = (2.0 / (2.0 + 1.0)) - const_max;
 
-    
     let mut sum_roc1 = 0.0;
     let today = first_valid;
     unsafe {
-        
         let mut prev = *data.get_unchecked(today);
         for i in 0..=lookback {
             let next = *data.get_unchecked(today + i + 1);
@@ -354,35 +307,28 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
         }
     }
 
-    
     let initial_idx = today + lookback + 1;
     let mut kama = data[initial_idx];
     out[initial_idx] = kama;
 
-    
     let mut trailing_idx = today;
     let mut trailing_value = data[trailing_idx];
 
-    
     unsafe {
-        
         let dp = data.as_ptr();
         let op = out.as_mut_ptr();
         for i in (initial_idx + 1)..len {
             let price_prev = *dp.add(i - 1);
             let price = *dp.add(i);
 
-            
             let next_tail = *dp.add(trailing_idx + 1);
             let old_diff = (next_tail - trailing_value).abs();
             let new_diff = (price - price_prev).abs();
             sum_roc1 += new_diff - old_diff;
 
-            
             trailing_value = next_tail;
             trailing_idx += 1;
 
-            
             let direction = (price - next_tail).abs();
             let er = if sum_roc1 == 0.0 {
                 0.0
@@ -390,9 +336,8 @@ pub fn kama_scalar(data: &[f64], period: usize, first_valid: usize, out: &mut [f
                 direction / sum_roc1
             };
             let t = er.mul_add(const_diff, const_max);
-            let sc = t * t; 
+            let sc = t * t;
 
-            
             kama = (price - kama).mul_add(sc, kama);
             *op.add(i) = kama;
         }
@@ -409,9 +354,6 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
     debug_assert!(period >= 2 && period <= data.len());
     debug_assert_eq!(data.len(), out.len());
 
-    
-    
-    
     let lookback = period - 1;
     let mut sum_roc1: f64 = 0.0;
     let base = data.as_ptr().add(first_valid);
@@ -422,7 +364,6 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
         let mut acc1 = _mm256_setzero_pd();
         let mut idx = 0usize;
 
-        
         #[inline(always)]
         unsafe fn abs_diff(ptr: *const f64, ofs: usize, m: __m256d) -> __m256d {
             let a = _mm256_loadu_pd(ptr.add(ofs));
@@ -438,14 +379,12 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
             idx += 16;
         }
 
-        
-        let sumv = _mm256_add_pd(acc0, acc1); 
-        let hi = _mm256_extractf128_pd::<1>(sumv); 
-        let lo = _mm256_castpd256_pd128(sumv); 
-        let pair = _mm_add_pd(lo, hi); 
-        sum_roc1 = _mm_cvtsd_f64(pair) + _mm_cvtsd_f64(_mm_unpackhi_pd(pair, pair)); 
+        let sumv = _mm256_add_pd(acc0, acc1);
+        let hi = _mm256_extractf128_pd::<1>(sumv);
+        let lo = _mm256_castpd256_pd128(sumv);
+        let pair = _mm_add_pd(lo, hi);
+        sum_roc1 = _mm_cvtsd_f64(pair) + _mm_cvtsd_f64(_mm_unpackhi_pd(pair, pair));
 
-        
         while idx <= lookback {
             sum_roc1 += (*base.add(idx + 1) - *base.add(idx)).abs();
             idx += 1;
@@ -456,16 +395,10 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
         }
     }
 
-    
-    
-    
     let init_idx = first_valid + lookback + 1;
     let mut kama = *data.get_unchecked(init_idx);
     *out.get_unchecked_mut(init_idx) = kama;
 
-    
-    
-    
     let const_max = 2.0 / 31.0;
     let const_diff = (2.0 / 3.0) - const_max;
 
@@ -473,7 +406,6 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
     let mut tail_val = *data.get_unchecked(tail_idx);
 
     for i in (init_idx + 1)..data.len() {
-        
         let price = *data.get_unchecked(i);
         let new_diff = (price - *data.get_unchecked(i - 1)).abs();
 
@@ -484,23 +416,19 @@ pub unsafe fn kama_avx2(data: &[f64], period: usize, first_valid: usize, out: &m
         tail_val = next_tail;
         tail_idx += 1;
 
-        
-        
         let direction = (price - next_tail).abs();
         let er = if sum_roc1 == 0.0 {
             0.0
         } else {
             direction / sum_roc1
         };
-        let t = er.mul_add(const_diff, const_max); 
+        let t = er.mul_add(const_diff, const_max);
         let sc = t * t;
 
-        
         kama = (price - kama).mul_add(sc, kama);
 
-        *out.get_unchecked_mut(i) = kama; 
+        *out.get_unchecked_mut(i) = kama;
 
-        
         let pf = core::cmp::min(i + 128, data.len() - 1);
         _mm_prefetch(data.as_ptr().add(pf) as *const i8, _MM_HINT_T1);
     }
@@ -517,9 +445,6 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
     debug_assert!(period >= 2 && period <= data.len());
     debug_assert_eq!(data.len(), out.len());
 
-    
-    
-    
     let lookback = period - 1;
     let mut sum_roc1: f64 = 0.0;
     let base = data.as_ptr().add(first_valid);
@@ -547,7 +472,7 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
             j += 32;
         }
         let acc_all = _mm512_add_pd(_mm512_add_pd(acc0, acc1), _mm512_add_pd(acc2, acc3));
-        sum_roc1 = _mm512_reduce_add_pd(acc_all); 
+        sum_roc1 = _mm512_reduce_add_pd(acc_all);
 
         while j <= lookback {
             sum_roc1 += (*base.add(j + 1) - *base.add(j)).abs();
@@ -559,16 +484,10 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
         }
     }
 
-    
-    
-    
     let init_idx = first_valid + lookback + 1;
     let mut kama = *data.get_unchecked(init_idx);
     *out.get_unchecked_mut(init_idx) = kama;
 
-    
-    
-    
     let const_max = 2.0 / 31.0;
     let const_diff = (2.0 / 3.0) - const_max;
 
@@ -576,7 +495,6 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
     let mut tail_val = *data.get_unchecked(tail_idx);
 
     for i in (init_idx + 1)..data.len() {
-        
         let price = *data.get_unchecked(i);
         let new_diff = (price - *data.get_unchecked(i - 1)).abs();
 
@@ -587,8 +505,6 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
         tail_val = next_tail;
         tail_idx += 1;
 
-        
-        
         let direction = (price - next_tail).abs();
         let er = if sum_roc1 == 0.0 {
             0.0
@@ -596,45 +512,36 @@ pub unsafe fn kama_avx512(data: &[f64], period: usize, first_valid: usize, out: 
             direction / sum_roc1
         };
 
-        
         let t = er.mul_add(const_diff, const_max);
         let sc = t * t;
 
-        
-        
         kama = (price - kama).mul_add(sc, kama);
 
-        *out.get_unchecked_mut(i) = kama; 
+        *out.get_unchecked_mut(i) = kama;
 
-        
         let pf = core::cmp::min(i + 128, data.len() - 1);
         _mm_prefetch(data.as_ptr().add(pf) as *const i8, _MM_HINT_T1);
     }
 }
 
-
-
-
 #[derive(Debug, Clone)]
 pub struct KamaStream {
     period: usize,
 
-    
-    prices: Vec<f64>, 
-    diffs: Vec<f64>,  
+    prices: Vec<f64>,
+    diffs: Vec<f64>,
 
-    head_p: usize, 
-    head_d: usize, 
-    count: usize,  
-    seeded: bool,  
+    head_p: usize,
+    head_d: usize,
+    count: usize,
+    seeded: bool,
 
-    prev_price: f64, 
-    prev_kama: f64,  
-    sum_roc1: f64,   
+    prev_price: f64,
+    prev_kama: f64,
+    sum_roc1: f64,
 
-    
-    const_max: f64,  
-    const_diff: f64, 
+    const_max: f64,
+    const_diff: f64,
 }
 
 impl KamaStream {
@@ -663,10 +570,8 @@ impl KamaStream {
         })
     }
 
-    /// Push one price; returns `Some(kama)` after warmup, else `None`.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
-        
         if self.count == 0 {
             self.prices[0] = value;
             self.prev_price = value;
@@ -674,12 +579,9 @@ impl KamaStream {
             return None;
         }
 
-        
         let new_diff = (value - self.prev_price).abs();
 
-        
         if self.count < self.period {
-            
             self.diffs[self.count - 1] = new_diff;
             self.sum_roc1 += new_diff;
 
@@ -689,16 +591,13 @@ impl KamaStream {
             return None;
         }
 
-        
         if !self.seeded {
             self.sum_roc1 += new_diff;
 
             self.prev_kama = value;
 
-            
             self.diffs[self.period - 1] = new_diff;
 
-            
             self.prices[self.head_p] = value;
             self.head_p = if self.period == 1 { 0 } else { 1 };
             self.head_d = 0;
@@ -708,7 +607,6 @@ impl KamaStream {
             return Some(self.prev_kama);
         }
 
-        
         let old_diff = self.diffs[self.head_d];
         self.sum_roc1 += new_diff - old_diff;
 
@@ -717,7 +615,6 @@ impl KamaStream {
         let er = if self.sum_roc1 == 0.0 {
             0.0
         } else {
-            
             direction * (1.0 / self.sum_roc1)
         };
         let t = er.mul_add(self.const_diff, self.const_max);
@@ -725,7 +622,6 @@ impl KamaStream {
 
         self.prev_kama = (value - self.prev_kama).mul_add(sc, self.prev_kama);
 
-        
         self.diffs[self.head_d] = new_diff;
         self.head_d = if self.head_d + 1 == self.period {
             0
@@ -805,8 +701,6 @@ pub fn kama_batch_with_kernel(
     k: Kernel,
 ) -> Result<KamaBatchOutput, KamaError> {
     let kernel = match k {
-        
-        
         Kernel::Auto => match detect_best_batch_kernel() {
             Kernel::Avx512Batch => Kernel::Avx2Batch,
             other => other,
@@ -854,7 +748,7 @@ fn expand_grid(r: &KamaBatchRange) -> Result<Vec<KamaParams>, KamaError> {
         if start < end {
             return Ok((start..=end).step_by(step).collect());
         }
-        
+
         let mut v = Vec::new();
         let mut cur = start;
         loop {
@@ -920,21 +814,17 @@ fn kama_batch_inner(
         return Err(KamaError::EmptyInputData);
     }
 
-    
     let total_cells = rows
         .checked_mul(cols)
         .ok_or(KamaError::InvalidInput("rows*cols overflow"))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(KamaError::AllValuesNaN)?;
 
-    
     let max_p = combos.iter().map(|c| c.period.unwrap()).max().unwrap();
     if data.len() - first <= max_p {
         return Err(KamaError::NotEnoughValidData {
@@ -945,19 +835,15 @@ fn kama_batch_inner(
 
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    
     kama_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -997,7 +883,6 @@ fn kama_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let expected = rows
         .checked_mul(cols)
         .ok_or(KamaError::InvalidInput("rows*cols overflow"))?;
@@ -1008,14 +893,8 @@ fn kama_batch_inner_into(
         });
     }
 
-    
-    
-    
-    
-    
     let mut abs_delta = vec![0.0f64; cols];
     if cols > 1 {
-        
         for i in (first + 1)..cols {
             let a = data[i];
             let b = data[i - 1];
@@ -1029,10 +908,6 @@ fn kama_batch_inner_into(
         prefix[i] = run;
     }
 
-    
-    
-    
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1040,11 +915,9 @@ fn kama_batch_inner_into(
     let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let dst = core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
         match kern {
-            
             Kernel::Scalar | Kernel::ScalarBatch => {
                 kama_row_scalar_prefixed(data, &prefix, first, period, dst)
             }
@@ -1052,13 +925,10 @@ fn kama_batch_inner_into(
             Kernel::Avx2 | Kernel::Avx2Batch => kama_row_avx2(data, first, period, dst),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
             Kernel::Avx512 | Kernel::Avx512Batch => kama_row_avx512(data, first, period, dst),
-            _ => kama_row_scalar(data, first, period, dst), 
+            _ => kama_row_scalar(data, first, period, dst),
         }
     };
 
-    
-    
-    
     if parallel {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1099,15 +969,12 @@ unsafe fn kama_row_scalar_prefixed(
     let len = data.len();
     let lookback = period - 1;
 
-    
     let sum0 = prefix[first + period] - prefix[first];
 
-    
-    let init_idx = first + lookback + 1; 
+    let init_idx = first + lookback + 1;
     let mut kama = data[init_idx];
     out[init_idx] = kama;
 
-    
     let mut sum_roc1 = sum0;
     let const_max = 2.0 / 31.0;
     let const_diff = (2.0 / 3.0) - const_max;
@@ -1118,7 +985,6 @@ unsafe fn kama_row_scalar_prefixed(
         let price_prev = data[i - 1];
         let price = data[i];
 
-        
         let next_tail = data[trailing_idx + 1];
         let old_diff = (next_tail - trailing_value).abs();
         let new_diff = (price - price_prev).abs();
@@ -1127,7 +993,6 @@ unsafe fn kama_row_scalar_prefixed(
         trailing_value = next_tail;
         trailing_idx += 1;
 
-        
         let direction = (price - trailing_value).abs();
         let er = if sum_roc1 == 0.0 {
             0.0
@@ -1137,7 +1002,6 @@ unsafe fn kama_row_scalar_prefixed(
         let t = er.mul_add(const_diff, const_max);
         let sc = t * t;
 
-        
         kama = (price - kama).mul_add(sc, kama);
         out[i] = kama;
     }
@@ -1154,7 +1018,6 @@ pub unsafe fn kama_row_avx2(data: &[f64], first: usize, period: usize, out: &mut
 pub unsafe fn kama_row_avx512(data: &[f64], first: usize, period: usize, out: &mut [f64]) {
     kama_avx512(data, period, first, out)
 }
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -1212,7 +1075,6 @@ pub fn kama_batch_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
 
-    
     let first = slice_in
         .iter()
         .position(|x| !x.is_nan())
@@ -1232,10 +1094,8 @@ pub fn kama_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    
     let warm: Vec<usize> = combos.iter().map(|c| first + c.period.unwrap()).collect();
 
-    
     for (row, &warmup) in warm.iter().enumerate() {
         let start = row * cols;
         let end = start + warmup.min(cols);
@@ -1247,7 +1107,6 @@ pub fn kama_batch_py<'py>(
     let combos = py
         .allow_threads(|| {
             let kernel = match kern {
-                
                 Kernel::Auto => match detect_best_batch_kernel() {
                     Kernel::Avx512Batch => Kernel::Avx2Batch,
                     other => other,
@@ -1258,11 +1117,11 @@ pub fn kama_batch_py<'py>(
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
                 Kernel::ScalarBatch => Kernel::Scalar,
-                
+
                 Kernel::Scalar => Kernel::Scalar,
                 Kernel::Avx2 => Kernel::Avx2,
                 Kernel::Avx512 => Kernel::Avx512,
-                _ => Kernel::Scalar, 
+                _ => Kernel::Scalar,
             };
 
             kama_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
@@ -1339,7 +1198,6 @@ pub fn kama_cuda_many_series_one_param_dev_py(
     Ok(KamaDeviceArrayF32Py { inner })
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct KamaDeviceArrayF32Py {
@@ -1362,13 +1220,12 @@ impl KamaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Kernels synchronize before returning; omit 'stream' per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
     fn __dlpack_device__(&self) -> (i32, i32) {
-        // 2 == kDLCUDA per DLPack
         (2, self.inner.device_id as i32)
     }
 
@@ -1384,9 +1241,7 @@ impl KamaDeviceArrayF32Py {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
         use cust::memory::DeviceBuffer;
 
-        // We synchronize producer work before returning; we only accept None or allowed integers.
         if let Some(obj) = &stream {
-            // Accept None implicitly; if provided and int==0 (disallowed), error.
             if let Ok(i) = obj.extract::<i64>(py) {
                 if i == 0 {
                     return Err(pyo3::exceptions::PyValueError::new_err(
@@ -1396,8 +1251,7 @@ impl KamaDeviceArrayF32Py {
             }
         }
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1418,12 +1272,10 @@ impl KamaDeviceArrayF32Py {
             }
         }
 
-        // Producer synchronizes internally; beyond validation we ignore `stream` per Array API.
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
         let ctx = self.inner.ctx.clone();
         let device_id = self.inner.device_id;
@@ -1473,13 +1325,12 @@ impl KamaStreamPy {
     }
 }
 
-// ================== WASM Bindings ==================
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     let params = KamaParams {
@@ -1487,32 +1338,26 @@ pub fn kama_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = KamaInput::from_slice(data, params);
 
-    // Allocate output buffer once
     let mut output = vec![0.0; data.len()];
 
-    // Compute directly into output buffer
     kama_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-// ================== Zero-Copy WASM Functions ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_alloc(len: usize) -> *mut f64 {
-    // Allocate memory for input/output buffer
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); // Prevent deallocation
+    std::mem::forget(vec);
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_free(ptr: *mut f64, len: usize) {
-    // Free allocated memory
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -1520,7 +1365,7 @@ pub fn kama_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_into(
     in_ptr: *const f64,
@@ -1528,38 +1373,30 @@ pub fn kama_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    // Check for null pointers
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("null pointer passed to kama_into"));
     }
 
     unsafe {
-        // Create slice from pointer
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        // Validate inputs
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        // Create KAMA input
         let params = KamaParams {
             period: Some(period),
         };
         let input = KamaInput::from_slice(data, params);
 
-        // Check for aliasing (input and output buffers are the same)
         if in_ptr == out_ptr {
-            // Use temporary buffer to avoid corruption during sliding window computation
             let mut temp = vec![0.0; len];
             kama_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            // Copy results back to output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             kama_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -1569,15 +1406,13 @@ pub fn kama_into(
     }
 }
 
-// ================== Batch Processing ==================
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KamaBatchConfig {
     pub period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct KamaBatchJsOutput {
     pub values: Vec<f64>,
@@ -1586,7 +1421,7 @@ pub struct KamaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = kama_batch)]
 pub fn kama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let config: KamaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -1610,7 +1445,7 @@ pub fn kama_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_batch_into(
     in_ptr: *const f64,
@@ -1637,7 +1472,6 @@ pub fn kama_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        // Use optimized batch processing
         kama_batch_inner_into(data, &sweep, Kernel::Auto, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
@@ -1645,8 +1479,7 @@ pub fn kama_batch_into(
     }
 }
 
-// Keep legacy batch function for backwards compatibility
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_batch_js(
     data: &[f64],
@@ -1663,7 +1496,7 @@ pub fn kama_batch_js(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn kama_batch_metadata_js(
     period_start: usize,
@@ -1891,7 +1724,7 @@ mod tests {
             }
         }
     }
-    // Check for poison values in single output - only runs in debug mode
+
     #[cfg(debug_assertions)]
     fn check_kama_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1899,7 +1732,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations to better catch uninitialized memory bugs
         let test_periods = vec![2, 5, 10, 14, 20, 30, 50, 100, 200];
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
@@ -1914,16 +1746,13 @@ mod tests {
                 );
                 let output = kama_with_kernel(&input, kernel)?;
 
-                // Check every value for poison patterns
                 for (i, &val) in output.values.iter().enumerate() {
-                    // Skip NaN values as they're expected in the warmup period
                     if val.is_nan() {
                         continue;
                     }
 
                     let bits = val.to_bits();
 
-                    
                     if bits == 0x11111111_11111111 {
                         panic!(
                             "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1931,7 +1760,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x22222222_22222222 {
                         panic!(
                             "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1939,7 +1767,6 @@ mod tests {
                         );
                     }
 
-                    
                     if bits == 0x33333333_33333333 {
                         panic!(
                             "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with period={}, source={}",
@@ -1953,7 +1780,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_kama_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1963,7 +1789,6 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=100).prop_flat_map(|period| {
             (
                 prop::collection::vec(
@@ -1980,7 +1805,6 @@ mod tests {
             };
             let input = KamaInput::from_slice(&data, params);
 
-            
             let result = kama_with_kernel(&input, kernel);
             prop_assert!(
                 result.is_ok(),
@@ -1993,14 +1817,11 @@ mod tests {
             prop_assert!(ref_result.is_ok(), "Reference KAMA failed");
             let ref_out = ref_result.unwrap().values;
 
-            
             prop_assert_eq!(out.len(), data.len(), "Output length mismatch");
 
-            
             let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
             let warmup_end = first_valid + period;
 
-            
             for i in 0..warmup_end.min(out.len()) {
                 prop_assert!(
                     out[i].is_nan(),
@@ -2010,7 +1831,6 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_end..out.len() {
                 prop_assert!(
                     out[i].is_finite(),
@@ -2020,9 +1840,7 @@ mod tests {
                 );
             }
 
-            
             for i in warmup_end..out.len() {
-                
                 let window_start = i.saturating_sub(period);
                 let window = &data[window_start..=i];
                 let min_val = window.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -2038,10 +1856,9 @@ mod tests {
                 );
             }
 
-            
             if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10) && !data.is_empty() {
                 let const_val = data[first_valid];
-                
+
                 if out.len() > warmup_end + period * 2 {
                     let last_val = out[out.len() - 1];
                     prop_assert!(
@@ -2053,7 +1870,6 @@ mod tests {
                 }
             }
 
-            
             for i in warmup_end..out.len() {
                 let diff = (out[i] - ref_out[i]).abs();
                 let ulps = {
@@ -2066,7 +1882,6 @@ mod tests {
                     }
                 };
 
-                
                 prop_assert!(
                     ulps <= 10 || diff < 1e-10,
                     "Kernel mismatch at index {}: {} vs {} (diff={}, ulps={})",
@@ -2078,14 +1893,11 @@ mod tests {
                 );
             }
 
-            
-            
-            
             for i in (warmup_end + 1)..out.len() {
                 let change = (out[i] - out[i - 1]).abs();
                 let price = data[i];
                 let prev_kama = out[i - 1];
-                
+
                 let max_possible_change = (price - prev_kama).abs() * 0.445;
                 prop_assert!(
                     change <= max_possible_change + 1e-6,
@@ -2096,8 +1908,6 @@ mod tests {
                 );
             }
 
-            
-            
             let post_warmup_data = &data[warmup_end..];
             if post_warmup_data.len() > period {
                 let is_increasing = post_warmup_data.windows(2).all(|w| w[1] >= w[0] - 1e-10);
@@ -2123,21 +1933,14 @@ mod tests {
                 }
             }
 
-            
-            
-            
             for i in (warmup_end + period)..out.len() {
-                
                 let window_start = i - period + 1;
                 let window = &data[window_start..=i];
                 let all_same = window.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                 if all_same && i > warmup_end + period {
-                    
-                    
-                    
                     let change = (out[i] - out[i - 1]).abs();
-                    let min_sc = (2.0 / 31.0_f64).powi(2); 
+                    let min_sc = (2.0 / 31.0_f64).powi(2);
                     let max_change = (data[i] - out[i - 1]).abs() * min_sc;
                     prop_assert!(
 							change <= max_change + 1e-9,
@@ -2217,7 +2020,6 @@ mod tests {
         };
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2225,19 +2027,15 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_sources = vec!["open", "high", "low", "close", "hl2", "hlc3", "ohlc4"];
 
         for source in &test_sources {
-            
             let output = KamaBatchBuilder::new()
                 .kernel(kernel)
-                .period_range(2, 200, 3) 
+                .period_range(2, 200, 3)
                 .apply_candles(&c, source)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2246,7 +2044,6 @@ mod tests {
                 let row = idx / output.cols;
                 let col = idx % output.cols;
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -2254,7 +2051,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -2262,7 +2058,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (flat index {}) with source={}",
@@ -2272,7 +2067,6 @@ mod tests {
             }
         }
 
-        
         let edge_case_ranges = vec![(2, 5, 1), (190, 200, 2), (50, 100, 10)];
         for (start, end, step) in edge_case_ranges {
             let output = KamaBatchBuilder::new()
@@ -2304,7 +2098,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2315,20 +2108,16 @@ mod tests {
 
     #[test]
     fn test_kama_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let params = KamaParams::default();
         let input = KamaInput::from_candles(&candles, "close", params);
 
-        
         let base = kama(&input)?;
 
-        
         let mut out = vec![0.0f64; candles.close.len()];
         kama_into(&input, &mut out)?;
 
-        
         assert_eq!(base.values.len(), out.len());
         for (a, b) in base.values.iter().zip(out.iter()) {
             let equal = (a.is_nan() && b.is_nan()) || (*a - *b).abs() <= 1e-12;

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::stddev::{
     stddev_batch_with_kernel, stddev_with_kernel, StdDevBatchRange, StdDevInput, StdDevParams,
 };
@@ -94,7 +92,6 @@ fn stddev_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
         }
     }
 
-    
     let period = 15usize;
     let nbdev = 2.0f64;
     let mut cpu_tm = vec![f64::NAN; cols * rows];

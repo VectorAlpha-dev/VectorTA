@@ -1,8 +1,3 @@
-//! Kernel validation for Python bindings
-//!
-//! This module provides validation for kernel selection in Python bindings
-//! to prevent segfaults when unsupported SIMD instructions are requested.
-
 use crate::utilities::enums::Kernel;
 #[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;

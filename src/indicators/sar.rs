@@ -1,35 +1,9 @@
-//! # Parabolic SAR (SAR)
-//!
-//! The Parabolic SAR is a trend-following indicator that provides stop and reverse points
-//! using a system of progressively accelerating dots that follow price trends.
-//!
-//! ## Parameters
-//! - **acceleration**: Initial acceleration factor. Defaults to 0.02.
-//! - **maximum**: Maximum acceleration limit. Defaults to 0.2.
-//!
-//! ## Returns
-//! - **`Ok(SarOutput)`** containing a `Vec<f64>` of SAR values matching input length.
-//! - **`Err(SarError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - Decision: Keep scalar path safe and unchanged; AVX2/AVX512 keep an unsafe-indexing
-//!   specialization (no true vector ops) that removes bounds checks and uses `mul_add`.
-//!   SAR is inherently sequential; AVX2 improves ~14–15% at 100k on x86_64.
-//! - Streaming Performance: O(1) – maintains minimal state for incremental updates.
-//! - Memory Optimization: ✓ Uses `alloc_with_nan_prefix` and write-into-slice variants.
-//! - Batch Support: ✓ Parallel per-row sweep; row-specific SIMD not attempted (no reusable
-//!   precompute across rows).
-//! - Decision log: SIMD enabled on x86_64 (AVX2/AVX512 specializations) with scalar as
-//!   the reference path; CUDA wrapper enabled and returning VRAM handles exposed via
-//!   CUDA Array Interface v3 and DLPack v1.x; scalar/CPU, WASM, and CUDA outputs remain
-//!   numerically aligned (tests unchanged).
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::memory::DeviceBuffer;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -39,9 +13,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -74,7 +48,10 @@ pub struct SarOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SarParams {
     pub acceleration: Option<f64>,
     pub maximum: Option<f64>,
@@ -231,7 +208,6 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
         return Err(SarError::EmptyInputData);
     }
 
-    
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
 
@@ -261,7 +237,6 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
         return Err(SarError::InvalidMaximum { maximum });
     }
 
-    
     let mut out = alloc_with_nan_prefix(high.len(), first + 1);
 
     let chosen = match kernel {
@@ -289,7 +264,6 @@ pub fn sar_with_kernel(input: &SarInput, kernel: Kernel) -> Result<SarOutput, Sa
     Ok(SarOutput { values: out })
 }
 
-/// Write SAR results directly to output slice - no allocations
 #[inline]
 pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result<(), SarError> {
     let (high, low) = match &input.data {
@@ -301,7 +275,6 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         return Err(SarError::EmptyInputData);
     }
 
-    
     let expected_len = high.len().min(low.len());
     if dst.len() != expected_len {
         return Err(SarError::OutputLengthMismatch {
@@ -309,7 +282,7 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
             got: dst.len(),
         });
     }
-    
+
     let (high, low) = (&high[..expected_len], &low[..expected_len]);
 
     let first_valid_idx = high
@@ -338,7 +311,6 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         return Err(SarError::InvalidMaximum { maximum });
     }
 
-    
     for v in &mut dst[..first.saturating_add(1)] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
@@ -356,18 +328,13 @@ pub fn sar_into_slice(dst: &mut [f64], input: &SarInput, kern: Kernel) -> Result
         Kernel::Avx512 | Kernel::Avx512Batch => {
             sar_avx512(high, low, first, acceleration, maximum, dst)
         }
-        
+
         _ => sar_scalar(high, low, first, acceleration, maximum, dst),
     }
     Ok(())
 }
 
-/// Parabolic SAR into an existing buffer (no allocation).
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API (quiet-NaN prefix).
-/// - `out.len()` must equal the input length; returns existing length/validation errors on mismatch.
-/// - Uses `Kernel::Auto` dispatch matching `sar()` semantics.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn sar_into(input: &SarInput, out: &mut [f64]) -> Result<(), SarError> {
     sar_into_slice(out, input, Kernel::Auto)
@@ -383,7 +350,6 @@ pub fn sar_avx512(
     maximum: f64,
     out: &mut [f64],
 ) {
-    
     sar_avx2(high, low, first_valid, acceleration, maximum, out)
 }
 
@@ -400,12 +366,10 @@ pub fn sar_scalar(
     let i0 = first;
     let i1 = i0 + 1;
 
-    
     if i1 >= len || i1 >= low.len() || i1 >= out.len() {
         return;
     }
 
-    
     let h0 = high[i0];
     let h1 = high[i1];
     let l0 = low[i0];
@@ -416,34 +380,28 @@ pub fn sar_scalar(
     let mut ep = if trend_up { h1 } else { l1 };
     let mut acc = acceleration;
 
-    
     out[i0] = f64::NAN;
     out[i1] = sar;
 
-    
     let mut low_prev2 = l0;
     let mut low_prev = l1;
     let mut high_prev2 = h0;
     let mut high_prev = h1;
 
-    
     let mut i = i1 + 1;
     while i < len {
         let hi = high[i];
         let lo = low[i];
 
-        
         let mut next_sar = acc.mul_add(ep - sar, sar);
 
         if trend_up {
             if lo < next_sar {
-                
                 trend_up = false;
                 next_sar = ep;
                 ep = lo;
                 acc = acceleration;
             } else {
-                
                 if hi > ep {
                     ep = hi;
                     acc = (acc + acceleration).min(maximum);
@@ -452,13 +410,11 @@ pub fn sar_scalar(
             }
         } else {
             if hi > next_sar {
-                
                 trend_up = true;
                 next_sar = ep;
                 ep = hi;
                 acc = acceleration;
             } else {
-                
                 if lo < ep {
                     ep = lo;
                     acc = (acc + acceleration).min(maximum);
@@ -470,7 +426,6 @@ pub fn sar_scalar(
         out[i] = next_sar;
         sar = next_sar;
 
-        
         low_prev2 = low_prev;
         low_prev = lo;
         high_prev2 = high_prev;
@@ -575,8 +530,6 @@ pub fn sar_simd128(
     maximum: f64,
     out: &mut [f64],
 ) {
-    
-    
     sar_scalar(high, low, first_valid, acceleration, maximum, out)
 }
 
@@ -606,27 +559,22 @@ pub unsafe fn sar_avx512_long(
     sar_avx2(high, low, first_valid, acceleration, maximum, out)
 }
 
-
-
-
-
 #[derive(Debug, Clone)]
 pub struct SarStream {
     acceleration: f64,
     maximum: f64,
     state: Option<StreamState>,
-    
+
     idx: usize,
 }
 
 #[derive(Debug, Clone)]
 struct StreamState {
-    
     trend_up: bool,
     sar: f64,
     ep: f64,
     acc: f64,
-    
+
     prev_high: f64,
     prev_high2: f64,
     prev_low: f64,
@@ -653,19 +601,13 @@ impl SarStream {
         })
     }
 
-    /// O(1) update. Returns:
-    /// - `None` for the first valid bar (warmup) or if inputs are non-finite,
-    /// - `Some(sar)` for the second valid bar (initial SAR),
-    /// - `Some(next_sar)` thereafter.
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64) -> Option<f64> {
-        
         if !high.is_finite() || !low.is_finite() {
             return None;
         }
 
         match self.state.as_mut() {
-            
             None => {
                 self.state = Some(StreamState {
                     trend_up: false,
@@ -673,26 +615,20 @@ impl SarStream {
                     ep: f64::NAN,
                     acc: self.acceleration,
                     prev_high: high,
-                    prev_high2: high, 
+                    prev_high2: high,
                     prev_low: low,
-                    prev_low2: low, 
+                    prev_low2: low,
                 });
                 self.idx = 1;
                 None
             }
 
-            
             Some(st) if self.idx == 1 => {
-                
                 let trend_up = high > st.prev_high;
 
-                
-                
-                
                 let sar = if trend_up { st.prev_low } else { st.prev_high };
                 let ep = if trend_up { high } else { low };
 
-                
                 st.prev_high2 = st.prev_high;
                 st.prev_low2 = st.prev_low;
                 st.prev_high = high;
@@ -707,20 +643,16 @@ impl SarStream {
                 Some(sar)
             }
 
-            
             Some(st) => {
-                
                 let mut next_sar = st.acc.mul_add(st.ep - st.sar, st.sar);
 
                 if st.trend_up {
-                    
                     if low < next_sar {
                         st.trend_up = false;
-                        next_sar = st.ep; 
-                        st.ep = low; 
+                        next_sar = st.ep;
+                        st.ep = low;
                         st.acc = self.acceleration;
                     } else {
-                        
                         if high > st.ep {
                             st.ep = high;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -728,14 +660,12 @@ impl SarStream {
                         next_sar = min3(next_sar, st.prev_low, st.prev_low2);
                     }
                 } else {
-                    
                     if high > next_sar {
                         st.trend_up = true;
-                        next_sar = st.ep; 
-                        st.ep = high; 
+                        next_sar = st.ep;
+                        st.ep = high;
                         st.acc = self.acceleration;
                     } else {
-                        
                         if low < st.ep {
                             st.ep = low;
                             st.acc = (st.acc + self.acceleration).min(self.maximum);
@@ -744,7 +674,6 @@ impl SarStream {
                     }
                 }
 
-                
                 st.prev_high2 = st.prev_high;
                 st.prev_low2 = st.prev_low;
                 st.prev_high = high;
@@ -767,8 +696,6 @@ fn min3(a: f64, b: f64, c: f64) -> f64 {
 fn max3(a: f64, b: f64, c: f64) -> f64 {
     a.max(b.max(c))
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct SarBatchRange {
@@ -895,14 +822,12 @@ fn axis_f64_checked(axis: (f64, f64, f64)) -> Result<Vec<f64>, SarError> {
 
     if step > 0.0 {
         if start <= end {
-            
             let mut x = start;
             while x <= end + tol {
                 v.push(x);
                 x += step;
             }
         } else {
-            
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
@@ -910,16 +835,13 @@ fn axis_f64_checked(axis: (f64, f64, f64)) -> Result<Vec<f64>, SarError> {
             }
         }
     } else {
-        
         if start >= end {
-            
             let mut x = start;
             while x >= end - tol {
                 v.push(x);
-                x += step; 
+                x += step;
             }
         } else {
-            
             return Err(SarError::InvalidRange { start, end, step });
         }
     }
@@ -987,7 +909,6 @@ fn sar_batch_inner(
 ) -> Result<SarBatchOutput, SarError> {
     let combos = expand_grid(sweep)?;
 
-    
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
     let first = high
@@ -1005,14 +926,11 @@ fn sar_batch_inner(
     let rows = combos.len();
     let cols = high.len();
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
-    let warm = vec![first + 1; rows]; 
+    let warm = vec![first + 1; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
@@ -1072,7 +990,6 @@ fn sar_batch_inner(
         }
     }
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -1172,7 +1089,6 @@ pub fn sar_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    // Take the minimum length when arrays have different sizes
     let min_len = high_slice.len().min(low_slice.len());
     let high_trimmed = &high_slice[..min_len];
     let low_trimmed = &low_slice[..min_len];
@@ -1232,7 +1148,6 @@ pub fn sar_batch_py<'py>(
     let high_slice = high.as_slice()?;
     let low_slice = low.as_slice()?;
 
-    
     let min_len = high_slice.len().min(low_slice.len());
     let (high_slice, low_slice) = (&high_slice[..min_len], &low_slice[..min_len]);
 
@@ -1247,7 +1162,6 @@ pub fn sar_batch_py<'py>(
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("sar_batch_py: size overflow in rows*cols"))?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
@@ -1308,13 +1222,11 @@ fn sar_batch_inner_into_noalloc(
 
     let rows = combos.len();
     let cols = high.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(SarError::InvalidRange {
-            start: sweep.acceleration.0,
-            end: sweep.acceleration.1,
-            step: sweep.acceleration.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(SarError::InvalidRange {
+        start: sweep.acceleration.0,
+        end: sweep.acceleration.1,
+        step: sweep.acceleration.2,
+    })?;
     if out.len() != expected {
         return Err(SarError::OutputLengthMismatch {
             expected,
@@ -1322,7 +1234,6 @@ fn sar_batch_inner_into_noalloc(
         });
     }
 
-    
     unsafe {
         let out_mu = std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1407,9 +1318,7 @@ fn sar_batch_inner_into_noalloc(
     Ok(combos)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sar_js(
     high: &[f64],
@@ -1417,7 +1326,6 @@ pub fn sar_js(
     acceleration: f64,
     maximum: f64,
 ) -> Result<Vec<f64>, JsValue> {
-    
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
 
@@ -1435,11 +1343,10 @@ pub fn sar_js(
     Ok(output)
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct SarDeviceArrayF32Py {
-    pub(crate) buf: Option<DeviceBuffer<f32>>, 
+    pub(crate) buf: Option<DeviceBuffer<f32>>,
     pub(crate) rows: usize,
     pub(crate) cols: usize,
     pub(crate) _ctx: Arc<Context>,
@@ -1467,7 +1374,7 @@ impl SarDeviceArrayF32Py {
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
         let ptr = buf.as_device_ptr().as_raw() as usize;
         d.set_item("data", (ptr, false))?;
-        // Producing stream is synchronized before return; omit 'stream' per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -1485,8 +1392,7 @@ impl SarDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -1508,7 +1414,6 @@ impl SarDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move ownership of the device buffer into the shared DLPack capsule.
         let buf = self
             .buf
             .take()
@@ -1523,7 +1428,6 @@ impl SarDeviceArrayF32Py {
     }
 }
 
-// ----------------------------- PYTHON CUDA BINDINGS -----------------------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "sar_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, acceleration_range, maximum_range, device_id=0))]
@@ -1558,7 +1462,13 @@ pub fn sar_cuda_batch_dev_py(
         let ctx = cuda.context_arc();
         Ok::<_, pyo3::PyErr>((dev.buf, dev.rows, dev.cols, ctx, cuda.device_id()))
     })?;
-    Ok(SarDeviceArrayF32Py { buf: Some(buf), rows, cols, _ctx: ctx, device_id: dev_id })
+    Ok(SarDeviceArrayF32Py {
+        buf: Some(buf),
+        rows,
+        cols,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -1582,9 +1492,9 @@ pub fn sar_cuda_many_series_one_param_dev_py(
     }
     let h = high_tm_f32.as_slice()?;
     let l = low_tm_f32.as_slice()?;
-    let expected = cols
-        .checked_mul(rows)
-        .ok_or_else(|| PyValueError::new_err("sar_cuda_many_series_one_param_dev: size overflow in cols*rows"))?;
+    let expected = cols.checked_mul(rows).ok_or_else(|| {
+        PyValueError::new_err("sar_cuda_many_series_one_param_dev: size overflow in cols*rows")
+    })?;
     if expected != h.len() || h.len() != l.len() {
         return Err(PyValueError::new_err(
             "time‑major inputs must be equal length and cols*rows",
@@ -1602,10 +1512,16 @@ pub fn sar_cuda_many_series_one_param_dev_py(
         let ctx = cuda.context_arc();
         Ok::<_, pyo3::PyErr>((dev.buf, dev.rows, dev.cols, ctx, cuda.device_id()))
     })?;
-    Ok(SarDeviceArrayF32Py { buf: Some(buf), rows: r_out, cols: c_out, _ctx: ctx, device_id: dev_id })
+    Ok(SarDeviceArrayF32Py {
+        buf: Some(buf),
+        rows: r_out,
+        cols: c_out,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sar_into(
     high_ptr: *const f64,
@@ -1629,7 +1545,6 @@ pub fn sar_into(
         };
         let input = SarInput::from_slices(high_slice, low_slice, params);
 
-        // Check if output pointer aliases with either input
         if high_ptr == out_ptr || low_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             sar_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1646,7 +1561,7 @@ pub fn sar_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sar_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1655,7 +1570,7 @@ pub fn sar_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sar_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -1665,7 +1580,7 @@ pub fn sar_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn sar_batch_into(
     high_ptr: *const f64,
@@ -1689,8 +1604,7 @@ pub fn sar_batch_into(
             acceleration: (acc_start, acc_end, acc_step),
             maximum: (max_start, max_end, max_step),
         };
-        let combos =
-            expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -1698,25 +1612,24 @@ pub fn sar_batch_into(
             .ok_or_else(|| JsValue::from_str("sar_batch_into: size overflow in rows*cols"))?;
 
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
-        // Use Scalar kernel for WASM batch operations
+
         sar_batch_inner_into_noalloc_wasm(high, low, &sweep, Kernel::Scalar, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 fn sar_batch_inner_into_noalloc_wasm(
     high: &[f64],
     low: &[f64],
     sweep: &SarBatchRange,
-    _kern: Kernel, // Unused in WASM, always use scalar
+    _kern: Kernel,
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<SarParams>, SarError> {
     let combos = expand_grid(sweep)?;
 
-    // Trim to minimum length to avoid out-of-bounds access
     let min_len = high.len().min(low.len());
     let (high, low) = (&high[..min_len], &low[..min_len]);
 
@@ -1734,13 +1647,11 @@ fn sar_batch_inner_into_noalloc_wasm(
 
     let rows = combos.len();
     let cols = high.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(SarError::InvalidRange {
-            start: sweep.acceleration.0,
-            end: sweep.acceleration.1,
-            step: sweep.acceleration.2,
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(SarError::InvalidRange {
+        start: sweep.acceleration.0,
+        end: sweep.acceleration.1,
+        step: sweep.acceleration.2,
+    })?;
     if out.len() != expected {
         return Err(SarError::OutputLengthMismatch {
             expected,
@@ -1748,7 +1659,6 @@ fn sar_batch_inner_into_noalloc_wasm(
         });
     }
 
-    // poison-safe NaN prefixes without allocation
     unsafe {
         let out_mu = std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -1758,7 +1668,6 @@ fn sar_batch_inner_into_noalloc_wasm(
         init_matrix_prefixes(out_mu, cols, &warm);
     }
 
-    // For WASM, always use scalar kernel since SIMD isn't fully implemented
     let exec = |row: usize, row_out: &mut [f64]| unsafe {
         let p = &combos[row];
         sar_row_scalar(
@@ -1794,14 +1703,14 @@ fn sar_batch_inner_into_noalloc_wasm(
     Ok(combos)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SarBatchConfig {
     pub acceleration_range: (f64, f64, f64),
     pub maximum_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SarBatchJsOutput {
     pub values: Vec<f64>,
@@ -1810,7 +1719,7 @@ pub struct SarBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = sar_batch)]
 pub fn sar_batch_unified_js(
     high: &[f64],
@@ -1825,7 +1734,6 @@ pub fn sar_batch_unified_js(
         maximum: config.maximum_range,
     };
 
-    
     let kernel = if cfg!(target_arch = "wasm32") {
         Kernel::Scalar
     } else {
@@ -1956,49 +1864,48 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            SarParams::default(), 
+            SarParams::default(),
             SarParams {
                 acceleration: Some(0.001),
                 maximum: Some(0.001),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.01),
                 maximum: Some(0.1),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.02),
                 maximum: Some(0.3),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.05),
                 maximum: Some(0.2),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.05),
                 maximum: Some(0.5),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.1),
                 maximum: Some(0.5),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.1),
                 maximum: Some(0.9),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.2),
                 maximum: Some(0.9),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.001),
                 maximum: Some(0.9),
-            }, 
+            },
             SarParams {
                 acceleration: Some(0.2),
                 maximum: Some(0.01),
-            }, 
+            },
         ];
 
         for (param_idx, params) in test_params.iter().enumerate() {
@@ -2007,12 +1914,11 @@ mod tests {
 
             for (i, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -2062,7 +1968,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_sar_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -2074,40 +1980,28 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
-        let strat = (0.001f64..0.5f64) 
-            .prop_flat_map(|acceleration| {
-                (
-                    Just(acceleration),
-                    acceleration..1.0f64, 
-                )
-            })
+        let strat = (0.001f64..0.5f64)
+            .prop_flat_map(|acceleration| (Just(acceleration), acceleration..1.0f64))
             .prop_flat_map(|(acceleration, maximum)| {
                 (
-                    
                     prop::collection::vec(
                         (1.0f64..1e6f64).prop_filter("finite price", |x| x.is_finite() && *x > 0.0),
-                        10..400, 
+                        10..400,
                     ),
                     Just(acceleration),
                     Just(maximum),
-                    
-                    0.001f64..0.1f64, 
+                    0.001f64..0.1f64,
                 )
             });
 
         proptest::test_runner::TestRunner::default().run(
             &strat,
             |(base_prices, acceleration, maximum, volatility)| {
-                
                 let mut high = Vec::with_capacity(base_prices.len());
                 let mut low = Vec::with_capacity(base_prices.len());
 
-                
                 let mut spread_factor = 1.0;
                 for price in &base_prices {
-                    
                     spread_factor = (spread_factor + (price % 0.1 - 0.05) * 0.2)
                         .max(0.5)
                         .min(2.0);
@@ -2122,16 +2016,12 @@ mod tests {
                 };
                 let input = SarInput::from_slices(&high, &low, params.clone());
 
-                
                 let SarOutput { values: out } = sar_with_kernel(&input, kernel).unwrap();
 
-                
                 let SarOutput { values: ref_out } =
                     sar_with_kernel(&input, Kernel::Scalar).unwrap();
 
-                
                 for i in 1..out.len() {
-                    
                     if !out[i].is_nan() {
                         let min_price = low.iter().cloned().fold(f64::INFINITY, f64::min);
                         let max_price = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -2147,19 +2037,16 @@ mod tests {
                     }
                 }
 
-                
                 prop_assert!(
                     out[0].is_nan(),
                     "First SAR value should be NaN during warmup, got {}",
                     out[0]
                 );
 
-                
                 for i in 0..out.len() {
                     let y = out[i];
                     let r = ref_out[i];
 
-                    
                     if y.is_nan() {
                         prop_assert!(
                             r.is_nan(),
@@ -2177,7 +2064,6 @@ mod tests {
                             r
                         );
                     } else {
-                        
                         let diff = (y - r).abs();
                         prop_assert!(
                             diff < 1e-9,
@@ -2190,15 +2076,11 @@ mod tests {
                     }
                 }
 
-                
-                
                 if out.len() > 10 {
-                    
                     let mut last_movement = 0.0;
                     let mut increasing_count = 0;
 
                     for i in 2..out.len().min(20) {
-                        
                         if !out[i].is_nan() && !out[i - 1].is_nan() {
                             let movement = (out[i] - out[i - 1]).abs();
                             if movement > last_movement {
@@ -2208,7 +2090,6 @@ mod tests {
                         }
                     }
 
-                    
                     prop_assert!(
                         increasing_count > 0 || out.len() < 5,
                         "SAR acceleration never increases (count: {})",
@@ -2216,18 +2097,14 @@ mod tests {
                     );
                 }
 
-                
-                
                 let strong_uptrend = high.windows(2).all(|w| w[1] > w[0] + 1e-9)
                     && low.windows(2).all(|w| w[1] > w[0] + 1e-9);
                 if strong_uptrend && out.len() > 10 {
-                    
                     let start = out.len() * 3 / 4;
                     for i in start..out.len() {
                         if !out[i].is_nan() {
-                            
                             prop_assert!(
-                                out[i] <= low[i] + 1e-6, 
+                                out[i] <= low[i] + 1e-6,
                                 "In uptrend, SAR[{}] = {} should be <= low[{}] = {}",
                                 i,
                                 out[i],
@@ -2238,16 +2115,14 @@ mod tests {
                     }
                 }
 
-                
                 let strong_downtrend = high.windows(2).all(|w| w[1] < w[0] - 1e-9)
                     && low.windows(2).all(|w| w[1] < w[0] - 1e-9);
                 if strong_downtrend && out.len() > 10 {
                     let start = out.len() * 3 / 4;
                     for i in start..out.len() {
                         if !out[i].is_nan() {
-                            
                             prop_assert!(
-                                out[i] >= high[i] - 1e-6, 
+                                out[i] >= high[i] - 1e-6,
                                 "In downtrend, SAR[{}] = {} should be >= high[{}] = {}",
                                 i,
                                 out[i],
@@ -2258,24 +2133,16 @@ mod tests {
                     }
                 }
 
-                
-                
                 if out.len() > 5 {
                     for i in 2..out.len() {
                         if !out[i].is_nan() && !out[i - 1].is_nan() {
-                            
                             let jump = (out[i] - out[i - 1]).abs();
                             let avg_price = (high[i] + low[i]) / 2.0;
 
-                            
                             if jump > avg_price * 0.05 {
-                                
-                                
                                 let prev_below = out[i - 1] < low[i - 1];
                                 let curr_below = out[i] < low[i];
 
-                                
-                                
                                 prop_assert!(
                                     prev_below != curr_below || jump > avg_price * 0.03,
                                     "Large SAR jump without proper reversal at index {}",
@@ -2286,10 +2153,7 @@ mod tests {
                     }
                 }
 
-                
-                
                 if base_prices.windows(2).all(|w| w[1] > w[0]) && out.len() > 20 {
-                    
                     let quarter = out.len() / 4;
                     let first_quarter: Vec<f64> = out[quarter..quarter * 2]
                         .iter()
@@ -2307,17 +2171,14 @@ mod tests {
                             first_quarter.iter().sum::<f64>() / first_quarter.len() as f64;
                         let last_avg = last_quarter.iter().sum::<f64>() / last_quarter.len() as f64;
 
-                        
-                        
                         prop_assert!(
-							last_avg >= first_avg * 0.95,  
+							last_avg >= first_avg * 0.95,
 							"For increasing prices, SAR should generally trend up: first_avg={}, last_avg={}",
 							first_avg, last_avg
 						);
                     }
                 }
 
-                
                 #[cfg(debug_assertions)]
                 {
                     for (i, &val) in out.iter().enumerate() {
@@ -2415,16 +2276,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            (0.01, 0.05, 0.01, 0.1, 0.3, 0.1), 
-            (0.02, 0.1, 0.02, 0.2, 0.5, 0.1),  
-            (0.05, 0.2, 0.05, 0.3, 0.9, 0.2),  
-            (0.001, 0.005, 0.001, 0.05, 0.1, 0.05), 
-            (0.02, 0.02, 0.0, 0.2, 0.2, 0.0),  
-            (0.1, 0.2, 0.025, 0.5, 0.9, 0.1),  
-            (0.001, 0.01, 0.003, 0.1, 0.5, 0.2), 
+            (0.01, 0.05, 0.01, 0.1, 0.3, 0.1),
+            (0.02, 0.1, 0.02, 0.2, 0.5, 0.1),
+            (0.05, 0.2, 0.05, 0.3, 0.9, 0.2),
+            (0.001, 0.005, 0.001, 0.05, 0.1, 0.05),
+            (0.02, 0.02, 0.0, 0.2, 0.2, 0.0),
+            (0.1, 0.2, 0.025, 0.5, 0.9, 0.1),
+            (0.001, 0.01, 0.003, 0.1, 0.5, 0.2),
         ];
 
         for (cfg_idx, &(a_start, a_end, a_step, m_start, m_end, m_step)) in
@@ -2446,7 +2305,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Config {}: Found alloc_with_nan_prefix poison value {} (0x{:016X}) \
@@ -2502,7 +2360,7 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     macro_rules! gen_batch_tests {
@@ -2530,30 +2388,25 @@ mod tests {
 
     #[test]
     fn test_sar_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
         let input = SarInput::from_candles(&candles, SarParams::default());
 
-        
         let SarOutput { values: expected } = sar(&input)?;
 
-        
         let mut actual = vec![0.0; candles.high.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             sar_into(&input, &mut actual)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             sar_into_slice(&mut actual, &input, Kernel::Auto)?;
         }
 
         assert_eq!(expected.len(), actual.len());
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }

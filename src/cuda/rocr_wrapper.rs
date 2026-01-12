@@ -1,14 +1,6 @@
-//! CUDA scaffolding for ROCR (Rate of Change Ratio).
-//!
-//! Mirrors ALMA wrapper conventions: NON_BLOCKING stream, PTX load with
-//! DetermineTargetFromContext + O2 (with fallbacks), simple policies, VRAM
-//! checks + grid.y chunking, and public device entry points for:
-//! - One-series × many-params (batch)
-//! - Many-series × one-param (time-major)
-
 #![cfg(feature = "cuda")]
 
-use crate::cuda::moving_averages::DeviceArrayF32; 
+use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::rocr::RocrBatchRange;
 use cust::context::Context;
 use cust::device::{Device, DeviceAttribute};
@@ -29,7 +21,11 @@ pub enum CudaRocrError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -37,7 +33,14 @@ pub enum CudaRocrError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -82,9 +85,8 @@ impl CudaRocr {
     pub fn new(device_id: usize) -> Result<Self, CudaRocrError> {
         cust::init(CudaFlags::empty())?;
         let device = Device::get_device(device_id as u32)?;
-        
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
+
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/rocr_kernel.ptx"));
@@ -95,8 +97,7 @@ impl CudaRocr {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -117,7 +118,10 @@ impl CudaRocr {
         })
     }
 
-    pub fn new_with_policy(device_id: usize, policy: CudaRocrPolicy) -> Result<Self, CudaRocrError> {
+    pub fn new_with_policy(
+        device_id: usize,
+        policy: CudaRocrPolicy,
+    ) -> Result<Self, CudaRocrError> {
         let mut s = Self::new(device_id)?;
         s.policy = policy;
         Ok(s)
@@ -136,7 +140,6 @@ impl CudaRocr {
         self.device_id
     }
 
-    
     pub fn prepare_inv_device(
         &self,
         d_data: &DeviceBuffer<f32>,
@@ -167,7 +170,6 @@ impl CudaRocr {
         }
         Ok(())
     }
-    
 
     fn expand_grid(range: &RocrBatchRange) -> Result<Vec<usize>, CudaRocrError> {
         let (start, end, step) = range.period;
@@ -281,7 +283,14 @@ impl CudaRocr {
             || gy > max_gy
             || gz > max_gz
         {
-            return Err(CudaRocrError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaRocrError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
@@ -331,11 +340,8 @@ impl CudaRocr {
             )));
         }
 
-        
-        
         let use_inv = combos.len() >= 3 && len >= 4096;
 
-        
         let elem_f32 = std::mem::size_of::<f32>();
         let prices_bytes = len
             .checked_mul(elem_f32)
@@ -372,19 +378,16 @@ impl CudaRocr {
             }
         }
 
-        
         let d_data = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let periods_i32: Vec<i32> = combos.iter().map(|&p| p as i32).collect();
-        let d_periods =
-            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(total_elems, &self.stream)? };
-        
+
         let mut d_inv_opt: Option<DeviceBuffer<f32>> = None;
         if use_inv {
-            let mut d_inv: DeviceBuffer<f32> = unsafe {
-                DeviceBuffer::uninitialized_async(len, &self.stream)?
-            };
+            let mut d_inv: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized_async(len, &self.stream)? };
             self.prepare_inv_device(&d_data, len, &mut d_inv)?;
             d_inv_opt = Some(d_inv);
         }
@@ -401,14 +404,18 @@ impl CudaRocr {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: combos.len(), cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: combos.len(),
+            cols: len,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
     pub fn rocr_batch_device(
         &self,
         d_data: &DeviceBuffer<f32>,
-        d_inv_opt: Option<&DeviceBuffer<f32>>, 
+        d_inv_opt: Option<&DeviceBuffer<f32>>,
         d_periods: &DeviceBuffer<i32>,
         len: usize,
         first_valid: usize,
@@ -427,12 +434,11 @@ impl CudaRocr {
             return Err(CudaRocrError::InvalidInput("output length mismatch".into()));
         }
 
-        let func = self
-            .module
-            .get_function("rocr_batch_f32")
-            .map_err(|_| CudaRocrError::MissingKernelSymbol {
+        let func = self.module.get_function("rocr_batch_f32").map_err(|_| {
+            CudaRocrError::MissingKernelSymbol {
                 name: "rocr_batch_f32",
-            })?;
+            }
+        })?;
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => 256u32,
@@ -444,7 +450,6 @@ impl CudaRocr {
 
         self.assert_current_device()?;
 
-        
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if !self
                 .debug_once
@@ -459,9 +464,8 @@ impl CudaRocr {
             }
         }
 
-        
         let mut launched = 0usize;
-            while launched < n_combos {
+        while launched < n_combos {
             let remain = n_combos - launched;
             let chunk = remain.min(65_535);
             let grid: GridSize = (grid_x.max(1), chunk as u32, 1).into();
@@ -497,8 +501,6 @@ impl CudaRocr {
         Ok(())
     }
 
-    
-
     pub fn rocr_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -523,7 +525,6 @@ impl CudaRocr {
             return Err(CudaRocrError::InvalidInput("period must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![0i32; cols];
         for s in 0..cols {
             let mut fv = None;
@@ -547,7 +548,6 @@ impl CudaRocr {
             first_valids[s] = fv;
         }
 
-        
         let elem_f32 = std::mem::size_of::<f32>();
         let series_bytes = total_elems
             .checked_mul(elem_f32)
@@ -575,12 +575,10 @@ impl CudaRocr {
             }
         }
 
-        let d_data_tm =
-            unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
+        let d_data_tm = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(total_elems, &self.stream)?
-        };
+        let mut d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(total_elems, &self.stream)? };
 
         self.rocr_many_series_one_param_device(
             &d_data_tm,
@@ -593,7 +591,11 @@ impl CudaRocr {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out_tm, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out_tm,
+            rows,
+            cols,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -613,14 +615,15 @@ impl CudaRocr {
                 name: "rocr_many_series_one_param_f32",
             })?;
 
-        
         let (block_x, block_y) = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => (128u32, 4u32),
             ManySeriesKernelPolicy::OneD { block_x } => (block_x.max(64), 4u32),
         };
         let mut grid_x = ((cols as u32) + block_x - 1) / block_x;
         let mut grid_y = ((rows as u32) + block_y - 1) / block_y;
-        if grid_y > 65_535 { grid_y = 65_535; } 
+        if grid_y > 65_535 {
+            grid_y = 65_535;
+        }
         if std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
             if !self
                 .debug_once
@@ -659,7 +662,6 @@ impl CudaRocr {
         Ok(())
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -722,15 +724,18 @@ pub mod benches {
             prices[i] = (x * 0.00123).sin() + 0.00017 * x;
         }
         let first = prices.iter().position(|v| !v.is_nan()).unwrap_or(0);
-        let sweep = RocrBatchRange { period: (5, 245, 5) };
+        let sweep = RocrBatchRange {
+            period: (5, 245, 5),
+        };
         let combos = super::CudaRocr::expand_grid(&sweep).expect("valid sweep");
         let n_combos = combos.len();
         let periods_i32: Vec<i32> = combos.iter().map(|&p| p as i32).collect();
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
-        
+
         let mut d_inv: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(len) }.expect("d_inv");
-        cuda.prepare_inv_device(&d_prices, len, &mut d_inv).expect("prepare_inv_device");
+        cuda.prepare_inv_device(&d_prices, len, &mut d_inv)
+            .expect("prepare_inv_device");
         cuda.synchronize().expect("sync");
         let d_periods = DeviceBuffer::from_slice(&periods_i32).expect("d_periods");
         let total_elems = n_combos.checked_mul(len).expect("rows*cols overflow");

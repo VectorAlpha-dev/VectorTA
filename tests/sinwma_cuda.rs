@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::sinwma::{
     sinwma_batch_with_kernel, sinwma_with_kernel, SinWmaBatchRange, SinWmaInput, SinWmaParams,
 };

@@ -1,12 +1,3 @@
-//! CUDA support for the DEMA (Double Exponential Moving Average) indicator.
-//!
-//! Mirrors the ALMA "gold standard" wrapper: VRAM-first design, explicit
-//! kernel policies (with sensible Auto defaults), device-memory checks, and
-//! deterministic benches. DEMA is a recursive filter, so kernels parallelize
-//! across parameter combos and series while each thread walks time sequentially
-//! for its assigned work item. All variants match the scalar warm-up semantics:
-//! indices t < (first_valid + period - 1) are set to NaN.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -23,8 +14,8 @@ use cust::sys as cu;
 use std::ffi::c_void;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
-use thiserror::Error;
 use std::sync::Arc;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CudaDemaError {
@@ -37,9 +28,20 @@ pub enum CudaDemaError {
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -58,7 +60,7 @@ pub enum BatchKernelPolicy {
     Plain {
         block_x: u32,
     },
-    
+
     Tiled {
         tile: u32,
         per_thread: BatchThreadsPerOutput,
@@ -69,7 +71,7 @@ pub enum BatchKernelPolicy {
 pub enum ManySeriesKernelPolicy {
     Auto,
     OneD { block_x: u32 },
-    
+
     Tiled2D { tx: u32, ty: u32 },
 }
 
@@ -122,7 +124,7 @@ impl CudaDema {
         ];
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
-            Err(_) => Module::from_ptx(ptx, &[])?
+            Err(_) => Module::from_ptx(ptx, &[])?,
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
@@ -160,9 +162,13 @@ impl CudaDema {
         &self.policy
     }
     #[inline]
-    pub fn ctx(&self) -> Arc<Context> { Arc::clone(&self.ctx) }
+    pub fn ctx(&self) -> Arc<Context> {
+        Arc::clone(&self.ctx)
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
     pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
         self.last_batch
     }
@@ -222,24 +228,30 @@ impl CudaDema {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        
-        let prices_bytes = series_len
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing prices_bytes".into()))?;
-        let periods_bytes = periods.len()
+        let prices_bytes = series_len.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaDemaError::InvalidInput("size overflow computing prices_bytes".into()),
+        )?;
+        let periods_bytes = periods
+            .len()
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing periods_bytes".into()))?;
+            .ok_or(CudaDemaError::InvalidInput(
+                "size overflow computing periods_bytes".into(),
+            ))?;
         let out_elems = series_len
             .checked_mul(combos.len())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing output elements".into()))?;
-        let out_bytes = out_elems
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing output bytes".into()))?;
+            .ok_or(CudaDemaError::InvalidInput(
+                "size overflow computing output elements".into(),
+            ))?;
+        let out_bytes = out_elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaDemaError::InvalidInput("size overflow computing output bytes".into()),
+        )?;
         let required = prices_bytes
             .checked_add(periods_bytes)
             .and_then(|v| v.checked_add(out_bytes))
-            .ok_or(CudaDemaError::InvalidInput("size overflow summing required bytes".into()))?;
-        
+            .ok_or(CudaDemaError::InvalidInput(
+                "size overflow summing required bytes".into(),
+            ))?;
+
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_prices = DeviceBuffer::from_slice(data_f32)?;
@@ -290,9 +302,6 @@ impl CudaDema {
         self.synchronize()
     }
 
-    /// Convenience: run DEMA batch using device-resident prices. Builds the
-    /// period vector on the device from the provided sweep and returns a VRAM
-    /// handle for the output matrix (rows = combos, cols = series_len).
     pub fn dema_batch_from_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -326,19 +335,25 @@ impl CudaDema {
             )));
         }
 
-        
-        let periods_bytes = periods.len()
+        let periods_bytes = periods
+            .len()
             .checked_mul(std::mem::size_of::<i32>())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing periods_bytes".into()))?;
+            .ok_or(CudaDemaError::InvalidInput(
+                "size overflow computing periods_bytes".into(),
+            ))?;
         let out_elems = series_len
             .checked_mul(combos.len())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing output elements".into()))?;
-        let out_bytes = out_elems
-            .checked_mul(std::mem::size_of::<f32>())
-            .ok_or(CudaDemaError::InvalidInput("size overflow computing output bytes".into()))?;
+            .ok_or(CudaDemaError::InvalidInput(
+                "size overflow computing output elements".into(),
+            ))?;
+        let out_bytes = out_elems.checked_mul(std::mem::size_of::<f32>()).ok_or(
+            CudaDemaError::InvalidInput("size overflow computing output bytes".into()),
+        )?;
         let required = periods_bytes
             .checked_add(out_bytes)
-            .ok_or(CudaDemaError::InvalidInput("size overflow summing required bytes".into()))?;
+            .ok_or(CudaDemaError::InvalidInput(
+                "size overflow summing required bytes".into(),
+            ))?;
         Self::will_fit_checked(required, 64 * 1024 * 1024)?;
 
         let d_periods = DeviceBuffer::from_slice(&periods)?;
@@ -441,12 +456,12 @@ impl CudaDema {
             return Ok(());
         }
 
-        let func = self
-            .module
-            .get_function("dema_batch_f32")
-            .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_batch_f32" })?;
+        let func = self.module.get_function("dema_batch_f32").map_err(|_| {
+            CudaDemaError::MissingKernelSymbol {
+                name: "dema_batch_f32",
+            }
+        })?;
 
-        
         let mut block_x: u32 = 1;
         if let BatchKernelPolicy::Plain { block_x: bx } = self.policy.batch {
             block_x = bx.max(1);
@@ -460,13 +475,20 @@ impl CudaDema {
         let grid_x: u32 = n_combos as u32;
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
-        
+
         {
             let dev = Device::get_device(self.device_id)?;
             let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
             let max_tpb = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
             if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_tpb {
-                return Err(CudaDemaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+                return Err(CudaDemaError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
             }
         }
 
@@ -488,11 +510,9 @@ impl CudaDema {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        
         Ok(())
     }
 
-    
     pub fn dema_many_series_one_param_time_major_dev(
         &self,
         data_tm_f32: &[f32],
@@ -503,7 +523,6 @@ impl CudaDema {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        
         let elems = num_series * series_len;
         let required =
             elems * 2 * std::mem::size_of::<f32>() + num_series * std::mem::size_of::<i32>();
@@ -609,10 +628,11 @@ impl CudaDema {
         let func = self
             .module
             .get_function("dema_many_series_one_param_time_major_f32")
-            .map_err(|_| CudaDemaError::MissingKernelSymbol { name: "dema_many_series_one_param_time_major_f32" })?;
+            .map_err(|_| CudaDemaError::MissingKernelSymbol {
+                name: "dema_many_series_one_param_time_major_f32",
+            })?;
 
-        
-        let mut block_x_req: u32 = 128; 
+        let mut block_x_req: u32 = 128;
         if let ManySeriesKernelPolicy::OneD { block_x: bx } = self.policy.many_series {
             block_x_req = bx.max(32);
         }
@@ -634,7 +654,14 @@ impl CudaDema {
             let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
             let max_tpb = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
             if grid_x == 0 || grid_x > max_grid_x || block_x == 0 || block_x > max_tpb {
-                return Err(CudaDemaError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 });
+                return Err(CudaDemaError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: 1,
+                    gz: 1,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
             }
         }
 
@@ -658,7 +685,6 @@ impl CudaDema {
         Ok(())
     }
 
-    
     #[inline]
     fn mem_check_enabled() -> bool {
         match std::env::var("CUDA_MEM_CHECK") {
@@ -676,7 +702,11 @@ impl CudaDema {
         if need <= free {
             Ok(())
         } else {
-            Err(CudaDemaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+            Err(CudaDemaError::OutOfMemory {
+                required: required_bytes,
+                free,
+                headroom: headroom_bytes,
+            })
         }
     }
 
@@ -718,7 +748,7 @@ impl CudaDema {
                 CudaDemaError::InvalidInput(format!("series {} contains only NaNs", s))
             })?;
             let remaining = series_len - fv as usize;
-            
+
             if remaining < needed {
                 return Err(CudaDemaError::InvalidInput(format!(
                     "series {} does not have enough valid data: need >= {}, have {}",
@@ -734,9 +764,15 @@ impl CudaDema {
 fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
     let (start, end, step) = range.period;
     if step == 0 || start == end {
-        return vec![DemaParams { period: Some(start) }];
+        return vec![DemaParams {
+            period: Some(start),
+        }];
     }
-    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
     let mut vals = Vec::new();
     let mut v = lo;
     while v <= hi {
@@ -749,10 +785,10 @@ fn expand_periods(range: &DemaBatchRange) -> Vec<DemaParams> {
     if start > end {
         vals.reverse();
     }
-    vals.into_iter().map(|p| DemaParams { period: Some(p) }).collect()
+    vals.into_iter()
+        .map(|p| DemaParams { period: Some(p) })
+        .collect()
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -887,12 +923,24 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         vec![
-            CudaBenchScenario::new("dema", "one_series_many_params", "dema_cuda_batch_dev", "1m_x_250", prep_one_series_many_params)
-                .with_sample_size(10)
-                .with_mem_required(bytes_one_series_many_params()),
-            CudaBenchScenario::new("dema", "many_series_one_param", "dema_cuda_many_series_one_param", "250x1m", prep_many_series_one_param)
-                .with_sample_size(5)
-                .with_mem_required(bytes_many_series_one_param()),
+            CudaBenchScenario::new(
+                "dema",
+                "one_series_many_params",
+                "dema_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params()),
+            CudaBenchScenario::new(
+                "dema",
+                "many_series_one_param",
+                "dema_cuda_many_series_one_param",
+                "250x1m",
+                prep_many_series_one_param,
+            )
+            .with_sample_size(5)
+            .with_mem_required(bytes_many_series_one_param()),
         ]
     }
 }

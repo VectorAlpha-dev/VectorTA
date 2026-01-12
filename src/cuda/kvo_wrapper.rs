@@ -1,13 +1,3 @@
-//! CUDA support for Klinger Volume Oscillator (KVO).
-//!
-//! Pattern: recurrence/IIR.
-//! - Batch (one series × many params): precompute VF on host once, then per-row EMA scan on device.
-//! - Many-series × one-param (time-major): per-series VF + EMA scan inside the kernel.
-//!
-//! Semantics: identical to scalar `kvo.rs` implementation.
-//! - Warmup: NaN up to `first_valid + 1`; seed EMAs at that index and write 0.0.
-//! - f64 accumulations for EMAs and VF intermediates; outputs f32.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
@@ -29,7 +19,11 @@ pub enum CudaKvoError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -37,7 +31,14 @@ pub enum CudaKvoError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -85,7 +86,7 @@ impl CudaKvo {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/kvo_kernel.ptx"));
-        
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -174,7 +175,6 @@ impl CudaKvo {
         Ok(())
     }
 
-    
     pub fn kvo_batch_dev(
         &self,
         high: &[f32],
@@ -213,18 +213,14 @@ impl CudaKvo {
             longs.push(l as i32);
         }
 
-        
         let vf = precompute_vf_f32(high, low, close, volume, first);
 
-        
         let combos_len = combos.len();
         let size_overflow = || CudaKvoError::InvalidInput("size overflow".into());
         let vf_bytes = len.checked_mul(4).ok_or_else(size_overflow)?;
         let shorts_bytes = combos_len.checked_mul(4).ok_or_else(size_overflow)?;
         let longs_bytes = combos_len.checked_mul(4).ok_or_else(size_overflow)?;
-        let out_elems = len
-            .checked_mul(combos_len)
-            .ok_or_else(size_overflow)?;
+        let out_elems = len.checked_mul(combos_len).ok_or_else(size_overflow)?;
         let out_bytes = out_elems.checked_mul(4).ok_or_else(size_overflow)?;
         let bytes = vf_bytes
             .checked_add(shorts_bytes)
@@ -233,7 +229,6 @@ impl CudaKvo {
             .ok_or_else(size_overflow)?;
         Self::will_fit(bytes, Self::headroom_bytes())?;
 
-        
         let d_vf = DeviceBuffer::from_slice(&vf)?;
         let d_shorts = DeviceBuffer::from_slice(&shorts)?;
         let d_longs = DeviceBuffer::from_slice(&longs)?;
@@ -274,12 +269,12 @@ impl CudaKvo {
         if len <= 0 || n_combos <= 0 {
             return Ok(());
         }
-        let func = self
-            .module
-            .get_function("kvo_batch_f32")
-            .map_err(|_| CudaKvoError::MissingKernelSymbol { name: "kvo_batch_f32" })?;
+        let func = self.module.get_function("kvo_batch_f32").map_err(|_| {
+            CudaKvoError::MissingKernelSymbol {
+                name: "kvo_batch_f32",
+            }
+        })?;
 
-        
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
             _ => 256,
@@ -313,7 +308,6 @@ impl CudaKvo {
         Ok(())
     }
 
-    
     pub fn kvo_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -328,9 +322,7 @@ impl CudaKvo {
             return Err(CudaKvoError::InvalidInput("empty matrix".into()));
         }
         let size_overflow = || CudaKvoError::InvalidInput("size overflow".into());
-        let elems = cols
-            .checked_mul(rows)
-            .ok_or_else(size_overflow)?;
+        let elems = cols.checked_mul(rows).ok_or_else(size_overflow)?;
         if high_tm.len() != elems
             || low_tm.len() != elems
             || close_tm.len() != elems
@@ -347,11 +339,9 @@ impl CudaKvo {
             return Err(CudaKvoError::InvalidInput("invalid (short,long)".into()));
         }
 
-        
         let first_valids =
             first_valids_time_major(high_tm, low_tm, close_tm, volume_tm, cols, rows);
 
-        
         let in_bytes = elems
             .checked_mul(4)
             .and_then(|b| b.checked_mul(4))
@@ -364,7 +354,6 @@ impl CudaKvo {
             .ok_or_else(size_overflow)?;
         Self::will_fit(bytes, Self::headroom_bytes())?;
 
-        
         let d_high = DeviceBuffer::from_slice(high_tm)?;
         let d_low = DeviceBuffer::from_slice(low_tm)?;
         let d_close = DeviceBuffer::from_slice(close_tm)?;
@@ -417,9 +406,11 @@ impl CudaKvo {
                 name: "kvo_many_series_one_param_time_major_f32",
             })?;
 
-        
         let (block_x, _ignore) = match self.policy.many_series {
-            ManySeriesKernelPolicy::OneD { block_x, block_y: _ } if block_x > 0 => (block_x, 1u32),
+            ManySeriesKernelPolicy::OneD {
+                block_x,
+                block_y: _,
+            } if block_x > 0 => (block_x, 1u32),
             _ => (256, 1u32),
         };
         let threads = block_x;
@@ -456,8 +447,6 @@ impl CudaKvo {
         Ok(())
     }
 }
-
-
 
 fn first_valid_ohlcv(h: &[f32], l: &[f32], c: &[f32], v: &[f32]) -> Option<usize> {
     h.iter()
@@ -628,7 +617,6 @@ fn grid_y_chunks(n: usize) -> impl Iterator<Item = (usize, usize)> {
     YChunks { n, launched: 0 }
 }
 
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{
@@ -638,21 +626,21 @@ pub mod benches {
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const SHORT_RANGE: (usize, usize, usize) = (2, 16, 1);
-    const LONG_RANGE: (usize, usize, usize) = (18, 50, 2); 
+    const LONG_RANGE: (usize, usize, usize) = (18, 50, 2);
     const MANY_SERIES_COLS: usize = 256;
     const MANY_SERIES_ROWS: usize = 1_000_000;
 
     fn bytes_one_series_many_params() -> usize {
         let combos = ((SHORT_RANGE.1 - SHORT_RANGE.0) / SHORT_RANGE.2 + 1)
             * ((LONG_RANGE.1 - LONG_RANGE.0) / LONG_RANGE.2 + 1);
-        let in_bytes = ONE_SERIES_LEN * 4 * 4; 
-        let vf_bytes = ONE_SERIES_LEN * 4; 
+        let in_bytes = ONE_SERIES_LEN * 4 * 4;
+        let vf_bytes = ONE_SERIES_LEN * 4;
         let out_bytes = ONE_SERIES_LEN * combos * 4;
         in_bytes + vf_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series_one_param() -> usize {
         let elems = MANY_SERIES_COLS * MANY_SERIES_ROWS;
-        let in_bytes = elems * 4 * 4; 
+        let in_bytes = elems * 4 * 4;
         let out_bytes = elems * 4;
         let fv_bytes = MANY_SERIES_COLS * 4;
         in_bytes + out_bytes + fv_bytes + 64 * 1024 * 1024
@@ -688,7 +676,7 @@ pub mod benches {
         let cuda = CudaKvo::new(0).expect("cuda kvo");
         let price = gen_series(ONE_SERIES_LEN);
         let vol = gen_volume(ONE_SERIES_LEN);
-        
+
         let mut h = price.clone();
         let mut l = price.clone();
         let mut c = price.clone();
@@ -702,8 +690,7 @@ pub mod benches {
             short_period: SHORT_RANGE,
             long_period: LONG_RANGE,
         };
-        let first_valid =
-            first_valid_ohlcv(&h, &l, &c, &vol).expect("first_valid_ohlcv");
+        let first_valid = first_valid_ohlcv(&h, &l, &c, &vol).expect("first_valid_ohlcv");
         let combos = expand_grid(&sweep).expect("expand_grid");
         let mut shorts = Vec::with_capacity(combos.len());
         let mut longs = Vec::with_capacity(combos.len());
@@ -767,7 +754,7 @@ pub mod benches {
         let rows = MANY_SERIES_ROWS;
         let price_tm = gen_time_major_prices(cols, rows);
         let vol_tm = gen_time_major_volumes(cols, rows);
-        
+
         let mut h_tm = price_tm.clone();
         let mut l_tm = price_tm.clone();
         let mut c_tm = price_tm.clone();

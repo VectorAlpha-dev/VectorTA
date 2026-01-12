@@ -1,18 +1,5 @@
 #![cfg(feature = "cuda")]
 
-/// Macro to define two standard CUDA benchmark scenarios (one-series × many-params,
-/// and many-series × one-param) for a moving average wrapper that follows the
-/// conventional API shape.
-///
-/// Parameters:
-/// - mod name to contain the benches (to avoid polluting wrapper namespace)
-/// - wrapper type path (e.g., crate::cuda::moving_averages::CudaSma)
-/// - range and params type paths (from indicators module)
-/// - batch function ident on the wrapper (e.g., sma_batch_dev)
-/// - many-series function ident on the wrapper (e.g., sma_multi_series_one_param_time_major_dev)
-/// - an expression that builds the batch range (uses the constants defined within)
-/// - an expression that builds the single-parameter params for many-series
-/// - indicator short name (e.g., "sma") and group base label (e.g., "sma")
 #[macro_export]
 macro_rules! define_ma_period_benches {
     (
@@ -125,8 +112,6 @@ macro_rules! define_ma_period_benches {
     };
 }
 
-/// Macro to define a batch-only benchmark (for wrappers that do not provide a
-/// many-series path).
 #[macro_export]
 macro_rules! define_ma_period_benches_batch_only {
     (

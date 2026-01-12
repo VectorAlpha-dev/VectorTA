@@ -1,26 +1,3 @@
-//! # Chaikin Accumulation/Distribution Oscillator (ADOSC)
-//!
-//! A momentum indicator that subtracts a long-term EMA of the Accumulation/Distribution Line (ADL)
-//! from a short-term EMA of the ADL to identify shifts in market buying/selling pressure.
-//!
-//! ## Parameters
-//! - **short_period**: The shorter EMA period (default: 3)
-//! - **long_period**: The longer EMA period (default: 10)
-//!
-//! ## Returns
-//! - `Ok(AdoscOutput)` on success, containing Vec<f64> with one value per bar
-//! - `Err(AdoscError)` otherwise.
-//!
-//! ## Developer Notes
-//! - SIMD status: Loop-carried dependencies (prefix ADL and EMA recurrences) limit gains; AVX2/AVX512 remain stubs that defer to scalar.
-//! - Streaming update: O(1) per bar via EMA; math matches batch/scalar path exactly (no FMA), with precomputed (1-α) and guards for `volume==0` and `high==low` fast paths.
-//! - Memory: Uses zero-copy helpers (alloc_with_nan_prefix).
-//! - Batch optimization: Shares ADL across rows to avoid recomputing MFV/ADL per parameter set.
-//!
-//! Decision log: SIMD paths are stubs that defer to scalar; CUDA wrapper uses typed errors, checked byte sizing, and an Arc<Context> guard;
-//! Python bindings expose CUDA Array Interface v3 (explicit byte strides, version=3, synchronized stream) and DLPack v1.x with legacy capsules,
-//! keeping numerical outputs and public APIs identical to the scalar reference implementation.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1};
 #[cfg(feature = "python")]
@@ -30,9 +7,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
@@ -72,7 +49,10 @@ pub struct AdoscOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct AdoscParams {
     pub short_period: Option<usize>,
     pub long_period: Option<usize>,
@@ -214,15 +194,28 @@ pub enum AdoscError {
     #[error("adosc: All values are NaN.")]
     AllValuesNaN,
     #[error("adosc: Invalid period: short={short}, long={long}, data length={data_len}")]
-    InvalidPeriod { short: usize, long: usize, data_len: usize },
+    InvalidPeriod {
+        short: usize,
+        long: usize,
+        data_len: usize,
+    },
     #[error("adosc: short_period must be less than long_period: short={short}, long={long}")]
     ShortPeriodGreaterThanLong { short: usize, long: usize },
     #[error("adosc: At least one slice is empty: high={high}, low={low}, close={close}, volume={volume}")]
-    EmptySlices { high: usize, low: usize, close: usize, volume: usize },
+    EmptySlices {
+        high: usize,
+        low: usize,
+        close: usize,
+        volume: usize,
+    },
     #[error("adosc: output length mismatch: expected={expected}, got={got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("adosc: invalid range expansion: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("adosc: not enough valid data: needed={needed}, valid={valid}")]
     NotEnoughValidData { needed: usize, valid: usize },
     #[error("adosc: invalid kernel for batch path: {0:?}")]
@@ -245,22 +238,22 @@ fn adosc_prepare<'a>(
         &'a [f64],
         &'a [f64],
         &'a [f64],
-        &'a [f64], 
+        &'a [f64],
         usize,
-        usize, 
         usize,
-        usize,  
-        Kernel, 
+        usize,
+        usize,
+        Kernel,
     ),
     AdoscError,
 > {
     let (high, low, close, volume) = match &input.data {
-    AdoscData::Candles { candles } => {
+        AdoscData::Candles { candles } => {
             let n = candles.close.len();
             if n == 0 {
                 return Err(AdoscError::EmptyInputData);
             }
-            
+
             let (hh, ll, cc, vv) = (
                 candles.high.as_slice(),
                 candles.low.as_slice(),
@@ -323,7 +316,6 @@ fn adosc_prepare<'a>(
         return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
     }
 
-    
     let all_nan = |s: &[f64]| s.iter().all(|x| x.is_nan());
     if all_nan(high) && all_nan(low) && all_nan(close) && all_nan(volume) {
         return Err(AdoscError::AllValuesNaN);
@@ -359,11 +351,7 @@ pub fn adosc_with_kernel(input: &AdoscInput, kernel: Kernel) -> Result<AdoscOutp
     }
 }
 
-/// Writes ADOSC values into a caller-provided output slice without allocating.
-///
-/// - Preserves ADOSC semantics: no warmup prefix (index 0 is a valid 0.0 value).
-/// - `out.len()` must exactly equal the input length; otherwise returns `AdoscError::OutputLengthMismatch`.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn adosc_into(input: &AdoscInput, out: &mut [f64]) -> Result<(), AdoscError> {
     adosc_into_slice(out, input, Kernel::Auto)
@@ -387,17 +375,14 @@ pub unsafe fn adosc_scalar(
     let one_minus_alpha_short = 1.0 - alpha_short;
     let one_minus_alpha_long = 1.0 - alpha_long;
 
-    
     let mut out = alloc_with_nan_prefix(len, 0);
 
-    
     let hp = high.as_ptr();
     let lp = low.as_ptr();
     let cp = close.as_ptr();
     let vp = volume.as_ptr();
     let op = out.as_mut_ptr();
 
-    
     let h0 = *hp;
     let l0 = *lp;
     let c0 = *cp;
@@ -412,9 +397,8 @@ pub unsafe fn adosc_scalar(
     let mut sum_ad = mfv0;
     let mut short_ema = sum_ad;
     let mut long_ema = sum_ad;
-    *op = short_ema - long_ema; 
+    *op = short_ema - long_ema;
 
-    
     let mut i = 1usize;
     while i < len {
         let h = *hp.add(i);
@@ -603,10 +587,14 @@ fn expand_grid_checked(r: &AdoscBatchRange) -> Result<Vec<AdoscParams>, AdoscErr
             let mut cur = start;
             while cur >= end {
                 v.push(cur);
-                if cur - end < step { break; }
+                if cur - end < step {
+                    break;
+                }
                 cur -= step;
             }
-            if v.is_empty() { return Err(AdoscError::InvalidRange { start, end, step }); }
+            if v.is_empty() {
+                return Err(AdoscError::InvalidRange { start, end, step });
+            }
             Ok(v)
         }
     }
@@ -619,7 +607,10 @@ fn expand_grid_checked(r: &AdoscBatchRange) -> Result<Vec<AdoscParams>, AdoscErr
             if short == 0 || long == 0 || short >= long {
                 continue;
             }
-            out.push(AdoscParams { short_period: Some(short), long_period: Some(long) });
+            out.push(AdoscParams {
+                short_period: Some(short),
+                long_period: Some(long),
+            });
         }
     }
     if out.is_empty() {
@@ -685,7 +676,6 @@ fn adosc_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<AdoscBatchOutput, AdoscError> {
-    
     if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
         return Err(AdoscError::EmptySlices {
             high: high.len(),
@@ -704,160 +694,17 @@ fn adosc_batch_inner(
         .checked_mul(cols)
         .ok_or_else(|| AdoscError::InvalidInput("rows*cols overflow".into()))?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     debug_assert_eq!(buf_mu.len(), expected);
 
-    
     let warm: Vec<usize> = vec![0; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut buf_guard = std::mem::ManuallyDrop::new(buf_mu);
     let values: &mut [f64] = unsafe {
         std::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
-    
-    let mut adl = vec![0.0f64; len];
-    unsafe {
-        
-        let hp = high.as_ptr();
-        let lp = low.as_ptr();
-        let cp = close.as_ptr();
-        let vp = volume.as_ptr();
-        let ap = adl.as_mut_ptr();
 
-        let h0 = *hp;
-        let l0 = *lp;
-        let c0 = *cp;
-        let v0 = *vp;
-        let hl0 = h0 - l0;
-        let mfm0 = if hl0 != 0.0 {
-            ((c0 - l0) - (h0 - c0)) / hl0
-        } else {
-            0.0
-        };
-        let mfv0 = mfm0 * v0;
-        *ap = mfv0; 
-
-        let mut i = 1usize;
-        while i < len {
-            let h = *hp.add(i);
-            let l = *lp.add(i);
-            let c = *cp.add(i);
-            let v = *vp.add(i);
-            let prev = *ap.add(i - 1);
-            let hl = h - l;
-            let mfm = if hl != 0.0 {
-                ((c - l) - (h - c)) / hl
-            } else {
-                0.0
-            };
-            let mfv = mfm * v;
-            *ap.add(i) = prev + mfv;
-            i += 1;
-        }
-    }
-
-    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
-        let prm = &combos[row];
-        let short = prm.short_period.unwrap();
-        let long = prm.long_period.unwrap();
-
-        
-        let alpha_short = 2.0 / (short as f64 + 1.0);
-        let alpha_long = 2.0 / (long as f64 + 1.0);
-        let one_minus_alpha_short = 1.0 - alpha_short;
-        let one_minus_alpha_long = 1.0 - alpha_long;
-
-        let ap = adl.as_ptr();
-        let op = out_row.as_mut_ptr();
-
-        let mut short_ema = *ap; 
-        let mut long_ema = *ap;
-        *op = short_ema - long_ema; 
-
-        let mut i = 1usize;
-        while i < cols {
-            let s = *ap.add(i);
-            short_ema = alpha_short * s + one_minus_alpha_short * short_ema;
-            long_ema = alpha_long * s + one_minus_alpha_long * long_ema;
-            *op.add(i) = short_ema - long_ema;
-            i += 1;
-        }
-    };
-    if parallel {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            values
-                .par_chunks_mut(cols)
-                .enumerate()
-                .for_each(|(row, slice)| do_row(row, slice));
-        }
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            for (row, slice) in values.chunks_mut(cols).enumerate() {
-                do_row(row, slice);
-            }
-        }
-    } else {
-        for (row, slice) in values.chunks_mut(cols).enumerate() {
-            do_row(row, slice);
-        }
-    }
-
-    
-    let values = unsafe {
-        Vec::from_raw_parts(
-            buf_guard.as_mut_ptr() as *mut f64,
-            buf_guard.len(),
-            buf_guard.capacity(),
-        )
-    };
-
-    Ok(AdoscBatchOutput {
-        values,
-        combos,
-        rows,
-        cols,
-    })
-}
-
-#[inline(always)]
-pub fn adosc_batch_inner_into(
-    high: &[f64],
-    low: &[f64],
-    close: &[f64],
-    volume: &[f64],
-    sweep: &AdoscBatchRange,
-    kern: Kernel,
-    parallel: bool,
-    out: &mut [f64],
-) -> Result<Vec<AdoscParams>, AdoscError> {
-    
-    if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
-        return Err(AdoscError::EmptySlices {
-            high: high.len(),
-            low: low.len(),
-            close: close.len(),
-            volume: volume.len(),
-        });
-    }
-
-    let combos = expand_grid_checked(sweep)?;
-    let first = 0;
-    let len = close.len();
-    let rows = combos.len();
-    let cols = len;
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or_else(|| AdoscError::InvalidInput("rows*cols overflow".into()))?;
-    if out.len() != expected {
-        return Err(AdoscError::OutputLengthMismatch { expected, got: out.len() });
-    }
-
-    
     let mut adl = vec![0.0f64; len];
     unsafe {
         let hp = high.as_ptr();
@@ -910,7 +757,145 @@ pub fn adosc_batch_inner_into(
 
         let ap = adl.as_ptr();
         let op = out_row.as_mut_ptr();
-        let mut short_ema = *ap; 
+
+        let mut short_ema = *ap;
+        let mut long_ema = *ap;
+        *op = short_ema - long_ema;
+
+        let mut i = 1usize;
+        while i < cols {
+            let s = *ap.add(i);
+            short_ema = alpha_short * s + one_minus_alpha_short * short_ema;
+            long_ema = alpha_long * s + one_minus_alpha_long * long_ema;
+            *op.add(i) = short_ema - long_ema;
+            i += 1;
+        }
+    };
+    if parallel {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            values
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(row, slice)| do_row(row, slice));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            for (row, slice) in values.chunks_mut(cols).enumerate() {
+                do_row(row, slice);
+            }
+        }
+    } else {
+        for (row, slice) in values.chunks_mut(cols).enumerate() {
+            do_row(row, slice);
+        }
+    }
+
+    let values = unsafe {
+        Vec::from_raw_parts(
+            buf_guard.as_mut_ptr() as *mut f64,
+            buf_guard.len(),
+            buf_guard.capacity(),
+        )
+    };
+
+    Ok(AdoscBatchOutput {
+        values,
+        combos,
+        rows,
+        cols,
+    })
+}
+
+#[inline(always)]
+pub fn adosc_batch_inner_into(
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+    volume: &[f64],
+    sweep: &AdoscBatchRange,
+    kern: Kernel,
+    parallel: bool,
+    out: &mut [f64],
+) -> Result<Vec<AdoscParams>, AdoscError> {
+    if high.is_empty() || low.is_empty() || close.is_empty() || volume.is_empty() {
+        return Err(AdoscError::EmptySlices {
+            high: high.len(),
+            low: low.len(),
+            close: close.len(),
+            volume: volume.len(),
+        });
+    }
+
+    let combos = expand_grid_checked(sweep)?;
+    let first = 0;
+    let len = close.len();
+    let rows = combos.len();
+    let cols = len;
+    let expected = rows
+        .checked_mul(cols)
+        .ok_or_else(|| AdoscError::InvalidInput("rows*cols overflow".into()))?;
+    if out.len() != expected {
+        return Err(AdoscError::OutputLengthMismatch {
+            expected,
+            got: out.len(),
+        });
+    }
+
+    let mut adl = vec![0.0f64; len];
+    unsafe {
+        let hp = high.as_ptr();
+        let lp = low.as_ptr();
+        let cp = close.as_ptr();
+        let vp = volume.as_ptr();
+        let ap = adl.as_mut_ptr();
+
+        let h0 = *hp;
+        let l0 = *lp;
+        let c0 = *cp;
+        let v0 = *vp;
+        let hl0 = h0 - l0;
+        let mfm0 = if hl0 != 0.0 {
+            ((c0 - l0) - (h0 - c0)) / hl0
+        } else {
+            0.0
+        };
+        let mfv0 = mfm0 * v0;
+        *ap = mfv0;
+
+        let mut i = 1usize;
+        while i < len {
+            let h = *hp.add(i);
+            let l = *lp.add(i);
+            let c = *cp.add(i);
+            let v = *vp.add(i);
+            let prev = *ap.add(i - 1);
+            let hl = h - l;
+            let mfm = if hl != 0.0 {
+                ((c - l) - (h - c)) / hl
+            } else {
+                0.0
+            };
+            let mfv = mfm * v;
+            *ap.add(i) = prev + mfv;
+            i += 1;
+        }
+    }
+
+    let do_row = |row: usize, out_row: &mut [f64]| unsafe {
+        let prm = &combos[row];
+        let short = prm.short_period.unwrap();
+        let long = prm.long_period.unwrap();
+
+        let alpha_short = 2.0 / (short as f64 + 1.0);
+        let alpha_long = 2.0 / (long as f64 + 1.0);
+        let one_minus_alpha_short = 1.0 - alpha_short;
+        let one_minus_alpha_long = 1.0 - alpha_long;
+
+        let ap = adl.as_ptr();
+        let op = out_row.as_mut_ptr();
+        let mut short_ema = *ap;
         let mut long_ema = *ap;
         *op = short_ema - long_ema;
 
@@ -972,7 +957,6 @@ pub unsafe fn adosc_row_scalar(
     let vp = volume.as_ptr();
     let op = out.as_mut_ptr();
 
-    
     let h0 = *hp;
     let l0 = *lp;
     let c0 = *cp;
@@ -989,7 +973,6 @@ pub unsafe fn adosc_row_scalar(
     let mut long_ema = sum_ad;
     *op = short_ema - long_ema;
 
-    
     let mut i = 1usize;
     while i < len {
         let h = *hp.add(i);
@@ -1077,12 +1060,12 @@ pub unsafe fn adosc_row_avx512_long(
 pub struct AdoscStream {
     short_period: usize,
     long_period: usize,
-    
+
     alpha_short: f64,
     alpha_long: f64,
     one_minus_alpha_short: f64,
     one_minus_alpha_long: f64,
-    
+
     sum_ad: f64,
     short_ema: f64,
     long_ema: f64,
@@ -1105,7 +1088,6 @@ impl AdoscStream {
             return Err(AdoscError::ShortPeriodGreaterThanLong { short, long });
         }
 
-        
         let alpha_short = 2.0 / (short as f64 + 1.0);
         let alpha_long = 2.0 / (long as f64 + 1.0);
 
@@ -1123,30 +1105,23 @@ impl AdoscStream {
         })
     }
 
-    /// O(1) update per bar. Preserves batch parity (no FMA; same MFM algebra/order).
     #[inline(always)]
     pub fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
-        
         if volume != 0.0 {
             let hl = high - low;
             if hl != 0.0 {
-                
                 let mfm = ((close - low) - (high - close)) / hl;
                 self.sum_ad += mfm * volume;
             }
-            
         }
-        
 
         if !self.initialized {
-            
             self.short_ema = self.sum_ad;
             self.long_ema = self.sum_ad;
             self.initialized = true;
             return 0.0;
         }
 
-        
         let x = self.sum_ad;
         self.short_ema = self.alpha_short * x + self.one_minus_alpha_short * self.short_ema;
         self.long_ema = self.alpha_long * x + self.one_minus_alpha_long * self.long_ema;
@@ -1434,7 +1409,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let len = candles.close.len();
         let mut high = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
         let mut low = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
@@ -1446,13 +1420,11 @@ mod tests {
         close.resize(len, f64::from_bits(0x33333333_33333333));
         volume.resize(len, f64::from_bits(0x11111111_11111111));
 
-        
         high.copy_from_slice(&candles.high);
         low.copy_from_slice(&candles.low);
         close.copy_from_slice(&candles.close);
         volume.copy_from_slice(&candles.volume);
 
-        
         let params = AdoscParams {
             short_period: Some(3),
             long_period: Some(10),
@@ -1460,7 +1432,6 @@ mod tests {
         let input = AdoscInput::from_slices(&high, &low, &close, &volume, params);
         let result = adosc_with_kernel(&input, kernel)?;
 
-        
         for (i, &val) in result.values.iter().enumerate() {
             assert_ne!(
                 val.to_bits(),
@@ -1496,20 +1467,17 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let slice_end = candles.close.len().min(1000);
         let high_slice = &candles.high[..slice_end];
         let low_slice = &candles.low[..slice_end];
         let close_slice = &candles.close[..slice_end];
         let volume_slice = &candles.volume[..slice_end];
 
-        
         let batch_config = AdoscBatchRange {
-            short_period: (2, 5, 1), 
-            long_period: (8, 12, 2), 
+            short_period: (2, 5, 1),
+            long_period: (8, 12, 2),
         };
 
-        
         let result = adosc_batch_with_kernel(
             high_slice,
             low_slice,
@@ -1519,9 +1487,7 @@ mod tests {
             kernel,
         )?;
 
-        
         for (i, &val) in result.values.iter().enumerate() {
-            
             assert_ne!(
                 val.to_bits(),
                 0x11111111_11111111,
@@ -1545,7 +1511,6 @@ mod tests {
             );
         }
 
-        
         let expected_rows = result.combos.len();
         let expected_cols = slice_end;
         assert_eq!(
@@ -1555,10 +1520,9 @@ mod tests {
             test_name
         );
 
-        
         let batch_config2 = AdoscBatchRange {
-            short_period: (3, 7, 2),  
-            long_period: (10, 20, 5), 
+            short_period: (3, 7, 2),
+            long_period: (10, 20, 5),
         };
 
         let result2 = adosc_batch_with_kernel(
@@ -1570,7 +1534,6 @@ mod tests {
             kernel,
         )?;
 
-        
         for (i, &val) in result2.values.iter().enumerate() {
             assert_ne!(
                 val.to_bits(),
@@ -1594,17 +1557,15 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
 
         let strat = (1usize..=10, 11usize..=30).prop_flat_map(|(short_period, long_period)| {
-            
             let len = long_period..400;
             (
                 prop::collection::vec(
-                    
                     (1f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
                     len.clone(),
                 )
                 .prop_flat_map(move |base_prices| {
                     let len = base_prices.len();
-                    
+
                     let high_spreads = prop::collection::vec(
                         (0f64..100f64).prop_filter("finite", |x| x.is_finite()),
                         len,
@@ -1613,7 +1574,7 @@ mod tests {
                         (0f64..100f64).prop_filter("finite", |x| x.is_finite()),
                         len,
                     );
-                    
+
                     let close_positions = prop::collection::vec(0f64..=1f64, len);
 
                     (
@@ -1650,13 +1611,11 @@ mod tests {
             .run(
                 &strat,
                 |((high, low, close), volume, short_period, long_period)| {
-                    
                     let len = high.len();
                     prop_assert_eq!(low.len(), len);
                     prop_assert_eq!(close.len(), len);
                     prop_assert_eq!(volume.len(), len);
 
-                    
                     for i in 0..len {
                         prop_assert!(
                             high[i] >= low[i],
@@ -1686,10 +1645,8 @@ mod tests {
 
                     let AdoscOutput { values: out } = result.unwrap();
 
-                    
                     prop_assert_eq!(out.len(), len, "Output length mismatch");
 
-                    
                     for (i, &val) in out.iter().enumerate() {
                         prop_assert!(
                             val.is_finite(),
@@ -1699,18 +1656,13 @@ mod tests {
                         );
                     }
 
-                    
                     prop_assert!(
                         out[0].abs() < 1e-10,
                         "First ADOSC value should be 0, got {}",
                         out[0]
                     );
 
-                    
                     if volume.iter().all(|&v| v == 0.0) {
-                        
-                        
-                        
                         for &val in out.iter() {
                             prop_assert!(
                                 val.abs() < 1e-9,
@@ -1720,8 +1672,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     for i in 0..len {
                         let h = high[i];
                         let l = low[i];
@@ -1738,14 +1688,9 @@ mod tests {
                         }
                     }
 
-                    
-                    
-                    
-                    
                     let total_volume: f64 = volume.iter().sum();
-                    
-                    
-                    let expected_bound = total_volume * 0.5; 
+
+                    let expected_bound = total_volume * 0.5;
                     for (i, &val) in out.iter().enumerate() {
                         prop_assert!(
                             val.abs() <= expected_bound,
@@ -1756,18 +1701,15 @@ mod tests {
                         );
                     }
 
-                    
                     prop_assert!(
                         short_period < long_period,
                         "Short period must be less than long period"
                     );
 
-                    
                     if len >= 3 {
                         let alpha_short = 2.0 / (short_period as f64 + 1.0);
                         let alpha_long = 2.0 / (long_period as f64 + 1.0);
 
-                        
                         let h0 = high[0];
                         let l0 = low[0];
                         let c0 = close[0];
@@ -1780,7 +1722,7 @@ mod tests {
                         };
                         let mfv0 = mfm0 * v0;
                         let sum_ad0 = mfv0;
-                        let expected_first = 0.0; 
+                        let expected_first = 0.0;
                         prop_assert!(
                             (out[0] - expected_first).abs() < 1e-9,
                             "First value mismatch: expected {}, got {}",
@@ -1788,7 +1730,6 @@ mod tests {
                             out[0]
                         );
 
-                        
                         let h1 = high[1];
                         let l1 = low[1];
                         let c1 = close[1];
@@ -1812,7 +1753,6 @@ mod tests {
                         );
                     }
 
-                    
                     let ref_output = adosc_with_kernel(&input, Kernel::Scalar);
                     prop_assert!(ref_output.is_ok(), "Reference scalar computation failed");
                     let AdoscOutput { values: ref_out } = ref_output.unwrap();
@@ -1889,10 +1829,9 @@ mod tests {
     gen_batch_tests!(check_batch_default_row);
     gen_batch_tests!(check_batch_no_poison);
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[test]
     fn test_adosc_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 512usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -1901,11 +1840,11 @@ mod tests {
 
         for i in 0..len {
             let base = 100.0 + (i as f64) * 0.05 + ((i % 13) as f64) * 0.01;
-            let spread = 0.5 + ((i % 7) as f64) * 0.03; 
+            let spread = 0.5 + ((i % 7) as f64) * 0.03;
             let lo = base - spread;
             let hi = base + spread;
-            
-            let frac = ((i % 97) as f64) / 96.0; 
+
+            let frac = ((i % 97) as f64) / 96.0;
             let cl = lo + (hi - lo) * frac;
             let vol = 1_000.0 + ((i * 37) % 10_000) as f64;
 
@@ -1917,10 +1856,8 @@ mod tests {
 
         let input = AdoscInput::from_slices(&high, &low, &close, &volume, AdoscParams::default());
 
-        
         let baseline = adosc(&input)?.values;
 
-        
         let mut out = vec![0.0; len];
         adosc_into(&input, &mut out)?;
 
@@ -1944,7 +1881,6 @@ mod tests {
     }
 }
 
-/// Write ADOSC directly to output slice - no allocations
 #[inline]
 pub fn adosc_into_slice(
     dst: &mut [f64],
@@ -1953,7 +1889,10 @@ pub fn adosc_into_slice(
 ) -> Result<(), AdoscError> {
     let (high, low, close, volume, short, long, first, len, chosen) = adosc_prepare(input, kern)?;
     if dst.len() != len {
-        return Err(AdoscError::OutputLengthMismatch { expected: len, got: dst.len() });
+        return Err(AdoscError::OutputLengthMismatch {
+            expected: len,
+            got: dst.len(),
+        });
     }
     unsafe {
         match chosen {
@@ -1994,7 +1933,6 @@ pub fn adosc_py<'py>(
     let close_slice = close.as_slice()?;
     let volume_slice = volume.as_slice()?;
 
-    // Validate all slices have the same length
     let len = close_slice.len();
     if high_slice.len() != len || low_slice.len() != len || volume_slice.len() != len {
         return Err(PyValueError::new_err(format!(
@@ -2006,10 +1944,8 @@ pub fn adosc_py<'py>(
         )));
     }
 
-    // Use kernel validation for safety
     let kern = validate_kernel(kernel, false)?;
 
-    // Build input struct
     let params = AdoscParams {
         short_period: Some(short_period),
         long_period: Some(long_period),
@@ -2017,12 +1953,10 @@ pub fn adosc_py<'py>(
     let adosc_in =
         AdoscInput::from_slices(high_slice, low_slice, close_slice, volume_slice, params);
 
-    // GOOD: Get Vec<f64> from Rust function
     let result_vec: Vec<f64> = py
         .allow_threads(|| adosc_with_kernel(&adosc_in, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // GOOD: Zero-copy transfer to NumPy
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -2046,13 +1980,11 @@ impl AdoscStreamPy {
         Ok(AdoscStreamPy { stream })
     }
 
-    /// Updates the stream with new values and returns the calculated ADOSC value.
     fn update(&mut self, high: f64, low: f64, close: f64, volume: f64) -> f64 {
         self.stream.update(high, low, close, volume)
     }
 }
 
-// ADOSC CUDA device handle for Python with CAI v3 and DLPack stubs
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
 pub struct DeviceArrayF32AdoscPy {
@@ -2079,7 +2011,7 @@ impl DeviceArrayF32AdoscPy {
             ),
         )?;
         d.set_item("data", (inner.device_ptr() as usize, false))?;
-        
+
         d.set_item("version", 3)?;
         Ok(d)
     }
@@ -2089,7 +2021,7 @@ impl DeviceArrayF32AdoscPy {
             .inner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("buffer already exported via __dlpack__"))?;
-        
+
         Ok((2, inner.device_id as i32))
     }
 
@@ -2104,8 +2036,6 @@ impl DeviceArrayF32AdoscPy {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        
-        
         if let Some(obj) = &stream {
             if let Ok(i) = obj.extract::<i64>(py) {
                 if i == 0 {
@@ -2116,7 +2046,6 @@ impl DeviceArrayF32AdoscPy {
             }
         }
 
-        
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -2136,7 +2065,6 @@ impl DeviceArrayF32AdoscPy {
             }
         }
 
-        
         let inner = self
             .inner
             .take()
@@ -2173,7 +2101,6 @@ pub fn adosc_batch_py<'py>(
     let close_slice = close.as_slice()?;
     let volume_slice = volume.as_slice()?;
 
-    // Validate all slices have the same length
     let len = close_slice.len();
     if high_slice.len() != len || low_slice.len() != len || volume_slice.len() != len {
         return Err(PyValueError::new_err(format!(
@@ -2190,27 +2117,20 @@ pub fn adosc_batch_py<'py>(
         long_period: long_period_range,
     };
 
-    // Expand grid to know rows*cols
-    let combos = expand_grid_checked(&sweep)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let combos = expand_grid_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos.len();
     let cols = len;
 
-    // Pre-allocate uninitialized NumPy array (1-D, will reshape later)
-    // NOTE: PyArray1::new() creates uninitialized memory, not zero-initialized
     let expected = rows
         .checked_mul(cols)
         .ok_or_else(|| PyValueError::new_err("rows*cols overflow"))?;
     let out_arr = unsafe { PyArray1::<f64>::new(py, [expected], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-    // Use kernel validation for safety
     let kern = validate_kernel(kernel, true)?;
 
-    // Heavy work without the GIL
     let combos = py
         .allow_threads(|| -> Result<Vec<AdoscParams>, AdoscError> {
-            // Resolve Kernel::Auto to a specific kernel
             let kernel = match kern {
                 Kernel::Auto => detect_best_batch_kernel(),
                 k => k,
@@ -2222,7 +2142,6 @@ pub fn adosc_batch_py<'py>(
                 _ => unreachable!(),
             };
 
-            // Use the optimized batch function that writes directly to output
             adosc_batch_inner_into(
                 high_slice,
                 low_slice,
@@ -2230,13 +2149,12 @@ pub fn adosc_batch_py<'py>(
                 volume_slice,
                 &sweep,
                 simd,
-                true, // parallel
+                true,
                 slice_out,
             )
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    // Build dict with the GIL
     let dict = PyDict::new(py);
     dict.set_item("values", out_arr.reshape((rows, cols))?)?;
     dict.set_item(
@@ -2259,7 +2177,6 @@ pub fn adosc_batch_py<'py>(
     Ok(dict)
 }
 
-// ---------------- CUDA Python bindings ----------------
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "adosc_cuda_batch_dev")]
 #[pyo3(signature = (high, low, close, volume, short_period_range, long_period_range, device_id=0))]
@@ -2347,7 +2264,7 @@ pub fn adosc_cuda_many_series_one_param_dev_py(
     Ok(DeviceArrayF32AdoscPy { inner: Some(inner) })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_js(
     high: &[f64],
@@ -2363,7 +2280,6 @@ pub fn adosc_js(
     };
     let input = AdoscInput::from_slices(high, low, close, volume, params);
 
-    // Single allocation with zero-copy pattern
     let mut output = vec![0.0; high.len()];
     adosc_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2371,7 +2287,7 @@ pub fn adosc_js(
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_batch_js(
     high: &[f64],
@@ -2390,13 +2306,12 @@ pub fn adosc_batch_js(
         long_period: (long_period_start, long_period_end, long_period_step),
     };
 
-    // Use the existing batch function with parallel=false for WASM
     adosc_batch_inner(high, low, close, volume, &sweep, Kernel::Scalar, false)
         .map(|output| output.values)
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_batch_metadata_js(
     short_period_start: usize,
@@ -2422,15 +2337,14 @@ pub fn adosc_batch_metadata_js(
     Ok(metadata)
 }
 
-// New ergonomic WASM API
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AdoscBatchConfig {
     pub short_period_range: (usize, usize, usize),
     pub long_period_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct AdoscBatchJsOutput {
     pub values: Vec<f64>,
@@ -2439,7 +2353,7 @@ pub struct AdoscBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = adosc_batch)]
 pub fn adosc_batch_unified_js(
     high: &[f64],
@@ -2448,7 +2362,6 @@ pub fn adosc_batch_unified_js(
     volume: &[f64],
     config: JsValue,
 ) -> Result<JsValue, JsValue> {
-    // 1. Deserialize the configuration object from JavaScript
     let config: AdoscBatchConfig = serde_wasm_bindgen::from_value(config)
         .map_err(|e| JsValue::from_str(&format!("Invalid config: {}", e)))?;
 
@@ -2457,11 +2370,9 @@ pub fn adosc_batch_unified_js(
         long_period: config.long_period_range,
     };
 
-    // 2. Run the existing core logic
     let output = adosc_batch_inner(high, low, close, volume, &sweep, Kernel::Scalar, false)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // 3. Create the structured output
     let js_output = AdoscBatchJsOutput {
         values: output.values,
         combos: output.combos,
@@ -2469,12 +2380,11 @@ pub fn adosc_batch_unified_js(
         cols: output.cols,
     };
 
-    // 4. Serialize the output struct into a JavaScript object
     serde_wasm_bindgen::to_value(&js_output)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2483,7 +2393,7 @@ pub fn adosc_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_free(ptr: *mut f64, len: usize) {
     if !ptr.is_null() {
@@ -2493,7 +2403,7 @@ pub fn adosc_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_into(
     high_ptr: *const f64,
@@ -2526,20 +2436,17 @@ pub fn adosc_into(
         };
         let input = AdoscInput::from_slices(high, low, close, volume, params);
 
-        // Check for aliasing - if output pointer matches ANY input pointer
         if out_ptr as *const f64 == high_ptr
             || out_ptr as *const f64 == low_ptr
             || out_ptr as *const f64 == close_ptr
             || out_ptr as *const f64 == volume_ptr
         {
-            // Handle aliasing by using temporary buffer
             let mut temp = vec![0.0; len];
             adosc_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            // No aliasing, compute directly into output
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             adosc_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2549,7 +2456,7 @@ pub fn adosc_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn adosc_batch_into(
     high_ptr: *const f64,
@@ -2585,8 +2492,7 @@ pub fn adosc_batch_into(
             long_period: (long_period_start, long_period_end, long_period_step),
         };
 
-        let combos = expand_grid_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let expected = rows

@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::tilson::{
     tilson_batch_with_kernel, tilson_with_kernel, TilsonBatchRange, TilsonInput, TilsonParams,
 };

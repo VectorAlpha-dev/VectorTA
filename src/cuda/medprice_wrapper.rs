@@ -1,10 +1,3 @@
-//! CUDA scaffolding for the MEDPRICE (Median Price) indicator.
-//!
-//! Mirrors the scalar CPU path: given `high` and `low` slices it writes
-//! `(high + low) * 0.5` into the output buffer. Warmup/NaN semantics match
-//! scalar: indices before the first valid element are NaN; any NaN input
-//! yields NaN at that position.
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -15,7 +8,7 @@ use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::sys as cu; 
+use cust::sys as cu;
 use std::ffi::c_void;
 use std::sync::Arc;
 use thiserror::Error;
@@ -27,13 +20,24 @@ pub enum CudaMedpriceError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -71,7 +75,6 @@ impl CudaMedprice {
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/medprice_kernel.ptx"));
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
-            
             ModuleJitOption::OptLevel(OptLevel::O4),
         ];
         let module = Module::from_ptx(ptx, jit_opts)
@@ -137,7 +140,6 @@ impl CudaMedprice {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
-        
         let elem = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(2)
@@ -182,9 +184,10 @@ impl CudaMedprice {
         let func = self
             .module
             .get_function("medprice_kernel_f32")
-            .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_kernel_f32" })?;
+            .map_err(|_| CudaMedpriceError::MissingKernelSymbol {
+                name: "medprice_kernel_f32",
+            })?;
 
-        
         let block_x: u32 = 256;
         let (grid, block) = grid_1d_for(len, block_x, self.sm_count);
 
@@ -209,7 +212,6 @@ impl CudaMedprice {
         Ok(())
     }
 
-    
     pub fn medprice_batch_dev(
         &self,
         high: &[f32],
@@ -223,7 +225,6 @@ impl CudaMedprice {
             .find(|&i| !high[i].is_nan() && !low[i].is_nan())
             .ok_or_else(|| CudaMedpriceError::InvalidInput("all values are NaN".into()))?;
 
-        
         let elem = std::mem::size_of::<f32>();
         let in_bytes = len
             .checked_mul(2)
@@ -246,12 +247,16 @@ impl CudaMedprice {
         let func = self
             .module
             .get_function("medprice_batch_f32")
-            .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_batch_f32" })?;
-        
-        let block_x = match self.batch_policy { BatchKernelPolicy::Auto => 256, BatchKernelPolicy::Plain{block_x} => block_x.max(32) };
+            .map_err(|_| CudaMedpriceError::MissingKernelSymbol {
+                name: "medprice_batch_f32",
+            })?;
+
+        let block_x = match self.batch_policy {
+            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+        };
         let (grid, block) = grid_1d_for(len, block_x, self.sm_count);
 
-        
         let mut fv_ptr: u64 = 0;
 
         unsafe {
@@ -274,10 +279,13 @@ impl CudaMedprice {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: 1, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: 1,
+            cols: len,
+        })
     }
 
-    
     pub fn medprice_many_series_one_param_time_major_dev(
         &self,
         high_tm: &[f32],
@@ -299,7 +307,6 @@ impl CudaMedprice {
             ));
         }
 
-        
         let elem = std::mem::size_of::<f32>();
         let bytes_inputs_outputs = 3usize
             .checked_mul(n)
@@ -314,8 +321,13 @@ impl CudaMedprice {
         let func = self
             .module
             .get_function("medprice_many_series_one_param_f32")
-            .map_err(|_| CudaMedpriceError::MissingKernelSymbol { name: "medprice_many_series_one_param_f32" })?;
-        let block_x = match self.many_policy { ManySeriesKernelPolicy::Auto => 256, ManySeriesKernelPolicy::OneD{block_x} => block_x.max(32) };
+            .map_err(|_| CudaMedpriceError::MissingKernelSymbol {
+                name: "medprice_many_series_one_param_f32",
+            })?;
+        let block_x = match self.many_policy {
+            ManySeriesKernelPolicy::Auto => 256,
+            ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
+        };
         let (grid, block) = grid_1d_for(cols, block_x, self.sm_count);
 
         unsafe {
@@ -323,7 +335,7 @@ impl CudaMedprice {
             let mut l = d_low.as_device_ptr().as_raw();
             let mut cols_i = cols as i32;
             let mut rows_i = rows as i32;
-            
+
             let mut fv: u64 = 0;
             let mut out_p = d_out.as_device_ptr().as_raw();
             let mut args: [*mut c_void; 6] = [
@@ -339,11 +351,13 @@ impl CudaMedprice {
 
         self.stream.synchronize()?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 }
-
-
 
 pub mod benches {
     use super::*;
@@ -353,7 +367,6 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
 
     fn bytes_one_series() -> usize {
-        
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
@@ -432,15 +445,14 @@ pub mod benches {
     }
 }
 
-
-
 fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
     unsafe {
         let mut dev: cu::CUdevice = 0;
         let r1 = cu::cuCtxGetDevice(&mut dev as *mut _);
         if r1 != cu::CUresult::CUDA_SUCCESS {
             return Err(CudaMedpriceError::InvalidInput(format!(
-                "cuCtxGetDevice failed: {:?}", r1
+                "cuCtxGetDevice failed: {:?}",
+                r1
             )));
         }
         let mut sms: std::os::raw::c_int = 0;
@@ -451,7 +463,8 @@ fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
         );
         if r2 != cu::CUresult::CUDA_SUCCESS {
             return Err(CudaMedpriceError::InvalidInput(format!(
-                "cuDeviceGetAttribute(MP_COUNT) failed: {:?}", r2
+                "cuDeviceGetAttribute(MP_COUNT) failed: {:?}",
+                r2
             )));
         }
         Ok(sms as u32)
@@ -460,7 +473,6 @@ fn sm_count_from_current_ctx() -> Result<u32, CudaMedpriceError> {
 
 #[inline]
 fn grid_1d_for(n: usize, block_x: u32, sm_count: u32) -> (GridSize, BlockSize) {
-    
     let full = ((n as u32).saturating_add(block_x - 1)) / block_x;
     let cap = sm_count.saturating_mul(4).max(1);
     let gx = full.min(cap).max(1);

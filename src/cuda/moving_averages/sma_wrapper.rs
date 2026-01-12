@@ -1,14 +1,3 @@
-//! CUDA scaffolding for the Simple Moving Average (SMA).
-//!
-//! Mirrors the VRAM-first integrations provided for ALMA/CWMA:
-//! - Host-side validation expands parameter sweeps and checks warmup (NaN) semantics.
-//! - Kernels execute in FP32 and return VRAM-resident `DeviceArrayF32` handles, with
-//!   host-copy helpers layered on top for convenience.
-//! - PTX is JITed with conservative options (DetermineTargetFromContext + O2) and
-//!   falls back progressively for driver stability.
-//! - Adds light VRAM checks to guard against accidental OOM for large sweeps; users
-//!   can override headroom via `CUDA_MEM_HEADROOM`.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
@@ -32,11 +21,22 @@ pub enum CudaSmaError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required}B free={free}B headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buffer on {buf}, current {current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -59,7 +59,7 @@ impl CudaSma {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/sma_kernel.ptx"));
-        
+
         let opt = match env::var("SMA_JIT_OPT").ok().as_deref() {
             Some("O0") => OptLevel::O0,
             Some("O1") => OptLevel::O1,
@@ -75,7 +75,8 @@ impl CudaSma {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                {
                     m
                 } else {
                     Module::from_ptx(ptx, &[])?
@@ -99,14 +100,17 @@ impl CudaSma {
     }
 
     #[inline]
-    pub fn context_arc_clone(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc_clone(&self) -> Arc<Context> {
+        self._context.clone()
+    }
 
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn use_async_transfers() -> bool {
-        
         match env::var("SMA_ASYNC") {
             Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
             Err(_) => true,
@@ -118,7 +122,7 @@ impl CudaSma {
         match env::var("SMA_CACHE").ok().as_deref() {
             Some("prefer_l1") => Some(CacheConfig::PreferL1),
             Some("prefer_shared") => Some(CacheConfig::PreferShared),
-            _ => Some(CacheConfig::PreferL1), 
+            _ => Some(CacheConfig::PreferL1),
         }
     }
 
@@ -131,16 +135,24 @@ impl CudaSma {
     }
 
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
 
     #[inline]
     fn will_fit(required_bytes: usize, headroom_bytes: usize) -> Result<(), CudaSmaError> {
-        if !Self::mem_check_enabled() { return Ok(()); }
+        if !Self::mem_check_enabled() {
+            return Ok(());
+        }
         if let Some((free, _total)) = Self::device_mem_info() {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaSmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaSmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -161,8 +173,8 @@ impl CudaSma {
             .position(|v| !v.is_nan())
             .ok_or_else(|| CudaSmaError::InvalidInput("all values are NaN".into()))?;
 
-        let combos = expand_grid_sma(sweep)
-            .map_err(|e| CudaSmaError::InvalidInput(e.to_string()))?;
+        let combos =
+            expand_grid_sma(sweep).map_err(|e| CudaSmaError::InvalidInput(e.to_string()))?;
         if combos.is_empty() {
             return Err(CudaSmaError::InvalidInput(
                 "no parameter combinations".into(),
@@ -204,21 +216,28 @@ impl CudaSma {
         let mut func: Function = self
             .module
             .get_function("sma_exclusive_prefix_f64")
-            .map_err(|_| CudaSmaError::MissingKernelSymbol { name: "sma_exclusive_prefix_f64" })?;
+            .map_err(|_| CudaSmaError::MissingKernelSymbol {
+                name: "sma_exclusive_prefix_f64",
+            })?;
 
         if let Some(cfg) = Self::parse_cache_pref() {
             let _ = func.set_cache_config(cfg);
         }
 
-        
         let grid: GridSize = (1u32, 1u32, 1u32).into();
         let block: BlockSize = (1u32, 1u32, 1u32).into();
 
-        
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if 1u32 > max_threads {
-            return Err(CudaSmaError::LaunchConfigTooLarge { gx: 1, gy: 1, gz: 1, bx: 1, by: 1, bz: 1 });
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: 1,
+                gy: 1,
+                gz: 1,
+                bx: 1,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -252,17 +271,18 @@ impl CudaSma {
         let mut func: Function = self
             .module
             .get_function("sma_batch_from_prefix_f64")
-            .map_err(|_| CudaSmaError::MissingKernelSymbol { name: "sma_batch_from_prefix_f64" })?;
+            .map_err(|_| CudaSmaError::MissingKernelSymbol {
+                name: "sma_batch_from_prefix_f64",
+            })?;
 
         if let Some(cfg) = Self::parse_cache_pref() {
             let _ = func.set_cache_config(cfg);
         }
 
-        
         let block_x: u32 = match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
             Some(s) if s.eq_ignore_ascii_case("auto") => {
-                let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_min_grid, suggested) =
+                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested.max(32)
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
@@ -277,15 +297,36 @@ impl CudaSma {
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
         if block_x > max_threads {
-            return Err(CudaSmaError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
         if grid_x > max_grid_x {
-            return Err(CudaSmaError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
         let max_grid_y = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
         if grid_y > max_grid_y {
-            return Err(CudaSmaError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: block_x, by: 1, bz: 1 });
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
         }
 
         unsafe {
@@ -318,9 +359,8 @@ impl CudaSma {
         first_valid: usize,
         len: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
-        
         let rows = combos.len();
-        
+
         let elems = rows
             .checked_mul(len)
             .ok_or_else(|| CudaSmaError::InvalidInput("rows*cols overflow".into()))?;
@@ -350,26 +390,24 @@ impl CudaSma {
         let periods: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
 
         if Self::use_async_transfers() {
-            
             let h_prices = LockedBuffer::from_slice(data_f32)?;
             let h_periods = LockedBuffer::from_slice(&periods)?;
 
-            let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
-            let mut d_periods = unsafe { DeviceBuffer::<i32>::uninitialized_async(combos.len(), &self.stream) }?;
-            let mut d_prefix = unsafe { DeviceBuffer::<f64>::uninitialized_async(len + 1, &self.stream) }?;
-            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
+            let mut d_periods =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(combos.len(), &self.stream) }?;
+            let mut d_prefix =
+                unsafe { DeviceBuffer::<f64>::uninitialized_async(len + 1, &self.stream) }?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
             unsafe {
                 d_prices.async_copy_from(&h_prices, &self.stream)?;
                 d_periods.async_copy_from(&h_periods, &self.stream)?;
             }
 
-            self.launch_batch_kernel(
-                &d_prices,
-                len,
-                first_valid,
-                &mut d_prefix,
-            )?;
+            self.launch_batch_kernel(&d_prices, len, first_valid, &mut d_prefix)?;
             self.launch_batch_from_prefix_kernel(
                 &d_prefix,
                 &d_periods,
@@ -379,7 +417,6 @@ impl CudaSma {
                 &mut d_out,
             )?;
 
-            
             self.stream.synchronize()?;
 
             Ok(DeviceArrayF32 {
@@ -388,7 +425,6 @@ impl CudaSma {
                 cols: len,
             })
         } else {
-            
             let d_prices = DeviceBuffer::from_slice(data_f32)?;
             let d_periods = DeviceBuffer::from_slice(&periods)?;
 
@@ -396,12 +432,7 @@ impl CudaSma {
             let mut d_prefix = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
             let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
 
-            self.launch_batch_kernel(
-                &d_prices,
-                len,
-                first_valid,
-                &mut d_prefix,
-            )?;
+            self.launch_batch_kernel(&d_prices, len, first_valid, &mut d_prefix)?;
             self.launch_batch_from_prefix_kernel(
                 &d_prefix,
                 &d_periods,
@@ -411,7 +442,6 @@ impl CudaSma {
                 &mut d_out,
             )?;
 
-            
             self.stream.synchronize()?;
 
             Ok(DeviceArrayF32 {
@@ -526,23 +556,24 @@ impl CudaSma {
         let mut func: Function = self
             .module
             .get_function("sma_many_series_one_param_f32")
-            .map_err(|_| CudaSmaError::MissingKernelSymbol { name: "sma_many_series_one_param_f32" })?;
+            .map_err(|_| CudaSmaError::MissingKernelSymbol {
+                name: "sma_many_series_one_param_f32",
+            })?;
 
         if let Some(cfg) = Self::parse_cache_pref() {
             let _ = func.set_cache_config(cfg);
         }
 
-        
         let block_x: u32 = match env::var("SMA_MS_BLOCK_X").ok().as_deref() {
             Some(s) if s.eq_ignore_ascii_case("auto") => {
-                let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_min_grid, suggested) =
+                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested
             }
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
             None => {
-                let (_min_grid, suggested) = func
-                    .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                let (_min_grid, suggested) =
+                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested
             }
         };
@@ -582,14 +613,16 @@ impl CudaSma {
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSmaError> {
         if Self::use_async_transfers() {
-            
             let h_prices = LockedBuffer::from_slice(data_tm_f32)?;
             let h_first = LockedBuffer::from_slice(first_valids)?;
 
-            let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
-            let mut d_first = unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
+            let mut d_prices =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(cols * rows, &self.stream) }?;
+            let mut d_first =
+                unsafe { DeviceBuffer::<i32>::uninitialized_async(cols, &self.stream) }?;
             let elems = cols * rows;
-            let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
+            let mut d_out =
+                unsafe { DeviceBuffer::<f32>::uninitialized_async(elems, &self.stream) }?;
 
             unsafe {
                 d_prices.async_copy_from(&h_prices, &self.stream)?;
@@ -606,7 +639,6 @@ impl CudaSma {
                 cols,
             })
         } else {
-            
             let d_prices = DeviceBuffer::from_slice(data_tm_f32)?;
             let d_first = DeviceBuffer::from_slice(first_valids)?;
             let elems = cols * rows;
@@ -652,13 +684,9 @@ impl CudaSma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
-        dev.buf
-            .copy_to(out_tm)
-            .map_err(CudaSmaError::Cuda)
+        dev.buf.copy_to(out_tm).map_err(CudaSmaError::Cuda)
     }
 
-    
-    /// Copy SMA batch output directly into a page-locked host buffer using async D2H.
     pub fn sma_batch_into_host_pinned_f32(
         &self,
         data_f32: &[f32],
@@ -675,12 +703,13 @@ impl CudaSma {
             )));
         }
         let dev = self.run_batch_kernel(data_f32, &combos, first_valid, len)?;
-        unsafe { dev.buf.async_copy_to(out_pinned, &self.stream)?; }
+        unsafe {
+            dev.buf.async_copy_to(out_pinned, &self.stream)?;
+        }
         self.stream.synchronize()?;
         Ok((combos.len(), len, combos))
     }
 
-    /// Copy many-series, one-param output directly into a page-locked host buffer.
     pub fn sma_multi_series_one_param_time_major_into_host_pinned_f32(
         &self,
         data_tm_f32: &[f32],
@@ -699,11 +728,12 @@ impl CudaSma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
         let dev = self.run_many_series_kernel(data_tm_f32, cols, rows, &first_valids, period)?;
-        unsafe { dev.buf.async_copy_to(out_tm_pinned, &self.stream)?; }
+        unsafe {
+            dev.buf.async_copy_to(out_tm_pinned, &self.stream)?;
+        }
         Ok(self.stream.synchronize()?)
     }
 
-    
     pub fn sma_batch_dev_from_device(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -716,12 +746,7 @@ impl CudaSma {
         let mut d_prefix = unsafe { DeviceBuffer::<f64>::uninitialized(len + 1) }?;
         let elems = combos.len() * len;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized(elems) }?;
-        self.launch_batch_kernel(
-            d_prices,
-            len,
-            first_valid,
-            &mut d_prefix,
-        )?;
+        self.launch_batch_kernel(d_prices, len, first_valid, &mut d_prefix)?;
         self.launch_batch_from_prefix_kernel(
             &d_prefix,
             &d_periods,
@@ -764,8 +789,6 @@ impl CudaSma {
     }
 }
 
-
-
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
@@ -805,7 +828,12 @@ pub mod benches {
     impl CudaBenchState for SmaBatchDevState {
         fn launch(&mut self) {
             self.cuda
-                .launch_batch_kernel(&self.d_prices, self.len, self.first_valid, &mut self.d_prefix)
+                .launch_batch_kernel(
+                    &self.d_prices,
+                    self.len,
+                    self.first_valid,
+                    &mut self.d_prefix,
+                )
                 .expect("sma prefix");
             self.cuda
                 .launch_batch_from_prefix_kernel(

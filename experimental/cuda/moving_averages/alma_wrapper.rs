@@ -41,26 +41,26 @@ impl CudaAlma {
         let device = CudaDevice::new(device_id)
             .map_err(|e| CudaAlmaError::CudaError(e.to_string()))?;
 
-        // TODO: Implement proper PTX loading once we understand the cudarc 0.12 API better
-        // For now, this is a placeholder implementation
+
+
 
         Ok(Self {
             device,
         })
     }
 
-    /// Process batch ALMA calculations on GPU
+
     pub fn alma_batch(&self,
         _data: &[f64],
         _sweep: &AlmaBatchRange,
         _first_valid: usize
     ) -> Result<AlmaBatchOutput, CudaAlmaError> {
-        // TODO: Implement CUDA kernel launching
+
         Err(CudaAlmaError::NotImplemented)
     }
 }
 
-// Helper function to compute weights on CPU (for single calculations)
+
 fn compute_weights_cpu(period: usize, offset: f64, sigma: f64) -> (Vec<f64>, f64) {
     let m = offset * (period - 1) as f64;
     let s = period as f64 / sigma;
@@ -79,7 +79,7 @@ fn compute_weights_cpu(period: usize, offset: f64, sigma: f64) -> (Vec<f64>, f64
     (weights, 1.0 / norm)
 }
 
-// Expand parameter grid (matching CPU implementation)
+
 fn expand_grid(r: &AlmaBatchRange) -> Vec<AlmaParams> {
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 || start == end {

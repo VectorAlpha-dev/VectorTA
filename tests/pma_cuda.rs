@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::pma::{pma, PmaInput, PmaParams};
 
 #[cfg(feature = "cuda")]
@@ -61,7 +59,6 @@ fn pma_cuda_one_series_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     pair.predict.buf.copy_to(&mut gpu_predict)?;
     pair.trigger.buf.copy_to(&mut gpu_trigger)?;
 
-    
     let tol = 2e-4;
     for idx in 0..n {
         assert!(
@@ -90,12 +87,11 @@ fn pma_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         return Ok(());
     }
 
-    let cols = 7usize; 
-    let rows = 2048usize; 
+    let cols = 7usize;
+    let rows = 2048usize;
     let mut data_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for r in s..rows {
-            
             let x = r as f64 + (s as f64) * 0.37;
             data_tm[r * cols + s] = (x * 0.0016).cos() + (x * 0.0011).sin() * 0.4 + 0.0003 * x;
         }

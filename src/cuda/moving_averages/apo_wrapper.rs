@@ -1,12 +1,3 @@
-//! CUDA support for the Absolute Price Oscillator (APO).
-//!
-//! Parity with ALMA/EMA wrappers:
-//! - NON_BLOCKING stream, PTX JIT with DetermineTargetFromContext, O2 fallback
-//! - VRAM estimates with ~64MB headroom guard
-//! - Policy enums for explicit configuration (kept simple here)
-//! - Warmup/NaN semantics identical to scalar APO:
-//!   prefix [0..first_valid) = NaN, out[first_valid] = 0.0, then EMA(se)-EMA(le)
-
 #![cfg(feature = "cuda")]
 
 use crate::indicators::apo::{ApoBatchRange, ApoParams};
@@ -31,18 +22,28 @@ pub enum CudaApoError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
     #[error("Out of memory on device: required={required} bytes, free={free} bytes, headroom={headroom} bytes")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("Missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("Launch configuration too large (grid=({gx},{gy},{gz}), block=({bx},{by},{bz}))")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf}, current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// VRAM-backed array returned by APO CUDA wrapper.
 pub struct DeviceArrayF32 {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -52,13 +53,21 @@ pub struct DeviceArrayF32 {
 }
 impl DeviceArrayF32 {
     #[inline]
-    pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
     #[inline]
-    pub fn len(&self) -> usize { self.rows * self.cols }
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
     #[inline]
-    pub(crate) fn ctx(&self) -> Arc<Context> { self.ctx_guard.clone() }
+    pub(crate) fn ctx(&self) -> Arc<Context> {
+        self.ctx_guard.clone()
+    }
     #[inline]
-    pub(crate) fn device_id(&self) -> u32 { self.device_id }
+    pub(crate) fn device_id(&self) -> u32 {
+        self.device_id
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -108,7 +117,7 @@ impl CudaApo {
             Ok(m) => m,
             Err(_) => match Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext]) {
                 Ok(m) => m,
-                Err(_) => { Module::from_ptx(ptx, &[])? }
+                Err(_) => Module::from_ptx(ptx, &[])?,
             },
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -133,7 +142,6 @@ impl CudaApo {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    // -------------------- Public API: One series × many params --------------------
     pub fn apo_batch_dev(
         &self,
         data_f32: &[f32],
@@ -142,48 +150,61 @@ impl CudaApo {
         let prep = Self::prepare_batch_inputs(data_f32, sweep)?;
         let n = prep.combos.len();
 
-        // VRAM estimate with checked arithmetic
         let item_f32 = std::mem::size_of::<f32>();
         let item_i32 = std::mem::size_of::<i32>();
-        let prices_bytes = prep.series_len.checked_mul(item_f32)
+        let prices_bytes = prep
+            .series_len
+            .checked_mul(item_f32)
             .ok_or_else(|| CudaApoError::InvalidInput("series_len bytes overflow".into()))?;
-        let params_a = prep.short_periods.len().checked_mul(item_i32)
+        let params_a = prep
+            .short_periods
+            .len()
+            .checked_mul(item_i32)
             .ok_or_else(|| CudaApoError::InvalidInput("short_periods bytes overflow".into()))?;
-        let params_b = prep.long_periods.len().checked_mul(item_i32)
+        let params_b = prep
+            .long_periods
+            .len()
+            .checked_mul(item_i32)
             .ok_or_else(|| CudaApoError::InvalidInput("long_periods bytes overflow".into()))?;
-        let params_c = prep.short_alphas.len().checked_mul(item_f32)
+        let params_c = prep
+            .short_alphas
+            .len()
+            .checked_mul(item_f32)
             .ok_or_else(|| CudaApoError::InvalidInput("short_alphas bytes overflow".into()))?;
-        let params_d = prep.long_alphas.len().checked_mul(item_f32)
+        let params_d = prep
+            .long_alphas
+            .len()
+            .checked_mul(item_f32)
             .ok_or_else(|| CudaApoError::InvalidInput("long_alphas bytes overflow".into()))?;
         let params_bytes = params_a
-            .checked_add(params_b).and_then(|x| x.checked_add(params_c)).and_then(|x| x.checked_add(params_d))
+            .checked_add(params_b)
+            .and_then(|x| x.checked_add(params_c))
+            .and_then(|x| x.checked_add(params_d))
             .ok_or_else(|| CudaApoError::InvalidInput("param bytes overflow".into()))?;
-        let out_elems = prep.series_len.checked_mul(n)
+        let out_elems = prep
+            .series_len
+            .checked_mul(n)
             .ok_or_else(|| CudaApoError::InvalidInput("rows*cols overflow".into()))?;
-        let out_bytes = out_elems.checked_mul(item_f32)
+        let out_bytes = out_elems
+            .checked_mul(item_f32)
             .ok_or_else(|| CudaApoError::InvalidInput("output bytes overflow".into()))?;
         let required = prices_bytes
-            .checked_add(params_bytes).and_then(|x| x.checked_add(out_bytes))
+            .checked_add(params_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaApoError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
-        // Async H2D
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
-        let d_sp = unsafe {
-            DeviceBuffer::from_slice_async(&prep.short_periods, &self.stream)?
-        };
-        let d_lp = unsafe {
-            DeviceBuffer::from_slice_async(&prep.long_periods, &self.stream)?
-        };
-        let d_sa = unsafe {
-            DeviceBuffer::from_slice_async(&prep.short_alphas, &self.stream)?
-        };
-        let d_la = unsafe {
-            DeviceBuffer::from_slice_async(&prep.long_alphas, &self.stream)?
-        };
-        let out_len = prep.series_len.checked_mul(n)
+        let d_sp = unsafe { DeviceBuffer::from_slice_async(&prep.short_periods, &self.stream)? };
+        let d_lp = unsafe { DeviceBuffer::from_slice_async(&prep.long_periods, &self.stream)? };
+        let d_sa = unsafe { DeviceBuffer::from_slice_async(&prep.short_alphas, &self.stream)? };
+        let d_la = unsafe { DeviceBuffer::from_slice_async(&prep.long_alphas, &self.stream)? };
+        let out_len = prep
+            .series_len
+            .checked_mul(n)
             .ok_or_else(|| CudaApoError::InvalidInput("rows*cols overflow".into()))?;
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_len, &self.stream)? };
 
         self.launch_batch_kernel(
             &d_prices,
@@ -197,7 +218,13 @@ impl CudaApo {
             &mut d_out,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n, cols: prep.series_len, ctx_guard: self._context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n,
+            cols: prep.series_len,
+            ctx_guard: self._context.clone(),
+            device_id: self.device_id,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -218,7 +245,8 @@ impl CudaApo {
                 "series_len and n_combos must be positive".into(),
             ));
         }
-        let expected = series_len.checked_mul(n_combos)
+        let expected = series_len
+            .checked_mul(n_combos)
             .ok_or_else(|| CudaApoError::InvalidInput("rows*cols overflow".into()))?;
         if d_out.len() != expected {
             return Err(CudaApoError::InvalidInput(
@@ -249,34 +277,43 @@ impl CudaApo {
         let (first_valids, sp, lp, a_s, a_l) =
             Self::prepare_many_series_inputs(data_tm_f32, num_series, series_len, params)?;
 
-        // VRAM estimate
         let elems = num_series
             .checked_mul(series_len)
             .ok_or_else(|| CudaApoError::InvalidInput("num_series*series_len overflow".into()))?;
-        let in_bytes = elems.checked_mul(std::mem::size_of::<f32>())
+        let in_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaApoError::InvalidInput("in bytes overflow".into()))?;
-        let first_bytes = first_valids.len().checked_mul(std::mem::size_of::<i32>())
+        let first_bytes = first_valids
+            .len()
+            .checked_mul(std::mem::size_of::<i32>())
             .ok_or_else(|| CudaApoError::InvalidInput("first_valids bytes overflow".into()))?;
-        let out_bytes = elems.checked_mul(std::mem::size_of::<f32>())
+        let out_bytes = elems
+            .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaApoError::InvalidInput("out bytes overflow".into()))?;
-        let required = in_bytes.checked_add(first_bytes).and_then(|x| x.checked_add(out_bytes))
+        let required = in_bytes
+            .checked_add(first_bytes)
+            .and_then(|x| x.checked_add(out_bytes))
             .ok_or_else(|| CudaApoError::InvalidInput("total bytes overflow".into()))?;
         Self::will_fit(required, 64 * 1024 * 1024)?;
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream)? };
-        let d_first = unsafe {
-            DeviceBuffer::from_slice_async(&first_valids, &self.stream)?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
+        let d_first = unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
 
         self.launch_many_series_kernel(
             &d_prices, &d_first, sp, a_s, lp, a_l, num_series, series_len, &mut d_out,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: series_len, cols: num_series, ctx_guard: self._context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: series_len,
+            cols: num_series,
+            ctx_guard: self._context.clone(),
+            device_id: self.device_id,
+        })
     }
 
-    // -------------------- Launch helpers --------------------
     #[allow(clippy::too_many_arguments)]
     fn launch_batch_kernel(
         &self,
@@ -290,12 +327,12 @@ impl CudaApo {
         n_combos: usize,
         d_out: &mut DeviceBuffer<f32>,
     ) -> Result<(), CudaApoError> {
-        let func = self
-            .module
-            .get_function("apo_batch_f32")
-            .map_err(|_| CudaApoError::MissingKernelSymbol { name: "apo_batch_f32" })?;
+        let func = self.module.get_function("apo_batch_f32").map_err(|_| {
+            CudaApoError::MissingKernelSymbol {
+                name: "apo_batch_f32",
+            }
+        })?;
 
-        // Default launch config
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => env::var("APO_BLOCK_X")
@@ -363,7 +400,9 @@ impl CudaApo {
         let func = self
             .module
             .get_function("apo_many_series_one_param_f32")
-            .map_err(|_| CudaApoError::MissingKernelSymbol { name: "apo_many_series_one_param_f32" })?;
+            .map_err(|_| CudaApoError::MissingKernelSymbol {
+                name: "apo_many_series_one_param_f32",
+            })?;
         let block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::Auto => 128u32,
             ManySeriesKernelPolicy::OneD { block_x } => block_x.max(32),
@@ -407,7 +446,6 @@ impl CudaApo {
         Ok(())
     }
 
-    // -------------------- Preparation helpers --------------------
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &ApoBatchRange,
@@ -427,7 +465,6 @@ impl CudaApo {
             .position(|v| v.is_finite())
             .ok_or_else(|| CudaApoError::InvalidInput("all values are NaN".into()))?;
 
-        // Validate sufficient valid samples for the longest period
         let max_long = combos
             .iter()
             .map(|c| c.long_period.unwrap_or(0))
@@ -482,12 +519,16 @@ impl CudaApo {
             ));
         }
         if data_tm_f32.len() != num_series * series_len {
-            return Err(CudaApoError::InvalidInput("time-major slice length mismatch".into()));
+            return Err(CudaApoError::InvalidInput(
+                "time-major slice length mismatch".into(),
+            ));
         }
         let sp = params.short_period.unwrap_or(0) as i32;
         let lp = params.long_period.unwrap_or(0) as i32;
         if sp <= 0 || lp <= 0 || sp >= lp {
-            return Err(CudaApoError::InvalidInput("invalid short/long period".into()));
+            return Err(CudaApoError::InvalidInput(
+                "invalid short/long period".into(),
+            ));
         }
         let a_s = 2.0f32 / (sp as f32 + 1.0f32);
         let a_l = 2.0f32 / (lp as f32 + 1.0f32);
@@ -506,7 +547,10 @@ impl CudaApo {
                 fv.ok_or_else(|| CudaApoError::InvalidInput(format!("series {} all NaN", s)))?;
             let remaining = series_len - fv as usize;
             if remaining < lp as usize {
-                return Err(CudaApoError::InvalidInput(format!("series {} not enough valid data (need >= {}, have {})", s, lp, remaining)));
+                return Err(CudaApoError::InvalidInput(format!(
+                    "series {} not enough valid data (need >= {}, have {})",
+                    s, lp, remaining
+                )));
             }
             first_valids.push(fv);
         }
@@ -521,7 +565,11 @@ impl CudaApo {
                 if required_bytes.saturating_add(headroom_bytes) <= free {
                     Ok(())
                 } else {
-                    Err(CudaApoError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                    Err(CudaApoError::OutOfMemory {
+                        required: required_bytes,
+                        free,
+                        headroom: headroom_bytes,
+                    })
                 }
             }
             Err(_) => Ok(()),
@@ -541,26 +589,55 @@ struct PreparedApoBatch {
 
 fn expand_grid(r: &ApoBatchRange) -> Result<Vec<ApoParams>, CudaApoError> {
     fn axis_u((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaApoError> {
-        if step == 0 || start == end { return Ok(vec![start]); }
+        if step == 0 || start == end {
+            return Ok(vec![start]);
+        }
         let mut v = Vec::new();
         if start < end {
             let mut cur = start;
-            while cur <= end { v.push(cur); if let Some(n) = cur.checked_add(step) { cur = n; } else { break; } }
+            while cur <= end {
+                v.push(cur);
+                if let Some(n) = cur.checked_add(step) {
+                    cur = n;
+                } else {
+                    break;
+                }
+            }
         } else {
             let mut cur = start;
-            while cur >= end { v.push(cur); if let Some(n) = cur.checked_sub(step) { cur = n; } else { break; } if cur == usize::MAX { break; } }
+            while cur >= end {
+                v.push(cur);
+                if let Some(n) = cur.checked_sub(step) {
+                    cur = n;
+                } else {
+                    break;
+                }
+                if cur == usize::MAX {
+                    break;
+                }
+            }
         }
-        if v.is_empty() { return Err(CudaApoError::InvalidInput("empty parameter range".into())); }
+        if v.is_empty() {
+            return Err(CudaApoError::InvalidInput("empty parameter range".into()));
+        }
         Ok(v)
     }
     let shorts = axis_u(r.short)?;
     let longs = axis_u(r.long)?;
     let mut out = Vec::with_capacity(shorts.len().saturating_mul(longs.len()));
-    for &s in &shorts { for &l in &longs { if s > 0 && l > 0 && s < l { out.push(ApoParams { short_period: Some(s), long_period: Some(l) }); } } }
+    for &s in &shorts {
+        for &l in &longs {
+            if s > 0 && l > 0 && s < l {
+                out.push(ApoParams {
+                    short_period: Some(s),
+                    long_period: Some(l),
+                });
+            }
+        }
+    }
     Ok(out)
 }
 
-// -------------------- Benches --------------------
 pub mod benches {
     use super::*;
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};

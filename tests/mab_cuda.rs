@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::mab::{mab, mab_batch, MabBatchRange, MabInput, MabParams};
 
 #[cfg(feature = "cuda")]
@@ -45,7 +43,7 @@ fn mab_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         fast_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
         slow_ma_type: ("sma".to_string(), "sma".to_string(), String::new()),
     };
-    let cpu = mab_batch(&price, &sweep)?; 
+    let cpu = mab_batch(&price, &sweep)?;
 
     let price_f32: Vec<f32> = price.iter().map(|&v| v as f32).collect();
     let cuda = CudaMab::new(0).expect("CudaMab::new");
@@ -92,8 +90,8 @@ fn mab_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         eprintln!("[mab_cuda_many_series_one_param_matches_cpu] skipped - no CUDA device");
         return Ok(());
     }
-    let cols = 8usize; 
-    let rows = 1024usize; 
+    let cols = 8usize;
+    let rows = 1024usize;
     let mut tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in s..rows {
@@ -110,7 +108,6 @@ fn mab_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::error
         slow_ma_type: Some("sma".into()),
     };
 
-    
     let mut up_cpu = vec![f64::NAN; cols * rows];
     let mut mid_cpu = vec![f64::NAN; cols * rows];
     let mut lo_cpu = vec![f64::NAN; cols * rows];

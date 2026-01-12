@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::natr::{NatrBatchBuilder, NatrBatchRange};
 use vector_ta::utilities::enums::Kernel;
 
@@ -107,7 +105,6 @@ fn natr_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     }
     let period = 14usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut h = vec![f64::NAN; rows];

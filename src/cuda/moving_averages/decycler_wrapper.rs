@@ -1,13 +1,4 @@
-//! CUDA wrapper for Ehlers Decycler (input minus two‑pole high‑pass).
-//!
-//! Parity goals with ALMA wrapper:
-//! - Stream NON_BLOCKING, PTX loaded from OUT_DIR
-//! - Policy enums for kernel selection (1D variants)
-//! - VRAM estimation and basic checks, chunking kept simple (grid 1D)
-//! - Bench registration via define_ma_period_benches!
-
 #![cfg(feature = "cuda")]
-
 
 use crate::indicators::decycler::{DecyclerBatchRange, DecyclerParams};
 use cust::context::{CacheConfig, Context};
@@ -19,16 +10,20 @@ use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
 use std::ffi::c_void;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Error)]
 pub enum CudaDecyclerError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -36,7 +31,14 @@ pub enum CudaDecyclerError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -97,10 +99,10 @@ impl CudaDecycler {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/decycler_kernel.ptx"));
-        
+
         let module = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
-        
+
         if let Ok(mut f) = module.get_function("decycler_batch_f32") {
             let _ = f.set_cache_config(CacheConfig::PreferL1);
         }
@@ -143,9 +145,15 @@ impl CudaDecycler {
     pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
         self.last_many
     }
-    pub fn synchronize(&self) -> Result<(), CudaDecyclerError> { self.stream.synchronize().map_err(Into::into) }
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn synchronize(&self) -> Result<(), CudaDecyclerError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn calc_launch_1d(
@@ -231,8 +239,6 @@ impl CudaDecycler {
         }
     }
 
-    
-
     pub fn decycler_batch_dev(
         &self,
         data_f32: &[f32],
@@ -247,15 +253,12 @@ impl CudaDecycler {
             .series_len
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaDecyclerError::InvalidInput("series_len bytes overflow".into()))?;
-        let per_combo_bytes = elem_i32
-            .checked_add(
-                3usize
-                    .checked_mul(elem_f32)
-                    .ok_or_else(|| {
-                        CudaDecyclerError::InvalidInput("param bytes overflow".into())
-                    })?,
-            )
-            .ok_or_else(|| CudaDecyclerError::InvalidInput("param bytes overflow".into()))?;
+        let per_combo_bytes =
+            elem_i32
+                .checked_add(3usize.checked_mul(elem_f32).ok_or_else(|| {
+                    CudaDecyclerError::InvalidInput("param bytes overflow".into())
+                })?)
+                .ok_or_else(|| CudaDecyclerError::InvalidInput("param bytes overflow".into()))?;
         let params_bytes = n
             .checked_mul(per_combo_bytes)
             .ok_or_else(|| CudaDecyclerError::InvalidInput("params bytes overflow".into()))?;
@@ -266,9 +269,7 @@ impl CudaDecycler {
         let out_elems = prepared
             .series_len
             .checked_mul(n)
-            .ok_or_else(|| {
-                CudaDecyclerError::InvalidInput("output elements overflow".into())
-            })?;
+            .ok_or_else(|| CudaDecyclerError::InvalidInput("output elements overflow".into()))?;
         let out_bytes = out_elems
             .checked_mul(elem_f32)
             .ok_or_else(|| CudaDecyclerError::InvalidInput("output bytes overflow".into()))?;
@@ -279,7 +280,11 @@ impl CudaDecycler {
             .ok_or_else(|| CudaDecyclerError::InvalidInput("total bytes overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             let (free, _) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaDecyclerError::OutOfMemory { required, free, headroom: 64 * 1024 * 1024 });
+            return Err(CudaDecyclerError::OutOfMemory {
+                required,
+                free,
+                headroom: 64 * 1024 * 1024,
+            });
         }
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream) }?;
@@ -287,7 +292,8 @@ impl CudaDecycler {
             unsafe { DeviceBuffer::from_slice_async(&prepared.periods_i32, &self.stream) }?;
         let d_c = unsafe { DeviceBuffer::from_slice_async(&prepared.c_vals, &self.stream) }?;
         let d_two = unsafe { DeviceBuffer::from_slice_async(&prepared.two_1m_vals, &self.stream) }?;
-        let d_neg = unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }?;
+        let d_neg =
+            unsafe { DeviceBuffer::from_slice_async(&prepared.neg_oma_sq_vals, &self.stream) }?;
         let d_diff = unsafe { DeviceBuffer::from_slice_async(&prepared.diff, &self.stream) }?;
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
@@ -305,9 +311,14 @@ impl CudaDecycler {
             &mut d_out,
         )?;
 
-        
         self.synchronize()?;
-        Ok(DeviceArrayF32Decycler { buf: d_out, rows: n, cols: prepared.series_len, ctx: self._context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32Decycler {
+            buf: d_out,
+            rows: n,
+            cols: prepared.series_len,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -351,10 +362,7 @@ impl CudaDecycler {
                         let mut len_i = series_len as i32;
                         let mut n_i = rows as i32;
                         let mut first_i = first_valid as i32;
-                        let mut out_ptr = d_out
-                            .as_device_ptr()
-                            .add(launched * series_len)
-                            .as_raw();
+                        let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
                         let mut args: [*mut c_void; 10] = [
                             &mut p_ptr as *mut _ as *mut c_void,
                             &mut per_ptr as *mut _ as *mut c_void,
@@ -381,7 +389,9 @@ impl CudaDecycler {
         let func = self
             .module
             .get_function("decycler_batch_f32")
-            .map_err(|_| CudaDecyclerError::MissingKernelSymbol { name: "decycler_batch_f32" })?;
+            .map_err(|_| CudaDecyclerError::MissingKernelSymbol {
+                name: "decycler_batch_f32",
+            })?;
         let (block, grid) = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => (
                 (block_x, 1, 1).into(),
@@ -389,12 +399,23 @@ impl CudaDecycler {
             ),
             BatchKernelPolicy::Auto => self.calc_launch_1d(&func, n_combos, None),
         };
-        
+
         if let Ok(dev) = Device::get_device(self.device_id) {
-            let max_gx = dev.get_attribute(DeviceAttribute::MaxGridDimX).unwrap_or(2_147_483_647) as u32;
-            let max_bx = dev.get_attribute(DeviceAttribute::MaxBlockDimX).unwrap_or(1024) as u32;
+            let max_gx = dev
+                .get_attribute(DeviceAttribute::MaxGridDimX)
+                .unwrap_or(2_147_483_647) as u32;
+            let max_bx = dev
+                .get_attribute(DeviceAttribute::MaxBlockDimX)
+                .unwrap_or(1024) as u32;
             if grid.x > max_gx || block.x > max_bx {
-                return Err(CudaDecyclerError::LaunchConfigTooLarge { gx: grid.x, gy: grid.y, gz: grid.z, bx: block.x, by: block.y, bz: block.z });
+                return Err(CudaDecyclerError::LaunchConfigTooLarge {
+                    gx: grid.x,
+                    gy: grid.y,
+                    gz: grid.z,
+                    bx: block.x,
+                    by: block.y,
+                    bz: block.z,
+                });
             }
         }
         unsafe {
@@ -420,8 +441,7 @@ impl CudaDecycler {
                 &mut first_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&func, grid, block, 0, &mut args)?;
+            self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
         unsafe {
             let bx = match self.policy.batch {
@@ -434,8 +454,6 @@ impl CudaDecycler {
         self.maybe_log_batch_debug();
         Ok(())
     }
-
-    
 
     pub fn decycler_many_series_one_param_time_major_dev(
         &self,
@@ -466,7 +484,11 @@ impl CudaDecycler {
             .ok_or_else(|| CudaDecyclerError::InvalidInput("total bytes overflow".into()))?;
         if !Self::will_fit(required, 64 * 1024 * 1024) {
             let (free, _) = mem_get_info().unwrap_or((0, 0));
-            return Err(CudaDecyclerError::OutOfMemory { required, free, headroom: 64 * 1024 * 1024 });
+            return Err(CudaDecyclerError::OutOfMemory {
+                required,
+                free,
+                headroom: 64 * 1024 * 1024,
+            });
         }
 
         let d_prices = unsafe { DeviceBuffer::from_slice_async(data_tm_f32, &self.stream) }?;
@@ -485,7 +507,13 @@ impl CudaDecycler {
             &mut d_out,
         )?;
         self.synchronize()?;
-        Ok(DeviceArrayF32Decycler { buf: d_out, rows, cols, ctx: self._context.clone(), device_id: self.device_id })
+        Ok(DeviceArrayF32Decycler {
+            buf: d_out,
+            rows,
+            cols,
+            ctx: self._context.clone(),
+            device_id: self.device_id,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -504,7 +532,9 @@ impl CudaDecycler {
         let func = self
             .module
             .get_function("decycler_many_series_one_param_f32")
-            .map_err(|_| CudaDecyclerError::MissingKernelSymbol { name: "decycler_many_series_one_param_f32" })?;
+            .map_err(|_| CudaDecyclerError::MissingKernelSymbol {
+                name: "decycler_many_series_one_param_f32",
+            })?;
         let (block, grid) = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => (
                 (block_x, 1, 1).into(),
@@ -550,7 +580,7 @@ impl CudaDecycler {
                 &mut cols_i as *mut _ as *mut c_void,
                 &mut rows_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
-                std::ptr::null_mut(), 
+                std::ptr::null_mut(),
             ];
             self.stream.launch(&func, grid, block, 0, &mut args)?;
         }
@@ -566,8 +596,6 @@ impl CudaDecycler {
         Ok(())
     }
 
-    
-
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &DecyclerBatchRange,
@@ -578,7 +606,6 @@ impl CudaDecycler {
         }
         let combos = expand_grid(sweep)?;
 
-        
         let mut first_valid: Option<usize> = None;
         for i in 0..series_len {
             if data_f32[i].is_finite() {
@@ -597,7 +624,6 @@ impl CudaDecycler {
             )));
         }
 
-        
         let mut diff = vec![0f32; series_len];
         for i in (fv + 2)..series_len {
             let x = data_f32[i];
@@ -606,7 +632,6 @@ impl CudaDecycler {
             diff[i] = x - 2.0 * x1 + x2;
         }
 
-        
         let mut periods_i32 = Vec::with_capacity(combos.len());
         let mut c_vals = Vec::with_capacity(combos.len());
         let mut two_1m_vals = Vec::with_capacity(combos.len());
@@ -660,7 +685,6 @@ impl CudaDecycler {
             ));
         }
 
-        
         let needed = period;
         let mut first_valids = Vec::with_capacity(cols);
         for s in 0..cols {
@@ -696,7 +720,6 @@ impl CudaDecycler {
     }
 }
 
-
 struct PreparedDecyclerBatch {
     combos: Vec<DecyclerParams>,
     first_valid: usize,
@@ -714,7 +737,6 @@ struct PreparedDecyclerMany {
     two_1m: f32,
     neg_oma_sq: f32,
 }
-
 
 pub mod benches {
     use super::*;
@@ -895,7 +917,6 @@ pub mod benches {
     }
 }
 
-
 struct Coefficients {
     c: f32,
     two_1m: f32,
@@ -921,45 +942,71 @@ fn compute_coefficients(period: usize, k: f64) -> Coefficients {
 fn expand_grid(range: &DecyclerBatchRange) -> Result<Vec<DecyclerParams>, CudaDecyclerError> {
     fn axis_usize(a: (usize, usize, usize)) -> Result<Vec<usize>, CudaDecyclerError> {
         let (s, e, st) = a;
-        if st == 0 || s == e { return Ok(vec![s]); }
-        if s < e { return Ok((s..=e).step_by(st).collect()); }
+        if st == 0 || s == e {
+            return Ok(vec![s]);
+        }
+        if s < e {
+            return Ok((s..=e).step_by(st).collect());
+        }
         let mut v = Vec::new();
         let mut cur: isize = s as isize;
         let end_i: isize = e as isize;
         let step_i: isize = st as isize;
         while cur >= end_i {
             v.push(cur as usize);
-            if step_i == 0 { break; }
+            if step_i == 0 {
+                break;
+            }
             cur = cur.saturating_sub(step_i);
-            if cur == std::isize::MIN { break; }
+            if cur == std::isize::MIN {
+                break;
+            }
         }
         if v.is_empty() {
-            return Err(CudaDecyclerError::InvalidInput("invalid usize range".into()));
+            return Err(CudaDecyclerError::InvalidInput(
+                "invalid usize range".into(),
+            ));
         }
         Ok(v)
     }
     fn axis_f64(a: (f64, f64, f64)) -> Result<Vec<f64>, CudaDecyclerError> {
         let (s, e, st) = a;
-        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 { return Ok(vec![s]); }
+        if st.abs() < 1e-12 || (s - e).abs() < 1e-12 {
+            return Ok(vec![s]);
+        }
         let mut v = Vec::new();
         if s < e && st > 0.0 {
             let mut cur = s;
-            while cur <= e + 1e-12 { v.push(cur); cur += st; }
+            while cur <= e + 1e-12 {
+                v.push(cur);
+                cur += st;
+            }
         } else if s > e && st < 0.0 {
             let mut cur = s;
-            while cur >= e - 1e-12 { v.push(cur); cur += st; }
+            while cur >= e - 1e-12 {
+                v.push(cur);
+                cur += st;
+            }
         }
-        if v.is_empty() { return Err(CudaDecyclerError::InvalidInput("invalid f64 range".into())); }
+        if v.is_empty() {
+            return Err(CudaDecyclerError::InvalidInput("invalid f64 range".into()));
+        }
         Ok(v)
     }
     let ps = axis_usize(range.hp_period)?;
     let ks = axis_f64(range.k)?;
     let mut out = Vec::with_capacity(ps.len().saturating_mul(ks.len()));
-    for &p in &ps { for &k in &ks { out.push(DecyclerParams { hp_period: Some(p), k: Some(k) }); } }
+    for &p in &ps {
+        for &k in &ks {
+            out.push(DecyclerParams {
+                hp_period: Some(p),
+                k: Some(k),
+            });
+        }
+    }
     Ok(out)
 }
 
-/// VRAM-backed array handle for decycler with context/device info for interop
 pub struct DeviceArrayF32Decycler {
     pub buf: DeviceBuffer<f32>,
     pub rows: usize,
@@ -968,6 +1015,12 @@ pub struct DeviceArrayF32Decycler {
     pub device_id: u32,
 }
 impl DeviceArrayF32Decycler {
-    #[inline] pub fn device_ptr(&self) -> u64 { self.buf.as_device_ptr().as_raw() as u64 }
-    #[inline] pub fn len(&self) -> usize { self.rows * self.cols }
+    #[inline]
+    pub fn device_ptr(&self) -> u64 {
+        self.buf.as_device_ptr().as_raw() as u64
+    }
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.rows * self.cols
+    }
 }

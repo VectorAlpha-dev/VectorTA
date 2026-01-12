@@ -1,11 +1,3 @@
-//! CUDA wrapper for Momentum (MOM): value[t] = price[t] - price[t - period]
-//!
-//! Parity with scalar semantics:
-//! - Warmup prefix: NaN up to first_valid + period - 1
-//! - Mid-stream NaNs propagate naturally (no masking)
-//! - FP32 compute and NON_BLOCKING stream
-//! - VRAM guard with ~64MB headroom and simple chunking for large combo counts
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::DeviceArrayF32;
@@ -28,13 +20,24 @@ pub enum CudaMomError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -58,9 +61,7 @@ pub struct CudaMom {
 }
 
 fn expand_grid_checked_cuda(r: &MomBatchRange) -> Result<Vec<MomParams>, CudaMomError> {
-    fn axis_usize(
-        (start, end, step): (usize, usize, usize),
-    ) -> Result<Vec<usize>, CudaMomError> {
+    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaMomError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -110,10 +111,6 @@ impl CudaMom {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        
-        
-        
-        
         context.set_flags(ContextFlags::SCHED_AUTO)?;
 
         let ptx = include_str!(concat!(env!("OUT_DIR"), "/mom_kernel.ptx"));
@@ -126,11 +123,8 @@ impl CudaMom {
             .or_else(|_| Module::from_ptx(ptx, &[]))?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-        
-        let sm_count = device
-            .get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
-        let max_grid_x = device
-            .get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        let sm_count = device.get_attribute(DeviceAttribute::MultiprocessorCount)? as u32;
+        let max_grid_x = device.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
 
         Ok(Self {
             module,
@@ -163,7 +157,11 @@ impl CudaMom {
         match mem_get_info() {
             Ok((free, _total)) => {
                 if required.saturating_add(headroom) > free {
-                    return Err(CudaMomError::OutOfMemory { required, free, headroom });
+                    return Err(CudaMomError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    });
                 }
                 Ok(())
             }
@@ -177,12 +175,18 @@ impl CudaMom {
         let (bx, by, bz) = (block.x, block.y, block.z);
         let threads = (bx as u64) * (by as u64) * (bz as u64);
         if threads > 1024 {
-            return Err(CudaMomError::LaunchConfigTooLarge { gx, gy, gz, bx, by, bz });
+            return Err(CudaMomError::LaunchConfigTooLarge {
+                gx,
+                gy,
+                gz,
+                bx,
+                by,
+                bz,
+            });
         }
         Ok(())
     }
 
-    
     pub fn mom_batch_dev(
         &self,
         prices_f32: &[f32],
@@ -195,7 +199,6 @@ impl CudaMom {
             .map(|p| p.period.unwrap_or(0) as i32)
             .collect();
 
-        
         let in_bytes = prices_f32
             .len()
             .checked_mul(std::mem::size_of::<f32>())
@@ -218,9 +221,7 @@ impl CudaMom {
 
         let d_prices = DeviceBuffer::from_slice(prices_f32)?;
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(out_elems)?
-        };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
 
         self.launch_batch(
             &d_prices,
@@ -249,14 +250,14 @@ impl CudaMom {
         if n_combos == 0 {
             return Ok(());
         }
-        let func = self
-            .module
-            .get_function("mom_batch_f32")
-            .map_err(|_| CudaMomError::MissingKernelSymbol { name: "mom_batch_f32" })?;
+        let func = self.module.get_function("mom_batch_f32").map_err(|_| {
+            CudaMomError::MissingKernelSymbol {
+                name: "mom_batch_f32",
+            }
+        })?;
 
-        
         let block_x = self.policy.batch_block_x.unwrap_or(256);
-        
+
         let max_blocks: u32 = self.max_grid_x.max(1);
         let mut launched = 0usize;
         while launched < n_combos {
@@ -267,7 +268,6 @@ impl CudaMom {
             CudaMom::validate_launch(grid, block)?;
 
             unsafe {
-                
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                 let mut periods_ptr = d_periods
                     .as_device_ptr()
@@ -298,7 +298,6 @@ impl CudaMom {
         self.stream.synchronize().map_err(CudaMomError::Cuda)
     }
 
-    
     pub fn mom_many_series_one_param_time_major_dev(
         &self,
         prices_tm_f32: &[f32],
@@ -321,7 +320,6 @@ impl CudaMom {
             return Err(CudaMomError::InvalidInput("period must be > 0".into()));
         }
 
-        
         let mut first_valids = vec![i32::MAX; cols];
         let mut remaining = cols;
         for t in 0..rows {
@@ -337,10 +335,12 @@ impl CudaMom {
             }
         }
         if let Some(s_bad) = first_valids.iter().position(|&fv| fv == i32::MAX) {
-            return Err(CudaMomError::InvalidInput(format!("series {} all NaN", s_bad)));
+            return Err(CudaMomError::InvalidInput(format!(
+                "series {} all NaN",
+                s_bad
+            )));
         }
 
-        
         let elems = expected;
         let prices_bytes = elems
             .checked_mul(std::mem::size_of::<f32>())
@@ -360,9 +360,7 @@ impl CudaMom {
 
         let d_prices = DeviceBuffer::from_slice(prices_tm_f32)?;
         let d_first = DeviceBuffer::from_slice(&first_valids)?;
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized(expected)?
-        };
+        let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(expected)? };
 
         self.launch_many_series(&d_prices, &d_first, cols, rows, period, &mut d_out)?;
         Ok(DeviceArrayF32 {
@@ -384,11 +382,13 @@ impl CudaMom {
         let func = self
             .module
             .get_function("mom_many_series_one_param_f32")
-            .map_err(|_| CudaMomError::MissingKernelSymbol { name: "mom_many_series_one_param_f32" })?;
-        
+            .map_err(|_| CudaMomError::MissingKernelSymbol {
+                name: "mom_many_series_one_param_f32",
+            })?;
+
         let block_x = self.policy.many_block_x.unwrap_or(256);
         let needed = ((cols as u32) + block_x - 1) / block_x;
-        
+
         let cap = self.sm_count.saturating_mul(8).max(1);
         let grid_x = needed.min(cap).max(1);
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -416,7 +416,6 @@ impl CudaMom {
         self.stream.synchronize().map_err(CudaMomError::Cuda)
     }
 
-    
     fn prepare_batch_inputs(
         prices: &[f32],
         sweep: &MomBatchRange,
@@ -438,12 +437,10 @@ impl CudaMom {
         if max_p == 0 {
             return Err(CudaMomError::InvalidInput("period must be > 0".into()));
         }
-        
-        
+
         Ok((combos, first_valid, len))
     }
 
-    /// Copy a host series once and get its first_valid (host-scan).
     pub fn copy_series_to_device_with_first_valid(
         &self,
         prices_f32: &[f32],
@@ -463,7 +460,6 @@ impl CudaMom {
         Ok((d_prices, first_valid))
     }
 
-    /// Fast path: reuse a device-resident series across many parameter sweeps (no H→D for prices).
     pub fn mom_batch_dev_with_device_prices(
         &self,
         d_prices: &DeviceBuffer<f32>,
@@ -473,9 +469,11 @@ impl CudaMom {
     ) -> Result<DeviceArrayF32, CudaMomError> {
         let combos = expand_grid_checked_cuda(sweep)?;
         let n_combos = combos.len();
-        let periods_i32: Vec<i32> = combos.iter().map(|p| p.period.unwrap_or(0) as i32).collect();
+        let periods_i32: Vec<i32> = combos
+            .iter()
+            .map(|p| p.period.unwrap_or(0) as i32)
+            .collect();
 
-        
         let params_bytes = periods_i32
             .len()
             .checked_mul(std::mem::size_of::<i32>())
@@ -491,7 +489,6 @@ impl CudaMom {
             .ok_or_else(|| CudaMomError::InvalidInput("total VRAM size overflow".into()))?;
         self.will_fit(required, 64 * 1024 * 1024)?;
 
-        
         unsafe {
             let mut cur: i32 = 0;
             let _ = cust::sys::cuCtxGetDevice(&mut cur);
@@ -506,10 +503,13 @@ impl CudaMom {
         let d_periods = DeviceBuffer::from_slice(&periods_i32)?;
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(out_elems)? };
         self.launch_batch(d_prices, &d_periods, len, first_valid, n_combos, &mut d_out)?;
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: len,
+        })
     }
 }
-
 
 pub mod benches {
     use super::*;
@@ -519,7 +519,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 1024;
     const MANY_ROWS: usize = 8192;
-    const PARAM_SWEEP: usize = 250; 
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -560,7 +560,7 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let cuda = CudaMom::new(0).expect("cuda mom");
         let mut prices = gen_series(ONE_SERIES_LEN);
-        
+
         for i in 0..8 {
             prices[i] = f32::NAN;
         }
@@ -580,18 +580,13 @@ pub mod benches {
             .collect();
         let n_combos = periods_i32.len();
 
-        let d_prices = unsafe {
-            DeviceBuffer::from_slice_async(&prices, &cuda.stream)
-        }
-        .expect("d_prices H2D");
-        let d_periods = unsafe {
-            DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream)
-        }
-        .expect("d_periods H2D");
-        let d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(len * n_combos, &cuda.stream)
-        }
-        .expect("d_out alloc");
+        let d_prices =
+            unsafe { DeviceBuffer::from_slice_async(&prices, &cuda.stream) }.expect("d_prices H2D");
+        let d_periods = unsafe { DeviceBuffer::from_slice_async(&periods_i32, &cuda.stream) }
+            .expect("d_periods H2D");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len * n_combos, &cuda.stream) }
+                .expect("d_out alloc");
         cuda.stream.synchronize().expect("mom prep sync");
 
         Box::new(MomBatchDeviceState {
@@ -633,7 +628,6 @@ pub mod benches {
         let mut prices = vec![f32::NAN; n];
         for s in 0..MANY_COLS {
             for t in s..MANY_ROWS {
-                
                 let idx = t * MANY_COLS + s;
                 let x = (t as f32) * 0.002 + (s as f32) * 0.01;
                 prices[idx] = base[idx] + 0.05 * x.sin();
@@ -653,18 +647,12 @@ pub mod benches {
             first_valids[s] = fv.max(0);
         }
 
-        let d_prices_tm = unsafe {
-            DeviceBuffer::from_slice_async(&prices, &cuda.stream)
-        }
-        .expect("d_prices_tm H2D");
-        let d_first_valids = unsafe {
-            DeviceBuffer::from_slice_async(&first_valids, &cuda.stream)
-        }
-        .expect("d_first_valids H2D");
-        let d_out_tm: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(n, &cuda.stream)
-        }
-        .expect("d_out_tm alloc");
+        let d_prices_tm = unsafe { DeviceBuffer::from_slice_async(&prices, &cuda.stream) }
+            .expect("d_prices_tm H2D");
+        let d_first_valids = unsafe { DeviceBuffer::from_slice_async(&first_valids, &cuda.stream) }
+            .expect("d_first_valids H2D");
+        let d_out_tm: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n, &cuda.stream) }.expect("d_out_tm alloc");
         cuda.stream.synchronize().expect("mom many prep sync");
 
         Box::new(MomManyDeviceState {

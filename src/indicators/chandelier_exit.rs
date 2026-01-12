@@ -1,34 +1,3 @@
-//! # Chandelier Exit (CE)
-//!
-//! A volatility-based trailing stop-loss indicator that creates dynamic support and resistance bands
-//! using ATR (Average True Range) combined with rolling highest high or lowest low values. Developed
-//! by Chuck LeBeau, it provides adaptive stop levels that follow price movements while accounting for
-//! market volatility. The stops tighten in trending markets and widen during volatile periods.
-//!
-//! ## Parameters
-//! - **period**: ATR period for volatility calculation (default: 22)
-//! - **mult**: ATR multiplier for stop distance (default: 3.0)
-//! - **use_close**: Use close price for extremums instead of high/low (default: true)
-//!
-//! ## Inputs
-//! - Requires high, low, and close price arrays
-//! - Supports both raw slices and Candles data structure
-//!
-//! ## Returns
-//! - **`Ok(ChandelierExitOutput)`** containing:
-//!   - `long_stop`: Long position stop levels (highest[period] - ATR * mult)
-//!   - `short_stop`: Short position stop levels (lowest[period] + ATR * mult)
-//!   - Both arrays match input length with NaN during warmup
-//!
-//! ## Developer Notes (Implementation Status)
-//! - Scalar optimized: uses monotone deques for rolling extrema in O(n).
-//! - SIMD status: disabled by design — loop-carried dependencies (deque + trailing logic)
-//!   make time-wise SIMD ineffective. Runtime selection maps to scalar for CE; ATR may use its own kernels.
-//! - Streaming performance: O(1) updates; batch uses per-row deques.
-//! - Memory: minimal allocations via `alloc_with_nan_prefix` and uninit-matrix helpers.
-//! - Batch: supported; no row-shared precompute beyond ATR and per-row extrema; further wins unlikely.
-//! - CUDA/Python: CUDA wrappers use typed errors + VRAM checks; `CeDeviceArrayF32Py` exposes CAI v3 and DLPack v1.x capsules with primary-context guards.
-
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -38,12 +7,14 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::{PyDict, PyList};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -51,8 +22,6 @@ use crate::utilities::helpers::{
 };
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
@@ -62,11 +31,11 @@ use std::error::Error;
 use std::mem::MaybeUninit;
 use thiserror::Error;
 
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32 as DeviceArrayF32Cuda;
 #[cfg(feature = "cuda")]
 use crate::cuda::{CudaCeError, CudaChandelierExit};
 use crate::indicators::atr::{atr_with_kernel, AtrInput, AtrParams};
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32 as DeviceArrayF32Cuda;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use cust::context::Context as CudaContext;
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -117,7 +86,6 @@ impl CeDeviceArrayF32Py {
         dl_device: Option<pyo3::PyObject>,
         copy: Option<pyo3::PyObject>,
     ) -> PyResult<PyObject> {
-        // Compute target device id and validate `dl_device` hint if provided.
         let (kdl, alloc_dev) = self.__dlpack_device__()?;
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
@@ -138,9 +106,8 @@ impl CeDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
             DeviceArrayF32Cuda {
@@ -184,12 +151,15 @@ pub enum ChandelierExitData<'a> {
 
 #[derive(Debug, Clone)]
 pub struct ChandelierExitOutput {
-    pub long_stop: Vec<f64>,  
-    pub short_stop: Vec<f64>, 
+    pub long_stop: Vec<f64>,
+    pub short_stop: Vec<f64>,
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct ChandelierExitParams {
     pub period: Option<usize>,
     pub mult: Option<f64>,
@@ -332,51 +302,46 @@ impl ChandelierExitBuilder {
         chandelier_exit_with_kernel(&i, self.kernel)
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     #[inline(always)]
     pub fn into_stream(self) -> Result<ChandelierExitStream, ChandelierExitError> {
         ChandelierExitStream::try_new(self.build())
     }
 }
 
-// Native Rust streaming type (not available in WASM)
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[derive(Debug, Clone)]
 pub struct ChandelierExitStream {
     period: usize,
     mult: f64,
     use_close: bool,
 
-    // index of current bar (0-based)
     i: usize,
 
-    // Wilder ATR state
-    alpha: f64,            // 1.0 / period
-    atr_prev: Option<f64>, // None until seed is built
-    warm_tr_sum: f64,      // sum of TR for first N bars
+    alpha: f64,
+    atr_prev: Option<f64>,
+    warm_tr_sum: f64,
     prev_close: Option<f64>,
 
-    // trailing state (unmasked raw stops)
-    long_raw_prev: f64,  // NaN until warm is reached
-    short_raw_prev: f64, // NaN until warm is reached
-    dir_prev: i8,        // Pine-style: starts at 1
+    long_raw_prev: f64,
+    short_raw_prev: f64,
+    dir_prev: i8,
 
-    // Monotonic deques for rolling max/min over chosen source
-    cap: usize, // power-of-two capacity
+    cap: usize,
     mask: usize,
-    // max deque
+
     dq_max_idx: Vec<usize>,
     dq_max_val: Vec<f64>,
     hmax: usize,
     tmax: usize,
-    // min deque
+
     dq_min_idx: Vec<usize>,
     dq_min_val: Vec<f64>,
     hmin: usize,
     tmin: usize,
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 impl ChandelierExitStream {
     pub fn try_new(p: ChandelierExitParams) -> Result<Self, ChandelierExitError> {
         let period = p.period.unwrap_or(22);
@@ -423,10 +388,8 @@ impl ChandelierExitStream {
         self.period - 1
     }
 
-    // ---- deque helpers ----
     #[inline(always)]
     fn evict_old(&mut self, i: usize) {
-        // evict indices older than window [i - period + 1 .. i]
         while self.hmax != self.tmax {
             let idx = self.dq_max_idx[self.hmax & self.mask];
             if idx + self.period <= i {
@@ -449,7 +412,7 @@ impl ChandelierExitStream {
         if v.is_nan() {
             return;
         }
-        // pop smaller values
+
         while self.hmax != self.tmax {
             let back_pos = (self.tmax.wrapping_sub(1)) & self.mask;
             if self.dq_max_val[back_pos] < v {
@@ -468,7 +431,7 @@ impl ChandelierExitStream {
         if v.is_nan() {
             return;
         }
-        // pop larger values
+
         while self.hmin != self.tmin {
             let back_pos = (self.tmin.wrapping_sub(1)) & self.mask;
             if self.dq_min_val[back_pos] > v {
@@ -499,7 +462,6 @@ impl ChandelierExitStream {
         }
     }
 
-    // True Range helper (Wilder)
     #[inline(always)]
     fn true_range(high: f64, low: f64, prev_close: Option<f64>) -> f64 {
         if let Some(pc) = prev_close {
@@ -517,10 +479,8 @@ impl ChandelierExitStream {
         let i = self.i;
         let warm = self.period - 1;
 
-        // 1) TR & ATR update (Wilder / RMA)
         let tr = Self::true_range(high, low, self.prev_close);
 
-        // Maintain window deques for this bar (evict then push current)
         self.evict_old(i);
         if self.use_close {
             self.push_max(i, close);
@@ -531,12 +491,10 @@ impl ChandelierExitStream {
         }
 
         let atr = if let Some(prev) = self.atr_prev {
-            // Wilder recurrence: ATR_t = ATR_{t-1} + α * (TR_t - ATR_{t-1})
             let next = (tr - prev).mul_add(self.alpha, prev);
             self.atr_prev = Some(next);
             next
         } else {
-            // seed with SMA(TR, N) on the warm bar
             self.warm_tr_sum += tr;
             if i < warm {
                 self.prev_close = Some(close);
@@ -548,15 +506,12 @@ impl ChandelierExitStream {
             seed
         };
 
-        // 2) Rolling extrema from deques
         let highest = self.front_max();
         let lowest = self.front_min();
 
-        // 3) Candidate raw stops (use FMA for single-rounding)
-        let ls0 = (-self.mult).mul_add(atr, highest); // highest - mult * atr
-        let ss0 = (self.mult).mul_add(atr, lowest); // lowest  + mult * atr
+        let ls0 = (-self.mult).mul_add(atr, highest);
+        let ss0 = (self.mult).mul_add(atr, lowest);
 
-        // 4) nz-prev semantics (raw, unmasked)
         let lsp = if self.long_raw_prev.is_nan() {
             ls0
         } else {
@@ -568,9 +523,6 @@ impl ChandelierExitStream {
             self.short_raw_prev
         };
 
-        // 5) Trail using previous close; match batch semantics:
-        //    - on the first warm bar (i == warm) do NOT trail
-        //    - for i > warm use prev_close
         let (ls, ss) = if i > warm {
             if let Some(pc) = self.prev_close {
                 let ls = if pc > lsp { ls0.max(lsp) } else { ls0 };
@@ -583,7 +535,6 @@ impl ChandelierExitStream {
             (ls0, ss0)
         };
 
-        // 6) Direction decision from previous raw stops
         let d = if close > ssp {
             1
         } else if close < lsp {
@@ -592,14 +543,12 @@ impl ChandelierExitStream {
             self.dir_prev
         };
 
-        // 7) Persist state
         self.long_raw_prev = ls;
         self.short_raw_prev = ss;
         self.dir_prev = d;
         self.prev_close = Some(close);
         self.i = i + 1;
 
-        // 8) Masked outputs (only one side active)
         Some((
             if d == 1 { ls } else { f64::NAN },
             if d == -1 { ss } else { f64::NAN },
@@ -635,13 +584,16 @@ pub enum ChandelierExitError {
     OutputLengthMismatch { expected: usize, got: usize },
 
     #[error("chandelier_exit: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
 
     #[error("chandelier_exit: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
 
-// NaN-skipping helper functions to match Pine Script's ta.highest/ta.lowest behavior
 #[inline]
 fn window_max(a: &[f64]) -> f64 {
     let mut m = f64::NAN;
@@ -670,7 +622,6 @@ fn window_min(a: &[f64]) -> f64 {
     m
 }
 
-
 #[inline(always)]
 fn ce_first_valid(
     use_close: bool,
@@ -691,7 +642,6 @@ fn ce_first_valid(
     f.ok_or(ChandelierExitError::AllValuesNaN)
 }
 
-
 #[inline(always)]
 fn ce_prepare<'a>(
     input: &'a ChandelierExitInput,
@@ -700,12 +650,12 @@ fn ce_prepare<'a>(
     (
         &'a [f64],
         &'a [f64],
-        &'a [f64], // high, low, close
+        &'a [f64],
         usize,
         f64,
-        bool,   // period, mult, use_close
-        usize,  // first
-        Kernel, // chosen
+        bool,
+        usize,
+        Kernel,
     ),
     ChandelierExitError,
 > {
@@ -800,7 +750,6 @@ fn ce_avx2_fill(
         !a.is_nan() && !b.is_nan() && a < b
     }
 
-    // Deques (power-of-two ring)
     let cap = period.next_power_of_two();
     let mask = cap - 1;
     let mut dq_max = vec![0usize; cap];
@@ -818,7 +767,6 @@ fn ce_avx2_fill(
 
     unsafe {
         for i in 0..len {
-            // Evict
             while hmax != tmax {
                 let idx = *dq_max.get_unchecked(hmax & mask);
                 if idx + period <= i {
@@ -835,7 +783,7 @@ fn ce_avx2_fill(
                     break;
                 }
             }
-            // Push current
+
             let vmax = *src_max.get_unchecked(i);
             if !vmax.is_nan() {
                 while hmax != tmax {
@@ -937,7 +885,6 @@ pub fn chandelier_exit_with_kernel(
 ) -> Result<ChandelierExitOutput, ChandelierExitError> {
     let (high, low, close, period, mult, use_close, first, chosen) = ce_prepare(input, kern)?;
 
-    // ATR
     let atr_in = AtrInput::from_slices(
         high,
         low,
@@ -953,11 +900,9 @@ pub fn chandelier_exit_with_kernel(
     let len = close.len();
     let warm = first + period - 1;
 
-    // Preallocate outputs with warmup NaNs
     let mut long_stop = alloc_with_nan_prefix(len, warm);
     let mut short_stop = alloc_with_nan_prefix(len, warm);
 
-    // Single pass over all bars; emit once warm is satisfied
     #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
     if matches!(chosen, Kernel::Avx2 | Kernel::Avx512) {
         ce_avx2_fill(
@@ -973,23 +918,19 @@ pub fn chandelier_exit_with_kernel(
             first,
         );
     } else {
-        // Rolling state for trailing logic (unmasked)
         let mut long_raw_prev = f64::NAN;
         let mut short_raw_prev = f64::NAN;
         let mut prev_dir: i8 = 1;
 
-        // Monotone deques for rolling max/min over the chosen source
-        // Use power-of-two capacity to enable fast masking
         let cap = period.next_power_of_two();
         let mask = cap - 1;
         let mut dq_max = vec![0usize; cap];
         let mut dq_min = vec![0usize; cap];
-        let mut hmax = 0usize; // head index for max deque
-        let mut tmax = 0usize; // tail index for max deque
-        let mut hmin = 0usize; // head index for min deque
-        let mut tmin = 0usize; // tail index for min deque
+        let mut hmax = 0usize;
+        let mut tmax = 0usize;
+        let mut hmin = 0usize;
+        let mut tmin = 0usize;
 
-        // Select extremum source once
         let (src_max, src_min) = if use_close {
             (close, close)
         } else {
@@ -997,7 +938,6 @@ pub fn chandelier_exit_with_kernel(
         };
 
         for i in 0..len {
-            // Evict indices that are out of the window [i - period + 1 .. i]
             while hmax != tmax {
                 let idx = dq_max[hmax & mask];
                 if idx + period <= i {
@@ -1015,7 +955,6 @@ pub fn chandelier_exit_with_kernel(
                 }
             }
 
-            // Push current index to deques (skip NaNs so all-NaN window -> NaN)
             let v_max = src_max[i];
             if !v_max.is_nan() {
                 while hmax != tmax {
@@ -1050,7 +989,6 @@ pub fn chandelier_exit_with_kernel(
                 continue;
             }
 
-            // Read current extrema (NaN if window had only NaNs)
             let highest = if hmax != tmax {
                 src_max[dq_max[hmax & mask]]
             } else {
@@ -1062,13 +1000,11 @@ pub fn chandelier_exit_with_kernel(
                 f64::NAN
             };
 
-            // Candidate stops (unmasked)
             let ai = atr[i];
-            // Use FMA when available for single-rounding and slight speedup
-            let ls0 = ai.mul_add(-mult, highest); // highest - mult*ai
-            let ss0 = ai.mul_add(mult, lowest); // lowest + mult*ai
 
-            // nz-prev semantics
+            let ls0 = ai.mul_add(-mult, highest);
+            let ss0 = ai.mul_add(mult, lowest);
+
             let lsp = if i == warm || long_raw_prev.is_nan() {
                 ls0
             } else {
@@ -1080,7 +1016,6 @@ pub fn chandelier_exit_with_kernel(
                 short_raw_prev
             };
 
-            // Trailing using previous close
             let ls = if i > warm && close[i - 1] > lsp {
                 ls0.max(lsp)
             } else {
@@ -1092,7 +1027,6 @@ pub fn chandelier_exit_with_kernel(
                 ss0
             };
 
-            // Direction decision uses previous unmasked stops
             let d = if close[i] > ssp {
                 1
             } else if close[i] < lsp {
@@ -1111,23 +1045,19 @@ pub fn chandelier_exit_with_kernel(
     }
     #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
     {
-        // Rolling state for trailing logic (unmasked)
         let mut long_raw_prev = f64::NAN;
         let mut short_raw_prev = f64::NAN;
         let mut prev_dir: i8 = 1;
 
-        // Monotone deques for rolling max/min over the chosen source
-        // Use power-of-two capacity to enable fast masking
         let cap = period.next_power_of_two();
         let mask = cap - 1;
         let mut dq_max = vec![0usize; cap];
         let mut dq_min = vec![0usize; cap];
-        let mut hmax = 0usize; // head index for max deque
-        let mut tmax = 0usize; // tail index for max deque
-        let mut hmin = 0usize; // head index for min deque
-        let mut tmin = 0usize; // tail index for min deque
+        let mut hmax = 0usize;
+        let mut tmax = 0usize;
+        let mut hmin = 0usize;
+        let mut tmin = 0usize;
 
-        // Select extremum source once
         let (src_max, src_min) = if use_close {
             (close, close)
         } else {
@@ -1135,7 +1065,6 @@ pub fn chandelier_exit_with_kernel(
         };
 
         for i in 0..len {
-            // Evict indices that are out of the window [i - period + 1 .. i]
             while hmax != tmax {
                 let idx = dq_max[hmax & mask];
                 if idx + period <= i {
@@ -1153,7 +1082,6 @@ pub fn chandelier_exit_with_kernel(
                 }
             }
 
-            // Push current index to deques (skip NaNs so all-NaN window -> NaN)
             let v_max = src_max[i];
             if !v_max.is_nan() {
                 while hmax != tmax {
@@ -1188,7 +1116,6 @@ pub fn chandelier_exit_with_kernel(
                 continue;
             }
 
-            // Read current extrema (NaN if window had only NaNs)
             let highest = if hmax != tmax {
                 src_max[dq_max[hmax & mask]]
             } else {
@@ -1200,12 +1127,10 @@ pub fn chandelier_exit_with_kernel(
                 f64::NAN
             };
 
-            // Candidate stops (unmasked)
             let ai = atr[i];
             let ls0 = ai.mul_add(-mult, highest);
             let ss0 = ai.mul_add(mult, lowest);
 
-            // nz-prev semantics
             let lsp = if i == warm || long_raw_prev.is_nan() {
                 ls0
             } else {
@@ -1217,7 +1142,6 @@ pub fn chandelier_exit_with_kernel(
                 short_raw_prev
             };
 
-            // Trailing using previous close
             let ls = if i > warm && close[i - 1] > lsp {
                 ls0.max(lsp)
             } else {
@@ -1229,7 +1153,6 @@ pub fn chandelier_exit_with_kernel(
                 ss0
             };
 
-            // Direction decision uses previous unmasked stops
             let d = if close[i] > ssp {
                 1
             } else if close[i] < lsp {
@@ -1253,13 +1176,7 @@ pub fn chandelier_exit_with_kernel(
     })
 }
 
-/// Compute Chandelier Exit into caller-provided buffers (no allocations).
-///
-/// - Preserves NaN warmups exactly like `chandelier_exit()`.
-/// - `long_out.len()` and `short_out.len()` must equal the input length; returns
-///   `OutputLengthMismatch` on mismatch.
-/// - Uses `Kernel::Auto` for dispatch and calls the existing compute-into path.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn chandelier_exit_into(
     input: &ChandelierExitInput,
@@ -1269,7 +1186,6 @@ pub fn chandelier_exit_into(
     chandelier_exit_into_slices(long_out, short_out, input, Kernel::Auto)
 }
 
-// Into-slice APIs for zero-copy operations
 #[inline]
 pub fn chandelier_exit_into_slices(
     long_dst: &mut [f64],
@@ -1305,12 +1221,10 @@ pub fn chandelier_exit_into_slices(
         *v = f64::NAN;
     }
 
-    // Rolling state
     let mut long_raw_prev = f64::NAN;
     let mut short_raw_prev = f64::NAN;
     let mut prev_dir: i8 = 1;
 
-    // Monotone deques (power-of-two ring)
     let cap = period.next_power_of_two();
     let mask = cap - 1;
     let mut dq_max = vec![0usize; cap];
@@ -1330,7 +1244,6 @@ pub fn chandelier_exit_into_slices(
     }
 
     for i in 0..len {
-        // evict outdated
         while hmax != tmax {
             let idx = dq_max[hmax & mask];
             if idx + period <= i {
@@ -1347,7 +1260,7 @@ pub fn chandelier_exit_into_slices(
                 break;
             }
         }
-        // push current
+
         let vmax = src_max[i];
         if !vmax.is_nan() {
             while hmax != tmax {
@@ -1436,7 +1349,7 @@ pub fn chandelier_exit_into_slices(
 
 #[inline]
 pub fn chandelier_exit_into_flat(
-    flat_out: &mut [f64], // shape: rows=2, cols=len, row-major [long..., short...]
+    flat_out: &mut [f64],
     input: &ChandelierExitInput,
     kern: Kernel,
 ) -> Result<(), ChandelierExitError> {
@@ -1458,12 +1371,11 @@ pub fn chandelier_exit_into_flat(
     chandelier_exit_into_slices(long_dst, short_dst, input, kern)
 }
 
-// Batch API types and implementation
 #[derive(Clone, Debug)]
 pub struct CeBatchRange {
     pub period: (usize, usize, usize),
     pub mult: (f64, f64, f64),
-    pub use_close: (bool, bool, bool), // static only if step==false
+    pub use_close: (bool, bool, bool),
 }
 
 impl Default for CeBatchRange {
@@ -1537,7 +1449,7 @@ impl CeBatchBuilder {
 
 #[derive(Clone, Debug)]
 pub struct CeBatchOutput {
-    pub values: Vec<f64>, // rows = 2*combos, cols = len
+    pub values: Vec<f64>,
     pub combos: Vec<ChandelierExitParams>,
     pub rows: usize,
     pub cols: usize,
@@ -1594,7 +1506,7 @@ fn expand_ce_checked(r: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, Chan
             while x >= end {
                 v.push(x);
                 if x < step {
-                    break; // avoid underflow; next would wrap
+                    break;
                 }
                 x -= step;
                 if x == usize::MAX {
@@ -1621,10 +1533,18 @@ fn expand_ce_checked(r: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, Chan
             return Ok(vec![start]);
         }
         let mut v = Vec::new();
-        // choose direction based on bounds when step is positive; respect sign if negative
-        let s = if step > 0.0 { if start <= end { step } else { -step } } else { step };
+
+        let s = if step > 0.0 {
+            if start <= end {
+                step
+            } else {
+                -step
+            }
+        } else {
+            step
+        };
         let mut x = start;
-        // guard against too many steps
+
         let mut iters = 0usize;
         while iters < 1_000_000 {
             if (s > 0.0 && x > end + 1e-12) || (s < 0.0 && x < end - 1e-12) {
@@ -1645,7 +1565,7 @@ fn expand_ce_checked(r: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, Chan
     }
     let periods = axis_usize(r.period)?;
     let mults = axis_f64(r.mult)?;
-    let uses = vec![r.use_close.0]; // static
+    let uses = vec![r.use_close.0];
     let cap = periods
         .len()
         .checked_mul(mults.len())
@@ -1677,7 +1597,6 @@ fn expand_ce_checked(r: &CeBatchRange) -> Result<Vec<ChandelierExitParams>, Chan
     Ok(out)
 }
 
-// Single-threaded batch processing
 #[inline]
 pub fn ce_batch_slice(
     h: &[f64],
@@ -1689,7 +1608,6 @@ pub fn ce_batch_slice(
     ce_batch_inner(h, l, c, sweep, kern, false)
 }
 
-// Parallel batch processing with rayon
 #[inline]
 pub fn ce_batch_par_slice(
     h: &[f64],
@@ -1701,7 +1619,6 @@ pub fn ce_batch_par_slice(
     ce_batch_inner(h, l, c, sweep, kern, true)
 }
 
-// Main batch function that routes to appropriate implementation
 pub fn ce_batch_with_kernel(
     h: &[f64],
     l: &[f64],
@@ -1724,7 +1641,6 @@ pub fn ce_batch_with_kernel(
     ce_batch_par_slice(h, l, c, sweep, simd)
 }
 
-// Internal batch processing function with parallel option
 #[inline(always)]
 fn ce_batch_inner(
     h: &[f64],
@@ -1747,7 +1663,6 @@ fn ce_batch_inner(
         return Err(ChandelierExitError::EmptyInputData);
     }
 
-    // Prefixes per row (2 rows per combo), with proper error surfacing
     let warms: Vec<usize> = {
         let mut w = Vec::with_capacity(2 * combos.len());
         for prm in &combos {
@@ -1766,7 +1681,7 @@ fn ce_batch_inner(
             end: "2".into(),
             step: "mul overflow".into(),
         })?;
-    // Guard rows*cols overflow
+
     let _ = rows
         .checked_mul(cols)
         .ok_or(ChandelierExitError::InvalidRange {
@@ -1781,7 +1696,6 @@ fn ce_batch_inner(
     let out: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    // Map *Batch -> non-batch inside inner_into (same as Alma)
     ce_batch_inner_into(h, l, c, &combos, kern, out)?;
 
     let values = unsafe {
@@ -1867,7 +1781,6 @@ fn ce_batch_inner_into(
             *v = f64::NAN;
         }
 
-        // Rolling state
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         if matches!(
             chosen,
@@ -1877,7 +1790,6 @@ fn ce_batch_inner_into(
                 long_dst, short_dst, h, l, c, &atr, period, mult, use_close, first,
             );
         } else {
-            // Scalar per-row path
             let mut long_raw_prev = f64::NAN;
             let mut short_raw_prev = f64::NAN;
             let mut prev_dir: i8 = 1;
@@ -1989,7 +1901,6 @@ fn ce_batch_inner_into(
         }
         #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
         {
-            // Scalar per-row path
             let mut long_raw_prev = f64::NAN;
             let mut short_raw_prev = f64::NAN;
             let mut prev_dir: i8 = 1;
@@ -2105,7 +2016,6 @@ fn ce_batch_inner_into(
     Ok(())
 }
 
-// Python bindings
 #[cfg(feature = "python")]
 #[pyfunction(name = "chandelier_exit")]
 #[pyo3(signature = (high, low, close, period=None, mult=None, use_close=None, kernel=None))]
@@ -2137,7 +2047,6 @@ pub fn chandelier_exit_py<'py>(
     Ok((long_vec.into_pyarray(py), short_vec.into_pyarray(py)))
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "chandelier_exit_batch")]
 #[pyo3(signature = (high, low, close, period_range, mult_range, use_close=true, kernel=None))]
@@ -2162,7 +2071,6 @@ pub fn chandelier_exit_batch_py<'py>(
         use_close: (use_close, use_close, false),
     };
 
-    
     let combos = expand_ce_checked(&sweep).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let rows = combos
         .len()
@@ -2179,7 +2087,6 @@ pub fn chandelier_exit_batch_py<'py>(
     let kern = validate_kernel(kernel, true)?;
 
     py.allow_threads(|| {
-        
         let simd = match kern {
             Kernel::Auto => detect_best_batch_kernel(),
             Kernel::Avx512Batch => Kernel::Avx512,
@@ -2220,7 +2127,6 @@ pub fn chandelier_exit_batch_py<'py>(
     Ok(d)
 }
 
-
 #[cfg(feature = "python")]
 #[pyclass]
 pub struct ChandelierExitStreamPy {
@@ -2231,13 +2137,13 @@ pub struct ChandelierExitStreamPy {
     mult: f64,
     use_close: bool,
     kernel: Kernel,
-    
+
     prev_close: Option<f64>,
-    atr_prev: Option<f64>, 
+    atr_prev: Option<f64>,
     long_stop_prev: Option<f64>,
     short_stop_prev: Option<f64>,
-    dir_prev: i8,     
-    warm_tr_sum: f64, 
+    dir_prev: i8,
+    warm_tr_sum: f64,
     count: usize,
 }
 
@@ -2265,19 +2171,17 @@ impl ChandelierExitStreamPy {
             atr_prev: None,
             long_stop_prev: None,
             short_stop_prev: None,
-            dir_prev: 1, 
+            dir_prev: 1,
             warm_tr_sum: 0.0,
             count: 0,
         })
     }
 
     fn update(&mut self, high: f64, low: f64, close: f64) -> PyResult<Option<(f64, f64)>> {
-        
         self.high_buffer.push(high);
         self.low_buffer.push(low);
         self.close_buffer.push(close);
 
-        
         let tr = if let Some(pc) = self.prev_close {
             let hl = (high - low).abs();
             let hc = (high - pc).abs();
@@ -2287,7 +2191,6 @@ impl ChandelierExitStreamPy {
             (high - low).abs()
         };
 
-        
         let atr = if self.atr_prev.is_none() {
             self.warm_tr_sum += tr;
             self.count += 1;
@@ -2306,14 +2209,12 @@ impl ChandelierExitStreamPy {
             next
         };
 
-        
         if self.high_buffer.len() > self.period {
             self.high_buffer.remove(0);
             self.low_buffer.remove(0);
             self.close_buffer.remove(0);
         }
 
-        
         let (highest, lowest) = if self.use_close {
             (
                 window_max(&self.close_buffer),
@@ -2323,15 +2224,12 @@ impl ChandelierExitStreamPy {
             (window_max(&self.high_buffer), window_min(&self.low_buffer))
         };
 
-        
         let long_stop_val = highest - self.mult * atr;
         let short_stop_val = lowest + self.mult * atr;
 
-        
         let lsp = self.long_stop_prev.unwrap_or(long_stop_val);
         let ssp = self.short_stop_prev.unwrap_or(short_stop_val);
 
-        
         let ls = if let Some(pc) = self.prev_close {
             if pc > lsp {
                 long_stop_val.max(lsp)
@@ -2351,7 +2249,6 @@ impl ChandelierExitStreamPy {
             short_stop_val
         };
 
-        
         let d = if close > ssp {
             1
         } else if close < lsp {
@@ -2360,7 +2257,6 @@ impl ChandelierExitStreamPy {
             self.dir_prev
         };
 
-        
         self.long_stop_prev = Some(ls);
         self.short_stop_prev = Some(ss);
         self.dir_prev = d;
@@ -2385,8 +2281,7 @@ impl ChandelierExitStreamPy {
     }
 }
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CeResult {
     pub values: Vec<f64>,
@@ -2394,7 +2289,7 @@ pub struct CeResult {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct CeBatchJsOutput {
     pub values: Vec<f64>,
@@ -2403,7 +2298,7 @@ pub struct CeBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ce_js(
     high: &[f64],
@@ -2433,7 +2328,6 @@ pub fn ce_js(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "chandelier_exit_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, period_range, mult_range=(3.0,3.0,0.0), use_close=true, device_id=0))]
@@ -2461,12 +2355,12 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
         use_close: (use_close, use_close, false),
     };
     let (inner, combos, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaChandelierExit::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         cuda.chandelier_exit_batch_dev(h, l, c, &sweep)
-            .map(|(a,b)| (a,b,ctx,dev_id))
+            .map(|(a, b)| (a, b, ctx, dev_id))
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
 
@@ -2495,7 +2389,14 @@ pub fn chandelier_exit_cuda_batch_dev_py<'py>(
             .collect::<Vec<_>>()
             .into_pyarray(py),
     )?;
-    Ok((CeDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id }, d))
+    Ok((
+        CeDeviceArrayF32Py {
+            inner,
+            _ctx: ctx,
+            device_id: dev_id,
+        },
+        d,
+    ))
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2521,8 +2422,8 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
     let l = low_tm_f32.as_slice()?;
     let c = close_tm_f32.as_slice()?;
     let (inner, ctx, dev_id) = py.allow_threads(|| {
-        let cuda = CudaChandelierExit::new(device_id)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let cuda =
+            CudaChandelierExit::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
         let ctx = cuda.context_arc();
         let dev_id = cuda.device_id();
         cuda.chandelier_exit_many_series_one_param_time_major_dev(
@@ -2538,10 +2439,14 @@ pub fn chandelier_exit_cuda_many_series_one_param_dev_py<'py>(
         .map(|a| (a, ctx, dev_id))
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
-    Ok(CeDeviceArrayF32Py { inner, _ctx: ctx, device_id: dev_id })
+    Ok(CeDeviceArrayF32Py {
+        inner,
+        _ctx: ctx,
+        device_id: dev_id,
+    })
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ce_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2550,7 +2455,7 @@ pub fn ce_alloc(len: usize) -> *mut f64 {
     p
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ce_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2558,7 +2463,7 @@ pub fn ce_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ce_into(
     high_ptr: *const f64,
@@ -2615,18 +2520,17 @@ pub fn ce_into(
             use_close: Some(use_close),
         };
         let input = ChandelierExitInput::from_slices(h, l, c, params);
-        let (long_stop, short_stop) =
-            match chandelier_exit_with_kernel(&input, Kernel::Auto) {
-                Ok(o) => (o.long_stop, o.short_stop),
-                Err(e) => return Err(JsValue::from_str(&e.to_string())),
-            };
+        let (long_stop, short_stop) = match chandelier_exit_with_kernel(&input, Kernel::Auto) {
+            Ok(o) => (o.long_stop, o.short_stop),
+            Err(e) => return Err(JsValue::from_str(&e.to_string())),
+        };
         out[..len].copy_from_slice(&long_stop);
         out[len..].copy_from_slice(&short_stop);
     }
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn ce_batch_into(
     high_ptr: *const f64,
@@ -2662,15 +2566,15 @@ pub fn ce_batch_into(
             mult: (mult_start, mult_end, mult_step),
             use_close: (use_close, use_close, false),
         };
-        let combos = expand_ce_checked(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        let rows = combos.len().checked_mul(2).ok_or_else(|| {
-            JsValue::from_str("rows*2 overflow in ce_batch_into")
-        })?;
+        let combos = expand_ce_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let rows = combos
+            .len()
+            .checked_mul(2)
+            .ok_or_else(|| JsValue::from_str("rows*2 overflow in ce_batch_into"))?;
         let cols = len;
-        let total = rows.checked_mul(cols).ok_or_else(|| {
-            JsValue::from_str("rows*cols overflow in ce_batch_into")
-        })?;
+        let total = rows
+            .checked_mul(cols)
+            .ok_or_else(|| JsValue::from_str("rows*cols overflow in ce_batch_into"))?;
         let out = std::slice::from_raw_parts_mut(out_ptr, total);
         ce_batch_inner_into(h, l, c, &combos, detect_best_kernel(), out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2678,8 +2582,7 @@ pub fn ce_batch_into(
     }
 }
 
-// Unified batch API for WASM with flexible JS configuration
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = ce_batch)]
 pub fn ce_batch_unified_js(
     high: &[f64],
@@ -2702,8 +2605,7 @@ pub fn ce_batch_unified_js(
         mult: cfg.mult_range,
         use_close: (cfg.use_close, cfg.use_close, false),
     };
-    let combos = expand_ce_checked(&sweep)
-        .map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let combos = expand_ce_checked(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
     let rows = combos
         .len()
         .checked_mul(2)
@@ -2725,8 +2627,7 @@ pub fn ce_batch_unified_js(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// Keep old name for backward compatibility with old API format
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn chandelier_exit_wasm(
     high: &[f64],
@@ -2740,7 +2641,6 @@ pub fn chandelier_exit_wasm(
     let m = mult.unwrap_or(3.0);
     let u = use_close.unwrap_or(true);
 
-    // Get the output with the original API format for backward compatibility
     let params = ChandelierExitParams {
         period: Some(p),
         mult: Some(m),
@@ -2750,7 +2650,6 @@ pub fn chandelier_exit_wasm(
     let out = chandelier_exit_with_kernel(&input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    // Return in the old format expected by tests
     #[derive(Serialize)]
     struct OldFormatResult {
         long_stop: Vec<f64>,
@@ -2764,8 +2663,7 @@ pub fn chandelier_exit_wasm(
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-// WASM streaming class
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub struct ChandelierExitStreamWasm {
     high_buffer: Vec<f64>,
@@ -2774,7 +2672,7 @@ pub struct ChandelierExitStreamWasm {
     period: usize,
     mult: f64,
     use_close: bool,
-    // Stateful fields for incremental calculation
+
     prev_close: Option<f64>,
     atr_prev: Option<f64>,
     long_stop_prev: Option<f64>,
@@ -2784,7 +2682,7 @@ pub struct ChandelierExitStreamWasm {
     count: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 impl ChandelierExitStreamWasm {
     #[wasm_bindgen(constructor)]
@@ -2807,12 +2705,10 @@ impl ChandelierExitStreamWasm {
     }
 
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Result<JsValue, JsValue> {
-        // Push inputs
         self.high_buffer.push(high);
         self.low_buffer.push(low);
         self.close_buffer.push(close);
 
-        // Compute TR
         let tr = if let Some(pc) = self.prev_close {
             let hl = (high - low).abs();
             let hc = (high - pc).abs();
@@ -2822,7 +2718,6 @@ impl ChandelierExitStreamWasm {
             (high - low).abs()
         };
 
-        // ATR calculation (Wilder's RMA)
         let atr = if self.atr_prev.is_none() {
             self.warm_tr_sum += tr;
             self.count += 1;
@@ -2841,14 +2736,12 @@ impl ChandelierExitStreamWasm {
             next
         };
 
-        
         if self.high_buffer.len() > self.period {
             self.high_buffer.remove(0);
             self.low_buffer.remove(0);
             self.close_buffer.remove(0);
         }
 
-        
         let (highest, lowest) = if self.use_close {
             (
                 window_max(&self.close_buffer),
@@ -2858,15 +2751,12 @@ impl ChandelierExitStreamWasm {
             (window_max(&self.high_buffer), window_min(&self.low_buffer))
         };
 
-        
         let long_stop_val = highest - self.mult * atr;
         let short_stop_val = lowest + self.mult * atr;
 
-        
         let lsp = self.long_stop_prev.unwrap_or(long_stop_val);
         let ssp = self.short_stop_prev.unwrap_or(short_stop_val);
 
-        
         let ls = if let Some(pc) = self.prev_close {
             if pc > lsp {
                 long_stop_val.max(lsp)
@@ -2886,7 +2776,6 @@ impl ChandelierExitStreamWasm {
             short_stop_val
         };
 
-        
         let d = if close > ssp {
             1
         } else if close < lsp {
@@ -2895,13 +2784,11 @@ impl ChandelierExitStreamWasm {
             self.dir_prev
         };
 
-        
         self.long_stop_prev = Some(ls);
         self.short_stop_prev = Some(ss);
         self.dir_prev = d;
         self.prev_close = Some(close);
 
-        
         let out_long = if d == 1 { ls } else { f64::NAN };
         let out_short = if d == -1 { ss } else { f64::NAN };
 
@@ -2973,7 +2860,6 @@ mod tests {
         let input = ChandelierExitInput::from_candles(&candles, params);
         let result = chandelier_exit_with_kernel(&input, kernel)?;
 
-        
         let expected_indices = [15386, 15387, 15388, 15389, 15390];
         let expected_short_stops = [
             68719.23648167,
@@ -2983,7 +2869,6 @@ mod tests {
             66883.02246342,
         ];
 
-        
         for (i, &idx) in expected_indices.iter().enumerate() {
             if idx < result.short_stop.len() {
                 let actual = result.short_stop[idx];
@@ -3002,7 +2887,6 @@ mod tests {
             }
         }
 
-        
         for i in 0..21 {
             assert!(
                 result.long_stop[i].is_nan(),
@@ -3020,7 +2904,6 @@ mod tests {
             );
         }
 
-        
         let has_valid_long = result.long_stop.iter().skip(21).any(|&v| !v.is_nan());
         let has_valid_short = result.short_stop.iter().skip(21).any(|&v| !v.is_nan());
         assert!(
@@ -3137,7 +3020,6 @@ mod tests {
         skip_if_unsupported!(kernel, test_name);
         let data = vec![1.0; 30];
 
-        
         let params = ChandelierExitParams {
             period: Some(10),
             mult: Some(-2.0),
@@ -3145,14 +3027,13 @@ mod tests {
         };
         let input = ChandelierExitInput::from_slices(&data, &data, &data, params);
         let res = chandelier_exit_with_kernel(&input, kernel);
-        
+
         assert!(
             res.is_ok(),
             "[{}] CE should handle negative multiplier",
             test_name
         );
 
-        
         let params_zero = ChandelierExitParams {
             period: Some(10),
             mult: Some(0.0),
@@ -3177,7 +3058,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let params = ChandelierExitParams {
             period: Some(14),
             mult: Some(2.5),
@@ -3186,7 +3066,6 @@ mod tests {
         let input1 = ChandelierExitInput::from_candles(&candles, params.clone());
         let output1 = chandelier_exit_with_kernel(&input1, kernel)?;
 
-        
         let input2 = ChandelierExitInput::from_slices(
             &output1.long_stop,
             &output1.long_stop,
@@ -3197,7 +3076,6 @@ mod tests {
 
         assert_eq!(output1.long_stop.len(), output2.long_stop.len());
 
-        
         let mut has_diff = false;
         for i in 14..output1.long_stop.len() {
             if !output1.long_stop[i].is_nan() && !output2.long_stop[i].is_nan() {
@@ -3225,7 +3103,6 @@ mod tests {
         let mut low = vec![5.0; 50];
         let mut close = vec![7.5; 50];
 
-        
         high[10] = f64::NAN;
         low[20] = f64::NAN;
         close[30] = f64::NAN;
@@ -3256,7 +3133,6 @@ mod tests {
         let mult = 3.0;
         let use_close = true;
 
-        
         let params = ChandelierExitParams {
             period: Some(period),
             mult: Some(mult),
@@ -3265,12 +3141,9 @@ mod tests {
         let input = ChandelierExitInput::from_candles(&candles, params);
         let batch_output = chandelier_exit_with_kernel(&input, kernel)?;
 
-        
         let mut stream_long: Vec<f64> = Vec::with_capacity(candles.close.len());
         let mut stream_short: Vec<f64> = Vec::with_capacity(candles.close.len());
 
-        
-        
         for i in 0..candles.close.len() {
             if i < period - 1 {
                 assert!(batch_output.long_stop[i].is_nan());
@@ -3365,7 +3238,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
     fn check_ce_streaming_vs_batch(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
         let c = read_candles_from_csv("src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv")?;
@@ -3394,20 +3267,17 @@ mod tests {
             let bs_nan = batch.long_stop[i].is_nan();
 
             if ls_nan && bs_nan {
-                continue; 
-            }
-
-            if ls_nan != bs_nan {
-                
-                
                 continue;
             }
 
-            
+            if ls_nan != bs_nan {
+                continue;
+            }
+
             let diff = (ls[i] - batch.long_stop[i]).abs();
             max_diff = max_diff.max(diff);
             assert!(
-                diff < 1e-9, 
+                diff < 1e-9,
                 "[{test}] long idx {i}: streaming={} vs batch={}, diff={}",
                 ls[i],
                 batch.long_stop[i],
@@ -3420,32 +3290,29 @@ mod tests {
             let bs_nan = batch.short_stop[i].is_nan();
 
             if ss_nan && bs_nan {
-                continue; 
-            }
-
-            if ss_nan != bs_nan {
-                
                 continue;
             }
 
-            
+            if ss_nan != bs_nan {
+                continue;
+            }
+
             let diff = (ss[i] - batch.short_stop[i]).abs();
             max_diff = max_diff.max(diff);
             assert!(
-                diff < 1e-9, 
+                diff < 1e-9,
                 "[{test}] short idx {i}: streaming={} vs batch={}, diff={}",
                 ss[i],
                 batch.short_stop[i],
                 diff
             );
         }
-        
+
         Ok(())
     }
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
     fn check_ce_streaming_vs_batch(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
-        
         Ok(())
     }
 
@@ -3502,7 +3369,6 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(high, low, close, period, mult, use_close)| {
-                
                 let mut high_fixed = high.clone();
                 let mut low_fixed = low.clone();
                 for i in 0..high.len().min(low.len()) {
@@ -3522,11 +3388,9 @@ mod tests {
                 let out = chandelier_exit_with_kernel(&input, kernel);
 
                 if let Ok(output) = out {
-                    
                     prop_assert_eq!(output.long_stop.len(), close.len());
                     prop_assert_eq!(output.short_stop.len(), close.len());
 
-                    
                     for i in 0..output.long_stop.len() {
                         let long_active = !output.long_stop[i].is_nan();
                         let short_active = !output.short_stop[i].is_nan();
@@ -3546,7 +3410,6 @@ mod tests {
         Ok(())
     }
 
-    
     macro_rules! generate_all_chandelier_exit_tests {
         ($($test_fn:ident),*) => {
             paste::paste! {
@@ -3598,7 +3461,6 @@ mod tests {
     #[cfg(feature = "proptest")]
     generate_all_chandelier_exit_tests!(check_chandelier_exit_property);
 
-    
     #[test]
     fn ce_no_poison() {
         use crate::utilities::data_loader::read_candles_from_csv;
@@ -3631,11 +3493,9 @@ mod tests {
             .apply_slices(high, low, close)
             .unwrap();
 
-        
         assert_eq!(batch_out.long_stop.len(), subset);
         assert_eq!(batch_out.short_stop.len(), subset);
 
-        
         for i in 0..21 {
             assert!(batch_out.long_stop[i].is_nan());
             assert!(batch_out.short_stop[i].is_nan());
@@ -3658,7 +3518,6 @@ mod tests {
 
     #[test]
     fn test_chandelier_exit_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let len = 256usize;
         let mut high = Vec::with_capacity(len);
         let mut low = Vec::with_capacity(len);
@@ -3676,10 +3535,8 @@ mod tests {
         let params = ChandelierExitParams::default();
         let input = ChandelierExitInput::from_slices(&high, &low, &close, params);
 
-        
         let baseline = chandelier_exit(&input)?;
 
-        
         let mut out_long = vec![0.0; len];
         let mut out_short = vec![0.0; len];
         chandelier_exit_into(&input, &mut out_long, &mut out_short)?;

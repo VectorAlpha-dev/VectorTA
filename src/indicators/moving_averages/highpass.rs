@@ -1,25 +1,3 @@
-//! # High-Pass Filter (HP)
-//!
-//! Decision log: SIMD kept scalar-first due to IIR dependency; AVX512 routes to AVX2; CUDA provided via wrappers; interop exposes CAI v3 and DLPack v1.x with version negotiation. Perf: scalar is baseline; GPU paths target large sweeps.
-//!
-//! A digital filter that attenuates low-frequency components of the input data,
-//! allowing higher-frequency fluctuations to pass through. This helps to remove
-//! or reduce slow-moving trends or bias.
-//!
-//! ## Parameters
-//! - **period**: The size of the window (number of data points). Defaults to 48.
-//!
-//! ## Returns
-//! - **`Ok(HighPassOutput)`** on success, containing a `Vec<f64>` matching the input length.
-//! - **`Err(HighPassError)`** otherwise.
-//!
-//! ## Developer Status
-//! - SIMD: single-series uses deep unrolling + FMA; true lane SIMD not applicable due to IIR dependence.
-//! - AVX2/AVX512: serial kernels with 16× ILP and prefetch; AVX512 routes to AVX2.
-//! - Batch: row-specific path precomputes Δx once and reuses across rows.
-//! - Streaming update: O(1) with prior state.
-//! - Allocation: uses zero-copy helpers; no O(N) output prefill.
-
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -39,9 +17,9 @@ use cust::memory::DeviceBuffer;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaHighpass;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::highpass_wrapper::DeviceArrayF32Highpass;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaHighpass;
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -71,7 +49,10 @@ pub struct HighPassDeviceArrayF32Py {
 #[pymethods]
 impl HighPassDeviceArrayF32Py {
     #[getter]
-    fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    fn __cuda_array_interface__<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
         let d = pyo3::types::PyDict::new(py);
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
@@ -83,13 +64,14 @@ impl HighPassDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Stream omitted: producing stream is synchronized before returning the handle
+
         d.set_item("version", 3)?;
         Ok(d)
     }
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.inner.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.inner.device_id as i32)
+    }
 
-    // DLPack v1.x with legacy fallback and versioned capsules via shared helper.
     #[pyo3(signature=(stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
         &mut self,
@@ -101,8 +83,7 @@ impl HighPassDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -122,11 +103,9 @@ impl HighPassDeviceArrayF32Py {
         }
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
-        let dummy = DeviceBuffer::from_slice(&[])
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let dummy =
+            DeviceBuffer::from_slice(&[]).map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-        // Preserve context and device id for the placeholder handle.
         let ctx = self.inner.ctx.clone();
         let device_id = self.inner.device_id;
 
@@ -171,7 +150,10 @@ pub enum HighPassData<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct HighPassParams {
     pub period: Option<usize>,
 }
@@ -290,7 +272,11 @@ pub enum HighPassError {
     #[error("highpass: Output slice length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("highpass: Invalid range: start = {start}, end = {end}, step = {step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
     #[error("highpass: Invalid kernel type for batch operation: {0:?}")]
     InvalidKernelForBatch(Kernel),
     #[error("highpass: dimensions too large to allocate: rows = {rows}, cols = {cols}")]
@@ -307,13 +293,7 @@ fn highpass_into_internal(input: &HighPassInput, out: &mut [f64]) -> Result<(), 
     highpass_with_kernel_into(input, Kernel::Auto, out)
 }
 
-/// Write High-Pass outputs into a caller-provided buffer without allocating.
-///
-/// - Preserves the indicator’s warmup semantics (High-Pass computes from the first
-///   valid sample; no NaN warmup prefix is used).
-/// - The `out` slice length must exactly match the input length.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn highpass_into(input: &HighPassInput, out: &mut [f64]) -> Result<(), HighPassError> {
     highpass_with_kernel_into(input, Kernel::Auto, out)
@@ -359,14 +339,11 @@ pub fn highpass_with_kernel(
         return Err(HighPassError::InvalidAlpha { cos_val });
     }
 
-    // SIMD underperforms for this IIR; prefer scalar on Auto
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // HighPass computes from the first valid sample. Preserve leading-NaN semantics by
-    // keeping the prefix NaN and running the recurrence on the valid suffix.
     let mut out = alloc_with_nan_prefix(len, first);
     let data_tail = &data[first..];
     let out_tail = &mut out[first..];
@@ -399,7 +376,6 @@ fn highpass_with_kernel_into(
         return Err(HighPassError::EmptyInputData);
     }
 
-    // Ensure output buffer is the correct size
     if out.len() != data.len() {
         return Err(HighPassError::OutputLengthMismatch {
             expected: data.len(),
@@ -433,13 +409,11 @@ fn highpass_with_kernel_into(
         return Err(HighPassError::InvalidAlpha { cos_val });
     }
 
-    // SIMD underperforms for this IIR; prefer scalar on Auto
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
         other => other,
     };
 
-    // Preserve leading-NaN semantics: write NaNs for the prefix and compute on the valid suffix.
     for v in &mut out[..first] {
         *v = f64::NAN;
     }
@@ -460,7 +434,6 @@ fn highpass_with_kernel_into(
     Ok(())
 }
 
-// Optimized scalar implementation with pointer arithmetic (2× unrolled)
 #[inline(always)]
 pub unsafe fn highpass_scalar(data: &[f64], period: usize, out: &mut [f64]) {
     use core::f64::consts::PI;
@@ -470,15 +443,14 @@ pub unsafe fn highpass_scalar(data: &[f64], period: usize, out: &mut [f64]) {
         return;
     }
 
-    let theta = 2.0 * PI / period as f64; // k=1 baked in
+    let theta = 2.0 * PI / period as f64;
     let alpha = 1.0 + ((theta.sin() - 1.0) / theta.cos());
-    let c = 1.0 - 0.5 * alpha; // (1 - α/2)
-    let oma = 1.0 - alpha; // (1 - α)
+    let c = 1.0 - 0.5 * alpha;
+    let oma = 1.0 - alpha;
 
     let mut src = data.as_ptr();
     let mut dst = out.as_mut_ptr();
 
-    // seed
     *dst = *src;
     if n == 1 {
         return;
@@ -512,7 +484,6 @@ pub unsafe fn highpass_scalar(data: &[f64], period: usize, out: &mut [f64]) {
     }
 }
 
-// AVX2 ILP kernel (serial due to recurrence)
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline(always)]
 pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
@@ -529,10 +500,9 @@ pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
     let cos_t = theta.cos();
     let alpha = 1.0 + (sin_t - 1.0) / cos_t;
 
-    let c = 1.0 - 0.5 * alpha; // (1-α/2)
-    let oma = 1.0 - alpha; // (1-α)
+    let c = 1.0 - 0.5 * alpha;
+    let oma = 1.0 - alpha;
 
-    // seed
     let mut src = data.as_ptr();
     let mut dst = out.as_mut_ptr();
     let mut x_prev = *src;
@@ -547,7 +517,6 @@ pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
     dst = dst.add(1);
     let mut rem = n - 1;
 
-    // 16× unrolled main loop with simple L1 prefetch
     while rem >= 16 {
         _mm_prefetch(src.add(64) as *const i8, _MM_HINT_T0);
 
@@ -660,14 +629,12 @@ pub unsafe fn highpass_avx2(data: &[f64], period: usize, out: &mut [f64]) {
     }
 }
 
-// AVX512 stub and long/short variants
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
 pub unsafe fn highpass_avx512(data: &[f64], period: usize, out: &mut [f64]) {
     highpass_avx2(data, period, out)
 }
 
-// Batch/Range types and functions
 #[derive(Clone, Debug)]
 pub struct HighPassBatchRange {
     pub period: (usize, usize, usize),
@@ -773,7 +740,6 @@ pub fn highpass_batch_with_kernel(
     sweep: &HighPassBatchRange,
     k: Kernel,
 ) -> Result<HighPassBatchOutput, HighPassError> {
-    // Row-specific path is serial per row; prefer scalar on Auto
     let kernel = match k {
         Kernel::Auto => Kernel::ScalarBatch,
         other if other.is_batch() => other,
@@ -812,7 +778,6 @@ fn highpass_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<HighPassBatchOutput, HighPassError> {
-    // Get combos to calculate dimensions
     let combos = expand_grid(sweep);
     let rows = combos.len();
     let cols = data.len();
@@ -828,30 +793,24 @@ fn highpass_batch_inner(
         return Err(HighPassError::EmptyInputData);
     }
 
-    // checked rows*cols to prevent overflow before allocations
     let _total = rows
         .checked_mul(cols)
         .ok_or(HighPassError::DimensionsTooLarge { rows, cols })?;
 
-    // Find first valid value
     let first = data
         .iter()
         .position(|x| !x.is_nan())
         .ok_or(HighPassError::AllValuesNaN)?;
 
-    // Allocate uninitialized matrix - no NaN prefixes needed for highpass
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    // Use ManuallyDrop to keep capacity when converting
     let mut buf_guard = core::mem::ManuallyDrop::new(buf_mu);
     let out: &mut [f64] = unsafe {
         core::slice::from_raw_parts_mut(buf_guard.as_mut_ptr() as *mut f64, buf_guard.len())
     };
 
-    // Delegate to the _into version which contains all the computation logic
     highpass_batch_inner_into(data, sweep, kern, parallel, out)?;
 
-    // Reclaim ownership as Vec<f64>
     let values = unsafe {
         Vec::from_raw_parts(
             buf_guard.as_mut_ptr() as *mut f64,
@@ -868,7 +827,6 @@ fn highpass_batch_inner(
     })
 }
 
-// Row functions, all variants just call scalar
 #[inline(always)]
 pub unsafe fn highpass_row_scalar(data: &[f64], period: usize, out: &mut [f64]) {
     highpass_scalar(data, period, out)
@@ -885,7 +843,6 @@ pub unsafe fn highpass_row_avx512(data: &[f64], period: usize, out: &mut [f64]) 
     highpass_row_avx2(data, period, out)
 }
 
-// Streaming
 #[derive(Debug, Clone)]
 pub struct HighPassStream {
     period: usize,
@@ -905,7 +862,7 @@ impl HighPassStream {
                 data_len: 0,
             });
         }
-        // θ = 2π/period (k fixed at 1)
+
         let theta = (2.0 * core::f64::consts::PI) / (period as f64);
         let (sin_val, cos_val) = theta.sin_cos();
         if cos_val.abs() < 1e-15 {
@@ -924,7 +881,6 @@ impl HighPassStream {
     }
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> f64 {
-        // Cold seed path kept out of the hot block to help the optimizer.
         #[cold]
         #[inline(never)]
         fn seed(this: &mut HighPassStream, v: f64) -> f64 {
@@ -935,8 +891,6 @@ impl HighPassStream {
         }
 
         if self.initialized {
-            // Hot path: 1 sub + 1 mul + 1 FMA
-            // out = (1 - α) * prev_output + (1 - α/2) * (value - prev_data)
             let dx = value - self.prev_data;
             let y = self
                 .one_minus_alpha
@@ -950,7 +904,6 @@ impl HighPassStream {
     }
 }
 
-// Tests: macro structure matches ALMA
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,28 +914,23 @@ mod tests {
 
     #[test]
     fn test_highpass_into_matches_api() -> Result<(), Box<dyn Error>> {
-        // Prepare non-trivial synthetic data (length 512)
         let n = 512usize;
         let mut data = Vec::with_capacity(n);
         for i in 0..n {
             let t = i as f64;
-            let v = (t * 0.07).sin() + (t * 0.013).cos() + 0.001 * t; // mix of signals
+            let v = (t * 0.07).sin() + (t * 0.013).cos() + 0.001 * t;
             data.push(v);
         }
 
-        // Default params (period=48)
         let input = HighPassInput::from_slice(&data, HighPassParams::default());
 
-        // Baseline via Vec-returning API
         let base = highpass(&input)?.values;
 
-        // Preallocate output and compute via into API
         let mut out = vec![0.0f64; n];
         super::highpass_into(&input, &mut out)?;
 
         assert_eq!(base.len(), out.len());
 
-        // Equality check: exact for finite values; treat NaN==NaN if any
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1189,7 +1137,7 @@ mod tests {
     fn check_highpass_invalid_alpha(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
         let data = [1.0, 2.0, 3.0, 4.0, 5.0];
-        let params = HighPassParams { period: Some(4) }; // cos(pi/2) ~ 0
+        let params = HighPassParams { period: Some(4) };
         let input = HighPassInput::from_slice(&data, params);
         let res = highpass_with_kernel(&input, kernel);
         assert!(
@@ -1200,7 +1148,6 @@ mod tests {
         Ok(())
     }
 
-    // Helper function for comparing floating-point values with ULP tolerance
     fn ulps_diff(a: f64, b: f64) -> u64 {
         if a.is_nan() && b.is_nan() {
             return 0;
@@ -1223,10 +1170,8 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        // Enhanced property testing strategy
         let strat = (3usize..=100)
             .prop_filter("avoid invalid alpha", |&p| {
-                // Avoid periods that cause cos_val ≈ 0 (InvalidAlpha error)
                 let cos_val = (2.0 * std::f64::consts::PI / (p as f64)).cos();
                 cos_val.abs() >= 1e-14
             })
@@ -1242,7 +1187,6 @@ mod tests {
 
         proptest::test_runner::TestRunner::default()
             .run(&strat, |(data, period)| {
-                // Create input and compute highpass
                 let params = HighPassParams {
                     period: Some(period),
                 };
@@ -1250,7 +1194,6 @@ mod tests {
                 let HighPassOutput { values: result } =
                     highpass_with_kernel(&input, kernel).unwrap();
 
-                // Property 1: Output length matches input length
                 prop_assert_eq!(
                     result.len(),
                     data.len(),
@@ -1260,7 +1203,6 @@ mod tests {
                     data.len()
                 );
 
-                // Property 2: No NaN values in output (highpass computes from start)
                 for (i, &val) in result.iter().enumerate() {
                     prop_assert!(
                         !val.is_nan(),
@@ -1270,7 +1212,6 @@ mod tests {
                     );
                 }
 
-                // Property 3: All output values are finite
                 for (i, &val) in result.iter().enumerate() {
                     prop_assert!(
                         val.is_finite(),
@@ -1281,9 +1222,6 @@ mod tests {
                     );
                 }
 
-                // Property 4: DC removal - constant data should converge to near zero
-                // (Highpass filters remove DC components)
-                // Use non-zero constant to avoid numerical edge cases
                 let constant_val = 42.0;
                 let constant_data = vec![constant_val; data.len()];
                 let constant_input = HighPassInput::from_slice(&constant_data, params);
@@ -1291,19 +1229,17 @@ mod tests {
                     values: constant_result,
                 } = highpass_with_kernel(&constant_input, kernel).unwrap();
 
-                // After sufficient samples for stabilization, output should be near zero for constant input
                 let check_start = (period * 3).min(constant_result.len());
                 if check_start < constant_result.len() {
                     for i in check_start..constant_result.len() {
                         let abs_val = constant_result[i].abs();
-                        // More lenient tolerance for edge cases
+
                         prop_assert!(abs_val < 1e-3,
 							"[{}] Highpass should remove DC component at index {}, got {} (should be near 0)",
 							test_name, i, constant_result[i]);
                     }
                 }
 
-                // Property 5: Kernel consistency - all kernels should produce similar results
                 if cfg!(all(feature = "nightly-avx", target_arch = "x86_64")) {
                     let scalar_result =
                         highpass_with_kernel(&input, Kernel::Scalar).unwrap().values;
@@ -1323,8 +1259,6 @@ mod tests {
                     }
                 }
 
-                // Property 6: IIR formula verification (spot check)
-                // out[i] = (1 - α/2) * (data[i] - data[i-1]) + (1 - α) * out[i-1]
                 if result.len() >= 10 {
                     let k = 1.0;
                     let two_pi_k_div = 2.0 * std::f64::consts::PI * k / (period as f64);
@@ -1334,7 +1268,6 @@ mod tests {
                     let one_minus_half_alpha = 1.0 - alpha / 2.0;
                     let one_minus_alpha = 1.0 - alpha;
 
-                    // Check a few points after initial value
                     for i in 5..10.min(result.len()) {
                         let expected = one_minus_half_alpha * data[i]
                             - one_minus_half_alpha * data[i - 1]
@@ -1352,7 +1285,6 @@ mod tests {
                     }
                 }
 
-                // Property 7: Stability - bounded input produces bounded output
                 let data_max = data.iter().fold(f64::NEG_INFINITY, |a, &b| {
                     if b.is_finite() {
                         a.max(b.abs())
@@ -1362,7 +1294,6 @@ mod tests {
                 });
                 if data_max.is_finite() && data_max > 0.0 {
                     for (i, &val) in result.iter().enumerate() {
-                        // Highpass filter output magnitude should not exceed a reasonable multiple of input
                         prop_assert!(
                             val.abs() <= data_max * 10.0,
                             "[{}] Output {} at index {} exceeds reasonable bounds for input max {}",
@@ -1374,24 +1305,19 @@ mod tests {
                     }
                 }
 
-                // Property 8: Basic signal processing - output changes with input changes
-                // Verify the filter responds to input variations (not stuck at zero or constant)
                 if data.len() >= 10 {
-                    // Check that output varies when input varies
                     let input_variance = {
                         let mean = data.iter().sum::<f64>() / data.len() as f64;
                         data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64
                     };
 
                     if input_variance > 1e-10 {
-                        // Only check if input has meaningful variance
                         let output_variance = {
                             let mean = result.iter().sum::<f64>() / result.len() as f64;
                             result.iter().map(|x| (x - mean).powi(2)).sum::<f64>()
                                 / result.len() as f64
                         };
 
-                        // Output should have some variance if input does
                         prop_assert!(
                             output_variance > 0.0,
                             "[{}] Output variance {} should be non-zero when input variance is {}",
@@ -1426,7 +1352,7 @@ mod tests {
             }
         }
     }
-    // Check for poison values in single output - only runs in debug mode
+
     #[cfg(debug_assertions)]
     fn check_highpass_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1434,21 +1360,19 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        // Test with multiple parameter combinations
         let test_cases = vec![
-            HighPassParams { period: Some(48) },  // default
-            HighPassParams { period: Some(10) },  // small period
-            HighPassParams { period: Some(100) }, // large period
-            HighPassParams { period: Some(3) },   // very small period
-            HighPassParams { period: Some(20) },  // medium period
-            HighPassParams { period: Some(60) },  // larger period
-            HighPassParams { period: Some(5) },   // another small period
-            HighPassParams { period: Some(80) },  // another large period
-            HighPassParams { period: None },      // None value (use default)
+            HighPassParams { period: Some(48) },
+            HighPassParams { period: Some(10) },
+            HighPassParams { period: Some(100) },
+            HighPassParams { period: Some(3) },
+            HighPassParams { period: Some(20) },
+            HighPassParams { period: Some(60) },
+            HighPassParams { period: Some(5) },
+            HighPassParams { period: Some(80) },
+            HighPassParams { period: None },
         ];
 
         for params in test_cases {
-            // Skip period=4 as it causes InvalidAlpha error (cos(pi/2) ~ 0)
             if params.period == Some(4) {
                 continue;
             }
@@ -1456,16 +1380,13 @@ mod tests {
             let input = HighPassInput::from_candles(&candles, "close", params);
             let output = highpass_with_kernel(&input, kernel)?;
 
-            // Check every value for poison patterns
             for (i, &val) in output.values.iter().enumerate() {
-                // Skip NaN values as they're expected in the warmup period
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} \
@@ -1474,7 +1395,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} \
@@ -1483,7 +1403,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} \
@@ -1497,7 +1416,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_highpass_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1565,7 +1483,7 @@ mod tests {
             }
         };
     }
-    
+
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -1573,22 +1491,18 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let batch_configs = vec![
-            
             (10, 30, 10),
-            
-            (48, 48, 0),    
-            (3, 15, 3),     
-            (50, 100, 25),  
-            (5, 25, 5),     
-            (20, 80, 20),   
-            (7, 21, 7),     
-            (100, 120, 10), 
+            (48, 48, 0),
+            (3, 15, 3),
+            (50, 100, 25),
+            (5, 25, 5),
+            (20, 80, 20),
+            (7, 21, 7),
+            (100, 120, 10),
         ];
 
         for (p_start, p_end, p_step) in batch_configs {
-            
             let periods: Vec<usize> = if p_step == 0 || p_start == p_end {
                 vec![p_start]
             } else {
@@ -1598,7 +1512,6 @@ mod tests {
                     .collect()
             };
 
-            
             if periods.is_empty() || (periods.len() == 1 && periods[0] == 4) {
                 continue;
             }
@@ -1608,9 +1521,7 @@ mod tests {
                 .period_range(p_start, p_end, p_step)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -1620,7 +1531,6 @@ mod tests {
                 let col = idx % output.cols;
                 let combo = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} \
@@ -1629,7 +1539,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
 						"[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} \
@@ -1638,7 +1547,6 @@ mod tests {
 					);
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
 						"[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} \
@@ -1652,7 +1560,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -1662,7 +1569,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-/// highpass_batch_inner_into writes directly to the output buffer
 #[inline(always)]
 fn highpass_batch_inner_into(
     data: &[f64],
@@ -1685,7 +1591,6 @@ fn highpass_batch_inner_into(
     }
     let first = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
 
-    
     for c in &combos {
         let period = c.period.unwrap();
         let k = 1.0;
@@ -1698,30 +1603,24 @@ fn highpass_batch_inner_into(
     let rows = combos.len();
     let cols = data.len();
 
-    
     let out_uninit = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
-    
 
-    
     let mut dx: Vec<f64> = Vec::with_capacity(cols);
     if cols > 0 {
-        dx.push(data[0]); 
+        dx.push(data[0]);
         for i in 1..cols {
             dx.push(data[i] - data[i - 1]);
         }
     }
 
-    
     let do_row = |row: usize, dst_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let period = combos[row].period.unwrap();
 
-        
         let out_row =
             core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
-        
         let theta = 2.0 * std::f64::consts::PI / period as f64;
         let sin_t = theta.sin();
         let cos_t = theta.cos();
@@ -1729,14 +1628,12 @@ fn highpass_batch_inner_into(
         let c = 1.0 - 0.5 * alpha;
         let oma = 1.0 - alpha;
 
-        
         let mut y_prev = dx[0];
         out_row[0] = y_prev;
 
-        
         let mut i = 1usize;
         let n = cols;
-        
+
         while i + 7 < n {
             let d1 = dx[i];
             let y1 = oma.mul_add(y_prev, c * d1);
@@ -1814,7 +1711,6 @@ fn highpass_batch_inner_into(
     Ok(combos)
 }
 
-
 #[cfg(feature = "python")]
 #[pyfunction(name = "highpass")]
 #[pyo3(signature = (data, period=48, kernel=None))]
@@ -1834,12 +1730,10 @@ pub fn highpass_py<'py>(
     };
     let hp_input = HighPassInput::from_slice(slice_in, params);
 
-    
     let result_vec: Vec<f64> = py
         .allow_threads(|| highpass_with_kernel(&hp_input, kern).map(|o| o.values))
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
-    
     Ok(result_vec.into_pyarray(py))
 }
 
@@ -1858,7 +1752,6 @@ pub fn highpass_batch_py<'py>(
     let slice_in = data.as_slice()?;
     let kern = validate_kernel(kernel, true)?;
 
-    
     if slice_in.is_empty() {
         return Err(PyValueError::new_err(
             "highpass: Input data slice is empty.",
@@ -1882,13 +1775,12 @@ pub fn highpass_batch_py<'py>(
     let out_arr = unsafe { PyArray1::<f64>::new(py, [total], false) };
     let slice_out = unsafe { out_arr.as_slice_mut()? };
 
-	    let combos = py
-	        .allow_threads(|| {
-	            let kernel = match kern {
-	                
-	                Kernel::Auto => Kernel::ScalarBatch,
-	                k => k,
-	            };
+    let combos = py
+        .allow_threads(|| {
+            let kernel = match kern {
+                Kernel::Auto => Kernel::ScalarBatch,
+                k => k,
+            };
             let simd = match kernel {
                 Kernel::Avx512Batch => Kernel::Avx512,
                 Kernel::Avx2Batch => Kernel::Avx2,
@@ -1995,16 +1887,12 @@ impl HighPassStreamPy {
     }
 }
 
-
-
-/// Helper function to write directly to output slice - no allocations
 #[inline]
 pub fn highpass_into_slice(
     dst: &mut [f64],
     input: &HighPassInput,
     kern: Kernel,
 ) -> Result<(), HighPassError> {
-    
     let data = input.as_ref();
 
     if data.is_empty() {
@@ -2018,12 +1906,8 @@ pub fn highpass_into_slice(
         });
     }
 
-    
-    
     highpass_with_kernel_into(input, kern, dst)
 }
-
-
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
@@ -2036,32 +1920,26 @@ pub fn highpass_js(data: &[f64], period: usize) -> Result<Vec<f64>, JsValue> {
     };
     let input = HighPassInput::from_slice(data, params);
 
-    
     let mut output = vec![0.0; data.len()];
 
-    
     highpass_into_slice(&mut output, &input, Kernel::Auto)
         .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
     Ok(output)
 }
 
-
-
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_alloc(len: usize) -> *mut f64 {
-    
     let mut vec = Vec::<f64>::with_capacity(len);
     let ptr = vec.as_mut_ptr();
-    std::mem::forget(vec); 
+    std::mem::forget(vec);
     ptr
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_free(ptr: *mut f64, len: usize) {
-    
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, len, len);
@@ -2077,38 +1955,30 @@ pub fn highpass_into(
     len: usize,
     period: usize,
 ) -> Result<(), JsValue> {
-    
     if in_ptr.is_null() || out_ptr.is_null() {
         return Err(JsValue::from_str("Null pointer provided"));
     }
 
     unsafe {
-        
         let data = std::slice::from_raw_parts(in_ptr, len);
 
-        
         if period == 0 || period > len {
             return Err(JsValue::from_str("Invalid period"));
         }
 
-        
         let params = HighPassParams {
             period: Some(period),
         };
         let input = HighPassInput::from_slice(data, params);
 
-        
         if in_ptr == out_ptr {
-            
             let mut temp = vec![0.0; len];
             highpass_into_slice(&mut temp, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             out.copy_from_slice(&temp);
         } else {
-            
             let out = std::slice::from_raw_parts_mut(out_ptr, len);
             highpass_into_slice(out, &input, Kernel::Auto)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2117,8 +1987,6 @@ pub fn highpass_into(
         Ok(())
     }
 }
-
-
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
@@ -2159,7 +2027,6 @@ pub fn highpass_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValu
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn highpass_batch_js(
@@ -2176,8 +2043,6 @@ pub fn highpass_batch_js(
         Err(e) => Err(JsValue::from_str(&format!("HighPass batch error: {}", e))),
     }
 }
-
-
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
@@ -2208,7 +2073,6 @@ pub fn highpass_batch_into(
 
         let out = std::slice::from_raw_parts_mut(out_ptr, rows * cols);
 
-        
         let kernel = detect_best_kernel();
         highpass_batch_inner_into(data, &sweep, kernel, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;

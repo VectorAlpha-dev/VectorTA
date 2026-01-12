@@ -1,43 +1,9 @@
-//! # End Point Moving Average (EPMA)
-//!
-//! A polynomial-weighted moving average with adjustable period and offset.
-//! SIMD (AVX2/AVX512) kernels generate weights on-the-fly (no weight tables)
-//! and use FMA to tighten hot loops. Despite EPMA being relatively memory bound,
-//! these kernels still provide measurable speedups over scalar.
-//!
-//! ## Parameters
-//! - **period**: Window size, >= 2 (default: 11)
-//! - **offset**: Weight offset (default: 4)
-//!
-//! ## Errors
-//! - **EmptyInputData**: epma: Input data slice is empty.
-//! - **AllValuesNaN**: epma: All input values are NaN
-//! - **InvalidPeriod**: epma: `period` < 2 or `period` > data length
-//! - **InvalidOffset**: epma: `offset` ≥ `period`
-//! - **NotEnoughValidData**: epma: `period` + `offset` + 1 > valid data length
-//! - **OutputLengthMismatch**: epma: Output buffer length doesn't match input data length
-//! - **InvalidKernelForBatch**: epma: Non-batch kernel provided to batch operation
-//!
-//! ## Returns
-//! - **Ok(EpmaOutput)** with a Vec<f64> of the same length as input
-//! - **Err(EpmaError)** otherwise
-//!
-//! ## Developer Notes
-//! - Scalar: ✅ On-the-fly linear weight ramp (no temp Vec); ~20–30% faster in 100k
-//! - AVX2: ✅ FMA + weight synthesis; ~1.7–2.2× vs scalar at 100k
-//! - AVX512: ✅ Short/long variants; ~3.3–3.5× vs scalar at 100k
-//! - Batch (rows): ✅ AVX2/AVX512 batch paths use shared prefix sums (P,Q) across rows for O(1) per-tick updates; >5% faster than scalar batch at 100k
-//! - Streaming update: ✅ O(1) per update via rolling S/R with Kahan compensation
-//! - Memory: ✅ Uses `alloc_with_nan_prefix` for zero-copy outputs and avoids O(N) temporaries on single-series paths
-//! - Status: SIMD enabled; fastest on AVX512 > AVX2 > Scalar by clear margins at realistic sizes (10k–100k)
-//! - Notes: For batch, scalar path remains per-row kernels; SIMD batch selects the shared-prefix implementation.
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::cuda_available;
 #[cfg(all(feature = "python", feature = "cuda"))]
-use crate::cuda::moving_averages::CudaEpma;
-#[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::cuda::moving_averages::CudaEpma;
 use crate::utilities::data_loader::{source_type, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
@@ -46,17 +12,16 @@ use crate::utilities::helpers::{
 };
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 use core::arch::x86_64::*;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use cust::context::Context;
 #[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::{ManuallyDrop, MaybeUninit};
-use thiserror::Error;
 #[cfg(all(feature = "python", feature = "cuda"))]
 use std::sync::Arc;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use cust::context::Context;
+use thiserror::Error;
 
-// Decision: Streaming uses O(1) updates maintaining S and R with Kahan compensation; matches batch outputs.
 impl<'a> AsRef<[f64]> for EpmaInput<'a> {
     #[inline(always)]
     fn as_ref(&self) -> &[f64] {
@@ -82,7 +47,10 @@ pub struct EpmaOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct EpmaParams {
     pub period: Option<usize>,
     pub offset: Option<usize>,
@@ -157,9 +125,12 @@ pub enum EpmaError {
     #[error("epma: Invalid kernel for batch operation: got {0:?}")]
     InvalidKernelForBatch(Kernel),
 
-    // Additional non-breaking coverage for batch/range and sizing guards
     #[error("epma: invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: usize, end: usize, step: usize },
+    InvalidRange {
+        start: usize,
+        end: usize,
+        step: usize,
+    },
 
     #[error("epma: size overflow computing rows*cols: rows={rows}, cols={cols}")]
     SizeOverflow { rows: usize, cols: usize },
@@ -237,23 +208,7 @@ pub fn epma(input: &EpmaInput) -> Result<EpmaOutput, EpmaError> {
 fn epma_prepare<'a>(
     input: &'a EpmaInput,
     kernel: Kernel,
-) -> Result<
-    (
-        // data
-        &'a [f64],
-        
-        usize,
-        
-        usize,
-        
-        usize,
-        
-        usize,
-        
-        Kernel,
-    ),
-    EpmaError,
-> {
+) -> Result<(&'a [f64], usize, usize, usize, usize, Kernel), EpmaError> {
     let data: &[f64] = input.as_ref();
     let len = data.len();
     if len == 0 {
@@ -304,7 +259,6 @@ fn epma_compute_into(
     out: &mut [f64],
 ) {
     unsafe {
-        
         #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
         {
             if matches!(kernel, Kernel::Scalar | Kernel::ScalarBatch) {
@@ -321,7 +275,6 @@ fn epma_compute_into(
             Kernel::Avx512 | Kernel::Avx512Batch => epma_avx512(data, period, offset, first, out),
             #[cfg(not(all(feature = "nightly-avx", target_arch = "x86_64")))]
             Kernel::Avx2 | Kernel::Avx2Batch | Kernel::Avx512 | Kernel::Avx512Batch => {
-                
                 epma_scalar(data, period, offset, first, out)
             }
             _ => unreachable!(),
@@ -338,49 +291,41 @@ pub fn epma_with_kernel(input: &EpmaInput, kernel: Kernel) -> Result<EpmaOutput,
     Ok(EpmaOutput { values: out })
 }
 
-/// Writes EPMA results into a caller-provided output slice without allocating.
-///
-/// - Preserves NaN warmup semantics by pre-filling the warmup prefix with the
-///   module's quiet-NaN pattern (same as `alloc_with_nan_prefix`).
-/// - The `out` slice length must equal the input length; otherwise returns
-///   `EpmaError::OutputLengthMismatch`.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn epma_into(input: &EpmaInput, out: &mut [f64]) -> Result<(), EpmaError> {
     let (data, period, offset, first, warmup, chosen) = epma_prepare(input, Kernel::Auto)?;
 
     if out.len() != data.len() {
-        return Err(EpmaError::OutputLengthMismatch { expected: data.len(), got: out.len() });
+        return Err(EpmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: out.len(),
+        });
     }
 
-    // Prefill warmup with the same quiet-NaN pattern used elsewhere.
     let w = warmup.min(out.len());
     for v in &mut out[..w] {
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
-    // Compute values into the provided buffer.
     epma_compute_into(data, period, offset, first, chosen, out);
     Ok(())
 }
 
-/// Computes EPMA directly into a provided output slice, avoiding allocation.
-/// The output slice must be the same length as the input data.
 #[inline]
 pub fn epma_into_slice(dst: &mut [f64], input: &EpmaInput, kern: Kernel) -> Result<(), EpmaError> {
     let (data, period, offset, first, warmup, chosen) = epma_prepare(input, kern)?;
 
-    // Verify output buffer size matches input
     if dst.len() != data.len() {
-        return Err(EpmaError::OutputLengthMismatch { expected: data.len(), got: dst.len() });
+        return Err(EpmaError::OutputLengthMismatch {
+            expected: data.len(),
+            got: dst.len(),
+        });
     }
 
-    // Compute EPMA values directly into dst
     epma_compute_into(data, period, offset, first, chosen, dst);
 
-    // Fill warmup period with NaN
     for v in &mut dst[..warmup] {
-        // Match alloc_with_nan_prefix quiet-NaN pattern
         *v = f64::from_bits(0x7ff8_0000_0000_0000);
     }
 
@@ -398,9 +343,6 @@ pub fn epma_scalar(
     let n = data.len();
     let p1 = period - 1;
 
-    // Linear ramp weights for oldest-to-newest index i:
-    // w(i) = (2 - offset) + i, i in [0, p1)
-    // Sum of weights = p1*(2 - offset) + (p1-1)*p1/2
     let c0 = 2.0 - (offset as f64);
     let p1f = p1 as f64;
     let weight_sum = p1f.mul_add(c0, 0.5 * (p1f - 1.0) * p1f);
@@ -409,15 +351,11 @@ pub fn epma_scalar(
     for j in (first_valid + period + offset + 1)..n {
         let start = j + 1 - p1;
 
-        // Unroll by 4 while generating weights on the fly to avoid
-        // memory loads of a weight table.
         let mut sum = 0.0;
         let mut i = 0usize;
-        let mut wi = c0; // weight for i
+        let mut wi = c0;
 
-        // Process blocks of 4
         while i + 3 < p1 {
-            // Weights for i, i+1, i+2, i+3 are wi, wi+1, wi+2, wi+3
             sum = data[start + i].mul_add(wi, sum);
             sum = data[start + i + 1].mul_add(wi + 1.0, sum);
             sum = data[start + i + 2].mul_add(wi + 2.0, sum);
@@ -426,7 +364,6 @@ pub fn epma_scalar(
             wi += 4.0;
         }
 
-        // Tail
         while i < p1 {
             sum = data[start + i].mul_add(wi, sum);
             i += 1;
@@ -448,12 +385,10 @@ unsafe fn epma_simd128(
 ) {
     use core::arch::wasm32::*;
 
-    // SIMD128 processes 2 f64 values at a time
     const STEP: usize = 2;
     let n = data.len();
     let p1 = period - 1;
 
-    // Build weights for oldest-to-newest order
     let mut weights = Vec::with_capacity(p1);
     let mut weight_sum = 0.0;
     for i in 0..p1 {
@@ -469,20 +404,17 @@ unsafe fn epma_simd128(
         let start = j + 1 - p1;
         let mut acc = f64x2_splat(0.0);
 
-        // Process chunks of 2
         for blk in 0..chunks {
             let idx = blk * STEP;
-            // Load 2 weights (reversed order)
+
             let w0 = weights[p1 - 1 - idx];
             let w1 = weights[p1 - 2 - idx];
             let w = f64x2(w0, w1);
 
-            // Load 2 data values
             let d = v128_load(data.as_ptr().add(start + idx) as *const v128);
             acc = f64x2_add(acc, f64x2_mul(d, w));
         }
 
-        // Process remaining element if period is odd
         let mut sum = f64x2_extract_lane::<0>(acc) + f64x2_extract_lane::<1>(acc);
 
         if tail != 0 {
@@ -498,12 +430,8 @@ fn build_weights_rev(period: usize, offset: usize) -> (Vec<f64>, f64) {
     let p1 = period - 1;
     let mut w = Vec::with_capacity(p1);
     let mut sum = 0.0;
-    // Match the scalar implementation's weight formula
-    
-    
-    
+
     for k in 0..p1 {
-        
         let val = (period as isize - (p1 - 1 - k) as isize - offset as isize) as f64;
         w.push(val);
         sum += val;
@@ -532,13 +460,11 @@ pub unsafe fn epma_avx2(
         _ => unreachable!(),
     };
 
-    
     let c0 = 2.0 - (offset as f64);
     let p1f = p1 as f64;
     let wsum = p1f.mul_add(c0, 0.5 * (p1f - 1.0) * p1f);
     let inv = 1.0 / wsum;
 
-    
     let ramp = _mm256_setr_pd(0.0, 1.0, 2.0, 3.0);
 
     for j in (first_valid + period + offset + 1)..data.len() {
@@ -547,7 +473,6 @@ pub unsafe fn epma_avx2(
 
         let mut acc = _mm256_setzero_pd();
 
-        
         for blk in 0..chunks {
             let base_w = c0 + (blk * STEP) as f64;
             let w = _mm256_add_pd(_mm256_set1_pd(base_w), ramp);
@@ -555,7 +480,6 @@ pub unsafe fn epma_avx2(
             acc = _mm256_fmadd_pd(d, w, acc);
         }
 
-        
         if tail != 0 {
             let base_w = c0 + (chunks * STEP) as f64;
             let w_t = _mm256_add_pd(_mm256_set1_pd(base_w), ramp);
@@ -563,7 +487,6 @@ pub unsafe fn epma_avx2(
             acc = _mm256_fmadd_pd(d_t, w_t, acc);
         }
 
-        
         let hi = _mm256_extractf128_pd(acc, 1);
         let lo = _mm256_castpd256_pd128(acc);
         let s2 = _mm_add_pd(hi, lo);
@@ -603,13 +526,11 @@ unsafe fn epma_avx512_short(
     let tail = p1 % STEP;
     let tmask: __mmask8 = (1u8 << tail).wrapping_sub(1);
 
-    
     let c0 = 2.0 - (offset as f64);
     let p1f = p1 as f64;
     let wsum = p1f.mul_add(c0, 0.5 * (p1f - 1.0) * p1f);
     let inv = 1.0 / wsum;
 
-    
     let ramp = _mm512_setr_pd(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0);
 
     for j in (first_valid + period + offset + 1)..data.len() {
@@ -650,25 +571,21 @@ unsafe fn epma_avx512_long(
     let paired = n_chunks & !3;
     let tmask: __mmask8 = (1u8 << tail_len).wrapping_sub(1);
 
-    
     let c0 = 2.0 - (offset as f64);
     let p1f = p1 as f64;
     let wsum = p1f.mul_add(c0, 0.5 * (p1f - 1.0) * p1f);
     let inv = 1.0 / wsum;
 
-    
     let ramp = _mm512_setr_pd(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0);
 
     for j in (first_valid + period + offset + 1)..data.len() {
         let start_ptr = data.as_ptr().add(j + 1 - p1);
 
-        
         let mut s0 = _mm512_setzero_pd();
         let mut s1 = _mm512_setzero_pd();
         let mut s2 = _mm512_setzero_pd();
         let mut s3 = _mm512_setzero_pd();
 
-        
         let mut blk = 0usize;
         while blk < paired {
             let base0 = c0 + ((blk + 0) * STEP) as f64;
@@ -694,7 +611,6 @@ unsafe fn epma_avx512_long(
             blk += 4;
         }
 
-        
         while blk < n_chunks {
             let base = c0 + (blk * STEP) as f64;
             let w = _mm512_add_pd(_mm512_set1_pd(base), ramp);
@@ -703,7 +619,6 @@ unsafe fn epma_avx512_long(
             blk += 1;
         }
 
-        
         if tail_len != 0 {
             let base = c0 + (n_chunks * STEP) as f64;
             let w_t = _mm512_add_pd(_mm512_set1_pd(base), ramp);
@@ -718,29 +633,24 @@ unsafe fn epma_avx512_long(
 
 #[derive(Debug, Clone)]
 pub struct EpmaStream {
-    period: usize, 
+    period: usize,
     offset: usize,
-    p1: usize, 
+    p1: usize,
 
-    
     buffer: Vec<f64>,
     head: usize,
 
-    
-    seen: usize,     
-    included: usize, 
+    seen: usize,
+    included: usize,
 
-    
-    sum: f64,    
-    sum_c: f64,  
-    ramp: f64,   
-    ramp_c: f64, 
+    sum: f64,
+    sum_c: f64,
+    ramp: f64,
+    ramp_c: f64,
 
-    
-    c0: f64,       
-    inv_wsum: f64, 
+    c0: f64,
+    inv_wsum: f64,
 }
-
 
 #[inline(always)]
 fn kahan_add(sum: &mut f64, c: &mut f64, x: f64) {
@@ -768,19 +678,15 @@ impl EpmaStream {
         let p1 = period - 1;
         let c0 = 2.0 - (offset as f64);
 
-        
-        
         let p1f = p1 as f64;
         let wsum = p1f.mul_add(c0, 0.5 * (p1f - 1.0) * p1f);
-        let inv_wsum = 1.0 / wsum; 
+        let inv_wsum = 1.0 / wsum;
 
         Ok(Self {
             period,
             offset,
             p1,
 
-            
-            
             buffer: vec![0.0; period],
             head: 0,
 
@@ -797,56 +703,44 @@ impl EpmaStream {
         })
     }
 
-    /// O(1) update. Returns the raw input during warmup (<= period+offset+1),
-    /// otherwise the EPMA value for the window ending at this tick.
     #[inline(always)]
     pub fn update(&mut self, value: f64) -> Option<f64> {
         let p = self.period;
         let p1m1 = (self.p1 - 1) as f64;
 
-        
         let idx_out = (self.head + 1) % p;
         let x_out = if self.included == self.p1 {
-            
             self.buffer[idx_out]
         } else {
             0.0
         };
 
-        
         self.buffer[self.head] = value;
         self.head = (self.head + 1) % p;
         self.seen += 1;
 
-        
         if self.included < self.p1 {
-            
             let m = self.included as f64;
 
             kahan_add(&mut self.sum, &mut self.sum_c, value);
-            
+
             kahan_add(&mut self.ramp, &mut self.ramp_c, m * value);
 
             self.included += 1;
         } else {
-            
             let s_old = self.sum;
 
-            
             let delta_s = value - x_out;
             kahan_add(&mut self.sum, &mut self.sum_c, delta_s);
 
-            
             let delta_r = p1m1.mul_add(value, x_out - s_old);
             kahan_add(&mut self.ramp, &mut self.ramp_c, delta_r);
         }
 
-        
         if self.seen <= (self.period + self.offset + 1) {
             return Some(value);
         }
 
-        
         let num = self.c0.mul_add(self.sum, self.ramp);
         Some(num * self.inv_wsum)
     }
@@ -939,15 +833,15 @@ impl EpmaBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &EpmaBatchRange) -> Vec<EpmaParams> {
-    
-    
-    
-    
     fn axis_usize((start, end, step): (usize, usize, usize)) -> Vec<usize> {
         if step == 0 {
             return vec![start];
         }
-        let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
         (lo..=hi).step_by(step).collect()
     }
     let periods = axis_usize(r.period);
@@ -1010,23 +904,18 @@ fn epma_batch_inner(
     kern: Kernel,
     parallel: bool,
 ) -> Result<EpmaBatchOutput, EpmaError> {
-    
     let combos = expand_grid(sweep);
     let rows = combos.len();
     let cols = data.len();
 
-    
     let _total_cells = rows
         .checked_mul(cols)
         .ok_or(EpmaError::SizeOverflow { rows, cols })?;
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
 
-    
     let combos = epma_batch_inner_into_uninit(data, sweep, kern, parallel, &mut buf_mu)?;
 
-    
     let values = unsafe {
         let mut buf_guard = ManuallyDrop::new(buf_mu);
         Vec::from_raw_parts(
@@ -1053,8 +942,6 @@ pub fn epma_batch_inner_into(
     parallel: bool,
     out: &mut [f64],
 ) -> Result<Vec<EpmaParams>, EpmaError> {
-    
-    
     let buf_mu = unsafe {
         std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut MaybeUninit<f64>, out.len())
     };
@@ -1074,8 +961,11 @@ fn epma_batch_inner_into_uninit(
     }
     let combos = expand_grid(sweep);
     if combos.is_empty() {
-        
-        return Err(EpmaError::InvalidRange { start: 0, end: 0, step: 0 });
+        return Err(EpmaError::InvalidRange {
+            start: 0,
+            end: 0,
+            step: 0,
+        });
     }
     for c in &combos {
         let p = c.period.unwrap();
@@ -1111,8 +1001,6 @@ fn epma_batch_inner_into_uninit(
         .collect();
     init_matrix_prefixes(buf_mu, cols, &warm);
 
-    
-    
     let use_prefix = {
         #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
         {
@@ -1125,7 +1013,6 @@ fn epma_batch_inner_into_uninit(
     };
 
     if use_prefix {
-        
         let mut p: Vec<f64> = Vec::with_capacity(cols);
         let mut q: Vec<f64> = Vec::with_capacity(cols);
         let mut ps = 0.0f64;
@@ -1147,29 +1034,27 @@ fn epma_batch_inner_into_uninit(
             let inv = 1.0 / wsum;
             let warmup = warm[row];
 
-            
             let dst = unsafe {
                 core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len())
             };
 
             for j in warmup..cols {
-                let a = j + 1 - p1; 
-                let b = j; 
-                           
+                let a = j + 1 - p1;
+                let b = j;
+
                 let sumx = if a > 0 { p[b] - p[a - 1] } else { p[b] };
-                
+
                 let sum_abs = if a > 0 { q[b] - q[a - 1] } else { q[b] };
-                
+
                 let sum_ix = sum_abs - (a as f64) * sumx;
                 let y = (c0 * sumx + sum_ix) * inv;
-                
+
                 unsafe {
                     *dst.get_unchecked_mut(j) = y;
                 }
             }
         };
 
-        
         if parallel {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -1190,12 +1075,10 @@ fn epma_batch_inner_into_uninit(
             }
         }
     } else {
-        
         let do_row = |row: usize, dst_mu: &mut [MaybeUninit<f64>]| unsafe {
             let period = combos[row].period.unwrap();
             let offset = combos[row].offset.unwrap();
 
-            
             let dst =
                 core::slice::from_raw_parts_mut(dst_mu.as_mut_ptr() as *mut f64, dst_mu.len());
 
@@ -1208,7 +1091,6 @@ fn epma_batch_inner_into_uninit(
             }
         };
 
-        
         if parallel {
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -1271,7 +1153,6 @@ mod tests {
 
     #[test]
     fn test_epma_into_matches_api() -> Result<(), Box<dyn Error>> {
-        
         let mut data = Vec::with_capacity(256);
         data.extend_from_slice(&[f64::NAN, f64::NAN, f64::NAN]);
         for i in 0..253u32 {
@@ -1281,17 +1162,14 @@ mod tests {
 
         let input = EpmaInput::from_slice(&data, EpmaParams::default());
 
-        
         let baseline = epma(&input)?.values;
 
-        
         let mut out = vec![0.0; data.len()];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             epma_into(&input, &mut out)?;
         }
 
-        
         fn eq_or_both_nan(a: f64, b: f64) -> bool {
             (a.is_nan() && b.is_nan()) || (a == b)
         }
@@ -1466,17 +1344,14 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50).prop_flat_map(|period| {
             (
-                
-                
                 prop::collection::vec(
                     (-1e6f64..1e6f64).prop_filter("finite", |x| x.is_finite()),
-                    (period * 2 + 10)..500, 
+                    (period * 2 + 10)..500,
                 ),
                 Just(period),
-                0usize..period, 
+                0usize..period,
             )
         });
 
@@ -1488,19 +1363,19 @@ mod tests {
 				};
 				let input = EpmaInput::from_slice(&data, params);
 
-				
+
 				let EpmaOutput { values: out } = epma_with_kernel(&input, kernel).unwrap();
 
-				
+
 				let EpmaOutput { values: ref_out } = epma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-				
+
 				let first_valid = data.iter().position(|x| !x.is_nan()).unwrap_or(0);
-				
-				
+
+
 				let warmup = first_valid + period + offset + 1;
 
-				
+
 				for i in 0..warmup.min(out.len()) {
 					prop_assert!(
 						out[i].is_nan(),
@@ -1511,10 +1386,10 @@ mod tests {
 					);
 				}
 
-				
-				
+
+
 				if warmup < out.len() && data[warmup].is_finite() {
-					
+
 					let p1 = period - 1;
 					let mut weight_sum = 0.0;
 					for i in 0..p1 {
@@ -1522,7 +1397,7 @@ mod tests {
 						weight_sum += w;
 					}
 
-					
+
 					if weight_sum.abs() > 1e-10 {
 						prop_assert!(
 							!out[warmup].is_nan(),
@@ -1533,8 +1408,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				let p1 = period - 1;
 				let mut weight_sum = 0.0;
 				for i in 0..p1 {
@@ -1543,7 +1418,7 @@ mod tests {
 				}
 
 				if weight_sum.abs() > 1e-10 {
-					
+
 					for i in warmup..data.len() {
 						let y = out[i];
 						prop_assert!(
@@ -1558,8 +1433,8 @@ mod tests {
 						);
 					}
 				} else {
-					
-					
+
+
 					for i in warmup..data.len() {
 						let both_nan = out[i].is_nan() && ref_out[i].is_nan();
 						let both_inf = out[i].is_infinite() && ref_out[i].is_infinite();
@@ -1576,14 +1451,14 @@ mod tests {
 					}
 				}
 
-				
-				
-				
+
+
+
 				if period == 2 && offset == 0 && warmup < data.len() {
-					
+
 					for i in warmup..data.len() {
 						if data[i].is_finite() {
-							
+
 							prop_assert!(
 								(out[i] - data[i]).abs() < 1e-9,
 								"[{}] Period=2,offset=0 mismatch at {}: got {}, expected {}",
@@ -1596,11 +1471,11 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				if data.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-12) && data.iter().any(|x| x.is_finite() && x.abs() > 1e-10) {
 					let constant = *data.iter().find(|x| x.is_finite()).unwrap();
-					
+
 					let p1 = period - 1;
 					let mut weight_sum = 0.0;
 					for i in 0..p1 {
@@ -1622,8 +1497,8 @@ mod tests {
 					}
 				}
 
-				
-				
+
+
 				for i in (warmup.saturating_add(1))..data.len() {
 					let y = out[i];
 					let r = ref_out[i];
@@ -1641,14 +1516,14 @@ mod tests {
 					}
 
 					let ulp_diff: u64 = y.to_bits().abs_diff(r.to_bits());
-					
+
 					let rel_error = if r.abs() > 1e-10 {
 						(y - r).abs() / r.abs()
 					} else {
 						(y - r).abs()
 					};
 
-					
+
 					prop_assert!(
 						rel_error <= 1e-4 || (y - r).abs() <= 1e-9 || ulp_diff <= 100,
 						"[{}] Kernel mismatch at idx {}: {} vs {} (ULP={}, rel_err={})",
@@ -1661,10 +1536,10 @@ mod tests {
 					);
 				}
 
-				
-				
+
+
 				if warmup + 5 < data.len() {
-					
+
 					let p1 = period - 1;
 					let mut weights = Vec::with_capacity(p1);
 					let mut weight_sum = 0.0;
@@ -1674,9 +1549,9 @@ mod tests {
 						weight_sum += w;
 					}
 
-					
+
 					if weight_sum.abs() > 1e-10 {
-						
+
 						for idx in [warmup + 1, warmup + 2, data.len() - 1].iter().copied() {
 							if idx > warmup && idx < data.len() {
 								let start = idx + 1 - p1;
@@ -1686,13 +1561,13 @@ mod tests {
 								}
 								let expected = expected_sum / weight_sum;
 
-								
+
 								if out[idx].is_finite() && expected.is_finite() {
-									
+
 									let tolerance = if expected.abs() > 1000.0 {
-										expected.abs() * 1e-12  
+										expected.abs() * 1e-12
 									} else {
-										1e-9  
+										1e-9
 									};
 									prop_assert!(
 										(out[idx] - expected).abs() < tolerance,
@@ -1704,7 +1579,7 @@ mod tests {
 										(out[idx] - expected).abs()
 									);
 								} else {
-									
+
 									prop_assert!(
 										out[idx].is_nan() == expected.is_nan() &&
 										out[idx].is_infinite() == expected.is_infinite(),
@@ -1720,11 +1595,11 @@ mod tests {
 					}
 				}
 
-				
-				
-				
+
+
+
 				if offset == period - 1 && warmup < data.len() && weight_sum.abs() > 1e-10 {
-					
+
 					for i in warmup..data.len() {
 						prop_assert!(
 							out[i].is_finite(),
@@ -1748,17 +1623,9 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         skip_if_unsupported!(kernel, test_name);
 
-        
-        
-        let zero_weight_cases = vec![
-            (4, 3), 
-            (5, 3), 
-            (6, 4), 
-            (8, 6), 
-        ];
+        let zero_weight_cases = vec![(4, 3), (5, 3), (6, 4), (8, 6)];
 
         for (period, offset) in zero_weight_cases {
-            
             let p1 = period - 1;
             let mut weight_sum = 0.0;
             for i in 0..p1 {
@@ -1766,7 +1633,6 @@ mod tests {
                 weight_sum += w;
             }
 
-            
             let data = vec![1.0; period * 2];
             let params = EpmaParams {
                 period: Some(period),
@@ -1774,7 +1640,6 @@ mod tests {
             };
             let input = EpmaInput::from_slice(&data, params);
 
-            
             if weight_sum.abs() < 1e-10 {
                 let out = epma_with_kernel(&input, kernel)?;
                 let scalar_out = epma_with_kernel(&input, Kernel::Scalar)?;
@@ -1901,7 +1766,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_epma_no_poison(test_name: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test_name);
@@ -1909,16 +1773,12 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_cases = vec![
-            
             EpmaParams::default(),
-            
             EpmaParams {
                 period: Some(2),
                 offset: Some(0),
             },
-            
             EpmaParams {
                 period: Some(5),
                 offset: Some(1),
@@ -1931,7 +1791,6 @@ mod tests {
                 period: Some(10),
                 offset: Some(9),
             },
-            
             EpmaParams {
                 period: Some(20),
                 offset: Some(5),
@@ -1940,7 +1799,6 @@ mod tests {
                 period: Some(30),
                 offset: Some(10),
             },
-            
             EpmaParams {
                 period: Some(15),
                 offset: Some(14),
@@ -1951,16 +1809,13 @@ mod tests {
             let input = EpmaInput::from_candles(&candles, "close", params.clone());
             let output = epma_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} with params period={:?}, offset={:?}",
@@ -1968,7 +1823,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at index {} with params period={:?}, offset={:?}",
@@ -1976,7 +1830,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at index {} with params period={:?}, offset={:?}",
@@ -1989,7 +1842,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_epma_no_poison(_test_name: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2014,7 +1866,7 @@ mod tests {
                         let _ = $test_fn(stringify!([<$test_fn _avx512_f64>]), Kernel::Avx512);
                     }
                 )*
-                
+
                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                 $(
                     #[test]
@@ -2051,21 +1903,17 @@ mod tests {
         let period = 5;
         let offset = 2;
 
-        
         let params = EpmaParams {
             period: Some(period),
             offset: Some(offset),
         };
         let input = EpmaInput::from_slice(&data, params);
 
-        
         let mut scalar_out = vec![0.0; data.len()];
         epma_scalar(&data, period, offset, 0, &mut scalar_out);
 
-        
         let simd128_output = epma_with_kernel(&input, Kernel::Scalar).unwrap();
 
-        
         let warmup = period + offset + 1;
         for i in warmup..data.len() {
             assert!(
@@ -2102,7 +1950,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(debug_assertions)]
     fn check_batch_no_poison(test: &str, kernel: Kernel) -> Result<(), Box<dyn Error>> {
         skip_if_unsupported!(kernel, test);
@@ -2110,17 +1957,11 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
             ((2, 5, 1), (0, 2, 1)),
-            
             ((10, 20, 5), (0, 19, 3)),
-            
             ((20, 30, 2), (5, 15, 5)),
-            
             ((15, 25, 5), (10, 14, 2)),
-            
             ((5, 10, 1), (0, 9, 1)),
         ];
 
@@ -2131,9 +1972,7 @@ mod tests {
                 .offset_range(offset_range.0, offset_range.1, offset_range.2)
                 .apply_candles(&c, "close")?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
-                
                 if val.is_nan() {
                     continue;
                 }
@@ -2143,7 +1982,6 @@ mod tests {
                 let col = idx % output.cols;
                 let params = &output.combos[row];
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
                         "[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, offset={:?})",
@@ -2151,7 +1989,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x22222222_22222222 {
                     panic!(
                         "[{}] Found init_matrix_prefixes poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, offset={:?})",
@@ -2159,7 +1996,6 @@ mod tests {
                     );
                 }
 
-                
                 if bits == 0x33333333_33333333 {
                     panic!(
                         "[{}] Found make_uninit_matrix poison value {} (0x{:016X}) at row {} col {} (params: period={:?}, offset={:?})",
@@ -2172,7 +2008,6 @@ mod tests {
         Ok(())
     }
 
-    
     #[cfg(not(debug_assertions))]
     fn check_batch_no_poison(_test: &str, _kernel: Kernel) -> Result<(), Box<dyn Error>> {
         Ok(())
@@ -2213,12 +2048,11 @@ mod tests {
             offset: Some(1),
         };
         let input = EpmaInput::from_slice(&data, params);
-        let mut wrong_size_dst = vec![0.0; 3]; 
+        let mut wrong_size_dst = vec![0.0; 3];
 
         let result = epma_into_slice(&mut wrong_size_dst, &input, Kernel::Scalar);
         assert!(result.is_err());
 
-        
         match result {
             Err(EpmaError::OutputLengthMismatch { expected, got }) => {
                 assert_eq!(expected, 5);
@@ -2236,11 +2070,9 @@ mod tests {
             offset: (1, 2, 1),
         };
 
-        
         let result = epma_batch_with_kernel(&data, &sweep, Kernel::Scalar);
         assert!(result.is_err());
 
-        
         match result {
             Err(EpmaError::InvalidKernelForBatch(k)) => {
                 assert_eq!(k, Kernel::Scalar);
@@ -2249,7 +2081,6 @@ mod tests {
         }
     }
 }
-
 
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
@@ -2280,7 +2111,6 @@ pub fn epma_py<'py>(
     let input = EpmaInput::from_slice(slice_in, params);
     let kern = validate_kernel(kernel, false)?;
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [slice_in.len()], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -2307,12 +2137,10 @@ pub fn epma_batch_py<'py>(
         offset: offset_range,
     };
 
-    
     let combos = expand_grid(&sweep);
     let rows = combos.len();
     let cols = slice_in.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -2384,7 +2212,11 @@ pub fn epma_cuda_batch_dev_py(
         Ok::<_, PyErr>((arr, ctx, device_id as u32))
     })?;
 
-    Ok(EpmaDeviceArrayF32Py { inner, _ctx_guard: ctx_guard, device_id: dev_id as u32 })
+    Ok(EpmaDeviceArrayF32Py {
+        inner,
+        _ctx_guard: ctx_guard,
+        device_id: dev_id as u32,
+    })
 }
 
 #[cfg(all(feature = "python", feature = "cuda"))]
@@ -2419,9 +2251,12 @@ pub fn epma_cuda_many_series_one_param_dev_py(
         Ok::<_, PyErr>((arr, ctx, device_id as u32))
     })?;
 
-    Ok(EpmaDeviceArrayF32Py { inner, _ctx_guard: ctx_guard, device_id: dev_id as u32 })
+    Ok(EpmaDeviceArrayF32Py {
+        inner,
+        _ctx_guard: ctx_guard,
+        device_id: dev_id as u32,
+    })
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyclass(module = "ta_indicators.cuda", unsendable)]
@@ -2437,7 +2272,7 @@ impl EpmaDeviceArrayF32Py {
     #[getter]
     fn __cuda_array_interface__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let d = PyDict::new(py);
-        // 2D row-major FP32: (rows, cols)
+
         d.set_item("shape", (self.inner.rows, self.inner.cols))?;
         d.set_item("typestr", "<f4")?;
         d.set_item(
@@ -2448,12 +2283,14 @@ impl EpmaDeviceArrayF32Py {
             ),
         )?;
         d.set_item("data", (self.inner.device_ptr() as usize, false))?;
-        // Producing stream is synchronized before returning; omit 'stream' per CAI v3.
+
         d.set_item("version", 3)?;
         Ok(d)
     }
 
-    fn __dlpack_device__(&self) -> (i32, i32) { (2, self.device_id as i32) }
+    fn __dlpack_device__(&self) -> (i32, i32) {
+        (2, self.device_id as i32)
+    }
 
     #[pyo3(signature = (stream=None, max_version=None, dl_device=None, copy=None))]
     fn __dlpack__<'py>(
@@ -2466,8 +2303,7 @@ impl EpmaDeviceArrayF32Py {
     ) -> PyResult<PyObject> {
         use crate::utilities::dlpack_cuda::export_f32_cuda_dlpack_2d;
 
-        // Compute target device id and validate `dl_device` hint if provided.
-        let (kdl, alloc_dev) = self.__dlpack_device__(); // (2, device_id)
+        let (kdl, alloc_dev) = self.__dlpack_device__();
         if let Some(dev_obj) = dl_device.as_ref() {
             if let Ok((dev_ty, dev_id)) = dev_obj.extract::<(i32, i32)>(py) {
                 if dev_ty != kdl || dev_id != alloc_dev {
@@ -2486,15 +2322,17 @@ impl EpmaDeviceArrayF32Py {
             }
         }
 
-        // Accept Array API stream semantics but do nothing since producer is synced.
         let _ = stream;
 
-        // Move VRAM handle out of this wrapper; the DLPack capsule owns it afterwards.
         let dummy = cust::memory::DeviceBuffer::from_slice(&[])
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
         let inner = std::mem::replace(
             &mut self.inner,
-            DeviceArrayF32 { buf: dummy, rows: 0, cols: 0 },
+            DeviceArrayF32 {
+                buf: dummy,
+                rows: 0,
+                cols: 0,
+            },
         );
 
         let rows = inner.rows;
@@ -2531,13 +2369,12 @@ impl EpmaStreamPy {
     }
 }
 
-// WASM bindings
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn epma_js(data: &[f64], period: usize, offset: usize) -> Result<Vec<f64>, JsValue> {
     let params = EpmaParams {
@@ -2551,14 +2388,14 @@ pub fn epma_js(data: &[f64], period: usize, offset: usize) -> Result<Vec<f64>, J
     Ok(out)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EpmaBatchConfig {
     pub period_range: (usize, usize, usize),
     pub offset_range: (usize, usize, usize),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct EpmaBatchJsOutput {
     pub values: Vec<f64>,
@@ -2567,7 +2404,7 @@ pub struct EpmaBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = epma_batch)]
 pub fn epma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, JsValue> {
     let cfg: EpmaBatchConfig = serde_wasm_bindgen::from_value(config)
@@ -2589,7 +2426,7 @@ pub fn epma_batch_unified_js(data: &[f64], config: JsValue) -> Result<JsValue, J
     .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn epma_alloc(len: usize) -> *mut f64 {
     let mut v = Vec::<f64>::with_capacity(len);
@@ -2598,7 +2435,7 @@ pub fn epma_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn epma_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2606,7 +2443,7 @@ pub fn epma_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn epma_into(
     in_ptr: *const f64,
@@ -2627,7 +2464,6 @@ pub fn epma_into(
         let input = EpmaInput::from_slice(data, params);
 
         if in_ptr == out_ptr {
-            // Safe in-place fallback
             let mut tmp = vec![0.0; len];
             epma_into_slice(&mut tmp, &input, detect_best_kernel())
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -2644,7 +2480,7 @@ pub fn epma_into(
     Ok(())
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn epma_batch_into(
     in_ptr: *const f64,

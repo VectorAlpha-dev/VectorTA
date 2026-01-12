@@ -1,14 +1,5 @@
 #![cfg(feature = "cuda")]
 
-//! CUDA wrapper for the DVDIQQE indicator.
-//!
-//! Parity goals with ALMA wrapper:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/dvdiqqe_kernel.ptx"))
-//! - NON_BLOCKING stream
-//! - Simple explicit policies for 1D launches
-//! - VRAM guard + chunking; grid.y <= 65_535
-//! - Public device entry points mirror other wrappers
-
 use crate::cuda::moving_averages::DeviceArrayF32;
 use crate::indicators::dvdiqqe::DvdiqqeBatchRange;
 use cust::context::Context;
@@ -54,7 +45,11 @@ pub enum CudaDvdiqqeError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -62,14 +57,20 @@ pub enum CudaDvdiqqeError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
 
-/// Four-plane output for DVDIQQE (dvdi, fast, slow, center)
 pub struct DeviceDvdiqqeQuad {
     pub dvdi: DeviceArrayF32,
     pub fast: DeviceArrayF32,
@@ -111,9 +112,13 @@ impl CudaDvdiqqe {
     }
 
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self.ctx.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.ctx.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn align_to_warp(x: u32) -> u32 {
@@ -128,14 +133,12 @@ impl CudaDvdiqqe {
 
     #[inline]
     fn chunk_size_for_batch(n_rows: usize, len: usize) -> usize {
-        
-        
-        let max_grid_x = 2_147_000_000usize; 
+        let max_grid_x = 2_147_000_000usize;
         let per_combo_bytes = 4usize * len * std::mem::size_of::<f32>();
 
         let mut max_by_mem = n_rows;
         if let Ok((free, _)) = mem_get_info() {
-            let headroom = 64usize << 20; 
+            let headroom = 64usize << 20;
             if free > (per_combo_bytes + headroom) {
                 let budget = free - headroom;
                 max_by_mem = (budget / per_combo_bytes).max(1);
@@ -151,7 +154,11 @@ impl CudaDvdiqqe {
         match mem_get_info() {
             Ok((free, _)) => {
                 if required.saturating_add(headroom) > free {
-                    return Err(CudaDvdiqqeError::OutOfMemory { required, free, headroom });
+                    return Err(CudaDvdiqqeError::OutOfMemory {
+                        required,
+                        free,
+                        headroom,
+                    });
                 }
                 Ok(())
             }
@@ -170,23 +177,27 @@ impl CudaDvdiqqe {
         tick_size: f32,
     ) -> Result<DeviceDvdiqqeQuad, CudaDvdiqqeError> {
         if open.len() != close.len() {
-            return Err(CudaDvdiqqeError::InvalidInput("open/close length mismatch".into()));
+            return Err(CudaDvdiqqeError::InvalidInput(
+                "open/close length mismatch".into(),
+            ));
         }
         if let Some(v) = volume {
             if v.len() != close.len() {
-                return Err(CudaDvdiqqeError::InvalidInput("volume length mismatch".into()));
+                return Err(CudaDvdiqqeError::InvalidInput(
+                    "volume length mismatch".into(),
+                ));
             }
         }
         let len = close.len();
-        if len == 0 { return Err(CudaDvdiqqeError::InvalidInput("empty series".into())); }
+        if len == 0 {
+            return Err(CudaDvdiqqeError::InvalidInput("empty series".into()));
+        }
 
-        
         let first_valid = match close.iter().position(|x| x.is_finite()) {
             Some(i) => i,
             None => return Err(CudaDvdiqqeError::InvalidInput("all NaN close".into())),
         };
 
-        
         let (p_start, p_end, p_step) = sweep.period;
         let (s_start, s_end, s_step) = sweep.smoothing_period;
         let (f_start, f_end, f_step) = sweep.fast_multiplier;
@@ -196,37 +207,85 @@ impl CudaDvdiqqe {
         let mut fasts = Vec::<f32>::new();
         let mut slows = Vec::<f32>::new();
         let mut n_combos = 0usize;
-        
+
         let mut push_axis_usize = |start: usize, end: usize, step: usize, dst: &mut Vec<i32>| {
-            if step == 0 || start == end { dst.push(start as i32); return; }
+            if step == 0 || start == end {
+                dst.push(start as i32);
+                return;
+            }
             if start < end {
-                let mut cur = start; while cur <= end { dst.push(cur as i32); cur = cur.saturating_add(step); }
+                let mut cur = start;
+                while cur <= end {
+                    dst.push(cur as i32);
+                    cur = cur.saturating_add(step);
+                }
             } else {
-                let mut cur = start; while cur >= end { dst.push(cur as i32); if cur < step { break; } cur -= step; if cur == usize::MAX { break; } }
+                let mut cur = start;
+                while cur >= end {
+                    dst.push(cur as i32);
+                    if cur < step {
+                        break;
+                    }
+                    cur -= step;
+                    if cur == usize::MAX {
+                        break;
+                    }
+                }
             }
         };
         let mut push_axis_f64 = |start: f64, end: f64, step: f64, dst: &mut Vec<f32>| {
-            if step == 0.0 || start == end { dst.push(start as f32); return; }
-            if start < end { let mut v = start; while v <= end + 1e-12 { dst.push(v as f32); v += step; } }
-            else { let mut v = start; let d = step.abs(); while v >= end - 1e-12 { dst.push(v as f32); v -= d; } }
+            if step == 0.0 || start == end {
+                dst.push(start as f32);
+                return;
+            }
+            if start < end {
+                let mut v = start;
+                while v <= end + 1e-12 {
+                    dst.push(v as f32);
+                    v += step;
+                }
+            } else {
+                let mut v = start;
+                let d = step.abs();
+                while v >= end - 1e-12 {
+                    dst.push(v as f32);
+                    v -= d;
+                }
+            }
         };
-        let (p_start, p_end, p_step) = sweep.period; let (s_start, s_end, s_step) = sweep.smoothing_period;
-        let (f_start, f_end, f_step) = sweep.fast_multiplier; let (sl_start, sl_end, sl_step) = sweep.slow_multiplier;
-        let mut pvec = Vec::<i32>::new(); push_axis_usize(p_start, p_end, p_step, &mut pvec);
-        let mut svec = Vec::<i32>::new(); push_axis_usize(s_start, s_end, s_step, &mut svec);
-        let mut fvec = Vec::<f32>::new(); push_axis_f64(f_start, f_end, f_step, &mut fvec);
-        let mut slvec = Vec::<f32>::new(); push_axis_f64(sl_start, sl_end, sl_step, &mut slvec);
-        for &p in &pvec { for &s in &svec { for &f in &fvec { for &sl in &slvec {
-            periods.push(p); smoothings.push(s); fasts.push(f); slows.push(sl); n_combos += 1;
-        }}}}
+        let (p_start, p_end, p_step) = sweep.period;
+        let (s_start, s_end, s_step) = sweep.smoothing_period;
+        let (f_start, f_end, f_step) = sweep.fast_multiplier;
+        let (sl_start, sl_end, sl_step) = sweep.slow_multiplier;
+        let mut pvec = Vec::<i32>::new();
+        push_axis_usize(p_start, p_end, p_step, &mut pvec);
+        let mut svec = Vec::<i32>::new();
+        push_axis_usize(s_start, s_end, s_step, &mut svec);
+        let mut fvec = Vec::<f32>::new();
+        push_axis_f64(f_start, f_end, f_step, &mut fvec);
+        let mut slvec = Vec::<f32>::new();
+        push_axis_f64(sl_start, sl_end, sl_step, &mut slvec);
+        for &p in &pvec {
+            for &s in &svec {
+                for &f in &fvec {
+                    for &sl in &slvec {
+                        periods.push(p);
+                        smoothings.push(s);
+                        fasts.push(f);
+                        slows.push(sl);
+                        n_combos += 1;
+                    }
+                }
+            }
+        }
         if n_combos == 0 {
             return Err(CudaDvdiqqeError::InvalidInput("empty sweep".into()));
         }
-        
+
         let plane = n_combos
             .checked_mul(len)
             .ok_or_else(|| CudaDvdiqqeError::InvalidInput("n_combos*len overflow".into()))?;
-        
+
         let bytes_out = plane
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaDvdiqqeError::InvalidInput("bytes overflow".into()))?;
@@ -239,43 +298,56 @@ impl CudaDvdiqqe {
             .saturating_add(slows.len() * std::mem::size_of::<f32>());
         self.will_fit(required, 64usize << 20)?;
 
-        
         let d_open: DeviceBuffer<f32> = DeviceBuffer::from_slice(open)?;
         let d_close: DeviceBuffer<f32> = DeviceBuffer::from_slice(close)?;
-        let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume { Some(DeviceBuffer::from_slice(v)?) } else { None };
+        let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume {
+            Some(DeviceBuffer::from_slice(v)?)
+        } else {
+            None
+        };
         let has_volume = d_vol.is_some() as i32;
         let d_periods: DeviceBuffer<i32> = DeviceBuffer::from_slice(&periods)?;
         let d_smooths: DeviceBuffer<i32> = DeviceBuffer::from_slice(&smoothings)?;
         let d_fasts: DeviceBuffer<f32> = DeviceBuffer::from_slice(&fasts)?;
         let d_slows: DeviceBuffer<f32> = DeviceBuffer::from_slice(&slows)?;
 
-        
         let mut d_dvdi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
         let mut d_fast: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
         let mut d_slow: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
         let mut d_cent: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }?;
 
-        
-        let func = self
-            .module
-            .get_function("dvdiqqe_batch_f32")
-            .map_err(|_| CudaDvdiqqeError::MissingKernelSymbol { name: "dvdiqqe_batch_f32" })?;
+        let func = self.module.get_function("dvdiqqe_batch_f32").map_err(|_| {
+            CudaDvdiqqeError::MissingKernelSymbol {
+                name: "dvdiqqe_batch_f32",
+            }
+        })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => Self::align_to_warp(block_x).max(32),
-            BatchKernelPolicy::Auto => 32, 
+            BatchKernelPolicy::Auto => 32,
         };
         let chunk = Self::chunk_size_for_batch(n_combos, len);
         let mut launched = 0usize;
         while launched < n_combos {
             let cur = (n_combos - launched).min(chunk);
-            let gx = cur as u32; let gy = 1u32; let gz = 1u32;
-            if gx == 0 || block_x == 0 { return Err(CudaDvdiqqeError::LaunchConfigTooLarge { gx, gy, gz, bx: block_x, by: 1, bz: 1 }); }
+            let gx = cur as u32;
+            let gy = 1u32;
+            let gz = 1u32;
+            if gx == 0 || block_x == 0 {
+                return Err(CudaDvdiqqeError::LaunchConfigTooLarge {
+                    gx,
+                    gy,
+                    gz,
+                    bx: block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
             let grid: GridSize = (gx, gy, gz).into();
             let block: BlockSize = (block_x, 1, 1).into();
             unsafe {
                 let mut open_ptr = d_open.as_device_ptr().as_raw();
                 let mut close_ptr = d_close.as_device_ptr().as_raw();
-                
+
                 let use_tick_only = volume_type.eq_ignore_ascii_case("tick-only")
                     || volume_type.eq_ignore_ascii_case("tick_only")
                     || volume_type.eq_ignore_ascii_case("tick");
@@ -311,7 +383,7 @@ impl CudaDvdiqqe {
                 let mut len_i = len as i32;
                 let mut fv_i = first_valid as i32;
                 let mut tick_f = tick_size as f32;
-                
+
                 let mut center_dyn = if center_type.eq_ignore_ascii_case("dynamic") {
                     1i32
                 } else {
@@ -379,9 +451,7 @@ impl CudaDvdiqqe {
             }
             launched += cur;
         }
-        self.stream
-            .synchronize()
-            .map_err(CudaDvdiqqeError::Cuda)?;
+        self.stream.synchronize().map_err(CudaDvdiqqeError::Cuda)?;
 
         Ok(DeviceDvdiqqeQuad {
             dvdi: DeviceArrayF32 {
@@ -465,7 +535,6 @@ impl CudaDvdiqqe {
             ));
         }
 
-        
         let mut first_valids = vec![-1i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -486,7 +555,6 @@ impl CudaDvdiqqe {
             }
         }
 
-        
         let bytes = n
             .checked_mul(std::mem::size_of::<f32>())
             .ok_or_else(|| CudaDvdiqqeError::InvalidInput("bytes overflow".into()))?;
@@ -497,7 +565,11 @@ impl CudaDvdiqqe {
 
         let d_open: DeviceBuffer<f32> = DeviceBuffer::from_slice(open_tm)?;
         let d_close: DeviceBuffer<f32> = DeviceBuffer::from_slice(close_tm)?;
-        let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume_tm { Some(DeviceBuffer::from_slice(v)?) } else { None };
+        let d_vol: Option<DeviceBuffer<f32>> = if let Some(v) = volume_tm {
+            Some(DeviceBuffer::from_slice(v)?)
+        } else {
+            None
+        };
         let has_volume = d_vol.is_some() as i32;
         let d_fv: DeviceBuffer<i32> = DeviceBuffer::from_slice(&first_valids)?;
 
@@ -509,21 +581,32 @@ impl CudaDvdiqqe {
         let func = self
             .module
             .get_function("dvdiqqe_many_series_one_param_f32")
-            .map_err(|_| CudaDvdiqqeError::MissingKernelSymbol { name: "dvdiqqe_many_series_one_param_f32" })?;
+            .map_err(|_| CudaDvdiqqeError::MissingKernelSymbol {
+                name: "dvdiqqe_many_series_one_param_f32",
+            })?;
         let mut block_x = match self.policy.many_series {
             ManySeriesKernelPolicy::OneD { block_x } => Self::align_to_warp(block_x),
-            ManySeriesKernelPolicy::Auto => 128, 
+            ManySeriesKernelPolicy::Auto => 128,
         };
         block_x = block_x.max(32);
         let wpb = Self::warps_per_block(block_x);
-        let grid_x = ((cols as u32) + wpb - 1) / wpb; 
-        if grid_x == 0 || block_x == 0 { return Err(CudaDvdiqqeError::LaunchConfigTooLarge { gx: grid_x, gy: 1, gz: 1, bx: block_x, by: 1, bz: 1 }); }
+        let grid_x = ((cols as u32) + wpb - 1) / wpb;
+        if grid_x == 0 || block_x == 0 {
+            return Err(CudaDvdiqqeError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         unsafe {
             let mut open_ptr = d_open.as_device_ptr().as_raw();
             let mut close_ptr = d_close.as_device_ptr().as_raw();
-            
+
             let use_tick_only = volume_type.eq_ignore_ascii_case("tick-only")
                 || volume_type.eq_ignore_ascii_case("tick_only")
                 || volume_type.eq_ignore_ascii_case("tick");
@@ -579,21 +662,34 @@ impl CudaDvdiqqe {
                 .launch(&func, grid, block, 0, args)
                 .map_err(CudaDvdiqqeError::Cuda)?;
         }
-        self.stream
-            .synchronize()
-            .map_err(CudaDvdiqqeError::Cuda)?;
+        self.stream.synchronize().map_err(CudaDvdiqqeError::Cuda)?;
 
         Ok(DeviceDvdiqqeQuad {
-            dvdi: DeviceArrayF32 { buf: d_dvdi, rows, cols },
-            fast: DeviceArrayF32 { buf: d_fast, rows, cols },
-            slow: DeviceArrayF32 { buf: d_slow, rows, cols },
-            center: DeviceArrayF32 { buf: d_cent, rows, cols },
+            dvdi: DeviceArrayF32 {
+                buf: d_dvdi,
+                rows,
+                cols,
+            },
+            fast: DeviceArrayF32 {
+                buf: d_fast,
+                rows,
+                cols,
+            },
+            slow: DeviceArrayF32 {
+                buf: d_slow,
+                rows,
+                cols,
+            },
+            center: DeviceArrayF32 {
+                buf: d_cent,
+                rows,
+                cols,
+            },
             ctx: self.ctx.clone(),
             device_id: self.device_id,
         })
     }
 }
-
 
 #[cfg(not(test))]
 pub mod benches {
@@ -639,7 +735,11 @@ pub mod benches {
                 } else {
                     self.d_vol.as_device_ptr().as_raw()
                 };
-                let mut has_vol_i = if self.use_tick_only { 0i32 } else { self.has_vol_i };
+                let mut has_vol_i = if self.use_tick_only {
+                    0i32
+                } else {
+                    self.has_vol_i
+                };
                 let mut per_ptr = self.d_periods.as_device_ptr().as_raw();
                 let mut sm_ptr = self.d_smooths.as_device_ptr().as_raw();
                 let mut fa_ptr = self.d_fasts.as_device_ptr().as_raw();
@@ -719,7 +819,11 @@ pub mod benches {
                 } else {
                     self.d_vol_tm.as_device_ptr().as_raw()
                 };
-                let mut has_vol_i = if self.use_tick_only { 0i32 } else { self.has_vol_i };
+                let mut has_vol_i = if self.use_tick_only {
+                    0i32
+                } else {
+                    self.has_vol_i
+                };
                 let mut fv_ptr = self.d_fv.as_device_ptr().as_raw();
                 let mut period_i = self.period as i32;
                 let mut smooth_i = self.smoothing as i32;
@@ -785,7 +889,6 @@ pub mod benches {
         let cuda = CudaDvdiqqe::new(0).unwrap();
         let first_valid = close.iter().position(|x| x.is_finite()).unwrap_or(0);
 
-        
         let axis_usize = |(start, end, step): (usize, usize, usize)| -> Vec<i32> {
             if step == 0 || start == end {
                 return vec![start as i32];
@@ -864,10 +967,14 @@ pub mod benches {
         let d_smooths = DeviceBuffer::from_slice(&smoothings).expect("d_smooths");
         let d_fasts = DeviceBuffer::from_slice(&fasts).expect("d_fasts");
         let d_slows = DeviceBuffer::from_slice(&slows).expect("d_slows");
-        let d_dvdi: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_dvdi");
-        let d_fast: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_fast");
-        let d_slow: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_slow");
-        let d_cent: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_cent");
+        let d_dvdi: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_dvdi");
+        let d_fast: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_fast");
+        let d_slow: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_slow");
+        let d_cent: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized(plane) }.expect("d_cent");
 
         let block_x: u32 = 32;
         let grid: GridSize = ((n_combos as u32).max(1), 1, 1).into();
@@ -912,7 +1019,7 @@ pub mod benches {
                 vol_tm[t * cols + s] = (0.4 + (x * 0.77).cos().abs()).max(0.0);
             }
         }
-        
+
         let mut first_valids = vec![rows as i32; cols];
         for s in 0..cols {
             for t in 0..rows {
@@ -935,7 +1042,6 @@ pub mod benches {
         let d_slow: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_slow");
         let d_cent: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(n) }.expect("d_cent");
 
-        
         let block_x: u32 = 128;
         let wpb = CudaDvdiqqe::warps_per_block(block_x);
         let grid_x = ((cols as u32) + wpb - 1) / wpb;

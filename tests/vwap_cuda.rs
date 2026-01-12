@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::vwap::{vwap_batch_with_kernel, VwapBatchRange};
 use vector_ta::indicators::moving_averages::vwap::{vwap_with_kernel, VwapInput, VwapParams};
 use vector_ta::utilities::enums::Kernel;
@@ -41,7 +39,7 @@ fn vwap_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut prices = Vec::with_capacity(series_len);
     let mut volumes = Vec::with_capacity(series_len);
     for i in 0..series_len {
-        timestamps.push(base_ts + (i as i64) * 60_000); 
+        timestamps.push(base_ts + (i as i64) * 60_000);
         let x = i as f64;
         prices.push(100.0 + (x * 0.01).sin() + 0.05 * (x * 0.001).cos());
         let vol = if i % 16 == 0 {
@@ -71,7 +69,7 @@ fn vwap_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda vwap batch result to host");
 
-    let tol = 1e-4f64; 
+    let tol = 1e-4f64;
     for idx in 0..(cpu.rows * cpu.cols) {
         let a = cpu.values[idx];
         let b = gpu_host[idx] as f64;
@@ -114,7 +112,6 @@ fn vwap_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let anchor = "1m".to_string();
 
-    
     let mut cpu_tm = vec![f64::NAN; rows * cols];
     for s in 0..cols {
         let mut p = vec![f64::NAN; rows];

@@ -48,8 +48,8 @@ fn compare_rows(cpu: &[f64], gpu: &[f64], combos: &[DemaParams], len: usize, fir
                 );
             } else {
                 let diff = (expected - actual).abs();
-                
-                let tol = 5e-6 + expected.abs() * 5e-6; 
+
+                let tol = 5e-6 + expected.abs() * 5e-6;
                 assert!(
                     diff <= tol,
                     "row {}, col {} expected {} got {} diff {} (tol {})",
@@ -122,7 +122,7 @@ fn dema_cuda_host_copy_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu_flat = vec![0f32; cpu_out.len()];
     cuda.dema_batch_into_host_f32(&data_f32, &sweep, &mut gpu_flat)
         .expect("dema_cuda_batch_into_host_f32");
-    
+
     assert_eq!(gpu_flat.len(), combos_cpu.len() * len);
 
     let gpu_flat_f64: Vec<f64> = gpu_flat.iter().map(|&v| v as f64).collect();
@@ -149,13 +149,11 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
         return Ok(());
     }
 
-    
     let cols = 8usize;
     let rows = 1536usize;
     let mut price_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         for t in (4 + s)..rows {
-            
             let x = (t as f64) + (s as f64) * 0.25;
             price_tm[t * cols + s] = (x * 0.00237).sin() + (x * 0.00071).cos() * 0.5 + 0.00021 * x;
         }
@@ -163,7 +161,6 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
 
     let period = 24usize;
 
-    
     let mut cpu_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
         let mut series = vec![f64::NAN; rows];
@@ -177,10 +174,8 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             data: vector_ta::indicators::moving_averages::dema::DemaData::Slice(&series),
             params,
         };
-        let out = vector_ta::indicators::moving_averages::dema::dema_with_kernel(
-            &input,
-            Kernel::Scalar,
-        )?;
+        let out =
+            vector_ta::indicators::moving_averages::dema::dema_with_kernel(&input, Kernel::Scalar)?;
         for t in 0..rows {
             cpu_tm[t * cols + s] = out.values[t];
         }
@@ -205,7 +200,6 @@ fn dema_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
     let mut gpu_tm = vec![0f32; dev.len()];
     dev.buf.copy_to(&mut gpu_tm)?;
 
-    
     let tol = 5e-6;
     for idx in 0..gpu_tm.len() {
         let c = cpu_tm[idx];

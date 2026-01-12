@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::srwma::{
     srwma_batch_with_kernel, srwma_with_kernel, SrwmaBatchRange, SrwmaInput, SrwmaParams,
 };

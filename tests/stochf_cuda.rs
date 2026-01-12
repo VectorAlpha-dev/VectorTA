@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::stochf::{
     stochf_batch_with_kernel, StochfBatchRange, StochfInput, StochfParams,
 };
@@ -36,7 +34,7 @@ fn stochf_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let len = 8192usize;
-    
+
     let mut close = vec![f64::NAN; len];
     let mut high = vec![f64::NAN; len];
     let mut low = vec![f64::NAN; len];
@@ -124,7 +122,6 @@ fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     let fd = 3usize;
     let mt = 0usize;
 
-    
     let mut cpu_k_tm = vec![f64::NAN; cols * rows];
     let mut cpu_d_tm = vec![f64::NAN; cols * rows];
     for s in 0..cols {
@@ -185,7 +182,7 @@ fn stochf_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::er
     k_dev_tm.buf.copy_to(&mut gk_tm)?;
     d_dev_tm.buf.copy_to(&mut gd_tm)?;
 
-    let tol = 1e-3; 
+    let tol = 1e-3;
     for idx in 0..gk_tm.len() {
         assert!(
             approx_eq(cpu_k_tm[idx], gk_tm[idx] as f64, tol),

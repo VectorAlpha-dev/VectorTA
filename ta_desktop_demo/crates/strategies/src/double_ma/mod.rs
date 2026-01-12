@@ -10,9 +10,9 @@ use my_project::utilities::data_loader::{source_type, Candles};
 pub struct DoubleMaParams {
     pub fast_len: u16,
     pub slow_len: u16,
-    /// Index into `DoubleMaBatchRange.fast_ma_types`.
+
     pub fast_ma_id: u16,
-    /// Index into `DoubleMaBatchRange.slow_ma_types`.
+
     pub slow_ma_id: u16,
 }
 
@@ -128,7 +128,7 @@ pub fn expand_grid(range: &DoubleMaBatchRange) -> Vec<DoubleMaParams> {
     combos
 }
 
-/// Builder-style API mirroring indicator batch builders (EhmaBatchBuilder, etc.).
+
 #[derive(Clone, Debug, Default)]
 pub struct DoubleMaBatchBuilder {
     range: DoubleMaBatchRange,
@@ -196,8 +196,8 @@ pub fn eval_double_ma_one(candles: &Candles, params: &DoubleMaParams) -> Metrics
         };
     }
 
-    
-    
+
+
     let fast = match params.fast_ma_id {
         0 => compute_ma_series(candles, params.fast_len as usize, "sma", "close"),
         1 => compute_ma_series(candles, params.fast_len as usize, "ema", "close"),
@@ -387,7 +387,7 @@ pub fn double_ma_batch_cpu(
 struct PeriodMatrixF64 {
     period_start: u16,
     period_end: u16,
-    values: Vec<f64>, 
+    values: Vec<f64>,
 }
 
 impl PeriodMatrixF64 {
@@ -462,8 +462,8 @@ fn build_ma_matrices_cpu<'a>(
 
         let mut values: Vec<f64> = vec![f64::NAN; expected_len];
 
-        
-        
+
+
         let batch = ma_batch(
             ma_type,
             MaData::Candles {
@@ -577,7 +577,7 @@ mod tests {
 
         let metrics = builder.run_cpu(&candles);
         assert_eq!(metrics.len(), 1);
-        
+
         let m = &metrics[0];
         assert!(m.max_dd >= 0.0);
     }

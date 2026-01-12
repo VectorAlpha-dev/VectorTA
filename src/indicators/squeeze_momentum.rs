@@ -1,29 +1,3 @@
-//! # Squeeze Momentum Indicator (SMI)
-//!
-//! Detects market volatility "squeeze" conditions by comparing Bollinger Bands to Keltner Channels,
-//! while providing momentum oscillator values with directional signal indicators.
-//!
-//! ## Parameters
-//! - **length_bb**: Bollinger Bands lookback period. Defaults to 20.
-//! - **mult_bb**: BB standard deviation multiplier. Defaults to 2.0.
-//! - **length_kc**: Keltner Channels lookback period. Defaults to 20.
-//! - **mult_kc**: KC ATR multiplier. Defaults to 1.5.
-//!
-//! ## Returns
-//! - **`Ok(SqueezeMomentumOutput)`** containing three `Vec<f64>`:
-//!   - `squeeze`: Squeeze state (-1=on, 0=neutral, 1=off)
-//!   - `momentum`: Linear regression of price momentum
-//!   - `momentum_signal`: Directional acceleration signal (±1=accelerating, ±2=decelerating)
-//! - **`Err(SqueezeMomentumError)`** on invalid parameters or insufficient data.
-//!
-//! ## Developer Notes
-//! - Decision: SIMD disabled by default. Hot paths rely on monotonic deques (rolling highs/lows) and O(1) sliding OLS, which are branchy/memory‑bound and did not show clear SIMD wins. Runtime selection short‑circuits to scalar.
-//! - Scalar: Optimized classic scalar kernel with O(n) rolling updates (no O(N·W) temporaries). Bench (100k): ~2.31 ms vs ~10.6 ms baseline on native CPU.
-//! - Streaming Performance: O(1) per update via rings + accumulators; BB vs KC squeeze classification avoids sqrt (exact). Matches scalar outputs.
-//! - Memory: Uses `alloc_with_nan_prefix`/`make_uninit_matrix` and zero‑copy batching.
-//! - Batch Optimization (ScalarBatch): Shared precompute across rows (TR, SMA(close), TR SMA, rolling highs/lows, RAW → momentum/signal) keyed by unique `length_kc`/`length_bb`, then per‑row band classification; removes redundant work when sweeping params.
-//! - CUDA: PTX batch + many‑series kernels wrapped by `CudaSqueezeMomentum` with VRAM checks and primary‑context RAII; Python bindings reuse `DeviceArrayF32Py` for CUDA Array Interface v3 + DLPack v1.x.
-
 #[cfg(feature = "python")]
 use crate::utilities::kernel_validation::validate_kernel;
 #[cfg(feature = "python")]
@@ -35,9 +9,9 @@ use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::{source_type, Candles};
@@ -54,8 +28,6 @@ use rayon::prelude::*;
 use std::convert::AsRef;
 use std::mem::MaybeUninit;
 use thiserror::Error;
-
-
 
 #[derive(Debug, Clone)]
 pub enum SqueezeMomentumData<'a> {
@@ -89,7 +61,6 @@ impl Default for SqueezeMomentumParams {
 }
 
 impl SqueezeMomentumParams {
-    /// Resolve optional parameters to their actual values
     pub fn resolve(&self) -> ResolvedParams {
         ResolvedParams {
             length_bb: self.length_bb.unwrap_or(20),
@@ -100,7 +71,6 @@ impl SqueezeMomentumParams {
     }
 }
 
-/// Resolved parameters with no Option types
 #[derive(Debug, Clone, Copy)]
 struct ResolvedParams {
     length_bb: usize,
@@ -245,12 +215,14 @@ pub enum SqueezeMomentumError {
     #[error("smi: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("smi: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("smi: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(Kernel),
 }
-
-
 
 #[inline]
 pub fn squeeze_momentum(
@@ -259,9 +231,6 @@ pub fn squeeze_momentum(
     squeeze_momentum_with_kernel(input, Kernel::Auto)
 }
 
-/// Write squeeze momentum results directly into pre-allocated slices.
-/// This is more efficient than allocating new vectors when the caller already has buffers.
-/// All slices must have the same length as the input data.
 #[inline]
 pub fn squeeze_momentum_into_slices(
     squeeze_dst: &mut [f64],
@@ -270,7 +239,6 @@ pub fn squeeze_momentum_into_slices(
     input: &SqueezeMomentumInput,
     kern: Kernel,
 ) -> Result<(), SqueezeMomentumError> {
-    
     let (high, low, close): (&[f64], &[f64], &[f64]) = match &input.data {
         SqueezeMomentumData::Candles { candles } => (
             source_type(candles, "high"),
@@ -289,7 +257,10 @@ pub fn squeeze_momentum_into_slices(
     if squeeze_dst.len() != n || momentum_dst.len() != n || signal_dst.len() != n {
         return Err(SqueezeMomentumError::OutputLengthMismatch {
             expected: n,
-            got: squeeze_dst.len().max(momentum_dst.len()).max(signal_dst.len()),
+            got: squeeze_dst
+                .len()
+                .max(momentum_dst.len())
+                .max(signal_dst.len()),
         });
     }
 
@@ -321,9 +292,7 @@ pub fn squeeze_momentum_into_slices(
         });
     }
 
-    
-    
-    let _ = kern; 
+    let _ = kern;
     unsafe {
         return squeeze_momentum_scalar_classic(
             high,
@@ -362,12 +331,7 @@ pub fn squeeze_momentum_with_kernel(
     })
 }
 
-/// Write Squeeze Momentum outputs into caller-provided buffers without allocating.
-///
-/// - Preserves NaN warmups exactly as the Vec-returning API.
-/// - All output slice lengths must match the input length.
-/// - Uses `Kernel::Auto` for kernel selection (short-circuits to scalar here).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn squeeze_momentum_into(
     input: &SqueezeMomentumInput,
@@ -383,8 +347,6 @@ pub fn squeeze_momentum_into(
         Kernel::Auto,
     )
 }
-
-
 
 #[derive(Clone, Debug)]
 pub struct SqueezeMomentumBatchRange {
@@ -473,7 +435,10 @@ impl SqueezeMomentumBatchBuilder {
 }
 
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct SqueezeMomentumBatchParams {
     pub length_bb: usize,
     pub mult_bb: f64,
@@ -516,8 +481,12 @@ fn warmups_for(p: &SqueezeMomentumBatchParams) -> (usize, usize, usize) {
     (sq, mo, si)
 }
 
-fn expand_grid_sm(range: &SqueezeMomentumBatchRange) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
-    fn axis_usize((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, SqueezeMomentumError> {
+fn expand_grid_sm(
+    range: &SqueezeMomentumBatchRange,
+) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
+    fn axis_usize(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, SqueezeMomentumError> {
         if step == 0 {
             return Ok(vec![start]);
         }
@@ -657,7 +626,6 @@ pub fn squeeze_momentum_batch_with_kernel(
         });
     }
 
-    
     let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kernel,
@@ -680,7 +648,6 @@ pub fn squeeze_momentum_batch_with_kernel(
             step: "rows*cols".into(),
         })?;
 
-    
     let mut buf_sq = make_uninit_matrix(rows, cols);
     let mut buf_mo = make_uninit_matrix(rows, cols);
     let mut buf_si = make_uninit_matrix(rows, cols);
@@ -693,7 +660,6 @@ pub fn squeeze_momentum_batch_with_kernel(
     init_matrix_prefixes(&mut buf_mo, cols, &warm_mo);
     init_matrix_prefixes(&mut buf_si, cols, &warm_si);
 
-    
     let mut sq =
         unsafe { core::slice::from_raw_parts_mut(buf_sq.as_mut_ptr() as *mut f64, rows * cols) };
     let mut mo =
@@ -702,12 +668,11 @@ pub fn squeeze_momentum_batch_with_kernel(
         unsafe { core::slice::from_raw_parts_mut(buf_si.as_mut_ptr() as *mut f64, rows * cols) };
 
     if matches!(batch_kernel, Kernel::ScalarBatch) {
-        
         squeeze_momentum_batch_fill_scalar_shared(high, low, close, &combos, sq, mo, si);
     } else {
         let do_row = |row: usize, sq_row: &mut [f64], mo_row: &mut [f64], si_row: &mut [f64]| {
             let p = &combos[row];
-            
+
             let params = SqueezeMomentumParams {
                 length_bb: Some(p.length_bb),
                 mult_bb: Some(p.mult_bb),
@@ -740,7 +705,6 @@ pub fn squeeze_momentum_batch_with_kernel(
         }
     }
 
-    
     let squeeze = unsafe {
         Vec::from_raw_parts(
             buf_sq.as_mut_ptr() as *mut f64,
@@ -789,7 +753,6 @@ pub fn squeeze_momentum_batch_inner_into(
 ) -> Result<Vec<SqueezeMomentumBatchParams>, SqueezeMomentumError> {
     let combos = expand_grid_sm(sweep)?;
 
-    
     let batch_kernel = match kernel {
         Kernel::Auto => detect_best_batch_kernel(),
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => kernel,
@@ -824,7 +787,6 @@ pub fn squeeze_momentum_batch_inner_into(
         });
     }
 
-    
     unsafe {
         let sq_mu = core::slice::from_raw_parts_mut(
             out_squeeze.as_mut_ptr() as *mut MaybeUninit<f64>,
@@ -847,7 +809,6 @@ pub fn squeeze_momentum_batch_inner_into(
     }
 
     if matches!(batch_kernel, Kernel::ScalarBatch) {
-        
         let combos_ref: &[SqueezeMomentumBatchParams] = &combos;
         squeeze_momentum_batch_fill_scalar_shared(
             high,
@@ -908,8 +869,6 @@ pub fn squeeze_momentum_batch_inner_into(
     Ok(combos)
 }
 
-
-
 fn sma_slice(data: &[f64], period: usize) -> Vec<f64> {
     let warm = period.saturating_sub(1);
     let n = data.len();
@@ -944,12 +903,10 @@ fn squeeze_momentum_batch_fill_scalar_shared(
     let rows = combos.len();
     let cols = n;
 
-    
     let first_valid = (0..n)
         .find(|&i| !(high[i].is_nan() || low[i].is_nan() || close[i].is_nan()))
         .unwrap_or(n);
 
-    
     let mut uniq_lkc: HashSet<usize> = HashSet::new();
     let mut uniq_lbb: HashSet<usize> = HashSet::new();
     for p in combos {
@@ -957,10 +914,8 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         uniq_lbb.insert(p.length_bb);
     }
 
-    
     let tr = true_range_slice(high, low, close);
 
-    
     struct KcPrecomp {
         kc_sma: Vec<f64>,
         tr_ma: Vec<f64>,
@@ -972,13 +927,11 @@ fn squeeze_momentum_batch_fill_scalar_shared(
     }
     let mut kc_map: HashMap<usize, KcPrecomp> = HashMap::with_capacity(uniq_lkc.len());
     for &lkc in &uniq_lkc {
-        
         let kc_sma = sma_slice(close, lkc);
         let tr_ma = sma_slice(&tr, lkc);
         let highest = rolling_high_slice(high, lkc);
         let lowest = rolling_low_slice(low, lkc);
 
-        
         let mut raw = alloc_with_nan_prefix(n, lkc.saturating_sub(1));
         for i in first_valid..n {
             if i + 1 >= lkc
@@ -1030,7 +983,6 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         );
     }
 
-    
     struct BbPrecomp {
         bb_sma: Vec<f64>,
         dev: Vec<f64>,
@@ -1042,7 +994,6 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         bb_map.insert(lbb, BbPrecomp { bb_sma, dev });
     }
 
-    
     let fill_row = |row: usize, sq_row: &mut [f64], mo_row: &mut [f64], si_row: &mut [f64]| {
         let p = &combos[row];
         let warm_sq = p.length_bb.max(p.length_kc).saturating_sub(1);
@@ -1050,7 +1001,6 @@ fn squeeze_momentum_batch_fill_scalar_shared(
         let kc = kc_map.get(&p.length_kc).unwrap();
         let bb = bb_map.get(&p.length_bb).unwrap();
 
-        
         for i in first_valid..n {
             if i >= warm_sq
                 && kc.kc_sma[i].is_finite()
@@ -1073,12 +1023,10 @@ fn squeeze_momentum_batch_fill_scalar_shared(
                     0.0
                 };
             } else if i >= warm_sq {
-                
                 sq_row[i] = f64::NAN;
             }
         }
 
-        
         mo_row.copy_from_slice(&kc.momentum);
         si_row.copy_from_slice(&kc.signal);
     };
@@ -1106,13 +1054,6 @@ fn squeeze_momentum_batch_fill_scalar_shared(
     }
 }
 
-
-
-/// Classic scalar kernel with O(n) rolling updates and minimal temporaries.
-/// - Rolling BB mean/std via sliding sums and FMA
-/// - Rolling KC mid and TR via sliding sums
-/// - Highest/lowest over KC window via monotonic deques (O(n))
-/// - Linear regression on RAW via O(1) sliding OLS accumulators
 #[inline(always)]
 pub unsafe fn squeeze_momentum_scalar_classic(
     high: &[f64],
@@ -1132,43 +1073,35 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         return Ok(());
     }
 
-    
     let warm_sq = lbb.max(lkc).saturating_sub(1);
     let warm_m = lkc.saturating_sub(1);
     let warm_sig = warm_m + 1;
 
-    
     squeeze_dst[..warm_sq.min(n)].fill(f64::NAN);
     momentum_dst[..warm_m.min(n)].fill(f64::NAN);
     signal_dst[..warm_sig.min(n)].fill(f64::NAN);
 
-    
     if first_valid >= n {
         return Ok(());
     }
 
-    
     let hp = high.as_ptr();
     let lp = low.as_ptr();
     let cp = close.as_ptr();
 
-    
     let inv_lbb = 1.0 / (lbb as f64);
     let inv_lkc = 1.0 / (lkc as f64);
 
-    
     let p = lkc as f64;
     let sum_x = 0.5 * p * (p + 1.0);
     let sum_x2 = p * (p + 1.0) * (2.0 * p + 1.0) / 6.0;
     let denom = p * sum_x2 - sum_x * sum_x;
     let inv_denom = 1.0 / denom;
-    let x_last_minus_xbar = p - sum_x * inv_lkc; 
+    let x_last_minus_xbar = p - sum_x * inv_lkc;
 
-    
     let start_bb = first_valid + lbb.saturating_sub(1);
     let start_kc = first_valid + lkc.saturating_sub(1);
 
-    
     let mut sum_bb = 0.0_f64;
     let mut sumsq_bb = 0.0_f64;
     if start_bb < n {
@@ -1180,7 +1113,6 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         }
     }
 
-    
     let mut sum_kc = 0.0_f64;
     let mut sum_tr = 0.0_f64;
     if start_kc < n {
@@ -1188,7 +1120,6 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         for j in s..=start_kc {
             sum_kc += *cp.add(j);
 
-            
             let h = *hp.add(j);
             let l = *lp.add(j);
             let tr = if j == 0 {
@@ -1204,26 +1135,20 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         }
     }
 
-    
-    
     let mut dq_max_idx = vec![0usize; lkc];
     let mut dq_min_idx = vec![0usize; lkc];
-    let mut max_head: usize = 0; 
-    let mut max_len: usize = 0; 
+    let mut max_head: usize = 0;
+    let mut max_len: usize = 0;
     let mut min_head: usize = 0;
     let mut min_len: usize = 0;
 
-    
     let mut raw_buf: Vec<f64> = vec![f64::NAN; lkc];
     let mut rb_pos: usize = 0;
     let mut raw_count: usize = 0;
 
-    
-    
     let mut S0 = 0.0_f64;
     let mut S1 = 0.0_f64;
 
-    
     #[inline(always)]
     fn rb_back(head: usize, len: usize, cap: usize) -> usize {
         (head + len - 1) % cap
@@ -1234,11 +1159,9 @@ pub unsafe fn squeeze_momentum_scalar_classic(
     }
 
     for i in first_valid..n {
-        
         let hi = *hp.add(i);
         let lo = *lp.add(i);
 
-        
         while max_len > 0 {
             let idx = dq_max_idx[max_head];
             if idx + lkc <= i {
@@ -1248,7 +1171,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 break;
             }
         }
-        
+
         while min_len > 0 {
             let idx = dq_min_idx[min_head];
             if idx + lkc <= i {
@@ -1259,12 +1182,11 @@ pub unsafe fn squeeze_momentum_scalar_classic(
             }
         }
 
-        
         while max_len > 0 {
             let back = rb_back(max_head, max_len, lkc);
             let idx = dq_max_idx[back];
             if *hp.add(idx) <= hi {
-                max_len -= 1; 
+                max_len -= 1;
             } else {
                 break;
             }
@@ -1273,12 +1195,11 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         dq_max_idx[pos] = i;
         max_len += 1;
 
-        
         while min_len > 0 {
             let back = rb_back(min_head, min_len, lkc);
             let idx = dq_min_idx[back];
             if *lp.add(idx) >= lo {
-                min_len -= 1; 
+                min_len -= 1;
             } else {
                 break;
             }
@@ -1287,22 +1208,19 @@ pub unsafe fn squeeze_momentum_scalar_classic(
         dq_min_idx[pos] = i;
         min_len += 1;
 
-        
         if i > start_bb {
             let c_new = *cp.add(i);
             let c_old = *cp.add(i - lbb);
             sum_bb += c_new - c_old;
-            
+
             sumsq_bb = f64::mul_add(c_new, c_new, sumsq_bb - c_old * c_old);
         }
 
-        
         if i > start_kc {
             let c_new = *cp.add(i);
             let c_old = *cp.add(i - lkc);
             sum_kc += c_new - c_old;
 
-            
             let tr_new = {
                 let h = *hp.add(i);
                 let l = *lp.add(i);
@@ -1316,7 +1234,7 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                     tr1.max(tr2).max(tr3)
                 }
             };
-            
+
             let old_idx = i - lkc;
             let tr_old = {
                 let h = *hp.add(old_idx);
@@ -1334,7 +1252,6 @@ pub unsafe fn squeeze_momentum_scalar_classic(
             sum_tr += tr_new - tr_old;
         }
 
-        
         if i >= start_bb && i >= start_kc && i >= warm_sq {
             let mean_bb = sum_bb * inv_lbb;
             let var_bb = f64::mul_add(-mean_bb, mean_bb, sumsq_bb * inv_lbb);
@@ -1358,22 +1275,17 @@ pub unsafe fn squeeze_momentum_scalar_classic(
             };
         }
 
-        
         if i >= start_kc {
-            
             let hi_idx = dq_max_idx[max_head];
             let lo_idx = dq_min_idx[min_head];
             let highest = *hp.add(hi_idx);
             let lowest = *lp.add(lo_idx);
 
-            
             let kc_mid = sum_kc * inv_lkc;
 
-            
             let c_i = *cp.add(i);
             let raw_i = c_i - 0.25 * (highest + lowest) - 0.5 * kc_mid;
 
-            
             let y_old = raw_buf[rb_pos];
             raw_buf[rb_pos] = raw_i;
             rb_pos += 1;
@@ -1381,16 +1293,14 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 rb_pos = 0;
             }
 
-            
             if raw_count < lkc {
                 raw_count += 1;
             }
 
-            
             if raw_count == lkc && i == start_kc + lkc - 1 {
                 let mut s0 = 0.0_f64;
                 let mut s1 = 0.0_f64;
-                
+
                 let mut idx = rb_pos;
                 let mut j = 1.0_f64;
                 for _ in 0..lkc {
@@ -1406,13 +1316,11 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                 S0 = s0;
                 S1 = s1;
 
-                
                 let b = f64::mul_add(-sum_x, S0, p * S1) * inv_denom;
                 let ybar = S0 * inv_lkc;
                 let yhat_last = f64::mul_add(b, x_last_minus_xbar, ybar);
                 *momentum_dst.get_unchecked_mut(i) = yhat_last;
 
-                
                 if i >= 1 {
                     let prev = *momentum_dst.get_unchecked(i - 1);
                     if prev.is_finite() && yhat_last.is_finite() {
@@ -1434,22 +1342,17 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                     }
                 }
             } else if raw_count == lkc {
-                
-                
-                
                 let y_new = raw_i;
                 let new_S1 = (S1 - S0) + p * y_new;
                 let new_S0 = (S0 - y_old) + y_new;
                 S1 = new_S1;
                 S0 = new_S0;
 
-                
                 let b = f64::mul_add(-sum_x, S0, p * S1) * inv_denom;
                 let ybar = S0 * inv_lkc;
                 let yhat_last = f64::mul_add(b, x_last_minus_xbar, ybar);
                 *momentum_dst.get_unchecked_mut(i) = yhat_last;
 
-                
                 if i >= 1 {
                     let prev = *momentum_dst.get_unchecked(i - 1);
                     if prev.is_finite() && yhat_last.is_finite() {
@@ -1471,7 +1374,6 @@ pub unsafe fn squeeze_momentum_scalar_classic(
                     }
                 }
             } else {
-                
                 *momentum_dst.get_unchecked_mut(i) = f64::NAN;
                 if i >= warm_sig {
                     *signal_dst.get_unchecked_mut(i) = f64::NAN;
@@ -1482,8 +1384,6 @@ pub unsafe fn squeeze_momentum_scalar_classic(
 
     Ok(())
 }
-
-
 
 fn stddev_slice(data: &[f64], period: usize) -> Vec<f64> {
     let warmup = period.saturating_sub(1);
@@ -1535,7 +1435,7 @@ fn true_range_slice(high: &[f64], low: &[f64], close: &[f64]) -> Vec<f64> {
     if high.len() != low.len() || low.len() != close.len() {
         return vec![];
     }
-    let mut output = alloc_with_nan_prefix(high.len(), 0); 
+    let mut output = alloc_with_nan_prefix(high.len(), 0);
     let mut prev_close = close[0];
     output[0] = high[0].max(low[0]) - low[0].min(high[0]);
     for i in 1..high.len() {
@@ -1557,12 +1457,11 @@ fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
         return output;
     }
 
-    
     use std::collections::VecDeque;
     let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
     for i in 0..n {
         let v = data[i];
-        
+
         while let Some(&front) = dq.front() {
             if front + period <= i {
                 dq.pop_front();
@@ -1570,7 +1469,7 @@ fn rolling_high_slice(data: &[f64], period: usize) -> Vec<f64> {
                 break;
             }
         }
-        
+
         if v.is_finite() {
             while let Some(&idx) = dq.back() {
                 if data[idx] <= v {
@@ -1599,12 +1498,11 @@ fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
         return output;
     }
 
-    
     use std::collections::VecDeque;
     let mut dq: VecDeque<usize> = VecDeque::with_capacity(period);
     for i in 0..n {
         let v = data[i];
-        
+
         while let Some(&front) = dq.front() {
             if front + period <= i {
                 dq.pop_front();
@@ -1612,7 +1510,7 @@ fn rolling_low_slice(data: &[f64], period: usize) -> Vec<f64> {
                 break;
             }
         }
-        
+
         if v.is_finite() {
             while let Some(&idx) = dq.back() {
                 if data[idx] >= v {
@@ -1644,7 +1542,6 @@ fn linearreg_slice(data: &[f64], period: usize) -> Vec<f64> {
         if subset.iter().all(|x| x.is_finite()) {
             output[i] = linear_regression_last_point(subset);
         } else {
-            
             output[i] = f64::NAN;
         }
     }
@@ -1677,85 +1574,63 @@ fn linear_regression_last_point(window: &[f64]) -> f64 {
     intercept + slope * x_last
 }
 
-
-
-
-
-
-
-
-
-
-
-/// Streaming implementation for Squeeze Momentum indicator
 pub struct SqueezeMomentumStream {
-    
     params: SqueezeMomentumParams,
     rp: ResolvedParams,
 
-    
-    n: usize,        
-    ready_bb: bool,  
-    ready_kc: bool,  
-    ready_raw: bool, 
+    n: usize,
+    ready_bb: bool,
+    ready_kc: bool,
+    ready_raw: bool,
 
-    
     lbb: usize,
     inv_lbb: f64,
     sum_bb: f64,
     sumsq_bb: f64,
-    rb_close_bb: Vec<f64>, 
-    bb_pos: usize,         
+    rb_close_bb: Vec<f64>,
+    bb_pos: usize,
 
-    
     lkc: usize,
     inv_lkc: f64,
     mbb: f64,
     mkc: f64,
 
-    
     sum_kc: f64,
-    rb_close_kc: Vec<f64>, 
+    rb_close_kc: Vec<f64>,
     kc_pos: usize,
 
-    
     sum_tr: f64,
-    rb_tr: Vec<f64>, 
+    rb_tr: Vec<f64>,
 
-    prev_close: f64, 
+    prev_close: f64,
 
-    
-    ring_high: Vec<f64>, 
-    ring_low: Vec<f64>,  
+    ring_high: Vec<f64>,
+    ring_low: Vec<f64>,
 
-    dq_hi_idx: Vec<usize>, 
+    dq_hi_idx: Vec<usize>,
     dq_hi_head: usize,
     dq_hi_len: usize,
 
-    dq_lo_idx: Vec<usize>, 
+    dq_lo_idx: Vec<usize>,
     dq_lo_head: usize,
     dq_lo_len: usize,
 
-    
-    raw_ring: Vec<f64>, 
+    raw_ring: Vec<f64>,
     raw_pos: usize,
     raw_count: usize,
-    S0: f64, 
-    S1: f64, 
+    S0: f64,
+    S1: f64,
 
-    
     p_f64: f64,
     sum_x: f64,
     sum_x2: f64,
     inv_denom: f64,
     x_last_minus_xbar: f64,
 
-    
     last_momentum: f64,
 }
 
 impl SqueezeMomentumStream {
-    /// Create a new SqueezeMomentumStream with given parameters (validated & resolved).
     pub fn try_new(params: SqueezeMomentumParams) -> Result<Self, SqueezeMomentumError> {
         let rp = params.resolve();
         if rp.length_bb == 0 || rp.length_kc == 0 {
@@ -1771,7 +1646,6 @@ impl SqueezeMomentumStream {
         let inv_lbb = 1.0 / (lbb as f64);
         let inv_lkc = 1.0 / (lkc as f64);
 
-        
         let p = lkc as f64;
         let sum_x = 0.5 * p * (p + 1.0);
         let sum_x2 = p * (p + 1.0) * (2.0 * p + 1.0) / 6.0;
@@ -1840,7 +1714,6 @@ impl SqueezeMomentumStream {
         })
     }
 
-    /// Create with default parameters
     pub fn new() -> Self {
         Self::try_new(SqueezeMomentumParams::default()).unwrap()
     }
@@ -1865,8 +1738,6 @@ impl SqueezeMomentumStream {
         *len -= 1;
     }
 
-    /// Classification without sqrt:
-    /// Returns -1.0 (on), 0.0 (neutral), 1.0 (off).
     #[inline(always)]
     fn classify_squeeze_no_sqrt(
         mean_bb: f64,
@@ -1879,13 +1750,11 @@ impl SqueezeMomentumStream {
         let upper_kc = kc_mid + mkc * tr_avg;
         let lower_kc = kc_mid - mkc * tr_avg;
 
-        
-        let d1 = mean_bb - lower_kc; 
-        let d2 = upper_kc - mean_bb; 
+        let d1 = mean_bb - lower_kc;
+        let d2 = upper_kc - mean_bb;
 
-        let m = mbb.abs(); 
+        let m = mbb.abs();
 
-        
         if d1 > 0.0 && d2 > 0.0 {
             let thr = (d1.min(d2) / m);
             if var_bb < thr * thr {
@@ -1893,7 +1762,6 @@ impl SqueezeMomentumStream {
             }
         }
 
-        
         let t1 = d1.max(0.0);
         let t2 = d2.max(0.0);
         let thr_off = (t1.max(t2) / m);
@@ -1903,10 +1771,7 @@ impl SqueezeMomentumStream {
         0.0
     }
 
-    /// Update the stream with a new (high, low, close).
-    /// Returns None until both windows are warm and the 1‑bar lagged signal is available.
     pub fn update(&mut self, high: f64, low: f64, close: f64) -> Option<(f64, f64, f64)> {
-        
         if !(high.is_finite() && low.is_finite() && close.is_finite()) {
             self.n = self.n.saturating_add(1);
             return None;
@@ -1916,11 +1781,7 @@ impl SqueezeMomentumStream {
         let lbb = self.lbb;
         let lkc = self.lkc;
 
-        
-        
-        
         if self.ready_bb {
-            
             let old = self.rb_close_bb[self.bb_pos];
             self.sum_bb += close - old;
             self.sumsq_bb += close * close - old * old;
@@ -1940,10 +1801,6 @@ impl SqueezeMomentumStream {
             }
         }
 
-        
-        
-        
-        
         let tr = if i == 0 || !self.prev_close.is_finite() {
             (high - low).abs()
         } else {
@@ -1962,7 +1819,7 @@ impl SqueezeMomentumStream {
             self.sum_tr += tr - old_tr;
             self.rb_close_kc[self.kc_pos] = close;
             self.rb_tr[self.kc_pos] = tr;
-            
+
             self.kc_pos += 1;
             if self.kc_pos == lkc {
                 self.kc_pos = 0;
@@ -1979,14 +1836,10 @@ impl SqueezeMomentumStream {
             }
         }
 
-        
-        
-        
         let slot = i % lkc;
         self.ring_high[slot] = high;
         self.ring_low[slot] = low;
 
-        
         while self.dq_hi_len > 0 {
             let idx = self.dq_hi_idx[self.dq_hi_head];
             if idx + lkc <= i {
@@ -2004,7 +1857,6 @@ impl SqueezeMomentumStream {
             }
         }
 
-        
         while self.dq_hi_len > 0 {
             let back = Self::dq_back(self.dq_hi_head, self.dq_hi_len, lkc);
             let idx = self.dq_hi_idx[back];
@@ -2023,7 +1875,6 @@ impl SqueezeMomentumStream {
             i,
         );
 
-        
         while self.dq_lo_len > 0 {
             let back = Self::dq_back(self.dq_lo_head, self.dq_lo_len, lkc);
             let idx = self.dq_lo_idx[back];
@@ -2042,9 +1893,6 @@ impl SqueezeMomentumStream {
             i,
         );
 
-        
-        
-        
         let mut momentum = f64::NAN;
         if self.ready_kc {
             let hi_idx = self.dq_hi_idx[self.dq_hi_head];
@@ -2053,14 +1901,12 @@ impl SqueezeMomentumStream {
             let lowest = self.ring_low[lo_idx % lkc];
             let kc_mid = self.sum_kc * self.inv_lkc;
 
-            
             let raw_i = close - 0.25 * (highest + lowest) - 0.5 * kc_mid;
 
             if self.raw_count < lkc {
-                
                 self.raw_ring[slot] = raw_i;
                 self.raw_count += 1;
-                
+
                 let j = self.raw_count as f64;
                 self.S0 += raw_i;
                 self.S1 = f64::mul_add(j, raw_i, self.S1);
@@ -2068,20 +1914,16 @@ impl SqueezeMomentumStream {
                     self.ready_raw = true;
                 }
             } else {
-                
                 let y_old = self.raw_ring[slot];
                 self.raw_ring[slot] = raw_i;
 
-                
-                
                 self.S1 = (self.S1 - self.S0) + self.p_f64 * raw_i;
                 self.S0 = (self.S0 - y_old) + raw_i;
             }
 
-            
             if self.ready_raw {
                 let ybar = self.S0 * self.inv_lkc;
-                
+
                 let b_num = -self.sum_x * self.S0 + self.p_f64 * self.S1;
                 let b = if self.inv_denom == 0.0 {
                     0.0
@@ -2090,19 +1932,14 @@ impl SqueezeMomentumStream {
                 };
                 momentum = f64::mul_add(b, self.x_last_minus_xbar, ybar);
             } else {
-                
-                
                 momentum = 0.0;
             }
         }
 
-        
-        
-        
         let mut squeeze = f64::NAN;
         if self.ready_bb && self.ready_kc {
             let mean_bb = self.sum_bb * self.inv_lbb;
-            let var_bb = f64::mul_add(self.sumsq_bb * self.inv_lbb, 1.0, -mean_bb * mean_bb); 
+            let var_bb = f64::mul_add(self.sumsq_bb * self.inv_lbb, 1.0, -mean_bb * mean_bb);
             let kc_mid = self.sum_kc * self.inv_lkc;
             let tr_avg = self.sum_tr * self.inv_lkc;
             squeeze = Self::classify_squeeze_no_sqrt(
@@ -2115,13 +1952,9 @@ impl SqueezeMomentumStream {
             );
         }
 
-        
-        
-        
         let mut signal = f64::NAN;
         if momentum.is_finite() {
             if self.last_momentum.is_finite() {
-                
                 signal = if momentum > 0.0 {
                     if momentum > self.last_momentum {
                         1.0
@@ -2136,21 +1969,16 @@ impl SqueezeMomentumStream {
                     }
                 };
             } else {
-                
-                
                 signal = if momentum >= 0.0 { 2.0 } else { -2.0 };
             }
         }
 
-        
         if momentum.is_finite() {
             self.last_momentum = momentum;
         }
 
-        
         self.n = i + 1;
 
-        
         if self.ready_bb && self.ready_kc {
             Some((squeeze, momentum, signal))
         } else {
@@ -2165,13 +1993,11 @@ impl Default for SqueezeMomentumStream {
     }
 }
 
-
-
 #[cfg(feature = "python")]
 #[pyclass(name = "SqueezeMomentumStream")]
 pub struct SqueezeMomentumStreamPy {
     stream: SqueezeMomentumStream,
-    
+
     lbb: usize,
     lkc: usize,
     n: usize,
@@ -2191,7 +2017,12 @@ impl SqueezeMomentumStreamPy {
         };
         let stream = SqueezeMomentumStream::try_new(params)
             .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Ok(SqueezeMomentumStreamPy { stream, lbb: length_bb, lkc: length_kc, n: 0 })
+        Ok(SqueezeMomentumStreamPy {
+            stream,
+            lbb: length_bb,
+            lkc: length_kc,
+            n: 0,
+        })
     }
 
     fn update(
@@ -2204,7 +2035,6 @@ impl SqueezeMomentumStreamPy {
         match self.stream.update(high, low, close) {
             Some((squeeze, momentum, signal)) => (Some(squeeze), Some(momentum), Some(signal)),
             None => {
-                
                 if self.n >= self.lbb.max(self.lkc) {
                     (Some(0.0), Some(0.0), Some(2.0))
                 } else {
@@ -2214,13 +2044,10 @@ impl SqueezeMomentumStreamPy {
         }
     }
 
-    /// Returns the number of updates processed so far (Python helper)
     pub fn count(&self) -> usize {
         self.n
     }
 }
-
-
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "squeeze_momentum")]
@@ -2270,13 +2097,11 @@ pub fn squeeze_momentum_py<'py>(
     Ok((sq, mo, si))
 }
 
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::cuda::{cuda_available, CudaSqueezeMomentum};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
 #[cfg(all(feature = "python", feature = "cuda"))]
-
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "squeeze_momentum_cuda_batch_dev")]
 #[pyo3(signature = (high_f32, low_f32, close_f32, length_bb_range, mult_bb_range, length_kc_range, mult_kc_range, device_id=0))]
@@ -2313,9 +2138,21 @@ pub fn squeeze_momentum_cuda_batch_dev_py(
             .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: sq, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: mo, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: si, _ctx: Some(ctx), device_id: Some(dev_id) },
+        DeviceArrayF32Py {
+            inner: sq,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: mo,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: si,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     ))
 }
 
@@ -2353,9 +2190,21 @@ pub fn squeeze_momentum_cuda_many_series_one_param_dev_py(
         .map_err(|e| PyValueError::new_err(e.to_string()))
     })?;
     Ok((
-        DeviceArrayF32Py { inner: sq, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: mo, _ctx: Some(ctx.clone()), device_id: Some(dev_id) },
-        DeviceArrayF32Py { inner: si, _ctx: Some(ctx), device_id: Some(dev_id) },
+        DeviceArrayF32Py {
+            inner: sq,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: mo,
+            _ctx: Some(ctx.clone()),
+            device_id: Some(dev_id),
+        },
+        DeviceArrayF32Py {
+            inner: si,
+            _ctx: Some(ctx),
+            device_id: Some(dev_id),
+        },
     ))
 }
 
@@ -2395,13 +2244,12 @@ pub fn squeeze_momentum_batch_py<'py>(
     })?;
 
     let dict = PyDict::new(py);
-    
+
     dict.set_item(
         "values",
         PyArray1::from_vec(py, out.momentum).reshape((out.rows, out.cols))?,
     )?;
 
-    
     dict.set_item(
         "squeeze",
         PyArray1::from_vec(py, out.squeeze).reshape((out.rows, out.cols))?,
@@ -2411,7 +2259,6 @@ pub fn squeeze_momentum_batch_py<'py>(
         PyArray1::from_vec(py, out.signal).reshape((out.rows, out.cols))?,
     )?;
 
-    
     dict.set_item(
         "length_bb",
         PyArray1::from_vec(
@@ -2443,17 +2290,15 @@ pub fn squeeze_momentum_batch_py<'py>(
     Ok(dict)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SmiResult {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn squeeze_momentum_js(
     high: &[f64],
@@ -2484,7 +2329,7 @@ pub fn squeeze_momentum_js(
     Ok(values)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SmiBatchConfig {
     pub length_bb_range: (usize, usize, usize),
@@ -2493,19 +2338,19 @@ pub struct SmiBatchConfig {
     pub mult_kc_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct SmiBatchJsOutput {
-    pub values: Vec<f64>, 
-    pub rows: usize,      
-    pub cols: usize,      
+    pub values: Vec<f64>,
+    pub rows: usize,
+    pub cols: usize,
     pub length_bb: Vec<usize>,
     pub mult_bb: Vec<f64>,
     pub length_kc: Vec<usize>,
     pub mult_kc: Vec<f64>,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = "squeeze_momentum_batch")]
 pub fn squeeze_momentum_batch(
     high: &[f64],
@@ -2525,7 +2370,6 @@ pub fn squeeze_momentum_batch(
         squeeze_momentum_batch_with_kernel(high, low, close, &sweep, detect_best_batch_kernel())
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-    
     let mut length_bb = Vec::with_capacity(out.combos.len());
     let mut mult_bb = Vec::with_capacity(out.combos.len());
     let mut length_kc = Vec::with_capacity(out.combos.len());
@@ -2539,7 +2383,7 @@ pub fn squeeze_momentum_batch(
     }
 
     let js = SmiBatchJsOutput {
-        values: out.momentum, 
+        values: out.momentum,
         rows: out.rows,
         cols: out.cols,
         length_bb,
@@ -2551,7 +2395,7 @@ pub fn squeeze_momentum_batch(
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn squeeze_momentum_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -2561,7 +2405,7 @@ pub fn squeeze_momentum_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn squeeze_momentum_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -2569,7 +2413,7 @@ pub fn squeeze_momentum_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn squeeze_momentum_into(
     input_ptr: *const f64,
@@ -2613,8 +2457,6 @@ pub fn squeeze_momentum_into(
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2623,25 +2465,27 @@ mod tests {
 
     #[test]
     fn test_squeeze_momentum_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
         let input = SqueezeMomentumInput::with_default_candles(&candles);
 
-        
         let baseline = squeeze_momentum(&input)?;
         let n = baseline.momentum.len();
 
-        
         let mut out_sq = vec![0.0; n];
         let mut out_mo = vec![0.0; n];
         let mut out_si = vec![0.0; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         squeeze_momentum_into(&input, &mut out_sq, &mut out_mo, &mut out_si)?;
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
-            squeeze_momentum_into_slices(&mut out_sq, &mut out_mo, &mut out_si, &input, Kernel::Auto)?;
+            squeeze_momentum_into_slices(
+                &mut out_sq,
+                &mut out_mo,
+                &mut out_si,
+                &input,
+                Kernel::Auto,
+            )?;
         }
 
         assert_eq!(baseline.squeeze.len(), n);
@@ -2850,25 +2694,20 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let test_params = vec![
-            
             SqueezeMomentumParams::default(),
-            
             SqueezeMomentumParams {
                 length_bb: Some(2),
                 mult_bb: Some(1.0),
                 length_kc: Some(2),
                 mult_kc: Some(1.0),
             },
-            
             SqueezeMomentumParams {
                 length_bb: Some(5),
                 mult_bb: Some(2.0),
                 length_kc: Some(5),
                 mult_kc: Some(1.5),
             },
-            
             SqueezeMomentumParams {
                 length_bb: Some(10),
                 mult_bb: Some(1.5),
@@ -2881,7 +2720,6 @@ mod tests {
                 length_kc: Some(14),
                 mult_kc: Some(1.0),
             },
-            
             SqueezeMomentumParams {
                 length_bb: Some(20),
                 mult_bb: Some(0.5),
@@ -2894,21 +2732,18 @@ mod tests {
                 length_kc: Some(20),
                 mult_kc: Some(3.0),
             },
-            
             SqueezeMomentumParams {
                 length_bb: Some(50),
                 mult_bb: Some(2.0),
                 length_kc: Some(50),
                 mult_kc: Some(1.5),
             },
-            
             SqueezeMomentumParams {
                 length_bb: Some(100),
                 mult_bb: Some(1.5),
                 length_kc: Some(100),
                 mult_kc: Some(2.0),
             },
-            
             SqueezeMomentumParams {
                 length_bb: Some(10),
                 mult_bb: Some(2.0),
@@ -2927,15 +2762,13 @@ mod tests {
             let input = SqueezeMomentumInput::from_candles(&candles, params.clone());
             let output = squeeze_momentum_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in output.squeeze.iter().enumerate() {
                 if val.is_nan() {
-                    continue; 
+                    continue;
                 }
 
                 let bits = val.to_bits();
 
-                
                 if bits == 0x11111111_11111111 {
                     panic!(
 						"[{}] Found alloc_with_nan_prefix poison value {} (0x{:016X}) at index {} in squeeze \
@@ -2976,7 +2809,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.momentum.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3024,7 +2856,6 @@ mod tests {
                 }
             }
 
-            
             for (i, &val) in output.momentum_signal.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -3081,7 +2912,7 @@ mod tests {
         _test_name: &str,
         _kernel: Kernel,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Ok(()) 
+        Ok(())
     }
 
     #[cfg(feature = "proptest")]
@@ -3093,22 +2924,16 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (2usize..=50).prop_flat_map(|max_period| {
-            let data_len = max_period * 2 + 50; 
+            let data_len = max_period * 2 + 50;
             (
-                
                 prop::collection::vec(
                     (100f64..10000f64).prop_filter("finite", |x| x.is_finite()),
                     data_len,
                 ),
-                
                 2usize..=max_period.min(30),
-                
                 0.5f64..3.0f64,
-                
                 2usize..=max_period.min(30),
-                
                 0.5f64..3.0f64,
             )
         });
@@ -3117,28 +2942,23 @@ mod tests {
             .run(
                 &strat,
                 |(base_prices, length_bb, mult_bb, length_kc, mult_kc)| {
-                    
                     let n = base_prices.len();
                     let mut high = Vec::with_capacity(n);
                     let mut low = Vec::with_capacity(n);
                     let mut close = Vec::with_capacity(n);
 
-                    
                     let is_flat = base_prices.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-10);
 
                     for &base in &base_prices {
                         if is_flat {
-                            
                             high.push(base);
                             low.push(base);
                             close.push(base);
                         } else {
-                            
-                            
-                            let variation = base * 0.01; 
+                            let variation = base * 0.01;
                             let h = base + variation;
                             let l = base - variation;
-                            let c = base + variation * 0.2; 
+                            let c = base + variation * 0.2;
 
                             high.push(h);
                             low.push(l);
@@ -3155,13 +2975,10 @@ mod tests {
                     let input =
                         SqueezeMomentumInput::from_slices(&high, &low, &close, params.clone());
 
-                    
                     let output = squeeze_momentum_with_kernel(&input, kernel)?;
 
-                    
                     let ref_output = squeeze_momentum_with_kernel(&input, Kernel::Scalar)?;
 
-                    
                     prop_assert_eq!(output.squeeze.len(), n, "Squeeze length mismatch");
                     prop_assert_eq!(output.momentum.len(), n, "Momentum length mismatch");
                     prop_assert_eq!(
@@ -3170,13 +2987,10 @@ mod tests {
                         "Momentum signal length mismatch"
                     );
 
-                    
-                    
                     let squeeze_warmup = length_bb.max(length_kc).saturating_sub(1);
                     let momentum_warmup = length_kc.saturating_sub(1);
-                    let signal_warmup = length_kc.saturating_sub(1) + 1; 
+                    let signal_warmup = length_kc.saturating_sub(1) + 1;
 
-                    
                     for i in 0..squeeze_warmup.min(n) {
                         prop_assert!(
                             output.squeeze[i].is_nan(),
@@ -3185,7 +2999,6 @@ mod tests {
                         );
                     }
 
-                    
                     for i in 0..momentum_warmup.min(n) {
                         prop_assert!(
                             output.momentum[i].is_nan(),
@@ -3194,7 +3007,6 @@ mod tests {
                         );
                     }
 
-                    
                     for i in 0..signal_warmup.min(n) {
                         prop_assert!(
                             output.momentum_signal[i].is_nan(),
@@ -3203,7 +3015,6 @@ mod tests {
                         );
                     }
 
-                    
                     for (i, &val) in output.squeeze.iter().enumerate() {
                         if !val.is_nan() {
                             prop_assert!(
@@ -3215,7 +3026,6 @@ mod tests {
                         }
                     }
 
-                    
                     for (i, &val) in output.momentum_signal.iter().enumerate() {
                         if !val.is_nan() {
                             prop_assert!(
@@ -3227,9 +3037,7 @@ mod tests {
                         }
                     }
 
-                    
                     for i in 0..n {
-                        
                         let sq = output.squeeze[i];
                         let ref_sq = ref_output.squeeze[i];
                         if sq.is_finite() && ref_sq.is_finite() {
@@ -3249,7 +3057,6 @@ mod tests {
                             );
                         }
 
-                        
                         let mom = output.momentum[i];
                         let ref_mom = ref_output.momentum[i];
                         if mom.is_finite() && ref_mom.is_finite() {
@@ -3274,7 +3081,6 @@ mod tests {
                             );
                         }
 
-                        
                         let sig = output.momentum_signal[i];
                         let ref_sig = ref_output.momentum_signal[i];
                         if sig.is_finite() && ref_sig.is_finite() {
@@ -3295,9 +3101,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
-                    
                     let overall_max = high.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let overall_min = low.iter().cloned().fold(f64::INFINITY, f64::min);
                     let overall_range = overall_max - overall_min;
@@ -3305,15 +3108,12 @@ mod tests {
                     for i in momentum_warmup..n {
                         if output.momentum[i].is_finite() {
                             if overall_range > 1e-10 {
-                                
-                                
                                 prop_assert!(
 								output.momentum[i].abs() <= overall_range * 5.0,
 								"Momentum {} exceeds reasonable bounds at index {} (overall range: {})",
 								output.momentum[i], i, overall_range
 							);
                             } else {
-                                
                                 prop_assert!(
                                     output.momentum[i].abs() < 1e-4,
                                     "Momentum {} should be near zero for flat market at index {}",
@@ -3399,17 +3199,14 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let test_configs = vec![
-            
-            
-            (2, 10, 2, 1.0, 2.0, 0.5, 2, 10, 2, 1.0, 2.0, 0.5), 
-            (5, 25, 5, 2.0, 2.0, 0.0, 5, 25, 5, 1.5, 1.5, 0.0), 
-            (10, 10, 0, 1.0, 3.0, 0.5, 10, 10, 0, 1.0, 3.0, 0.5), 
-            (2, 5, 1, 1.5, 1.5, 0.0, 2, 5, 1, 2.0, 2.0, 0.0),     
-            (30, 60, 15, 2.0, 2.0, 0.0, 30, 60, 15, 1.5, 1.5, 0.0), 
-            (20, 30, 5, 1.0, 2.5, 0.5, 15, 25, 5, 1.0, 2.0, 0.5), 
-            (8, 12, 1, 0.5, 3.0, 0.5, 8, 12, 1, 0.5, 2.5, 0.5), 
+            (2, 10, 2, 1.0, 2.0, 0.5, 2, 10, 2, 1.0, 2.0, 0.5),
+            (5, 25, 5, 2.0, 2.0, 0.0, 5, 25, 5, 1.5, 1.5, 0.0),
+            (10, 10, 0, 1.0, 3.0, 0.5, 10, 10, 0, 1.0, 3.0, 0.5),
+            (2, 5, 1, 1.5, 1.5, 0.0, 2, 5, 1, 2.0, 2.0, 0.0),
+            (30, 60, 15, 2.0, 2.0, 0.0, 30, 60, 15, 1.5, 1.5, 0.0),
+            (20, 30, 5, 1.0, 2.5, 0.5, 15, 25, 5, 1.0, 2.0, 0.5),
+            (8, 12, 1, 0.5, 3.0, 0.5, 8, 12, 1, 0.5, 2.5, 0.5),
         ];
 
         for (
@@ -3438,7 +3235,6 @@ mod tests {
                 .mult_kc_range(mkc_start, mkc_end, mkc_step)
                 .apply_candles(&c)?;
 
-            
             for (name, values) in [
                 ("squeeze", &output.squeeze),
                 ("momentum", &output.momentum),

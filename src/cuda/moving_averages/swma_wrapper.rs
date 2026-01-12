@@ -1,29 +1,20 @@
-//! CUDA wrapper for SWMA (Symmetric Weighted Moving Average) kernels.
-//!
-//! Parity with ALMA wrapper for API shape, policy, PTX JIT options, VRAM
-//! checks, chunking, and stream settings.
-//! - Batch (one-series × many-params): kernel computes normalized triangular
-//!   weights on device per block using shared memory.
-//! - Many-series × one-param (time-major): host precomputes normalized weights
-//!   and kernel consumes them from shared memory per block.
-
 #![cfg(feature = "cuda")]
 
 use super::alma_wrapper::DeviceArrayF32;
 use crate::indicators::moving_averages::swma::{SwmaBatchRange, SwmaParams};
 use cust::context::Context;
 use cust::device::Device;
+use cust::error::CudaError;
 use cust::function::{BlockSize, GridSize};
 use cust::memory::{mem_get_info, DeviceBuffer};
 use cust::module::{Module, ModuleJitOption, OptLevel};
 use cust::prelude::*;
 use cust::stream::{Stream, StreamFlags};
-use cust::error::CudaError;
 use std::env;
 use std::ffi::{c_void, CString};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -33,20 +24,29 @@ pub enum CudaSwmaError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
     #[error("insufficient VRAM: required={required}B, free={free}B, headroom={headroom}B")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx}, {gy}, {gz}), block=({bx}, {by}, {bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch for {buf} (current device id {current})")]
     DeviceMismatch { buf: &'static str, current: u32 },
     #[error("not implemented")]
     NotImplemented,
 }
-
-// -------- Kernel selection policy (ALMA-style) --------
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelPolicy {
@@ -96,14 +96,12 @@ pub struct CudaSwma {
     last_many: Option<ManySeriesKernelSelected>,
     debug_batch_logged: bool,
     debug_many_logged: bool,
-    // Kernel config awareness (kept minimal and defaulted for safety)
+
     outs_per_thread: u32,
     series_per_block: u32,
     max_period_const: usize,
     has_const_weights: bool,
 }
-
-// (Context lifetime is handled in Python by holding an Arc<Context> alongside the buffer.)
 
 impl CudaSwma {
     #[inline]
@@ -126,7 +124,7 @@ impl CudaSwma {
         let context = Arc::new(Context::new(device).map_err(CudaSwmaError::Cuda)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/swma_kernel.ptx"));
-        // Prefer context-derived target with a stable opt level; fall back to simpler JIT
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O2),
@@ -140,9 +138,6 @@ impl CudaSwma {
         };
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None).map_err(CudaSwmaError::Cuda)?;
 
-        // Try to discover the __constant__ symbol via safe cust API.
-        // Kernel defaults SWMA_MAX_PERIOD=4096 and SWMA_USE_CONST_WEIGHTS=1.
-        // If the symbol is present and sized as expected, enable constant path.
         let (has_const_weights, max_period_const) = {
             const SWMA_MAX_PERIOD_RS: usize = 4096;
             let name = CString::new("c_swma_weights").unwrap();
@@ -152,7 +147,6 @@ impl CudaSwma {
             }
         };
 
-        // Defaults must match compiled kernel (see SWMA_* defines in the .cu)
         let outs_per_thread = Self::parse_env_u32("SWMA_OUTS_PER_THREAD", 2);
         let series_per_block = Self::parse_env_u32("SWMA_SERIES_PER_BLOCK", 8);
         let max_period_const_env = Self::parse_env_usize(
@@ -196,9 +190,13 @@ impl CudaSwma {
         &self.policy
     }
     #[inline]
-    pub fn context_arc(&self) -> Arc<Context> { self._context.clone() }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self._context.clone()
+    }
     #[inline]
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -239,7 +237,6 @@ impl CudaSwma {
         }
     }
 
-    // ---------- VRAM helpers ----------
     #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
@@ -260,7 +257,11 @@ impl CudaSwma {
             if required_bytes.saturating_add(headroom_bytes) <= free {
                 Ok(())
             } else {
-                Err(CudaSwmaError::OutOfMemory { required: required_bytes, free, headroom: headroom_bytes })
+                Err(CudaSwmaError::OutOfMemory {
+                    required: required_bytes,
+                    free,
+                    headroom: headroom_bytes,
+                })
             }
         } else {
             Ok(())
@@ -279,11 +280,15 @@ impl CudaSwma {
         let mut cur = start;
         loop {
             v.push(cur);
-            if cur <= end { break; }
+            if cur <= end {
+                break;
+            }
             match cur.checked_sub(step.max(1)) {
                 Some(next) => {
                     cur = next;
-                    if cur < end { break; }
+                    if cur < end {
+                        break;
+                    }
                 }
                 None => break,
             }
@@ -345,7 +350,7 @@ impl CudaSwma {
                 period, self.max_period_const
             )));
         }
-        // Build a fixed-size host array matching the constant symbol, zero-padded beyond period
+
         const SWMA_MAX_PERIOD_RS: usize = 4096;
         let mut host = [0f32; SWMA_MAX_PERIOD_RS];
         host[..period].copy_from_slice(&weights[..period]);
@@ -462,36 +467,31 @@ impl CudaSwma {
             ));
         }
 
-        let func = self
-            .module
-            .get_function("swma_batch_f32")
-            .map_err(|_| CudaSwmaError::MissingKernelSymbol { name: "swma_batch_f32" })?;
+        let func = self.module.get_function("swma_batch_f32").map_err(|_| {
+            CudaSwmaError::MissingKernelSymbol {
+                name: "swma_batch_f32",
+            }
+        })?;
 
-        // Policy: block size along time dimension
-        // Match kernel defaults (see SWMA_BLOCK_X and SWMA_OUTS_PER_THREAD in swma_kernel.cu)
-        // OUTS_PER_THREAD is 2 in the kernel by default.
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
-        // Introspection
+
         unsafe {
             let this = self as *const _ as *mut CudaSwma;
             (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
         }
         self.maybe_log_batch_debug();
 
-        // Grid tiles along time with outs_per_thread outputs per thread
         let outs_per_thread = self.outs_per_thread.max(1);
         let tile_out = (block_x as usize) * (outs_per_thread as usize);
         let grid_x = ((series_len + tile_out - 1) / tile_out) as u32;
         let block: BlockSize = (block_x, 1, 1).into();
-        // Dynamic shared memory: weights (max_period) + price tile (block_x*outs_per_thread + max_period - 1)
-        // Use period = max_period to conservatively size the tile apron.
+
         let shared_elems = (max_period - 1) + tile_out + max_period;
         let shared_bytes = (shared_elems * std::mem::size_of::<f32>()) as u32;
 
-        // Chunk grid.y to <= 65_535
         const MAX_GRID_Y: usize = 65_535;
         let mut launched = 0usize;
         while launched < n_combos {
@@ -499,13 +499,13 @@ impl CudaSwma {
             let grid: GridSize = (grid_x.max(1), this_chunk as u32, 1).into();
             unsafe {
                 let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                // Offset params to chunk
+
                 let mut periods_ptr = d_periods.as_device_ptr().add(launched).as_raw();
                 let mut warms_ptr = d_warms.as_device_ptr().add(launched).as_raw();
                 let mut series_len_i = series_len as i32;
                 let mut n_combos_i = this_chunk as i32;
                 let mut max_period_i = max_period as i32;
-                // Offset output by rows already launched
+
                 let mut out_ptr = d_out.as_device_ptr().add(launched * series_len).as_raw();
                 let args: &mut [*mut c_void] = &mut [
                     &mut prices_ptr as *mut _ as *mut c_void,
@@ -516,7 +516,7 @@ impl CudaSwma {
                     &mut max_period_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                // Conservative launch validation: threads per block <= 1024
+
                 let threads_per_block = (block_x as u64) * 1 * 1;
                 if threads_per_block > 1024 {
                     return Err(CudaSwmaError::LaunchConfigTooLarge {
@@ -528,8 +528,7 @@ impl CudaSwma {
                         bz: 1,
                     });
                 }
-                self
-                    .stream
+                self.stream
                     .launch(&func, grid, block, shared_bytes, args)
                     .map_err(CudaSwmaError::Cuda)?;
             }
@@ -563,9 +562,10 @@ impl CudaSwma {
         let func = self
             .module
             .get_function("swma_multi_series_one_param_f32")
-            .map_err(|_| CudaSwmaError::MissingKernelSymbol { name: "swma_multi_series_one_param_f32" })?;
+            .map_err(|_| CudaSwmaError::MissingKernelSymbol {
+                name: "swma_multi_series_one_param_f32",
+            })?;
 
-        // Match kernel defaults for 2D mapping (see SWMA_BLOCK_X and SWMA_SERIES_PER_BLOCK)
         let (tx, ty, selected): (u32, u32, ManySeriesKernelSelected) = match self.policy.many_series
         {
             ManySeriesKernelPolicy::Auto => (
@@ -576,7 +576,7 @@ impl CudaSwma {
                     series_per_block: self.series_per_block.max(1),
                 },
             ),
-            // Preserve legacy OneD knob if explicitly requested
+
             ManySeriesKernelPolicy::OneD { block_x } => (
                 block_x.max(1),
                 1,
@@ -596,7 +596,7 @@ impl CudaSwma {
                 },
             ),
         };
-        // Introspection
+
         unsafe {
             let this = self as *const _ as *mut CudaSwma;
             (*this).last_many = Some(selected);
@@ -608,7 +608,6 @@ impl CudaSwma {
         let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
         let block: BlockSize = (tx, ty, 1).into();
 
-        // Dynamic shared memory: per-series tiles and optional shared weight staging
         let per_series_tile = (tx as usize) + period - 1;
         let mut shared_floats = per_series_tile * (ty as usize);
         if !self.has_const_weights {
@@ -637,13 +636,19 @@ impl CudaSwma {
                 &mut first_valids_ptr as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            // Conservative launch validation
+
             let threads_per_block = (tx as u64) * (ty as u64) * 1u64;
             if threads_per_block > 1024 {
-                return Err(CudaSwmaError::LaunchConfigTooLarge { gx: grid_x, gy: grid_y, gz: 1, bx: tx, by: ty, bz: 1 });
+                return Err(CudaSwmaError::LaunchConfigTooLarge {
+                    gx: grid_x,
+                    gy: grid_y,
+                    gz: 1,
+                    bx: tx,
+                    by: ty,
+                    bz: 1,
+                });
             }
-            self
-                .stream
+            self.stream
                 .launch(&func, grid, block, shared_bytes, args)
                 .map_err(CudaSwmaError::Cuda)?;
         }
@@ -675,18 +680,30 @@ impl CudaSwma {
             Self::prepare_batch_inputs(data_f32, sweep)?;
         let n_combos = periods.len();
 
-        // VRAM estimate and check (64MB headroom) with overflow guards
         let sb = std::mem::size_of::<f32>();
         let si = std::mem::size_of::<i32>();
-        let prices_bytes = series_len.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("series_len bytes overflow".into()))?;
-        let periods_bytes = n_combos.checked_mul(si).ok_or_else(|| CudaSwmaError::InvalidInput("periods bytes overflow".into()))?;
-        let warm_bytes = n_combos.checked_mul(si).ok_or_else(|| CudaSwmaError::InvalidInput("warms bytes overflow".into()))?;
-        let out_elems = n_combos.checked_mul(series_len).ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
-        let out_bytes = out_elems.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("output bytes overflow".into()))?;
+        let prices_bytes = series_len
+            .checked_mul(sb)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("series_len bytes overflow".into()))?;
+        let periods_bytes = n_combos
+            .checked_mul(si)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("periods bytes overflow".into()))?;
+        let warm_bytes = n_combos
+            .checked_mul(si)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("warms bytes overflow".into()))?;
+        let out_elems = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
+        let out_bytes = out_elems
+            .checked_mul(sb)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("output bytes overflow".into()))?;
         let required = prices_bytes
-            .checked_add(periods_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
-            .checked_add(warm_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
-            .checked_add(out_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?;
+            .checked_add(periods_bytes)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(warm_bytes)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
@@ -710,7 +727,11 @@ impl CudaSwma {
         )?;
         self.stream.synchronize().map_err(CudaSwmaError::Cuda)?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows: n_combos, cols: series_len })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
     }
 
     fn run_many_series_kernel(
@@ -722,7 +743,7 @@ impl CudaSwma {
         period: usize,
     ) -> Result<DeviceArrayF32, CudaSwmaError> {
         let weights = Self::compute_weights(period);
-        // If constant weights are available, upload once per call; otherwise we'll allocate a device buffer
+
         if self.has_const_weights {
             self.upload_const_weights(period, &weights)?;
         }
@@ -735,13 +756,10 @@ impl CudaSwma {
         let mut d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(total_elems) }.map_err(CudaSwmaError::Cuda)?;
 
-        
         let d_weights_opt = if self.has_const_weights {
             None
         } else {
-            Some(
-                DeviceBuffer::from_slice(&weights).map_err(CudaSwmaError::Cuda)?,
-            )
+            Some(DeviceBuffer::from_slice(&weights).map_err(CudaSwmaError::Cuda)?)
         };
 
         self.launch_many_series_kernel(
@@ -755,7 +773,11 @@ impl CudaSwma {
         )?;
         self.stream.synchronize().map_err(CudaSwmaError::Cuda)?;
 
-        Ok(DeviceArrayF32 { buf: d_out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: d_out,
+            rows,
+            cols,
+        })
     }
 
     pub fn swma_multi_series_one_param_device(
@@ -773,10 +795,12 @@ impl CudaSwma {
                 "period, num_series, and series_len must be positive".into(),
             ));
         }
-        
+
         if self.has_const_weights {
             let mut host_w = vec![0f32; period as usize];
-            d_weights.copy_to(&mut host_w).map_err(CudaSwmaError::Cuda)?;
+            d_weights
+                .copy_to(&mut host_w)
+                .map_err(CudaSwmaError::Cuda)?;
             self.upload_const_weights(period as usize, &host_w)?;
         }
         self.launch_many_series_kernel(
@@ -804,18 +828,34 @@ impl CudaSwma {
         let (first_valids, period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
         let sb = std::mem::size_of::<f32>();
         let si = std::mem::size_of::<i32>();
-        let elems = cols.checked_mul(rows).ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
-        let prices_bytes = elems.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("prices bytes overflow".into()))?;
-        let weights_bytes = if self.has_const_weights { 0 } else { period.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("weights bytes overflow".into()))? };
-        let first_valids_bytes = cols.checked_mul(si).ok_or_else(|| CudaSwmaError::InvalidInput("first_valids bytes overflow".into()))?;
-        let out_bytes = elems.checked_mul(sb).ok_or_else(|| CudaSwmaError::InvalidInput("out bytes overflow".into()))?;
+        let elems = cols
+            .checked_mul(rows)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("rows*cols overflow".into()))?;
+        let prices_bytes = elems
+            .checked_mul(sb)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("prices bytes overflow".into()))?;
+        let weights_bytes = if self.has_const_weights {
+            0
+        } else {
+            period
+                .checked_mul(sb)
+                .ok_or_else(|| CudaSwmaError::InvalidInput("weights bytes overflow".into()))?
+        };
+        let first_valids_bytes = cols
+            .checked_mul(si)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("first_valids bytes overflow".into()))?;
+        let out_bytes = elems
+            .checked_mul(sb)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("out bytes overflow".into()))?;
         let required = prices_bytes
-            .checked_add(weights_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
-            .checked_add(first_valids_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
-            .checked_add(out_bytes).ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?;
+            .checked_add(weights_bytes)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(first_valids_bytes)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?
+            .checked_add(out_bytes)
+            .ok_or_else(|| CudaSwmaError::InvalidInput("vram calc overflow".into()))?;
         let headroom = 64 * 1024 * 1024;
         Self::will_fit(required, headroom)?;
 
@@ -844,8 +884,6 @@ impl CudaSwma {
         Ok(())
     }
 }
-
-
 
 pub mod benches {
     use super::*;

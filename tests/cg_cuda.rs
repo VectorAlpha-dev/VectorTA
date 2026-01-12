@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::cg::{
     cg_batch_with_kernel, cg_with_kernel, CgBatchRange, CgInput, CgParams,
 };
@@ -62,8 +60,6 @@ fn cg_cuda_batch_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
         .copy_to(&mut gpu_host)
         .expect("copy cuda cg batch result");
 
-    
-    
     let rtol = 1.0e-3f64;
     let atol = 6.0e-2f64;
     for idx in 0..(cpu.rows * cpu.cols) {

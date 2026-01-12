@@ -56,24 +56,10 @@ pub mod wilders;
 pub mod wma;
 pub mod zlema;
 
-
 pub use cwma::{cwma, CwmaInput, CwmaOutput, CwmaParams};
 pub use dma::{
-    dma,
-    dma_batch_with_kernel,
-    dma_into_slice,
-    dma_with_kernel,
-    DmaBatchBuilder,
-    DmaBatchOutput,
-    
-    DmaBatchRange,
-    DmaBuilder,
-    DmaData,
-    DmaError,
-    DmaInput,
-    DmaOutput,
-    DmaParams,
-    DmaStream,
+    dma, dma_batch_with_kernel, dma_into_slice, dma_with_kernel, DmaBatchBuilder, DmaBatchOutput,
+    DmaBatchRange, DmaBuilder, DmaData, DmaError, DmaInput, DmaOutput, DmaParams, DmaStream,
 };
 
 pub use edcf::{edcf, EdcfInput, EdcfOutput, EdcfParams};
@@ -93,67 +79,23 @@ pub use volume_adjusted_ma::{
 };
 
 pub use ehma::{
-    ehma,
-    ehma_batch_inner_into,
-    ehma_batch_par_slice,
-    ehma_batch_slice,
-    ehma_batch_with_kernel,
-    ehma_batch_with_kernel_slice,
-    ehma_into_slice,
-    ehma_with_kernel,
-    EhmaBatchBuilder,
-    EhmaBatchOutput,
-    
-    EhmaBatchRange,
-    EhmaBuilder,
-    EhmaData,
-    EhmaError,
-    EhmaInput,
-    EhmaOutput,
-    EhmaParams,
-    
-    EhmaStream,
+    ehma, ehma_batch_inner_into, ehma_batch_par_slice, ehma_batch_slice, ehma_batch_with_kernel,
+    ehma_batch_with_kernel_slice, ehma_into_slice, ehma_with_kernel, EhmaBatchBuilder,
+    EhmaBatchOutput, EhmaBatchRange, EhmaBuilder, EhmaData, EhmaError, EhmaInput, EhmaOutput,
+    EhmaParams, EhmaStream,
 };
 
 pub use nama::{
-    nama,
-    nama_batch_with_kernel,
-    nama_into_slice,
-    nama_with_kernel,
-    NamaBatchBuilder,
-    NamaBatchOutput,
-    
-    NamaBatchRange,
-    NamaBuilder,
-    NamaData,
-    NamaError,
-    NamaInput,
-    NamaOutput,
-    NamaParams,
-    NamaStream,
+    nama, nama_batch_with_kernel, nama_into_slice, nama_with_kernel, NamaBatchBuilder,
+    NamaBatchOutput, NamaBatchRange, NamaBuilder, NamaData, NamaError, NamaInput, NamaOutput,
+    NamaParams, NamaStream,
 };
 
 pub use sama::{
-    sama,
-    sama_batch_par_slice,
-    sama_batch_slice,
-    sama_batch_with_kernel,
-    sama_into_slice,
-    sama_with_kernel,
-    SamaBatchBuilder,
-    SamaBatchOutput,
-    
-    SamaBatchRange,
-    SamaBuilder,
-    SamaData,
-    SamaError,
-    SamaInput,
-    SamaOutput,
-    SamaParams,
-    
-    SamaStream,
+    sama, sama_batch_par_slice, sama_batch_slice, sama_batch_with_kernel, sama_into_slice,
+    sama_with_kernel, SamaBatchBuilder, SamaBatchOutput, SamaBatchRange, SamaBuilder, SamaData,
+    SamaError, SamaInput, SamaOutput, SamaParams, SamaStream,
 };
-
 
 #[cfg(feature = "python")]
 pub use dma::{dma_batch_py, dma_py, DmaStreamPy};
@@ -167,6 +109,5 @@ pub use nama::{nama_batch_py, nama_py, NamaStreamPy};
 #[cfg(feature = "python")]
 pub use sama::{sama_batch_py, sama_py, SamaStreamPy};
 
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub use nama::{nama_alloc, nama_batch_unified_js, nama_free, nama_into, nama_js};

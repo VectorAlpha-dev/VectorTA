@@ -1,13 +1,3 @@
-//! CUDA wrapper for NET MyRSI (Ehlers' MyRSI + NET).
-//!
-//! Parity goals with ALMA/CWMA:
-//! - PTX load via include_str!(concat!(env!("OUT_DIR"), "/net_myrsi_kernel.ptx"))
-//! - Stream NON_BLOCKING, simple policy surface, selection logging gated by BENCH_DEBUG
-//! - VRAM checks with ~64MB headroom and basic chunk guards
-//! - Public device entry points for:
-//!     - one-series × many params (batch)
-//!     - many-series × one param (time-major)
-
 #![cfg(feature = "cuda")]
 
 use crate::cuda::moving_averages::alma_wrapper::DeviceArrayF32;
@@ -30,7 +20,11 @@ pub enum CudaNetMyrsiError {
     #[error(transparent)]
     Cuda(#[from] cust::error::CudaError),
     #[error("out of memory: required={required} free={free} headroom={headroom}")]
-    OutOfMemory { required: usize, free: usize, headroom: usize },
+    OutOfMemory {
+        required: usize,
+        free: usize,
+        headroom: usize,
+    },
     #[error("missing kernel symbol: {name}")]
     MissingKernelSymbol { name: &'static str },
     #[error("invalid input: {0}")]
@@ -38,7 +32,14 @@ pub enum CudaNetMyrsiError {
     #[error("invalid policy: {0}")]
     InvalidPolicy(&'static str),
     #[error("launch config too large: grid=({gx},{gy},{gz}) block=({bx},{by},{bz})")]
-    LaunchConfigTooLarge { gx: u32, gy: u32, gz: u32, bx: u32, by: u32, bz: u32 },
+    LaunchConfigTooLarge {
+        gx: u32,
+        gy: u32,
+        gz: u32,
+        bx: u32,
+        by: u32,
+        bz: u32,
+    },
     #[error("device mismatch: buf={buf} current={current}")]
     DeviceMismatch { buf: u32, current: u32 },
     #[error("not implemented")]
@@ -73,10 +74,24 @@ impl Default for CudaNetMyrsiPolicy {
 
 #[derive(Clone, Copy, Debug)]
 pub enum BatchKernelSelected {
-    OneD { block_x: u32 },
-    OneDSharedFast { block_x: u32, max_period: u32, shmem_bytes: u32 },
-    OneDSharedDbl { block_x: u32, max_period: u32, shmem_bytes: u32 },
-    WarpSharedDbl { block_x: u32, max_period: u32, shmem_bytes: u32 },
+    OneD {
+        block_x: u32,
+    },
+    OneDSharedFast {
+        block_x: u32,
+        max_period: u32,
+        shmem_bytes: u32,
+    },
+    OneDSharedDbl {
+        block_x: u32,
+        max_period: u32,
+        shmem_bytes: u32,
+    },
+    WarpSharedDbl {
+        block_x: u32,
+        max_period: u32,
+        shmem_bytes: u32,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -103,7 +118,7 @@ impl CudaNetMyrsi {
         let context = Arc::new(Context::new(device)?);
 
         let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/net_myrsi_kernel.ptx"));
-        // Prefer the highest JIT optimization (O4) and derive target from context.
+
         let jit_opts = &[
             ModuleJitOption::DetermineTargetFromContext,
             ModuleJitOption::OptLevel(OptLevel::O4),
@@ -111,8 +126,7 @@ impl CudaNetMyrsi {
         let module = match Module::from_ptx(ptx, jit_opts) {
             Ok(m) => m,
             Err(_) => {
-                if let Ok(m) =
-                    Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
+                if let Ok(m) = Module::from_ptx(ptx, &[ModuleJitOption::DetermineTargetFromContext])
                 {
                     m
                 } else {
@@ -121,7 +135,6 @@ impl CudaNetMyrsi {
             }
         };
 
-        // Favor L1 for ring-based working sets
         let _ = cust::context::CurrentContext::set_cache_config(CacheConfig::PreferL1);
 
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -138,24 +151,39 @@ impl CudaNetMyrsi {
         })
     }
 
-    // --- helpers for launch math ---
     #[inline(always)]
-    fn div_up_u32(x: u32, y: u32) -> u32 { (x + y - 1) / y }
+    fn div_up_u32(x: u32, y: u32) -> u32 {
+        (x + y - 1) / y
+    }
 
     #[inline(always)]
-    fn round_up_32(x: u32) -> u32 { (x + 31) & !31 }
+    fn round_up_32(x: u32) -> u32 {
+        (x + 31) & !31
+    }
 
-    pub fn context_arc(&self) -> Arc<Context> { self.context.clone() }
-    pub fn device_id(&self) -> u32 { self.device_id }
+    pub fn context_arc(&self) -> Arc<Context> {
+        self.context.clone()
+    }
+    pub fn device_id(&self) -> u32 {
+        self.device_id
+    }
 
     pub fn synchronize(&self) -> Result<(), CudaNetMyrsiError> {
         self.stream.synchronize().map_err(Into::into)
     }
 
-    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) { self.policy = policy; }
-    pub fn policy(&self) -> &CudaNetMyrsiPolicy { &self.policy }
-    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> { self.last_batch }
-    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> { self.last_many }
+    pub fn set_policy(&mut self, policy: CudaNetMyrsiPolicy) {
+        self.policy = policy;
+    }
+    pub fn policy(&self) -> &CudaNetMyrsiPolicy {
+        &self.policy
+    }
+    pub fn selected_batch_kernel(&self) -> Option<BatchKernelSelected> {
+        self.last_batch
+    }
+    pub fn selected_many_series_kernel(&self) -> Option<ManySeriesKernelSelected> {
+        self.last_many
+    }
 
     #[inline]
     fn maybe_log_batch_debug(&self) {
@@ -202,7 +230,9 @@ impl CudaNetMyrsi {
         }
     }
     #[inline]
-    fn device_mem_info() -> Option<(usize, usize)> { mem_get_info().ok() }
+    fn device_mem_info() -> Option<(usize, usize)> {
+        mem_get_info().ok()
+    }
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> bool {
         if !Self::mem_check_enabled() {
@@ -236,7 +266,13 @@ impl CudaNetMyrsi {
                 bz,
             });
         }
-        if gx > MAX_GRID || gy > MAX_GRID || gz > MAX_GRID || bx > MAX_BLOCK || by > MAX_BLOCK || bz > MAX_BLOCK {
+        if gx > MAX_GRID
+            || gy > MAX_GRID
+            || gz > MAX_GRID
+            || bx > MAX_BLOCK
+            || by > MAX_BLOCK
+            || bz > MAX_BLOCK
+        {
             return Err(CudaNetMyrsiError::LaunchConfigTooLarge {
                 gx,
                 gy,
@@ -249,9 +285,9 @@ impl CudaNetMyrsi {
         Ok(())
     }
 
-    // ---------- Batch (one series × many params) ----------
-
-    fn expand_periods((start, end, step): (usize, usize, usize)) -> Result<Vec<usize>, CudaNetMyrsiError> {
+    fn expand_periods(
+        (start, end, step): (usize, usize, usize),
+    ) -> Result<Vec<usize>, CudaNetMyrsiError> {
         if step == 0 || start == end {
             return Ok(vec![start]);
         }
@@ -261,9 +297,9 @@ impl CudaNetMyrsi {
             let st = step.max(1);
             while x <= end {
                 v.push(x);
-                x = x
-                    .checked_add(st)
-                    .ok_or_else(|| CudaNetMyrsiError::InvalidInput("period range overflow".into()))?;
+                x = x.checked_add(st).ok_or_else(|| {
+                    CudaNetMyrsiError::InvalidInput("period range overflow".into())
+                })?;
             }
             if v.is_empty() {
                 return Err(CudaNetMyrsiError::InvalidInput(
@@ -272,7 +308,7 @@ impl CudaNetMyrsi {
             }
             return Ok(v);
         }
-        // reversed bounds
+
         let mut v = Vec::new();
         let mut x = start as isize;
         let end_i = end as isize;
@@ -331,8 +367,7 @@ impl CudaNetMyrsi {
         data_f32: &[f32],
         sweep: &NetMyrsiBatchRange,
     ) -> Result<(DeviceArrayF32, Vec<NetMyrsiParams>), CudaNetMyrsiError> {
-        let (combos, first_valid, series_len, max_p) =
-            Self::prepare_batch_inputs(data_f32, sweep)?;
+        let (combos, first_valid, series_len, max_p) = Self::prepare_batch_inputs(data_f32, sweep)?;
 
         let prices_bytes = series_len
             .checked_mul(core::mem::size_of::<f32>())
@@ -362,26 +397,23 @@ impl CudaNetMyrsi {
             }
         }
 
-        // H2D async copies
-        let d_prices: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::from_slice_async(data_f32, &self.stream)?
-        };
+        let d_prices: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::from_slice_async(data_f32, &self.stream)? };
         let periods_i32: Vec<i32> = combos.iter().map(|c| c.period.unwrap() as i32).collect();
-        let d_periods: DeviceBuffer<i32> = unsafe {
-            DeviceBuffer::from_slice_async(&periods_i32, &self.stream)?
-        };
-        let mut d_out: DeviceBuffer<f32> = unsafe {
-            DeviceBuffer::uninitialized_async(out_elems, &self.stream)?
-        };
+        let d_periods: DeviceBuffer<i32> =
+            unsafe { DeviceBuffer::from_slice_async(&periods_i32, &self.stream)? };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(out_elems, &self.stream)? };
 
-        // Launch (warp-per-combo):
-        // - One warp computes one combo (period), parallelizing NET's O(period) update loop.
-        
         let desired_block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
             BatchKernelPolicy::Auto => 32,
         };
-        let desired_block_x = if desired_block_x == 0 { 32 } else { desired_block_x };
+        let desired_block_x = if desired_block_x == 0 {
+            32
+        } else {
+            desired_block_x
+        };
         let desired_block_x = Self::round_up_32(desired_block_x).min(1024).max(32);
 
         let max_dyn_default: usize = 48 * 1024;
@@ -389,9 +421,7 @@ impl CudaNetMyrsi {
             .checked_mul(2 * core::mem::size_of::<f64>())
             .ok_or_else(|| CudaNetMyrsiError::InvalidInput("shared bytes overflow".into()))?;
         if per_warp_bytes == 0 {
-            return Err(CudaNetMyrsiError::InvalidInput(
-                "invalid max_period".into(),
-            ));
+            return Err(CudaNetMyrsiError::InvalidInput("invalid max_period".into()));
         }
         let max_warps_by_smem = (max_dyn_default / per_warp_bytes).max(1) as u32;
 
@@ -439,13 +469,8 @@ impl CudaNetMyrsi {
                 &mut max_p_i as *mut _ as *mut c_void,
                 &mut out_ptr as *mut _ as *mut c_void,
             ];
-            self.stream.launch(
-                &func,
-                grid,
-                block,
-                shmem_bytes as u32,
-                &mut args,
-            )?;
+            self.stream
+                .launch(&func, grid, block, shmem_bytes as u32, &mut args)?;
             (*(self as *const _ as *mut CudaNetMyrsi)).last_batch =
                 Some(BatchKernelSelected::WarpSharedDbl {
                     block_x,
@@ -465,8 +490,6 @@ impl CudaNetMyrsi {
             combos,
         ))
     }
-
-    
 
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
@@ -501,8 +524,8 @@ impl CudaNetMyrsi {
                     break;
                 }
             }
-            let fv = fv
-                .ok_or_else(|| CudaNetMyrsiError::InvalidInput(format!("series {} all NaN", s)))?;
+            let fv =
+                fv.ok_or_else(|| CudaNetMyrsiError::InvalidInput(format!("series {} all NaN", s)))?;
             if rows - fv < period + 1 {
                 return Err(CudaNetMyrsiError::InvalidInput(format!(
                     "series {} not enough valid data (need >= {}, valid = {})",
@@ -526,35 +549,29 @@ impl CudaNetMyrsi {
         let (_first_valids, _period) =
             Self::prepare_many_series_inputs(data_tm_f32, cols, rows, params)?;
 
-        
-        
-        
-
-        
         let elems = cols
             .checked_mul(rows)
             .ok_or_else(|| CudaNetMyrsiError::InvalidInput("cols*rows overflow".into()))?;
         let mut out_tm_host = vec![f32::NAN; elems];
 
         for s in 0..cols {
-            
             let mut series64 = vec![f64::NAN; rows];
-            for r in 0..rows { series64[r] = data_tm_f32[r * cols + s] as f64; }
+            for r in 0..rows {
+                series64[r] = data_tm_f32[r * cols + s] as f64;
+            }
             let out = crate::indicators::net_myrsi::net_myrsi_with_kernel(
                 &crate::indicators::net_myrsi::NetMyrsiInput::from_slice(&series64, params.clone()),
                 crate::utilities::enums::Kernel::Scalar,
             )
             .map_err(|e| CudaNetMyrsiError::InvalidInput(e.to_string()))?;
-            for r in 0..rows { out_tm_host[r * cols + s] = out.values[r] as f32; }
+            for r in 0..rows {
+                out_tm_host[r * cols + s] = out.values[r] as f32;
+            }
         }
 
-        
-        let mut d_out = unsafe {
-            DeviceBuffer::uninitialized_async(elems, &self.stream)?
-        };
+        let mut d_out = unsafe { DeviceBuffer::uninitialized_async(elems, &self.stream)? };
         unsafe {
-            d_out
-                .async_copy_from(out_tm_host.as_slice(), &self.stream)?;
+            d_out.async_copy_from(out_tm_host.as_slice(), &self.stream)?;
         }
         self.synchronize()?;
         Ok(DeviceArrayF32 {
@@ -564,7 +581,6 @@ impl CudaNetMyrsi {
         })
     }
 }
-
 
 #[cfg(feature = "cuda")]
 pub mod benches {
@@ -655,8 +671,7 @@ pub mod benches {
         let block_x = warps_per_block * 32;
         let shmem_bytes = (warps_per_block as usize).saturating_mul(per_warp_bytes);
         let gx = CudaNetMyrsi::div_up_u32(rows as u32, warps_per_block).max(1);
-        CudaNetMyrsi::validate_launch(gx, 1, 1, block_x, 1, 1)
-            .expect("validate launch");
+        CudaNetMyrsi::validate_launch(gx, 1, 1, block_x, 1, 1).expect("validate launch");
         let grid: GridSize = (gx, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
 
@@ -678,14 +693,12 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![
-            CudaBenchScenario::new(
-                "net_myrsi",
-                "one_series_many_params",
-                "net_myrsi_cuda_batch_dev",
-                "1m_x_128",
-                prep_batch,
-            ),
-        ]
+        vec![CudaBenchScenario::new(
+            "net_myrsi",
+            "one_series_many_params",
+            "net_myrsi_cuda_batch_dev",
+            "1m_x_128",
+            prep_batch,
+        )]
     }
 }

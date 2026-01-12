@@ -1,28 +1,5 @@
-//! # Laguerre RSI (LRSI)
-//!
-//! Momentum oscillator using Laguerre filter, similar to RSI but with different
-//! responsiveness and smoothness characteristics.
-//!
-//! ## Parameters
-//! - **alpha**: Smoothing factor between 0 and 1 (default: 0.2)
-//!
-//! ## Returns
-//! - **`Ok(LrsiOutput)`** on success (`values: Vec<f64>` of length matching input)
-//! - **`Err(LrsiError)`** on failure
-//!
-//! ## Developer Status
-//! - **SIMD Kernels**: AVX2/AVX512 delegate to scalar (IIR dependency across time prevents lane speedup)
-//! - **CUDA**: Wrapper mirrors scalar/streaming semantics; FP32 GPU paths are validated against f64 CPU within loose tolerances.
-//! - **Python**: CUDA handles use shared DeviceArrayF32Py (CAI v3 + DLPack v1.x) with primary-context lifetime guards.
-//! - **Streaming**: O(1) performance
-//! - **Memory**: Good zero-copy usage (alloc_with_nan_prefix, make_uninit_matrix)
-//! - **Batch**: Row kernels reuse a precomputed mid-price series for all rows
-//!
-//! Decision: Streaming kernel mirrors scalar FMA ordering and uses a branchless
-//! CU/CD split; outputs match the batch scalar path. SIMD remains delegated due
-//! to IIR time dependency; CUDA paths are enabled but validated against the
-//! scalar reference with relaxed FP32 tolerances.
-
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 #[cfg(feature = "python")]
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 #[cfg(feature = "python")]
@@ -31,12 +8,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 #[cfg(feature = "python")]
 use pyo3::types::PyDict;
-#[cfg(all(feature = "python", feature = "cuda"))]
-use crate::indicators::moving_averages::alma::{make_device_array_py, DeviceArrayF32Py};
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
 use crate::utilities::data_loader::Candles;
@@ -67,7 +42,10 @@ pub struct LrsiOutput {
 }
 
 #[derive(Debug, Clone)]
-#[cfg_attr(feature = "wasm", derive(Serialize, Deserialize))]
+#[cfg_attr(
+    all(target_arch = "wasm32", feature = "wasm"),
+    derive(Serialize, Deserialize)
+)]
 pub struct LrsiParams {
     pub alpha: Option<f64>,
 }
@@ -174,7 +152,11 @@ pub enum LrsiError {
     #[error("lrsi: Output length mismatch: expected = {expected}, got = {got}")]
     OutputLengthMismatch { expected: usize, got: usize },
     #[error("lrsi: Invalid range: start={start}, end={end}, step={step}")]
-    InvalidRange { start: String, end: String, step: String },
+    InvalidRange {
+        start: String,
+        end: String,
+        step: String,
+    },
     #[error("lrsi: Invalid kernel for batch: {0:?}")]
     InvalidKernelForBatch(crate::utilities::enums::Kernel),
 }
@@ -184,12 +166,7 @@ pub fn lrsi(input: &LrsiInput) -> Result<LrsiOutput, LrsiError> {
     lrsi_with_kernel(input, Kernel::Auto)
 }
 
-/// Writes LRSI into the provided output slice without allocating.
-///
-/// - Preserves NaN warmups exactly like the Vec-returning API.
-/// - `out.len()` must equal the input length; returns `OutputLengthMismatch` otherwise.
-/// - Uses `Kernel::Auto` for runtime kernel selection.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
 #[inline]
 pub fn lrsi_into(input: &LrsiInput, out: &mut [f64]) -> Result<(), LrsiError> {
     lrsi_into_slice(out, input, Kernel::Auto)
@@ -221,7 +198,6 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
         return Err(LrsiError::InvalidAlpha { alpha });
     }
 
-    
     let mut first_valid_idx = None;
     for i in 0..high.len() {
         let price = (high[i] + low[i]) / 2.0;
@@ -240,12 +216,12 @@ pub fn lrsi_with_kernel(input: &LrsiInput, kernel: Kernel) -> Result<LrsiOutput,
         });
     }
 
-    let warmup_period = first_valid_idx + 3; 
+    let warmup_period = first_valid_idx + 3;
     let mut out = alloc_with_nan_prefix(n, warmup_period);
 
     let chosen = match kernel {
         Kernel::Auto => Kernel::Scalar,
-        
+
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
             return Err(LrsiError::NotEnoughValidData {
                 needed: 2,
@@ -292,7 +268,6 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
         return Err(LrsiError::InvalidAlpha { alpha });
     }
 
-    
     let mut first_valid_idx = None;
     for i in 0..high.len() {
         let price = (high[i] + low[i]) / 2.0;
@@ -321,7 +296,7 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
 
     let chosen = match kern {
         Kernel::Auto => Kernel::Scalar,
-        
+
         Kernel::ScalarBatch | Kernel::Avx2Batch | Kernel::Avx512Batch => {
             return Err(LrsiError::InvalidKernelForBatch(kern));
         }
@@ -339,7 +314,6 @@ pub fn lrsi_into_slice(dst: &mut [f64], input: &LrsiInput, kern: Kernel) -> Resu
         }
     }
 
-    
     let warmup_end = first_valid_idx + 3;
     for v in &mut dst[..warmup_end] {
         *v = f64::NAN;
@@ -354,50 +328,42 @@ mod tests_into_api {
 
     #[test]
     fn test_lrsi_into_matches_api() -> Result<(), Box<dyn std::error::Error>> {
-        
         let n = 256usize;
         let mut high = vec![f64::NAN; n];
         let mut low = vec![f64::NAN; n];
 
-        
         let mut v = 100.0f64;
         for i in 3..n {
-            
             high[i] = v + 1.0;
             low[i] = v - 1.0;
-            
-            if i % 37 == 0 { high[i] = f64::NAN; }
-            if i % 53 == 0 { low[i] = f64::NAN; }
+
+            if i % 37 == 0 {
+                high[i] = f64::NAN;
+            }
+            if i % 53 == 0 {
+                low[i] = f64::NAN;
+            }
             v += (i as f64).sin() * 0.25 + 0.5;
         }
 
         let input = LrsiInput::from_slices(&high, &low, LrsiParams::default());
 
-        
         let base = lrsi(&input)?.values;
 
-        
         let mut out = vec![0.0f64; n];
-        #[cfg(not(feature = "wasm"))]
+        #[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
         {
             lrsi_into(&input, &mut out)?;
         }
-        #[cfg(feature = "wasm")]
+        #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
         {
-            
             lrsi_into_slice(&mut out, &input, Kernel::Auto)?;
         }
 
         assert_eq!(base.len(), out.len());
         for (i, (&a, &b)) in base.iter().zip(out.iter()).enumerate() {
             let equal = (a.is_nan() && b.is_nan()) || (a == b);
-            assert!(
-                equal,
-                "mismatch at index {}: base={}, into={}",
-                i,
-                a,
-                b
-            );
+            assert!(equal, "mismatch at index {}: base={}, into={}", i, a, b);
         }
         Ok(())
     }
@@ -416,7 +382,6 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
     let mgamma = -gamma;
     let warm = first + 3;
 
-    
     let first_price = (high[first] + low[first]) * 0.5;
     let mut l0 = first_price;
     let mut l1 = first_price;
@@ -424,35 +389,30 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
     let mut l3 = first_price;
 
     for i in (first + 1)..len {
-        
         let p = (high[i] + low[i]) * 0.5;
 
         if p.is_nan() {
-            
             if i >= warm {
                 out[i] = f64::NAN;
             }
             continue;
         }
 
-        
         let t0 = (p - l0).mul_add(alpha, l0);
         let t1 = gamma.mul_add(l1, mgamma.mul_add(t0, l0));
         let t2 = gamma.mul_add(l2, mgamma.mul_add(t1, l1));
         let t3 = gamma.mul_add(l3, mgamma.mul_add(t2, l2));
 
         if i >= warm {
-            
             let d01 = t0 - t1;
             let d12 = t1 - t2;
             let d23 = t2 - t3;
 
-            
             let a01 = d01.abs();
             let a12 = d12.abs();
             let a23 = d23.abs();
 
-            let sum_abs = a01 + a12 + a23; 
+            let sum_abs = a01 + a12 + a23;
             let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
 
             let v = if sum_abs <= f64::EPSILON {
@@ -460,18 +420,16 @@ pub fn lrsi_scalar_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: 
             } else {
                 cu / sum_abs
             };
-            
+
             out[i] = v.min(1.0).max(0.0);
         }
 
-        
         l0 = t0;
         l1 = t1;
         l2 = t2;
         l3 = t3;
     }
 }
-
 
 #[inline]
 pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
@@ -520,7 +478,7 @@ pub fn lrsi_scalar(price: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
             } else {
                 cu / sum_abs
             };
-            
+
             out[i] = v.min(1.0).max(0.0);
         }
 
@@ -542,7 +500,6 @@ pub fn lrsi_avx2_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: &m
 pub fn lrsi_avx512_hl(high: &[f64], low: &[f64], alpha: f64, first: usize, out: &mut [f64]) {
     lrsi_scalar_hl(high, low, alpha, first, out)
 }
-
 
 #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]
 #[inline]
@@ -568,7 +525,6 @@ pub fn lrsi_avx512_long(price: &[f64], alpha: f64, first: usize, out: &mut [f64]
     lrsi_scalar(price, alpha, first, out)
 }
 
-
 #[derive(Debug, Clone)]
 pub struct LrsiStream {
     alpha: f64,
@@ -578,7 +534,7 @@ pub struct LrsiStream {
     l2: f64,
     l3: f64,
     initialized: bool,
-    count: usize, 
+    count: usize,
 }
 
 impl LrsiStream {
@@ -600,12 +556,10 @@ impl LrsiStream {
     }
     #[inline(always)]
     pub fn update(&mut self, price: f64) -> Option<f64> {
-        
         if price.is_nan() {
             return None;
         }
 
-        
         if !self.initialized {
             self.l0 = price;
             self.l1 = price;
@@ -613,10 +567,9 @@ impl LrsiStream {
             self.l3 = price;
             self.initialized = true;
             self.count = 0;
-            return None; 
+            return None;
         }
 
-        
         let gamma = self.gamma;
         let mgamma = -gamma;
 
@@ -630,19 +583,16 @@ impl LrsiStream {
         let t2 = gamma.mul_add(l2_prev, mgamma.mul_add(t1, l1_prev));
         let t3 = gamma.mul_add(l3_prev, mgamma.mul_add(t2, l2_prev));
 
-        
         self.l0 = t0;
         self.l1 = t1;
         self.l2 = t2;
         self.l3 = t3;
         self.count += 1;
 
-        
         if self.count < 3 {
             return None;
         }
 
-        
         let d01 = t0 - t1;
         let d12 = t1 - t2;
         let d23 = t2 - t3;
@@ -656,10 +606,8 @@ impl LrsiStream {
             return Some(0.0);
         }
 
-        
         let cu = 0.5 * (d01 + a01 + d12 + a12 + d23 + a23);
 
-        
         let v = cu / sum_abs;
         Some(v.min(1.0).max(0.0))
     }
@@ -774,9 +722,7 @@ impl LrsiBatchOutput {
 
 #[inline(always)]
 fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, LrsiError> {
-    fn axis_f64(
-        (start, end, step): (f64, f64, f64),
-    ) -> Result<Vec<f64>, LrsiError> {
+    fn axis_f64((start, end, step): (f64, f64, f64)) -> Result<Vec<f64>, LrsiError> {
         if step.abs() < 1e-12 || (start - end).abs() < 1e-12 {
             return Ok(vec![start]);
         }
@@ -797,7 +743,7 @@ fn expand_grid(r: &LrsiBatchRange) -> Result<Vec<LrsiParams>, LrsiError> {
             }
             return Ok(v);
         }
-        
+
         let mut v = Vec::new();
         let mut x = start;
         let st = step.abs();
@@ -869,15 +815,12 @@ fn lrsi_batch_inner(
 
     let cols = high.len();
     let rows = combos.len();
-    let total = rows
-        .checked_mul(cols)
-        .ok_or(LrsiError::InvalidRange {
-            start: rows.to_string(),
-            end: cols.to_string(),
-            step: "rows*cols".into(),
-        })?;
+    let total = rows.checked_mul(cols).ok_or(LrsiError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
 
-    
     let first = (0..cols)
         .find(|&i| ((high[i] + low[i]) / 2.0).is_finite())
         .ok_or(LrsiError::AllValuesNaN)?;
@@ -888,17 +831,14 @@ fn lrsi_batch_inner(
         });
     }
 
-    
     let mut buf_mu = make_uninit_matrix(rows, cols);
     let warm = vec![first + 3; rows];
     init_matrix_prefixes(&mut buf_mu, cols, &warm);
 
-    
     let mut guard = core::mem::ManuallyDrop::new(buf_mu);
     let out_slice: &mut [f64] =
         unsafe { core::slice::from_raw_parts_mut(guard.as_mut_ptr() as *mut f64, guard.len()) };
 
-    
     let resolved = match kern {
         Kernel::Auto => detect_best_batch_kernel(),
         k if k.is_batch() => k,
@@ -913,7 +853,6 @@ fn lrsi_batch_inner(
 
     let combos = lrsi_batch_inner_into(high, low, sweep, row_kernel, parallel, out_slice)?;
 
-    
     let values = unsafe {
         Vec::from_raw_parts(
             guard.as_mut_ptr() as *mut f64,
@@ -947,7 +886,6 @@ unsafe fn lrsi_row_avx512_hl(high: &[f64], low: &[f64], first: usize, alpha: f64
     lrsi_scalar_hl(high, low, alpha, first, out)
 }
 
-
 #[inline(always)]
 unsafe fn lrsi_row_scalar(price: &[f64], first: usize, alpha: f64, out: &mut [f64]) {
     lrsi_scalar(price, alpha, first, out)
@@ -977,9 +915,7 @@ unsafe fn lrsi_row_avx512_long(price: &[f64], first: usize, alpha: f64, out: &mu
     lrsi_scalar(price, alpha, first, out)
 }
 
-
-
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lrsi_js(high: &[f64], low: &[f64], alpha: f64) -> Result<Vec<f64>, JsValue> {
     let params = LrsiParams { alpha: Some(alpha) };
@@ -992,13 +928,13 @@ pub fn lrsi_js(high: &[f64], low: &[f64], alpha: f64) -> Result<Vec<f64>, JsValu
     Ok(output)
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LrsiBatchConfig {
     pub alpha_range: (f64, f64, f64),
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[derive(Serialize, Deserialize)]
 pub struct LrsiBatchJsOutput {
     pub values: Vec<f64>,
@@ -1007,7 +943,7 @@ pub struct LrsiBatchJsOutput {
     pub cols: usize,
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen(js_name = lrsi_batch)]
 pub fn lrsi_batch_unified_js(
     high: &[f64],
@@ -1033,7 +969,7 @@ pub fn lrsi_batch_unified_js(
     serde_wasm_bindgen::to_value(&output).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lrsi_alloc(len: usize) -> *mut f64 {
     let mut vec = Vec::<f64>::with_capacity(len);
@@ -1042,7 +978,7 @@ pub fn lrsi_alloc(len: usize) -> *mut f64 {
     ptr
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lrsi_free(ptr: *mut f64, len: usize) {
     unsafe {
@@ -1050,7 +986,7 @@ pub fn lrsi_free(ptr: *mut f64, len: usize) {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lrsi_into(
     high_ptr: *const f64,
@@ -1069,7 +1005,6 @@ pub fn lrsi_into(
         let params = LrsiParams { alpha: Some(alpha) };
         let input = LrsiInput::from_slices(high, low, params);
 
-        
         if high_ptr == out_ptr || low_ptr == out_ptr {
             let mut temp = vec![0.0; len];
             lrsi_into_slice(&mut temp, &input, Kernel::Auto)
@@ -1086,7 +1021,7 @@ pub fn lrsi_into(
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 #[wasm_bindgen]
 pub fn lrsi_batch_into(
     high_ptr: *const f64,
@@ -1101,7 +1036,6 @@ pub fn lrsi_batch_into(
         return Err(JsValue::from_str("null pointer passed to lrsi_batch_into"));
     }
 
-    
     if !(0.0 < alpha_start && alpha_start <= 1.0) {
         return Err(JsValue::from_str(&format!(
             "Invalid alpha_start: {}",
@@ -1121,8 +1055,7 @@ pub fn lrsi_batch_into(
         let sweep = LrsiBatchRange {
             alpha: (alpha_start, alpha_end, alpha_step),
         };
-        let combos = expand_grid(&sweep)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let combos = expand_grid(&sweep).map_err(|e| JsValue::from_str(&e.to_string()))?;
         let rows = combos.len();
         let cols = len;
         let total = rows
@@ -1282,7 +1215,6 @@ mod tests {
         let file_path = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let candles = read_candles_from_csv(file_path)?;
 
-        
         let len = candles.close.len();
         let mut high = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
         let mut low = AVec::<f64>::with_capacity(CACHELINE_ALIGN, len);
@@ -1290,14 +1222,12 @@ mod tests {
         high.resize(len, f64::from_bits(0x11111111_11111111));
         low.resize(len, f64::from_bits(0x22222222_22222222));
 
-        
         high.copy_from_slice(&candles.high);
         low.copy_from_slice(&candles.low);
 
-        
         let test_params = vec![
             LrsiParams { alpha: Some(0.1) },
-            LrsiParams { alpha: Some(0.2) }, 
+            LrsiParams { alpha: Some(0.2) },
             LrsiParams { alpha: Some(0.5) },
             LrsiParams { alpha: Some(0.8) },
             LrsiParams { alpha: Some(0.95) },
@@ -1307,7 +1237,6 @@ mod tests {
             let input = LrsiInput::from_slices(&high, &low, params.clone());
             let result = lrsi_with_kernel(&input, kernel)?;
 
-            
             for (i, &val) in result.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1366,11 +1295,9 @@ mod tests {
         use proptest::prelude::*;
         skip_if_unsupported!(kernel, test_name);
 
-        
         let strat = (4usize..=400, 0.01f64..0.99f64, prop::bool::weighted(0.1)).prop_flat_map(
             |(len, alpha, use_constant_price)| {
                 if use_constant_price && len < 50 {
-                    
                     let constant_price = (10.0f64..200.0f64);
                     constant_price
                         .prop_map(move |price| {
@@ -1380,22 +1307,15 @@ mod tests {
                         })
                         .boxed()
                 } else {
-                    
                     (
-                        
                         proptest::collection::vec(
                             (10.0f64..200.0f64).prop_filter("finite", |x| x.is_finite()),
                             len,
                         ),
-                        
-                        proptest::collection::vec(
-                            (0.0f64..0.05f64), 
-                            len,
-                        ),
+                        proptest::collection::vec((0.0f64..0.05f64), len),
                         Just(alpha),
                     )
                         .prop_map(|(base_prices, spreads, alpha)| {
-                            
                             let mut high = Vec::with_capacity(base_prices.len());
                             let mut low = Vec::with_capacity(base_prices.len());
 
@@ -1417,18 +1337,14 @@ mod tests {
                 let params = LrsiParams { alpha: Some(alpha) };
                 let input = LrsiInput::from_slices(&high, &low, params.clone());
 
-                
                 let result = lrsi_with_kernel(&input, kernel)?;
                 let out = result.values;
 
-                
                 let ref_result = lrsi_with_kernel(&input, Kernel::Scalar)?;
                 let ref_out = ref_result.values;
 
-                
                 prop_assert_eq!(out.len(), high.len(), "Output length mismatch");
 
-                
                 let mut first_valid_idx = None;
                 for i in 0..high.len() {
                     let price = (high[i] + low[i]) / 2.0;
@@ -1441,9 +1357,6 @@ mod tests {
                 if let Some(first_idx) = first_valid_idx {
                     let warmup_end = first_idx + 3;
 
-                    
-                    
-                    
                     for i in 0..first_idx {
                         prop_assert!(
                             out[i].is_nan(),
@@ -1453,11 +1366,8 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     let first_output_idx = first_idx + 3;
                     if first_output_idx < out.len() && !out[first_output_idx].is_nan() {
-                        
                         prop_assert!(
                             out[first_output_idx] >= 0.0 && out[first_output_idx] <= 1.0,
                             "First output after warmup at index {} = {}, should be in [0, 1]",
@@ -1466,8 +1376,6 @@ mod tests {
                         );
                     }
 
-                    
-                    
                     for i in (first_idx + 3)..out.len() {
                         if !out[i].is_nan() {
                             prop_assert!(
@@ -1479,7 +1387,6 @@ mod tests {
                         }
                     }
 
-                    
                     for i in 0..out.len() {
                         let y = out[i];
                         let r = ref_out[i];
@@ -1510,15 +1417,12 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     let is_constant = high
                         .iter()
                         .zip(low.iter())
                         .all(|(h, l)| (h - l).abs() < f64::EPSILON && h.is_finite());
 
                     if is_constant && out.len() > first_idx + 10 {
-                        
                         let last_values = &out[out.len() - 5..];
                         let valid_last = last_values
                             .iter()
@@ -1531,8 +1435,6 @@ mod tests {
                                 .map(|w| (w[1] - w[0]).abs())
                                 .fold(0.0, f64::max);
 
-                            
-                            
                             prop_assert!(
                                 variance < 0.1,
                                 "LRSI not stable for constant prices, variance: {}",
@@ -1541,10 +1443,7 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     if out.len() > first_idx + 25 {
-                        
                         let prices: Vec<f64> = high
                             .iter()
                             .zip(low.iter())
@@ -1560,7 +1459,7 @@ mod tests {
                             let input_volatility = if !price_changes.is_empty() {
                                 price_changes.iter().sum::<f64>() / price_changes.len() as f64
                             } else {
-                                0.01 
+                                0.01
                             };
 
                             let start = (first_idx + 5).min(out.len().saturating_sub(5));
@@ -1581,8 +1480,6 @@ mod tests {
                                         / (valid_mid.len() - 1) as f64;
 
                                     if alpha < 0.05 {
-                                        
-                                        
                                         let expected_max_change =
                                             input_volatility * (alpha * 20.0).max(0.1);
                                         prop_assert!(
@@ -1595,11 +1492,8 @@ mod tests {
 											input_volatility
 										);
                                     } else if alpha > 0.95 {
-                                        
-                                        
-                                        
                                         let expected_min_change = (input_volatility * 0.2).min(0.1);
-                                        
+
                                         if input_volatility > 0.01 {
                                             prop_assert!(
 												avg_change >= expected_min_change || avg_change < 0.001,
@@ -1617,12 +1511,10 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     let is_monotonic_up = high.windows(2).all(|w| w[1] >= w[0])
-                        && high.windows(2).any(|w| w[1] > w[0] + f64::EPSILON); 
+                        && high.windows(2).any(|w| w[1] > w[0] + f64::EPSILON);
                     let is_monotonic_down = high.windows(2).all(|w| w[1] <= w[0])
-                        && high.windows(2).any(|w| w[1] < w[0] - f64::EPSILON); 
+                        && high.windows(2).any(|w| w[1] < w[0] - f64::EPSILON);
 
                     if (is_monotonic_up || is_monotonic_down) && out.len() > first_idx + 20 {
                         let valid_out: Vec<(usize, f64)> = out
@@ -1634,7 +1526,6 @@ mod tests {
                             .collect();
 
                         if valid_out.len() >= 20 {
-                            
                             let chunk_size = valid_out.len() / 3;
                             if chunk_size >= 5 {
                                 let first_chunk_avg =
@@ -1646,7 +1537,6 @@ mod tests {
                                     .sum::<f64>()
                                     / chunk_size as f64;
 
-                                
                                 let price_range = high
                                     .iter()
                                     .zip(low.iter())
@@ -1661,11 +1551,9 @@ mod tests {
                                     0.01
                                 };
 
-                                
                                 let tolerance = (0.05 * (1.0 - alpha * 0.5)).min(0.05);
 
                                 if is_monotonic_up {
-                                    
                                     prop_assert!(
 										last_chunk_avg >= first_chunk_avg - tolerance,
 										"LRSI should respond to uptrend, but first_avg={}, last_avg={}, \
@@ -1677,7 +1565,6 @@ mod tests {
 										trend_strength
 									);
                                 } else if is_monotonic_down {
-                                    
                                     prop_assert!(
 										last_chunk_avg <= first_chunk_avg + tolerance,
 										"LRSI should respond to downtrend, but first_avg={}, last_avg={}, \
@@ -1693,8 +1580,6 @@ mod tests {
                         }
                     }
 
-                    
-                    
                     if alpha < 0.02 || alpha > 0.98 {
                         if out.len() > first_idx + 50 {
                             let valid_values: Vec<f64> = out
@@ -1706,10 +1591,8 @@ mod tests {
 
                             if valid_values.len() >= 20 {
                                 if alpha < 0.02 {
-                                    
-                                    
                                     let settled_values = if valid_values.len() > 10 {
-                                        &valid_values[5..] 
+                                        &valid_values[5..]
                                     } else {
                                         &valid_values[..]
                                     };
@@ -1720,10 +1603,8 @@ mod tests {
                                             .map(|w| (w[1] - w[0]).abs())
                                             .fold(0.0f64, f64::max);
 
-                                        
-                                        
                                         prop_assert!(
-											max_step < 0.7,  
+											max_step < 0.7,
 											"Extreme low alpha ({}) should produce smooth output after settling, \
 											but max step is {}",
 											alpha,
@@ -1731,11 +1612,9 @@ mod tests {
 										);
                                     }
 
-                                    
-                                    
                                     if valid_values.len() >= 20 {
                                         let last_10 = &valid_values[valid_values.len() - 10..];
-                                        
+
                                         let min_val =
                                             last_10.iter().fold(f64::INFINITY, |a, &b| a.min(b));
                                         let max_val = last_10
@@ -1743,7 +1622,6 @@ mod tests {
                                             .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                                         let range = max_val - min_val;
 
-                                        
                                         prop_assert!(
 											range < 0.5,
 											"Extreme low alpha ({}) should converge to stable value, \
@@ -1753,14 +1631,11 @@ mod tests {
 										);
                                     }
                                 } else {
-                                    
-                                    
                                     let range = valid_values.iter().fold(
                                         (f64::INFINITY, f64::NEG_INFINITY),
                                         |(min, max), &v| (min.min(v), max.max(v)),
                                     );
 
-                                    
                                     let input_has_variation =
                                         high.windows(2).any(|w| (w[1] - w[0]).abs() > w[0] * 0.001);
 
@@ -1859,18 +1734,16 @@ mod tests {
         let file = "src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv";
         let c = read_candles_from_csv(file)?;
 
-        
         let slice_end = c.close.len().min(1000);
         let high_slice = &c.high[..slice_end];
         let low_slice = &c.low[..slice_end];
 
-        
         let test_configs = vec![
-            (0.1, 0.3, 0.1),    
-            (0.2, 0.8, 0.2),    
-            (0.5, 0.9, 0.1),    
-            (0.1, 0.95, 0.15),  
-            (0.85, 0.95, 0.05), 
+            (0.1, 0.3, 0.1),
+            (0.2, 0.8, 0.2),
+            (0.5, 0.9, 0.1),
+            (0.1, 0.95, 0.15),
+            (0.85, 0.95, 0.05),
         ];
 
         for (cfg_idx, &(a_start, a_end, a_step)) in test_configs.iter().enumerate() {
@@ -1879,7 +1752,6 @@ mod tests {
                 .alpha_range(a_start, a_end, a_step)
                 .apply_slices(high_slice, low_slice)?;
 
-            
             for (idx, &val) in output.values.iter().enumerate() {
                 if val.is_nan() {
                     continue;
@@ -1969,7 +1841,6 @@ mod tests {
     gen_batch_tests!(check_batch_no_poison);
 }
 
-
 #[inline(always)]
 fn lrsi_batch_inner_into(
     high: &[f64],
@@ -1995,7 +1866,6 @@ fn lrsi_batch_inner_into(
         return Err(LrsiError::EmptyInputData);
     }
 
-    
     let len = high.len();
     let mut prices = Vec::with_capacity(len);
     prices.extend((0..len).map(|i| (high[i] + low[i]) * 0.5));
@@ -2011,13 +1881,11 @@ fn lrsi_batch_inner_into(
 
     let rows = combos.len();
     let cols = high.len();
-    let expected = rows
-        .checked_mul(cols)
-        .ok_or(LrsiError::InvalidRange {
-            start: rows.to_string(),
-            end: cols.to_string(),
-            step: "rows*cols".into(),
-        })?;
+    let expected = rows.checked_mul(cols).ok_or(LrsiError::InvalidRange {
+        start: rows.to_string(),
+        end: cols.to_string(),
+        step: "rows*cols".into(),
+    })?;
     if out.len() != expected {
         return Err(LrsiError::OutputLengthMismatch {
             expected,
@@ -2025,7 +1893,6 @@ fn lrsi_batch_inner_into(
         });
     }
 
-    
     let out_mu: &mut [std::mem::MaybeUninit<f64>] = unsafe {
         std::slice::from_raw_parts_mut(
             out.as_mut_ptr() as *mut std::mem::MaybeUninit<f64>,
@@ -2035,11 +1902,10 @@ fn lrsi_batch_inner_into(
 
     let do_row = |row: usize, dst_row_mu: &mut [std::mem::MaybeUninit<f64>]| unsafe {
         let alpha = combos[row].alpha.unwrap();
-        
+
         let dst_row =
             std::slice::from_raw_parts_mut(dst_row_mu.as_mut_ptr() as *mut f64, dst_row_mu.len());
 
-        
         let warmup_end = first + 3;
         for i in 0..warmup_end.min(dst_row.len()) {
             dst_row[i] = f64::NAN;
@@ -2138,7 +2004,6 @@ pub fn lrsi_batch_py<'py>(
     let rows = combos.len();
     let cols = h.len();
 
-    
     let out_arr = unsafe { PyArray1::<f64>::new(py, [rows * cols], false) };
     let out_slice = unsafe { out_arr.as_slice_mut()? };
 
@@ -2170,7 +2035,6 @@ pub fn lrsi_batch_py<'py>(
     )?;
     Ok(dict)
 }
-
 
 #[cfg(all(feature = "python", feature = "cuda"))]
 #[pyfunction(name = "lrsi_cuda_batch_dev")]

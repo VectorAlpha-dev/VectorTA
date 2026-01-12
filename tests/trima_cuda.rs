@@ -1,5 +1,3 @@
-
-
 use vector_ta::indicators::moving_averages::trima::{
     trima_batch_with_kernel, TrimaBatchRange, TrimaBuilder, TrimaParams,
 };
