@@ -49,7 +49,7 @@ __device__ __forceinline__ float avg2_compensated(float a, float b) {
 __device__ __forceinline__ float median3f(float a, float b, float c) {
     float ab = fminf(a, b), AB = fmaxf(a, b);
     float bc = fminf(AB, c), BC = fmaxf(AB, c);
-    (void)BC; 
+    (void)BC;
     return fmaxf(ab, bc);
 }
 
@@ -89,7 +89,7 @@ __device__ __forceinline__ float nth_element_inplace(float* a, int n, int k) {
 
 
 __device__ __forceinline__ float median_from_window(const float* __restrict__ orig, int n, float* __restrict__ scratch) {
-    
+
     for (int i = 0; i < n; ++i) scratch[i] = orig[i];
 
     if (n & 1) {
@@ -98,7 +98,7 @@ __device__ __forceinline__ float median_from_window(const float* __restrict__ or
     } else {
         const int k = n >> 1;
         const float upper = nth_element_inplace(scratch, n, k);
-        
+
         float lower = scratch[0];
         #pragma unroll 1
         for (int i = 1; i < k; ++i) {
@@ -110,15 +110,15 @@ __device__ __forceinline__ float median_from_window(const float* __restrict__ or
 
 
 __device__ __forceinline__ float mad_from_window(const float* __restrict__ orig, int n, float* __restrict__ scratch) {
-    
+
     const float med = median_from_window(orig, n, scratch);
 
-    
+
     for (int i = 0; i < n; ++i) {
         scratch[i] = fabsf_fast(orig[i] - med);
     }
 
-    
+
     if (n & 1) {
         const int k = n >> 1;
         return nth_element_inplace(scratch, n, k);
@@ -134,7 +134,7 @@ __device__ __forceinline__ float mad_from_window(const float* __restrict__ orig,
 
 
 __device__ __forceinline__ float mad_period_2(float x0, float x1) {
-    
+
     return 0.5f * fabsf_fast(x1 - x0);
 }
 
@@ -142,12 +142,12 @@ __device__ __forceinline__ float mad_period_2(float x0, float x1) {
 
 
 extern "C" __global__ void medium_ad_batch_f32(
-    const float* __restrict__ data,     
+    const float* __restrict__ data,
     int len,
     int first_valid,
-    const int* __restrict__ periods,    
+    const int* __restrict__ periods,
     int n_combos,
-    float* __restrict__ out)            
+    float* __restrict__ out)
 {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -159,11 +159,11 @@ extern "C" __global__ void medium_ad_batch_f32(
     const int row_off = combo * len;
     const float nan_f = nanf("");
 
-    
+
     float orig[MEDIUM_AD_MAX_PERIOD];
     float scratch[MEDIUM_AD_MAX_PERIOD];
 
-    
+
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
@@ -182,7 +182,7 @@ extern "C" __global__ void medium_ad_batch_f32(
                 const int start = t + 1 - period;
                 bool has_nan = false;
 
-                
+
                 #pragma unroll 1
                 for (int k = 0; k < period; ++k) {
                     const float v = data[start + k];
@@ -204,14 +204,14 @@ extern "C" __global__ void medium_ad_batch_f32(
 
 
 extern "C" __global__ void medium_ad_many_series_one_param_f32(
-    const float* __restrict__ data_tm, 
+    const float* __restrict__ data_tm,
     int cols,
     int rows,
     int period,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm)           
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     if (period <= 0 || period > MEDIUM_AD_MAX_PERIOD) {
@@ -225,7 +225,7 @@ extern "C" __global__ void medium_ad_many_series_one_param_f32(
     const int warm = first_valid + period - 1;
     const float nan_f = nanf("");
 
-    
+
     int prefill = warm < rows ? warm : rows;
     for (int t = 0; t < prefill; ++t) {
         out_tm[t * cols + s] = nan_f;

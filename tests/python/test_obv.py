@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    
+
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -23,18 +23,18 @@ class TestObv:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_obv_accuracy(self, test_data):
         """Test OBV matches expected values from Rust tests"""
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         result = ta_indicators.obv(close, volume)
-        
+
         assert len(result) == len(close), "Output length should match input length"
-        
-        
+
+
         expected_last_five = [
             -329661.6180239202,
             -329767.87639284023,
@@ -42,127 +42,127 @@ class TestObv:
             -329801.35075036023,
             -330218.2007503602,
         ]
-        
-        
+
+
         for i, expected in enumerate(expected_last_five):
             actual = result[-(5-i)]
-            
+
             assert_close(actual, expected, rtol=0.0, atol=1e-6, msg=f"OBV mismatch at tail index {i}")
-    
+
     def test_obv_empty_data(self):
         """Test OBV with empty data"""
         close = np.array([], dtype=np.float64)
         volume = np.array([], dtype=np.float64)
-        
-        with pytest.raises(Exception):  
+
+        with pytest.raises(Exception):
             ta_indicators.obv(close, volume)
-    
+
     def test_obv_mismatched_lengths(self):
         """Test OBV with mismatched input lengths"""
         close = np.array([1.0, 2.0, 3.0])
         volume = np.array([100.0, 200.0])
-        
-        with pytest.raises(Exception):  
+
+        with pytest.raises(Exception):
             ta_indicators.obv(close, volume)
-    
+
     def test_obv_all_nan(self):
         """Test OBV with all NaN values"""
         close = np.array([np.nan, np.nan])
         volume = np.array([np.nan, np.nan])
-        
-        with pytest.raises(Exception):  
+
+        with pytest.raises(Exception):
             ta_indicators.obv(close, volume)
-    
+
     def test_obv_batch(self, test_data):
         """Test OBV batch functionality"""
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         result = ta_indicators.obv_batch(close, volume)
-        
+
         assert 'values' in result
         values = result['values']
-        assert values.shape[0] == 1  
+        assert values.shape[0] == 1
         assert values.shape[1] == len(close)
-        
-        
+
+
         single_result = ta_indicators.obv(close, volume)
         np.testing.assert_array_almost_equal(values[0], single_result, decimal=10)
-    
+
     def test_obv_stream(self):
         """Test OBV streaming functionality"""
         stream = ta_indicators.ObvStream()
-        
-        
+
+
         test_data = [
             (100.0, 1000.0),
-            (101.0, 1500.0),  
-            (100.5, 2000.0),  
-            (100.5, 1000.0),  
-            (102.0, 3000.0),  
+            (101.0, 1500.0),
+            (100.5, 2000.0),
+            (100.5, 1000.0),
+            (102.0, 3000.0),
         ]
-        
+
         results = []
         for close, volume in test_data:
             result = stream.update(close, volume)
             if result is not None:
                 results.append(result)
-        
-        
+
+
         assert len(results) == len(test_data)
-    
+
     def test_obv_kernel_selection(self, test_data):
         """Test OBV with different kernel selections"""
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         result_auto = ta_indicators.obv(close, volume)
         result_scalar = ta_indicators.obv(close, volume, kernel='scalar')
-        
-        
+
+
         np.testing.assert_array_almost_equal(result_auto, result_scalar, decimal=10)
-        
-        
+
+
         try:
             result_avx2 = ta_indicators.obv(close, volume, kernel='avx2')
             np.testing.assert_array_almost_equal(result_auto, result_avx2, decimal=10)
         except ValueError:
-            
+
             pass
-        
+
         try:
             result_avx512 = ta_indicators.obv(close, volume, kernel='avx512')
             np.testing.assert_array_almost_equal(result_auto, result_avx512, decimal=10)
         except ValueError:
-            
+
             pass
-    
+
     def test_obv_nan_handling(self, test_data):
         """Test OBV handles NaN values correctly"""
         close = test_data['close']
         volume = test_data['volume']
-        
+
         result = ta_indicators.obv(close, volume)
         assert len(result) == len(close)
-        
-        
+
+
         first_valid = None
         for i in range(len(close)):
             if not np.isnan(close[i]) and not np.isnan(volume[i]):
                 first_valid = i
                 break
-        
+
         if first_valid is not None:
-            
+
             assert result[first_valid] == 0.0, f"OBV should start at 0.0, got {result[first_valid]}"
-            
-            
+
+
             if first_valid > 0:
                 assert np.all(np.isnan(result[:first_valid])), "Expected NaN before first valid data"
-            
-            
+
+
             for i in range(first_valid + 1, len(result)):
                 if not np.isnan(close[i]) and not np.isnan(volume[i]):
                     assert not np.isnan(result[i]), f"Unexpected NaN at index {i}"

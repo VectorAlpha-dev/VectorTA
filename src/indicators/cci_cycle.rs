@@ -954,7 +954,7 @@ impl CciCycleStream {
 
     #[inline(always)]
     fn ring_idx(&self, i: usize) -> usize {
-        i & (self.length - 1) /* if pow2 */
+        i & (self.length - 1)
     }
 
     #[inline(always)]

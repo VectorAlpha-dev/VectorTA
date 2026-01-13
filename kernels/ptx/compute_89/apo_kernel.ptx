@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry apo_batch_f32(
 	.param .u64 apo_batch_f32_param_0,
@@ -403,7 +403,7 @@ $L__BB0_35:
 	ret;
 
 }
-	
+
 .visible .entry apo_many_series_one_param_f32(
 	.param .u64 apo_many_series_one_param_f32_param_0,
 	.param .u64 apo_many_series_one_param_f32_param_1,

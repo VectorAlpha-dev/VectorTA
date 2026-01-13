@@ -5,10 +5,10 @@
 #include <stdint.h>
 #include <math.h>
 #include <math_constants.h>
-#include <math_functions.h> 
+#include <math_functions.h>
 
 #ifndef ROW_TILE
-#define ROW_TILE 8       
+#define ROW_TILE 8
 #endif
 
 
@@ -17,7 +17,7 @@ static __device__ __forceinline__ bool is_aligned_16(const void* p) {
 }
 
 static __device__ __forceinline__ float medprice_scalar(float h, float l) {
-    
+
     const float s = h + l;
     return __isnanf(s) ? CUDART_NAN_F : 0.5f * s;
 }
@@ -38,23 +38,23 @@ void medprice_kernel_f32(const float* __restrict__ high,
 
     const int fv = first_valid < 0 ? 0 : first_valid;
 
-    
+
     for (int i = tid; i < len && i < fv; i += stride) {
         out[i] = CUDART_NAN_F;
     }
 
-    
+
     const bool do_vec = is_aligned_16(high) && is_aligned_16(low) && is_aligned_16(out);
     if (do_vec) {
-        
+
         const int vecStart = ((fv + 3) & ~3);
-        
+
         for (int i = fv + tid; i < vecStart && i < len; i += stride) {
             out[i] = medprice_scalar(high[i], low[i]);
         }
 
         if (vecStart < len) {
-            const int totalVec = (len - vecStart) >> 2; 
+            const int totalVec = (len - vecStart) >> 2;
             const float4* __restrict__ h4 = reinterpret_cast<const float4*>(high + vecStart);
             const float4* __restrict__ l4 = reinterpret_cast<const float4*>(low  + vecStart);
             float4* __restrict__ o4       = reinterpret_cast<float4*>(out + vecStart);
@@ -70,14 +70,14 @@ void medprice_kernel_f32(const float* __restrict__ high,
                 o4[v] = r;
             }
 
-            
+
             const int tailStart = vecStart + (totalVec << 2);
             for (int i = tailStart + tid; i < len; i += stride) {
                 out[i] = medprice_scalar(high[i], low[i]);
             }
         }
     } else {
-        
+
         for (int i = max(fv, 0) + tid; i < len; i += stride) {
             out[i] = medprice_scalar(high[i], low[i]);
         }
@@ -104,7 +104,7 @@ void medprice_batch_f32(const float* __restrict__ high,
 
     const bool do_vec = is_aligned_16(high) && is_aligned_16(low) && is_aligned_16(out);
     if (do_vec) {
-        const int totalVec = len >> 2; 
+        const int totalVec = len >> 2;
         const float4* __restrict__ h4 = reinterpret_cast<const float4*>(high);
         const float4* __restrict__ l4 = reinterpret_cast<const float4*>(low);
 
@@ -113,7 +113,7 @@ void medprice_batch_f32(const float* __restrict__ high,
             const float4 ah = h4[v];
             const float4 al = l4[v];
 
-            
+
             const float sx = ah.x + al.x; const float r0 = __isnanf(sx) ? CUDART_NAN_F : 0.5f * sx;
             const float sy = ah.y + al.y; const float r1 = __isnanf(sy) ? CUDART_NAN_F : 0.5f * sy;
             const float sz = ah.z + al.z; const float r2 = __isnanf(sz) ? CUDART_NAN_F : 0.5f * sz;
@@ -132,7 +132,7 @@ void medprice_batch_f32(const float* __restrict__ high,
             }
         }
 
-        
+
         const int tailStart = (totalVec << 2);
         for (int i = tailStart + tid; i < len; i += stride) {
             const float r = medprice_scalar(high[i], low[i]);
@@ -145,7 +145,7 @@ void medprice_batch_f32(const float* __restrict__ high,
             }
         }
     } else {
-        
+
         for (int i = tid; i < len; i += stride) {
             const float r = medprice_scalar(high[i], low[i]);
             #pragma unroll
@@ -171,12 +171,12 @@ void medprice_many_series_one_param_f32(const float* __restrict__ high_tm,
                                         const int* __restrict__ first_valids,
                                         float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const int fv = first_valids ? max(first_valids[s], 0) : 0;
 
-    
+
     #pragma unroll 4
     for (int t = 0; t < rows; ++t) {
         const int idx = t * cols + s;

@@ -7,7 +7,7 @@ const __dirname = path.dirname(__filename);
 
 
 const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-const importPath = process.platform === 'win32' 
+const importPath = process.platform === 'win32'
     ? 'file:///' + wasmPath.replace(/\\/g, '/')
     : wasmPath;
 const wasm = await import(importPath);
@@ -22,8 +22,8 @@ try {
 } catch (error) {
     console.error('Error:', error.message);
     console.error('Full error:', error);
-    
-    
+
+
     if (error.stack) {
         const lines = error.stack.split('\n');
         console.log('\nStack trace:');
@@ -38,11 +38,11 @@ try {
     const ptr = wasm.tema_alloc(2);
     const memView = new Float64Array(wasm.__wasm.memory.buffer, ptr, 2);
     memView.set(data);
-    
+
     console.log('Calling tema_into...');
     wasm.tema_into(ptr, ptr, 2, 2);
     console.log('Success! Result:', Array.from(memView));
-    
+
     wasm.tema_free(ptr, 2);
 } catch (error) {
     console.error('Error:', error.message);

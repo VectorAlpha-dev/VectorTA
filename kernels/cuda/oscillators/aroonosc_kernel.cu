@@ -73,7 +73,7 @@ void aroonosc_batch_f32(const float* __restrict__ high,
         return;
     }
 
-    const int warm = first_valid + L;        
+    const int warm = first_valid + L;
     if (warm >= series_len) {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
             out[base + i] = CUDART_NAN_F;
@@ -81,31 +81,31 @@ void aroonosc_batch_f32(const float* __restrict__ high,
         return;
     }
 
-    
+
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out[base + i] = CUDART_NAN_F;
     }
 
     const float scale = 100.0f / (float)L;
 
-    
+
     const unsigned mask = __activemask();
     const int lane      = threadIdx.x & (WARP_SIZE - 1);
     const int warp_id   = threadIdx.x >> 5;
     const int warps_per_block = blockDim.x / WARP_SIZE;
 
-    
+
     for (int t = warm + warp_id; t < series_len; t += warps_per_block) {
         const int start = t - L;
 
-        
+
         float max_v = high[start];
         int   max_i = start;
         float min_v = low[start];
         int   min_i = start;
 
-        
-        
+
+
         for (int j = start + lane; j <= t; j += WARP_SIZE) {
             const float h = high[j];
             const float l = low[j];
@@ -113,12 +113,12 @@ void aroonosc_batch_f32(const float* __restrict__ high,
             min_earliest_update(l, j, min_v, min_i);
         }
 
-        
+
         warp_argmaxmin_earliest(max_v, max_i, min_v, min_i, mask);
 
         if (lane == 0) {
             float v = (float)(max_i - min_i) * scale;
-            
+
             v = fminf(100.0f, fmaxf(-100.0f, v));
             out[base + t] = v;
         }
@@ -136,7 +136,7 @@ void aroonosc_many_series_one_param_f32(const float* __restrict__ high_tm,
                                         int series_len,
                                         int length,
                                         float* __restrict__ out_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= num_series || series_len <= 0) return;
 
     if (length <= 0) {
@@ -155,7 +155,7 @@ void aroonosc_many_series_one_param_f32(const float* __restrict__ high_tm,
         return;
     }
 
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out_tm[t * num_series + s] = CUDART_NAN_F;
     }
@@ -163,7 +163,7 @@ void aroonosc_many_series_one_param_f32(const float* __restrict__ high_tm,
     const float scale  = 100.0f / (float)length;
     const int   stride = num_series;
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
 
     for (int t = warm; t < series_len; ++t) {
         const int start = t - length;

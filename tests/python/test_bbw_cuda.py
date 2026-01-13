@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -50,10 +50,10 @@ class TestBbwCuda:
         close = test_data['close']
         period, devup, devdn = 20, 2.0, 2.0
 
-        
+
         cpu = ti.bollinger_bands_width(close, period, devup, devdn, matype='sma', devtype=0)
 
-        
+
         handle, meta = ti.bollinger_bands_width_cuda_batch_dev(
             close.astype(np.float32),
             period_range=(period, period, 0),
@@ -62,7 +62,7 @@ class TestBbwCuda:
         )
         gpu = cp.asnumpy(cp.asarray(handle))[0]
 
-        
+
         assert_close(gpu, cpu, rtol=1e-4, atol=2e-5, msg="BBW CUDA batch vs CPU mismatch")
 
     def test_bbw_cuda_many_series_one_param_matches_cpu(self, test_data):
@@ -75,7 +75,7 @@ class TestBbwCuda:
 
         period, devup, devdn = 20, 2.0, 2.0
 
-        
+
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.bollinger_bands_width(

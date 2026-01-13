@@ -72,7 +72,7 @@ $estimateFiles = Get-ChildItem -Path $criterionDir -Recurse -File -Filter "estim
     Where-Object { $_.FullName -match '\\new\\estimates\.json$' }
 
 foreach ($f in $estimateFiles) {
-    $benchDir = Split-Path (Split-Path $f.FullName -Parent) -Parent # ...\<id>\new\estimates.json -> ...\<id>
+    $benchDir = Split-Path (Split-Path $f.FullName -Parent) -Parent
     $idRel = $benchDir.Substring($criterionDir.Length).TrimStart("\\")
     $id = To-PosixPath $idRel
     if ($Match -and ($id -notlike "*$Match*")) {

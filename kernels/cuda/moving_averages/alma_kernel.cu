@@ -161,7 +161,7 @@ void alma_compute_weights_and_invnorm(int period, float m, float s2,
   float local = 0.f;
   for (int i = threadIdx.x; i < period; i += blockDim.x) {
     float d  = float(i) - m;
-    
+
     float wi = __expf(-(d * d) / s2);
     weights[i] = wi;
     local     += wi;
@@ -209,7 +209,7 @@ void alma_batch_f32_onthefly(const float* __restrict__ prices,
 
   __shared__ float inv_norm_s;
   alma_compute_weights_and_invnorm(period, m, s2, weights, &inv_norm_s);
-  
+
   for (int i = threadIdx.x; i < period; i += blockDim.x) {
     weights[i] *= inv_norm_s;
   }
@@ -233,9 +233,9 @@ void alma_batch_f32_onthefly(const float* __restrict__ prices,
 
 extern "C" __global__
 void alma_batch_f32(const float* __restrict__ prices,
-                    const float* __restrict__ weights_flat, 
+                    const float* __restrict__ weights_flat,
                     const int*   __restrict__ periods,
-                    const float* __restrict__ inv_norms,     
+                    const float* __restrict__ inv_norms,
                     int max_period,
                     int series_len,
                     int n_combos,
@@ -247,7 +247,7 @@ void alma_batch_f32(const float* __restrict__ prices,
   const int   period   = periods[combo];
 
   extern __shared__ float sh[];
-  float* w = sh; 
+  float* w = sh;
   for (int i = threadIdx.x; i < period; i += blockDim.x) {
     w[i] = weights_flat[combo * max_period + i];
   }
@@ -306,15 +306,15 @@ struct AlmaBatchTiledPrecomputed {
 
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w   = reinterpret_cast<float*>(shraw + off);           
+    float* w   = reinterpret_cast<float*>(shraw + off);
     off = alma_align_up(off + size_t(period)*sizeof(float), 16);
-    float* buf    = reinterpret_cast<float*>(shraw + off);        
+    float* buf    = reinterpret_cast<float*>(shraw + off);
 
-    
+
     const float* wsrc = weights_flat + combo * max_period;
     uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
     if ((waddr & 0xF) == 0) {
-      int ve = period >> 2; 
+      int ve = period >> 2;
       for (int vi = threadIdx.x; vi < ve; vi += TILE) {
         reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(wsrc)[vi];
       }
@@ -330,14 +330,14 @@ struct AlmaBatchTiledPrecomputed {
     const int warm = first_valid + period - 1;
     const int combo_base = combo * series_len;
 
-    
+
     const int p_base0 = t0 - (period - 1);
     bool in_bounds = (p_base0 >= 0) && ((p_base0 + total) <= series_len);
     if (in_bounds) {
       const float* src = prices + p_base0;
       uintptr_t addr = reinterpret_cast<uintptr_t>(src);
       if ((addr & 0xF) == 0) {
-        int vec_elems = total >> 2; 
+        int vec_elems = total >> 2;
         int vec_idx = threadIdx.x;
         float4* dst4 = reinterpret_cast<float4*>(buf);
         const float4* src4 = reinterpret_cast<const float4*>(src);
@@ -421,15 +421,15 @@ struct AlmaBatchTiledPrecomputed2X {
 
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w   = reinterpret_cast<float*>(shraw + off);           
+    float* w   = reinterpret_cast<float*>(shraw + off);
     off = alma_align_up(off + size_t(period)*sizeof(float), 16);
-    float* buf = reinterpret_cast<float*>(shraw + off);           
+    float* buf = reinterpret_cast<float*>(shraw + off);
 
-    
+
     const float* wsrc = weights_flat + combo * max_period;
     uintptr_t waddr = reinterpret_cast<uintptr_t>(wsrc);
     if ((waddr & 0xF) == 0) {
-      int ve = period >> 2; 
+      int ve = period >> 2;
       for (int vi = threadIdx.x; vi < ve; vi += THREADS) {
         reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(wsrc)[vi];
       }
@@ -448,7 +448,7 @@ struct AlmaBatchTiledPrecomputed2X {
       const float* src = prices + p_base0;
       uintptr_t addr = reinterpret_cast<uintptr_t>(src);
       if ((addr & 0xF) == 0) {
-        int vec_elems = total >> 2; 
+        int vec_elems = total >> 2;
         int vec_idx = threadIdx.x;
         float4* dst4 = reinterpret_cast<float4*>(buf);
         const float4* src4 = reinterpret_cast<const float4*>(src);
@@ -474,8 +474,8 @@ struct AlmaBatchTiledPrecomputed2X {
     const int warm = first_valid + period - 1;
     const int combo_base = combo * series_len;
 
-    
-    int b = 2 * threadIdx.x; 
+
+    int b = 2 * threadIdx.x;
     int t = t0 + b;
     float out0 = NAN, out1 = NAN;
     if (t < series_len) {
@@ -487,10 +487,10 @@ struct AlmaBatchTiledPrecomputed2X {
         out0 = s0;
         out1 = s1;
       } else if (can0) {
-        
+
         out0 = alma_dot(&buf[b], w, period);
       } else if (can1) {
-        
+
         out1 = alma_dot(&buf[b + 1], w, period);
       }
       out[combo_base + t] = out0;
@@ -524,7 +524,7 @@ DEFINE_ALMA_BATCH_TILED_PRECOMP_2X(alma_batch_tiled_f32_2x_tile512, 512)
 
 extern "C" __global__
 void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
-                                     const float* __restrict__ weights, 
+                                     const float* __restrict__ weights,
                                      int period,
                                      float inv_norm,
                                      int num_series,
@@ -534,8 +534,8 @@ void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
   const int TX = blockDim.x;
   const int SY = blockDim.y;
 
-  int t = blockIdx.x * TX + threadIdx.x;  
-  int s = blockIdx.y * SY + threadIdx.y;  
+  int t = blockIdx.x * TX + threadIdx.x;
+  int s = blockIdx.y * SY + threadIdx.y;
   if (s >= num_series || t >= series_len) return;
 
   extern __shared__ float sh[];
@@ -556,7 +556,7 @@ void alma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
   int start = t - period + 1;
   const float* xptr = &prices_tm[start * num_series + s];
   float acc = alma_dot_stride(xptr, num_series, w, period);
-  
+
   out_tm[out_idx] = acc;
 }
 
@@ -583,11 +583,11 @@ void alma_precompute_weights_f32(const int*   __restrict__ periods,
 
   __shared__ float inv_norm_s;
   alma_compute_weights_and_invnorm(period, m, s2, w, &inv_norm_s);
-  
+
   for (int i = threadIdx.x; i < period; i += blockDim.x) {
     weights_flat[combo * max_period + i] = w[i] * inv_norm_s;
   }
-  if (threadIdx.x == 0) inv_norms[combo] = 1.0f; 
+  if (threadIdx.x == 0) inv_norms[combo] = 1.0f;
 }
 
 
@@ -609,7 +609,7 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
 
   if (t0 >= series_len || s0 >= num_series) return;
 
-  
+
   const int total = TX_ + period - 1;
   extern __shared__ __align__(16) unsigned char shraw[];
   size_t off = 0;
@@ -617,10 +617,10 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   off = alma_align_up(off + size_t(period) * sizeof(float), 16);
   float* tile = reinterpret_cast<float*>(shraw + off);
 
-  
+
   uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
   if ((waddr & 0xF) == 0) {
-    int ve = period >> 2; 
+    int ve = period >> 2;
     for (int vi = threadIdx.y * blockDim.x + threadIdx.x; vi < ve; vi += blockDim.x * blockDim.y) {
       reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(weights)[vi];
     }
@@ -635,15 +635,15 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
   __syncthreads();
 
-  
+
   const bool vec_ok = (TY_ == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
 
-  const int p0 = t0 - (period - 1); 
+  const int p0 = t0 - (period - 1);
   for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
     int t = p0 + dt;
     if (t >= 0 && t < series_len) {
       if (vec_ok && threadIdx.y == 0) {
-        
+
         const float4* src4 = reinterpret_cast<const float4*>(&prices_tm[t * num_series + s0]);
         float4 v = src4[0];
         tile[dt * TY_ + 0] = v.x;
@@ -663,7 +663,7 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
   __syncthreads();
 
-  
+
   int s = s0 + threadIdx.y;
   int t = t0 + threadIdx.x;
   if (s >= num_series || t >= series_len) return;
@@ -676,10 +676,10 @@ void alma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     return;
   }
 
-  int start = threadIdx.x; 
+  int start = threadIdx.x;
   const float* xptr = &tile[start * TY_ + threadIdx.y];
   float acc = alma_dot_stride(xptr, TY_, w, period);
-  
+
   out_tm[out_idx] = acc;
 }
 

@@ -9,13 +9,13 @@ autobins = false
 homepage = "https://vectoralpha.dev/projects/ta"
 documentation = "https://vectoralpha.dev/projects/ta"
 
-# NOTE: Set these before publishing.
-# repository = "https://..."
+
+
 
 keywords = ["technical-analysis", "trading", "indicators", "finance"]
 categories = ["algorithms"]
 
-# Publish only the minimal, reproducible crate surface.
+
 include = [
   "/Cargo.toml",
   "/README.md",
@@ -93,38 +93,38 @@ doctest = false
 
 [profile.release]
 opt-level       = 3
-codegen-units   = 255  # Single codegen unit for maximum optimization
+codegen-units   = 255
 incremental = false
-# panic = "abort"  # Commented out to allow benchmarks to compile
+
 overflow-checks = false
-debug = false  # Disable debug for better performance
+debug = false
 strip = "none"
 split-debuginfo = "unpacked"
-lto = "fat"  # Enable link-time optimization
+lto = "fat"
 
-# Additional WASM-specific optimizations
+
 [profile.wasm]
 inherits = "release"
-opt-level = "z"  # Optimize for size which often improves performance in browsers
-lto = false      # Disable LTO for WASM
+opt-level = "z"
+lto = false
 strip = "symbols"
 
 [profile.bench]
-# Don't inherit from any profile to avoid panic strategy conflicts
+
 opt-level = 3
-lto = "fat"  # Enable for maximum performance
-codegen-units = 255  # Single codegen unit for maximum optimization
+lto = "fat"
+codegen-units = 255
 incremental = false
 overflow-checks = false
-debug = false  # Disabled for faster compilation
+debug = false
 strip = "none"
 split-debuginfo = "unpacked"
 
 [profile.dev]
-# Development profile settings
+
 
 [profile.dev.build-override]
-# Ensure proc-macros don't use LTO in dev builds
+
 opt-level = 0
 codegen-units = 16
 
@@ -138,26 +138,26 @@ cuda = ["cust", "cust_derive"]
 cuda-build-ptx = ["cuda"]
 
 [package.metadata.wasm-pack.profile.release]
-# Disable wasm-opt during wasm-pack build to avoid CI/agent issues.
+
 wasm-opt = false
 
 [package.metadata.wasm-pack.profile.dev]
-# Also disable in dev builds for consistency.
+
 wasm-opt = false
 
 [profile.release.build-override]
-# Applies only to build-scripts & proc-macros, *not* to your library/bin code.
-# Note: Cannot specify lto in build-override profiles (Cargo restriction)
-codegen-units = 255      # optional tidy-up; keeps small helper crates optimised
+
+
+codegen-units = 255
 
 [profile.bench.build-override]
-# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+
 codegen-units = 255
 
 
-# ────────────────────────────────────────────────────────────────
-# 2.  Custom WASM profile used by wasm-pack  (inherits release)
-# ────────────────────────────────────────────────────────────────
+
+
+
 [profile.wasm.build-override]
-# Note: Cannot specify lto in build-override profiles (Cargo restriction)
+
 codegen-units = 1

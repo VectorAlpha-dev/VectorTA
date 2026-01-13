@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry willr_batch_f32(
 	.param .u64 willr_batch_f32_param_0,
@@ -218,7 +218,7 @@ $L__BB0_20:
 	ret;
 
 }
-	
+
 .visible .entry willr_many_series_one_param_time_major_f32(
 	.param .u64 willr_many_series_one_param_time_major_f32_param_0,
 	.param .u64 willr_many_series_one_param_time_major_f32_param_1,

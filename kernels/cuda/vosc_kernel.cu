@@ -43,7 +43,7 @@ __device__ __forceinline__ ds ds_make(float hi, float lo) { ds r{hi, lo}; return
 
 __device__ __forceinline__ ds ds_from_double(double d) {
     float hi = (float)d;
-    float lo = (float)(d - (double)hi); 
+    float lo = (float)(d - (double)hi);
     return ds_make(hi, lo);
 }
 
@@ -60,7 +60,7 @@ __device__ __forceinline__ ds ds_neg(ds a) { return ds_make(-a.hi, -a.lo); }
 __device__ __forceinline__ ds ds_sub(ds a, ds b) { return ds_add(a, ds_neg(b)); }
 
 __device__ __forceinline__ ds ds_mul_f(ds a, float k) {
-    
+
     float p  = a.hi * k;
     float e  = fmaf(a.hi, k, -p) + a.lo * k;
     float hi = p + e;
@@ -72,13 +72,13 @@ __device__ __forceinline__ float ds_to_float(ds a) { return a.hi + a.lo; }
 
 
 extern "C" __global__ void vosc_batch_prefix_f32(
-    const double* __restrict__ prefix_sum, 
+    const double* __restrict__ prefix_sum,
     int len,
     int first_valid,
-    const int* __restrict__ short_periods, 
-    const int* __restrict__ long_periods,  
+    const int* __restrict__ short_periods,
+    const int* __restrict__ long_periods,
     int n_combos,
-    float* __restrict__ out                
+    float* __restrict__ out
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -89,7 +89,7 @@ extern "C" __global__ void vosc_batch_prefix_f32(
 
     const int warm = first_valid + L - 1;
     const int row_off = combo * len;
-    
+
     const float inv_S = __fdividef(1.0f, (float)S);
     const float inv_L = __fdividef(1.0f, (float)L);
 
@@ -101,12 +101,12 @@ extern "C" __global__ void vosc_batch_prefix_f32(
             const int t1 = t + 1;
             int sS = t1 - S; if (sS < 0) sS = 0;
             int sL = t1 - L; if (sL < 0) sL = 0;
-            
+
             ds PT = ds_from_double(prefix_sum[t1]);
             ds PS = ds_from_double(prefix_sum[sS]);
             ds PL = ds_from_double(prefix_sum[sL]);
 
-            
+
             ds short_sum = ds_sub(PT, PS);
             ds long_sum  = ds_sub(PT, PL);
             ds savg_ds = ds_mul_f(short_sum, inv_S);
@@ -124,13 +124,13 @@ extern "C" __global__ void vosc_batch_prefix_f32(
 
 
 extern "C" __global__ void vosc_many_series_one_param_f32(
-    const double* __restrict__ prefix_tm, 
+    const double* __restrict__ prefix_tm,
     int short_period,
     int long_period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm            
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm
 ) {
     const int series = blockIdx.y;
     if (series >= num_series) return;

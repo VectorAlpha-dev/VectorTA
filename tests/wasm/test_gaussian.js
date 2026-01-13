@@ -1,7 +1,4 @@
-/**
- * WASM binding tests for Gaussian indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -24,7 +21,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-  
+
   try {
     const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
     const importPath = process.platform === 'win32' ? 'file:///' + wasmPath.replace(/\\/g, '/') : wasmPath;
@@ -45,11 +42,11 @@ test('Gaussian accuracy', async () => {
 
   assert.strictEqual(result.length, close.length);
 
-  
+
   const last5 = result.slice(-5);
   assertArrayClose(last5, expected.last5Values, 1e-4, 'Gaussian last 5 values mismatch');
 
-  
+
   await compareWithRust('gaussian', result, 'close', expected.defaultParams, 1e-10);
 });
 
@@ -75,8 +72,8 @@ test('Gaussian empty input', () => {
 
 test('Gaussian invalid poles', () => {
   const data = new Float64Array([1, 2, 3, 4, 5]);
-  assert.throws(() => wasm.gaussian_js(data, 3, 0)); 
-  assert.throws(() => wasm.gaussian_js(data, 3, 5)); 
+  assert.throws(() => wasm.gaussian_js(data, 3, 0));
+  assert.throws(() => wasm.gaussian_js(data, 3, 5));
 });
 
 test('Gaussian period one degeneracy', () => {
@@ -88,8 +85,8 @@ test('Gaussian NaN handling', () => {
   const close = new Float64Array(testData.close);
   const res = wasm.gaussian_js(close, 14, 4);
   assert.strictEqual(res.length, close.length);
-  
-  const skip = 4; 
+
+  const skip = 4;
   for (let i = skip; i < res.length; i++) {
     assert(Number.isFinite(res[i]), `Non-finite value at index ${i}`);
   }
@@ -110,13 +107,13 @@ test('Gaussian batch multiple combinations + metadata', () => {
   const close = new Float64Array(testData.close.slice(0, 50));
   const result = wasm.gaussian_batch(close, { period_range: [10, 20, 5], poles_range: [2, 4, 1] });
 
-  
+
   assert.strictEqual(result.rows, 9);
   assert.strictEqual(result.cols, 50);
   assert.strictEqual(result.values.length, 9 * 50);
   assert.strictEqual(result.combos.length, 9);
 
-  
+
   const idx = result.combos.findIndex(c => c.period === 15 && c.poles === 3);
   assert.ok(idx >= 0, 'Expected combo (15,3) missing');
   const row = result.values.slice(idx * result.cols, (idx + 1) * result.cols);
@@ -129,7 +126,7 @@ test('Gaussian zero-copy API (alloc/into/free)', () => {
   const period = 10;
   const poles = 3;
 
-  
+
   const ptr = wasm.gaussian_alloc(data.length);
   assert(ptr !== 0, 'Failed to allocate memory');
 
@@ -144,7 +141,7 @@ test('Gaussian zero-copy API (alloc/into/free)', () => {
   view.set(data);
 
   try {
-    
+
     wasm.gaussian_into(ptr, ptr, data.length, period, poles);
     const regular = wasm.gaussian_js(data, period, poles);
     for (let i = 0; i < data.length; i++) {

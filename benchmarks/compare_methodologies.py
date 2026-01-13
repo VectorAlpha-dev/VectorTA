@@ -35,15 +35,15 @@ gc.disable()
 
 warmup_start = time.perf_counter()
 warmup_iters = 0
-while (time.perf_counter() - warmup_start) < 0.15:  
+while (time.perf_counter() - warmup_start) < 0.15:
     _ = my_project.alma(data_1m, 9, 0.85, 6.0)
     warmup_iters += 1
 print(f"Warmup iterations: {warmup_iters}")
 
 
 samples = []
-for _ in range(10):  
-    
+for _ in range(10):
+
     batch_size = 10
     start = time.perf_counter()
     for _ in range(batch_size):
@@ -62,10 +62,10 @@ print(f"Median: {np.median(samples):.3f} ms")
 print("\nMethod 3: Including allocation overhead")
 times = []
 for _ in range(100):
-    
+
     start = time.perf_counter()
     result = my_project.alma(data_1m, 9, 0.85, 6.0)
-    _ = np.ascontiguousarray(result)  
+    _ = np.ascontiguousarray(result)
     end = time.perf_counter()
     times.append((end - start) * 1000)
 
@@ -76,9 +76,9 @@ print(f"Median: {np.median(times):.3f} ms")
 print("\nMethod 4: Real-world pattern (fresh data each time)")
 times = []
 for _ in range(50):
-    
+
     test_data = np.random.randn(1_000_000).astype(np.float64)
-    
+
     start = time.perf_counter()
     _ = my_project.alma(test_data, 9, 0.85, 6.0)
     end = time.perf_counter()

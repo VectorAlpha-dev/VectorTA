@@ -83,7 +83,7 @@ struct RingAvg;
 template <int MAXW>
 struct RingAvg<MAXW, false> {
     float* buf;  int w, idx, count; int bad; NeumaierAcc acc; float local_buf[MAXW];
-    __device__ __forceinline__ void init(int _w, float* /*external_buf*/) {
+    __device__ __forceinline__ void init(int _w, float* ) {
         w=_w; idx=0; count=0; bad=0; acc.reset(); buf = local_buf;
     }
     __device__ __forceinline__ void push(float x) {
@@ -170,19 +170,19 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
     int len,
     const int*   __restrict__ lookbacks,
     const int*   __restrict__ smoothings,
-    const int*   __restrict__ resets,   
+    const int*   __restrict__ resets,
     int n_combos,
-    float* __restrict__ upper_out,      
-    float* __restrict__ lower_out,      
-    float* __restrict__ upper_ts_out,   
-    float* __restrict__ lower_ts_out,   
-    int use_shmem_rings,                
-    int smem_stride                     
+    float* __restrict__ upper_out,
+    float* __restrict__ lower_out,
+    float* __restrict__ upper_ts_out,
+    float* __restrict__ lower_ts_out,
+    int use_shmem_rings,
+    int smem_stride
 ) {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
 
-    
+
     __shared__ int first_valid_sh;
     if (threadIdx.x == 0) {
         int fv = len;
@@ -201,7 +201,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
         return;
     }
 
-    
+
     extern __shared__ float shmem[];
 
     for (int row = tid0; row < n_combos; row += stride) {
@@ -213,22 +213,22 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
         float* L  = lower_out    + (size_t)row * len;
         float* UT = upper_ts_out + (size_t)row * len;
         float* LT = lower_ts_out + (size_t)row * len;
-        
+
         if (look <= 0 || look > FVGTS_MAX_LOOKBACK || w <= 0 || w > FVGTS_MAX_SMOOTH) {
             for (int i = 0; i < len; ++i) { U[i]=L[i]=UT[i]=LT[i]=CUDART_NAN_F; }
             continue;
         }
 
-        
+
         float bull_buf[FVGTS_MAX_LOOKBACK]; int bull_len = 0;
         float bear_buf[FVGTS_MAX_LOOKBACK]; int bear_len = 0;
 
-        
+
         float* close_ring_buf = nullptr;
         float* xbull_ring_buf = nullptr;
         float* xbear_ring_buf = nullptr;
         if (use_shmem_rings != 0) {
-            const int stride_per_ring = smem_stride * blockDim.x; 
+            const int stride_per_ring = smem_stride * blockDim.x;
             const int t_off = threadIdx.x * smem_stride;
             close_ring_buf = shmem + 0 * stride_per_ring + t_off;
             xbull_ring_buf = shmem + 1 * stride_per_ring + t_off;
@@ -239,18 +239,18 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
         RingAvg<FVGTS_MAX_SMOOTH, false> ring_xbull_w; ring_xbull_w.init(w, xbull_ring_buf);
         RingAvg<FVGTS_MAX_SMOOTH, false> ring_xbear_w; ring_xbear_w.init(w, xbear_ring_buf);
 
-        
+
         NeumaierAcc bs_acc_bull; bs_acc_bull.reset(); int bs_len_bull = 0; bool bs_bad_bull = false;
         NeumaierAcc bs_acc_bear; bs_acc_bear.reset(); int bs_len_bear = 0; bool bs_bad_bear = false;
 
         int last_bull_non_na = -1;
         int last_bear_non_na = -1;
-        int os = 0; 
+        int os = 0;
         float ts = CUDART_NAN_F;
         float ts_prev = CUDART_NAN_F;
 
         for (int i = 0; i < len; ++i) {
-            
+
             if (i >= 2) {
                 float hi2 = high[i-2];
                 float lo2 = low [i-2];
@@ -265,17 +265,17 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
 
             const float c = close[i];
 
-            
+
             ring_close_w.push(c);
 
-            
+
             int dummy_len = 0;
             float bull_avg = compact_and_avg_bull_f32_comp<FVGTS_MAX_LOOKBACK>(bull_buf, bull_len, c, dummy_len);
             float bear_avg = compact_and_avg_bear_f32_comp<FVGTS_MAX_LOOKBACK>(bear_buf, bear_len, c, dummy_len);
             if (!isnan(bull_avg)) { last_bull_non_na = i; bs_len_bull = 0; bs_bad_bull = false; bs_acc_bull.reset(); }
             if (!isnan(bear_avg)) { last_bear_non_na = i; bs_len_bear = 0; bs_bad_bear = false; bs_acc_bear.reset(); }
 
-            
+
             float bull_sma = CUDART_NAN_F;
             float bear_sma = CUDART_NAN_F;
 
@@ -302,7 +302,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
             const float xbull = isnan(bull_avg) ? bull_sma : bull_avg;
             const float xbear = isnan(bear_avg) ? bear_sma : bear_avg;
 
-            
+
             ring_xbull_w.push(xbull);
             ring_xbear_w.push(xbear);
             const float bull_disp = ring_xbull_w.avg();
@@ -344,7 +344,7 @@ extern "C" __global__ void fvg_trailing_stop_batch_f32(
             ts_prev = ts;
         }
 
-        
+
         int warm = first_valid_sh + 2 + (w - 1);
         if (warm > len) warm = len;
         for (int i = 0; i < warm; ++i) { U[i]=L[i]=UT[i]=LT[i]=CUDART_NAN_F; }
@@ -359,14 +359,14 @@ extern "C" __global__ void fvg_trailing_stop_batch_shmem_f32(
     int len,
     const int*   __restrict__ lookbacks,
     const int*   __restrict__ smoothings,
-    const int*   __restrict__ resets,   
+    const int*   __restrict__ resets,
     int n_combos,
-    float* __restrict__ upper_out,      
-    float* __restrict__ lower_out,      
-    float* __restrict__ upper_ts_out,   
-    float* __restrict__ lower_ts_out,   
-    int /*use_shmem_rings*/,
-    int smem_stride                     
+    float* __restrict__ upper_out,
+    float* __restrict__ lower_out,
+    float* __restrict__ upper_ts_out,
+    float* __restrict__ lower_ts_out,
+    int ,
+    int smem_stride
 ) {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -530,14 +530,14 @@ extern "C" __global__ void fvg_trailing_stop_batch_small_shmem_f32(
     int len,
     const int*   __restrict__ lookbacks,
     const int*   __restrict__ smoothings,
-    const int*   __restrict__ resets,   
+    const int*   __restrict__ resets,
     int n_combos,
-    float* __restrict__ upper_out,      
-    float* __restrict__ lower_out,      
-    float* __restrict__ upper_ts_out,   
-    float* __restrict__ lower_ts_out,   
-    int /*use_shmem_rings*/,
-    int smem_stride                     
+    float* __restrict__ upper_out,
+    float* __restrict__ lower_out,
+    float* __restrict__ upper_ts_out,
+    float* __restrict__ lower_ts_out,
+    int ,
+    int smem_stride
 ) {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -708,10 +708,10 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
     float* __restrict__ upper_ts_tm_out,
     float* __restrict__ lower_ts_tm_out
 ) {
-    int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
-    
+
     for (int t = 0; t < rows; ++t) {
         int idx = t * cols + s;
         upper_tm_out[idx] = CUDART_NAN_F;
@@ -722,7 +722,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
     if (look <= 0 || look > FVGTS_MAX_LOOKBACK || w <= 0 || w > FVGTS_MAX_SMOOTH) return;
 
-    
+
     int first_valid = rows;
     for (int t = 0; t < rows; ++t) {
         int idx = t * cols + s;
@@ -732,7 +732,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
     float bull_buf[FVGTS_MAX_LOOKBACK]; int bull_len = 0;
     float bear_buf[FVGTS_MAX_LOOKBACK]; int bear_len = 0;
-    
+
     double bull_ring_vals[FVGTS_MAX_SMOOTH]; bool bull_ring_nan[FVGTS_MAX_SMOOTH];
     double bear_ring_vals[FVGTS_MAX_SMOOTH]; bool bear_ring_nan[FVGTS_MAX_SMOOTH];
     int bull_ring_count = 0, bear_ring_count = 0;
@@ -746,7 +746,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
     for (int t = 0; t < rows; ++t) {
         int idx = t * cols + s;
-        
+
         if (t >= 2) {
             int im2 = (t-2) * cols + s;
             int im1 = (t-1) * cols + s;
@@ -771,12 +771,12 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
 
         int bull_bs = (!isnan(bull_avg)) ? 1 : ((last_bull_non_na >= 0) ? min(max(t - last_bull_non_na, 1), w) : 1);
         int bear_bs = (!isnan(bear_avg)) ? 1 : ((last_bear_non_na >= 0) ? min(max(t - last_bear_non_na, 1), w) : 1);
-        float bull_sma = isnan(bull_avg) ? sma_last_bs_over_close(close_tm + s, t, bull_bs) : CUDART_NAN_F; 
-        
+        float bull_sma = isnan(bull_avg) ? sma_last_bs_over_close(close_tm + s, t, bull_bs) : CUDART_NAN_F;
 
-        
+
+
         if (isnan(bull_avg)) {
-            
+
             double ss = 0.0; bool bad=false; int start = t + 1 - bull_bs;
             if (start >= 0) {
                 for (int j = start; j <= t; ++j) { float v = close_tm[j * cols + s]; if (isnan(v) || isinf(v)) { bad=true; break; } ss += (double)v; }
@@ -796,7 +796,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
         const float xbull = isnan(bull_avg) ? bull_sma : bull_avg;
         const float xbear = isnan(bear_avg) ? bear_sma : bear_avg;
 
-        
+
         if (bull_ring_count < w) {
             const bool is_nan = isnan(xbull);
             bull_ring_nan[bull_ring_count] = is_nan;
@@ -813,7 +813,7 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
             bull_ring_idx = (idx + 1 == w) ? 0 : (idx + 1);
         }
 
-        
+
         if (bear_ring_count < w) {
             const bool is_nan = isnan(xbear);
             bear_ring_nan[bear_ring_count] = is_nan;
@@ -864,12 +864,12 @@ extern "C" __global__ void fvg_trailing_stop_many_series_one_param_f32(
         } else if (os == -1 && show) {
             upper_tm_out[idx] = bear_disp; lower_tm_out[idx] = CUDART_NAN_F; upper_ts_tm_out[idx] = ts_nz; lower_ts_tm_out[idx] = CUDART_NAN_F;
         } else {
-            
+
         }
         ts_prev = ts;
     }
 
-    
+
     int warm = first_valid + 2 + (w - 1);
     if (warm > rows) warm = rows;
     for (int t = 0; t < warm; ++t) {

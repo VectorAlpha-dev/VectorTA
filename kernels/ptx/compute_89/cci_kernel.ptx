@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -28,11 +28,11 @@
 	.reg .f32 	%f<285>;
 	.reg .b32 	%r<190>;
 	.reg .b64 	%rd<68>;
-	
+
 	.shared .align 4 .b8 _ZZ13cci_batch_f32E12s_win_static[8192];
-	
+
 	.shared .align 4 .f32 _ZZ13cci_batch_f32E5s_sma;
-	
+
 	.shared .align 4 .b8 _ZZ16block_reduce_sumfE13warp_partials[128];
 
 	ld.param.u64 	%rd18, [cci_batch_f32_param_0];
@@ -743,7 +743,7 @@ $L__BB0_97:
 	bra.uni 	$L__BB0_101;
 
 }
-	
+
 .visible .entry cci_many_series_one_param_f32(
 	.param .u64 cci_many_series_one_param_f32_param_0,
 	.param .u64 cci_many_series_one_param_f32_param_1,

@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -28,7 +28,7 @@ def _cuda_available() -> bool:
         handle, meta = ti.trix_cuda_batch_dev(arr, period_range=(4, 4, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -43,7 +43,7 @@ class TestTrixCuda:
 
     def test_trix_cuda_batch_matches_cpu(self, test_data):
         close = test_data["close"].astype(np.float64)
-        
+
         close = np.abs(close) + 2.0
         period = 18
 
@@ -56,7 +56,7 @@ class TestTrixCuda:
         assert meta["periods"].tolist() == [period]
 
         gpu_row = cp.asnumpy(cp.asarray(handle))[0]
-        
+
         assert_close(gpu_row, cpu, rtol=5e-5, atol=5e-4, msg="CUDA TRIX batch mismatch")
 
     def test_trix_cuda_many_series_one_param_matches_cpu(self, test_data):

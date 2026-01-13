@@ -2,7 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Only compile CUDA kernels if the cuda feature is enabled
+    
     #[cfg(feature = "cuda")]
     compile_cuda_kernels();
 }
@@ -10,14 +10,14 @@ fn main() {
 #[cfg(feature = "cuda")]
 fn compile_cuda_kernels() {
     println!("cargo:rerun-if-changed=src/cuda");
+
     
-    // Get the path to CUDA toolkit
     let cuda_path = find_cuda_path();
-    
+
     println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
     println!("cargo:rustc-link-lib=cudart");
+
     
-    // Compile ALMA CUDA kernel
     compile_alma_kernel();
 }
 
@@ -27,7 +27,7 @@ fn find_cuda_path() -> String {
         .or_else(|_| env::var("CUDA_HOME"))
         .unwrap_or_else(|_| {
             if cfg!(target_os = "windows") {
-                // Try to find the actual CUDA installation
+                
                 let paths = [
                     "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.9",
                     "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1",
@@ -35,15 +35,15 @@ fn find_cuda_path() -> String {
                     "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.0",
                     "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v11.8",
                 ];
-                
+
                 for path in &paths {
                     if std::path::Path::new(path).exists() {
                         eprintln!("Found CUDA at: {}", path);
                         return path.to_string();
                     }
                 }
+
                 
-                // Default to v12.1 based on user's nvcc output
                 "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.1".to_string()
             } else {
                 "/usr/local/cuda".to_string()
@@ -54,58 +54,58 @@ fn find_cuda_path() -> String {
 #[cfg(feature = "cuda")]
 fn compile_alma_kernel() {
     use std::process::Command;
-    
+
     println!("cargo:rerun-if-changed=src/cuda/moving_averages/alma_kernel.cu");
-    
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let cuda_path = find_cuda_path();
+
     
-    // On Windows, we need to ensure MSVC is available
     if cfg!(target_os = "windows") {
-        // Check if we're in a VS developer command prompt
+        
         if env::var("VCINSTALLDIR").is_err() {
             eprintln!("Warning: VCINSTALLDIR not set. You may need to run from a Visual Studio Developer Command Prompt.");
             eprintln!("Or install Visual Studio Build Tools with C++ support.");
         }
     }
-    
+
     let nvcc = if cfg!(target_os = "windows") {
         format!("{}/bin/nvcc.exe", cuda_path)
     } else {
         format!("{}/bin/nvcc", cuda_path)
     };
-    
+
     let ptx_path = out_dir.join("alma_kernel.ptx");
+
     
-    // Build the nvcc command
     let mut cmd = Command::new(&nvcc);
     cmd.args(&[
         "-ptx",
         "-O3",
         "--use_fast_math",
-        "-arch=sm_70", // Compile for compute capability 7.0 (supports f64 atomics)
+        "-arch=sm_70", 
         "-o", ptx_path.to_str().unwrap(),
         "src/cuda/moving_averages/alma_kernel.cu"
     ]);
+
     
-    // On Windows, explicitly set the compiler if needed
     if cfg!(target_os = "windows") {
-        // Try to find cl.exe if not in PATH
+        
         if let Ok(vs_path) = find_vs_installation() {
             cmd.arg("-ccbin").arg(vs_path);
         }
     }
-    
+
     eprintln!("Running nvcc command: {:?}", cmd);
-    
+
     let output = cmd.output()
         .expect("Failed to execute nvcc");
-    
+
     if !output.status.success() {
         eprintln!("CUDA compilation failed!");
         eprintln!("stdout: {}", String::from_utf8_lossy(&output.stdout));
         eprintln!("stderr: {}", String::from_utf8_lossy(&output.stderr));
-        
+
         if cfg!(target_os = "windows") && String::from_utf8_lossy(&output.stderr).contains("Cannot find compiler 'cl.exe'") {
             eprintln!("\n=== CUDA Build Error: Missing Visual Studio C++ Compiler ===");
             eprintln!("nvcc requires the Microsoft Visual C++ compiler (cl.exe) to be available.");
@@ -116,16 +116,16 @@ fn compile_alma_kernel() {
             eprintln!("\nDownload from: https://visualstudio.microsoft.com/downloads/");
             eprintln!("===========================================================\n");
         }
-        
+
         panic!("nvcc compilation failed");
     }
-    
+
     println!("Successfully compiled ALMA CUDA kernel to PTX");
 }
 
 #[cfg(all(feature = "cuda", target_os = "windows"))]
 fn find_vs_installation() -> Result<String, ()> {
-    // Common paths for Visual Studio installations
+    
     let vs_paths = [
         "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC",
         "C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Tools/MSVC",
@@ -135,10 +135,10 @@ fn find_vs_installation() -> Result<String, ()> {
         "C:/Program Files/Microsoft Visual Studio/2019/Professional/VC/Tools/MSVC",
         "C:/Program Files/Microsoft Visual Studio/2019/Enterprise/VC/Tools/MSVC",
     ];
-    
+
     for vs_base in &vs_paths {
         if let Ok(entries) = std::fs::read_dir(vs_base) {
-            // Find the latest MSVC version
+            
             if let Some(msvc_version) = entries
                 .filter_map(|e| e.ok())
                 .filter_map(|e| e.file_name().into_string().ok())
@@ -153,11 +153,11 @@ fn find_vs_installation() -> Result<String, ()> {
             }
         }
     }
-    
+
     Err(())
 }
 
 #[cfg(all(feature = "cuda", not(target_os = "windows")))]
 fn find_vs_installation() -> Result<String, ()> {
-    Err(()) // Not needed on non-Windows platforms
+    Err(()) 
 }

@@ -56,7 +56,7 @@ static __device__ __forceinline__ double true_range_idx(
 }
 
 extern "C" __global__ void squeeze_momentum_batch_f32(
-    
+
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
@@ -67,7 +67,7 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
     int series_len,
     int n_combos,
     int first_valid,
-    
+
     float* __restrict__ out_sq,
     float* __restrict__ out_mo,
     float* __restrict__ out_si
@@ -77,7 +77,7 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
 
     const int base = combo * series_len;
 
-    
+
     for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
         out_sq[base + i] = SMI_QNAN_F;
         out_mo[base + i] = SMI_QNAN_F;
@@ -98,7 +98,7 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
     const int warm_mo = lkc - 1;
     const int warm_si = warm_mo + 1;
 
-    
+
     const double inv_lbb = 1.0 / (double)lbb;
     const double inv_lkc = 1.0 / (double)lkc;
     const double p = (double)lkc;
@@ -106,9 +106,9 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
     const double sum_x2 = p * (p + 1.0) * (2.0 * p + 1.0) / 6.0;
     const double denom  = p * sum_x2 - sum_x * sum_x;
     const double inv_den= 1.0 / denom;
-    const double x_last_minus_xbar = p - sum_x * inv_lkc; 
+    const double x_last_minus_xbar = p - sum_x * inv_lkc;
 
-    
+
     int start_bb = first_valid + lbb - 1;
     int start_kc = first_valid + lkc - 1;
     if (start_bb < series_len) {
@@ -118,8 +118,8 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
             sum_bb += v;
             sumsq_bb = fma(v, v, sumsq_bb);
         }
-        
-        
+
+
     }
     double sum_bb = 0.0, sumsq_bb = 0.0;
     if (start_bb < series_len) {
@@ -137,14 +137,14 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
         }
     }
 
-    
+
     bool bb_seed_ok = true; for (int j = 0; j < lbb && j < series_len; ++j) { if (!is_finite_f(close[j])) { bb_seed_ok = false; break; } }
     bool kc_seed_ok = true; for (int j = 0; j < lkc && j < series_len; ++j) { if (!is_finite_f(close[j]) || !is_finite_f(high[j]) || !is_finite_f(low[j])) { kc_seed_ok = false; break; } }
 
-    
+
     double prev_momentum = NAN;
     for (int i = first_valid; i < series_len; ++i) {
-        
+
         if (i > start_bb) {
             const double c_new = (double)close[i];
             const double c_old = (double)close[i - lbb];
@@ -155,17 +155,17 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
             const double c_new = (double)close[i];
             const double c_old = (double)close[i - lkc];
             sum_kc += c_new - c_old;
-            
+
             const double tr_new = true_range_idx(i, high, low, close);
             const int old_idx = i - lkc;
             const double tr_old = true_range_idx(old_idx, high, low, close);
             sum_tr += tr_new - tr_old;
         }
 
-        
+
         if (i >= start_bb && i >= start_kc && i >= warm_sq) {
-            
-            
+
+
             if (bb_seed_ok && kc_seed_ok) {
             const double mean_bb = sum_bb * inv_lbb;
             const double var_bb = fma(sumsq_bb * inv_lbb, 1.0, -mean_bb * mean_bb);
@@ -186,9 +186,9 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
             }
         }
 
-        
+
         if (i >= start_kc && kc_seed_ok) {
-            
+
             double highest = -INFINITY, lowest = INFINITY;
             const int win_start = i - lkc + 1;
             for (int j = win_start; j <= i; ++j) {
@@ -201,23 +201,23 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
             const double c_i = (double)close[i];
             const double raw_i = c_i - 0.25 * (highest + lowest) - 0.5 * kc_mid;
 
-            
+
             double S0 = 0.0, S1 = 0.0;
             double j = 1.0;
             for (int t = win_start; t <= i; ++t, j += 1.0) {
-                const double y = (double)close[t] - 0.25 * ((double)high[t] + (double)low[t]) - 0.5 * (sum_kc /* placeholder */);
-                
+                const double y = (double)close[t] - 0.25 * ((double)high[t] + (double)low[t]) - 0.5 * (sum_kc );
+
             }
-            
-            
+
+
             S0 = 0.0; S1 = 0.0; j = 1.0;
             for (int t = win_start; t <= i; ++t, j += 1.0) {
-                
+
                 double sum_c = 0.0;
                 const int ts = t - lkc + 1;
                 for (int u = ts; u <= t; ++u) sum_c += (double)close[u];
                 const double kc_mid_t = sum_c * inv_lkc;
-                
+
                 double hh = -INFINITY, ll = INFINITY;
                 for (int u = ts; u <= t; ++u) { double hhv=(double)high[u]; double llv=(double)low[u]; if (hhv>hh) hh=hhv; if (llv<ll) ll=llv; }
                 const double raw_t = (double)close[t] - 0.25 * (hh + ll) - 0.5 * kc_mid_t;
@@ -229,7 +229,7 @@ extern "C" __global__ void squeeze_momentum_batch_f32(
             const double yhat_last = fma(b, x_last_minus_xbar, ybar);
             out_mo[base + i] = (float)yhat_last;
 
-            
+
             if (i >= 1) {
                 const double prev = (double)out_mo[base + (i - 1)];
                 if (isfinite(prev) && isfinite(yhat_last)) {
@@ -273,21 +273,21 @@ extern "C" __global__ void smi_precompute_shared_f32(
     const float* __restrict__ low,
     const float* __restrict__ close,
     int series_len,
-    
-    float* __restrict__ tr,         
-    float* __restrict__ ps_close,   
-    float* __restrict__ ps_close2,  
-    float* __restrict__ ps_tr,      
-    int*   __restrict__ log2_tbl,   
-    float* __restrict__ st_max,     
-    float* __restrict__ st_min,     
-    int K                           
+
+    float* __restrict__ tr,
+    float* __restrict__ ps_close,
+    float* __restrict__ ps_close2,
+    float* __restrict__ ps_tr,
+    int*   __restrict__ log2_tbl,
+    float* __restrict__ st_max,
+    float* __restrict__ st_min,
+    int K
 ){
     const int N = series_len;
     const int tid = threadIdx.x;
     const int nthreads = blockDim.x;
 
-    
+
     for (int i = tid; i < N; i += nthreads) {
         float h = high[i], l = low[i];
         float tr1 = fabsf(h - l);
@@ -297,15 +297,15 @@ extern "C" __global__ void smi_precompute_shared_f32(
     }
     __syncthreads();
 
-    
+
     if (tid == 0) {
         log2_tbl[0] = 0;
         log2_tbl[1] = 0;
         for (int i = 2; i <= N; ++i) log2_tbl[i] = log2_tbl[i >> 1] + 1;
 
-        float s1=0.0f,c1=0.0f; 
-        float s2=0.0f,c2=0.0f; 
-        float s3=0.0f,c3=0.0f; 
+        float s1=0.0f,c1=0.0f;
+        float s2=0.0f,c2=0.0f;
+        float s3=0.0f,c3=0.0f;
         for (int i = 0; i < N; ++i) {
             const float ci = close[i];
             const float ci2 = ci * ci;
@@ -317,14 +317,14 @@ extern "C" __global__ void smi_precompute_shared_f32(
     }
     __syncthreads();
 
-    
+
     for (int i = tid; i < N; i += nthreads) {
         st_max[0 * N + i] = high[i];
         st_min[0 * N + i] = low[i];
     }
     __syncthreads();
 
-    
+
     for (int k = 1; k < K; ++k) {
         const int span = 1 << k;
         const int half = span >> 1;
@@ -341,7 +341,7 @@ extern "C" __global__ void smi_precompute_shared_f32(
 
 static __device__ __forceinline__ float rmq_max(
     const float* __restrict__ st_max, const int* __restrict__ log2_tbl,
-    int N, int /*K*/, int l, int r)
+    int N, int , int l, int r)
 {
     const int len = r - l + 1;
     const int k = log2_tbl[len];
@@ -351,7 +351,7 @@ static __device__ __forceinline__ float rmq_max(
 }
 static __device__ __forceinline__ float rmq_min(
     const float* __restrict__ st_min, const int* __restrict__ log2_tbl,
-    int N, int /*K*/, int l, int r)
+    int N, int , int l, int r)
 {
     const int len = r - l + 1;
     const int k = log2_tbl[len];
@@ -370,7 +370,7 @@ static __device__ __forceinline__ float win_sum_ps(
 
 
 extern "C" __global__ void squeeze_momentum_batch_f32_opt(
-    
+
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
@@ -381,16 +381,16 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
     int series_len,
     int n_combos,
     int first_valid,
-    
-    const float* __restrict__ tr,        
-    const float* __restrict__ ps_close,  
-    const float* __restrict__ ps_close2, 
-    const float* __restrict__ ps_tr,     
-    const int*   __restrict__ log2_tbl,  
-    const float* __restrict__ st_max,    
-    const float* __restrict__ st_min,    
+
+    const float* __restrict__ tr,
+    const float* __restrict__ ps_close,
+    const float* __restrict__ ps_close2,
+    const float* __restrict__ ps_tr,
+    const int*   __restrict__ log2_tbl,
+    const float* __restrict__ st_max,
+    const float* __restrict__ st_min,
     int K,
-    
+
     float* __restrict__ out_sq,
     float* __restrict__ out_mo,
     float* __restrict__ out_si
@@ -444,7 +444,7 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
             }
         }
 
-        
+
         if (sh_valid) {
             bool bb_ok = true;
             for (int j = 0; j < sh_lbb && j < series_len; ++j) {
@@ -458,13 +458,13 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
             if (!kc_ok) sh_valid = 0;
         }
 
-        
+
         sh_pref_sq = 0;
         sh_pref_mo = 0;
         sh_pref_si = 0;
         if (sh_valid) {
             const int warm_sq = max(sh_lbb, sh_lkc) - 1;
-            const int warm_si = sh_lkc; 
+            const int warm_si = sh_lkc;
 
             int pref_sq = sh_start_bb;
             if (sh_start_kc > pref_sq) pref_sq = sh_start_kc;
@@ -485,7 +485,7 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
         return;
     }
 
-    
+
     for (int i = threadIdx.x; i < sh_pref_sq; i += blockDim.x) out_sq[base + i] = SMI_QNAN_F;
     for (int i = threadIdx.x; i < sh_pref_mo; i += blockDim.x) out_mo[base + i] = SMI_QNAN_F;
     for (int i = threadIdx.x; i < sh_pref_si; i += blockDim.x) out_si[base + i] = SMI_QNAN_F;
@@ -516,10 +516,10 @@ extern "C" __global__ void squeeze_momentum_batch_f32_opt(
     const float inv_den = 1.0f / denom;
     const float x_last_minus_xbar = p - sum_x * inv_lkc;
 
-    extern __shared__ float s_ring[]; 
+    extern __shared__ float s_ring[];
     float* raw_ring = s_ring;
 
-    float S0 = 0.0f, S1 = 0.0f; 
+    float S0 = 0.0f, S1 = 0.0f;
     bool   ols_seeded = false;
 
     for (int i = first_valid; i < N; ++i) {
@@ -600,7 +600,7 @@ extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int lbb,
@@ -614,11 +614,11 @@ extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
     const int series = blockIdx.y;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
-    if (tid != 0) return; 
+    if (tid != 0) return;
 
     const int fv = first_valids[series];
     if (UNLIKELY(fv < 0 || fv >= series_len || lbb <= 0 || lkc <= 0)) {
-        
+
         float* sq = out_sq_tm + series;
         float* mo = out_mo_tm + series;
         float* si = out_si_tm + series;
@@ -640,7 +640,7 @@ extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
     const double inv_den= 1.0 / (p * sum_x2 - sum_x * sum_x);
     const double x_last_minus_xbar = p - sum_x * inv_lkc;
 
-    
+
     auto H = [&](int t){ return (double)high_tm[(size_t)t * num_series + series]; };
     auto L = [&](int t){ return (double)low_tm[(size_t)t * num_series + series]; };
     auto C = [&](int t){ return (double)close_tm[(size_t)t * num_series + series]; };
@@ -653,7 +653,7 @@ extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
         return fmax(fmax(tr1, tr2), tr3);
     };
 
-    
+
     double sum_bb = 0.0, sumsq_bb = 0.0;
     double sum_kc = 0.0, sum_tr = 0.0;
     const int start_bb = fv + lbb - 1;
@@ -675,12 +675,12 @@ extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
     float* mo = out_mo_tm + series;
     float* si = out_si_tm + series;
 
-    
+
     for (int r = 0; r < warm_sq && r < series_len; ++r) { sq[r * num_series] = SMI_QNAN_F; }
     for (int r = 0; r < warm_mo && r < series_len; ++r) { mo[r * num_series] = SMI_QNAN_F; }
     for (int r = 0; r < warm_si && r < series_len; ++r) { si[r * num_series] = SMI_QNAN_F; }
 
-    
+
     bool bb_seed_ok = true; for (int j = 0; j < lbb && j < series_len; ++j) { float cc = (float)C(j); if (!is_finite_f(cc)) { bb_seed_ok=false; break; } }
     bool kc_seed_ok = true; for (int j = 0; j < lkc && j < series_len; ++j) { float ch=(float)H(j); float cl=(float)L(j); float cc=(float)C(j); if (!is_finite_f(ch)||!is_finite_f(cl)||!is_finite_f(cc)) { kc_seed_ok=false; break; } }
 
@@ -712,15 +712,15 @@ extern "C" __global__ void squeeze_momentum_many_series_one_param_f32(
         }
 
         if (t >= start_kc) {
-            
+
             const int ws = t - lkc + 1;
             double highest = -INFINITY, lowest = INFINITY;
             for (int j = ws; j <= t; ++j) { const double h=H(j), l=L(j); if (h>highest) highest=h; if (l<lowest) lowest=l; }
 
-            
+
             double S0 = 0.0, S1 = 0.0, j = 1.0;
             for (int u = ws; u <= t; ++u, j += 1.0) {
-                
+
                 double sum_c = 0.0; const int us = u - lkc + 1;
                 for (int v = us; v <= u; ++v) sum_c += C(v);
                 const double kc_mid_u = sum_c * inv_lkc;

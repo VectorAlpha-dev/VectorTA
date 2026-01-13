@@ -76,7 +76,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
 
     const int base = combo * series_len;
 
-    
+
     if (length <= 1 || length > series_len || !isfinite(mult_f32) || mult_f32 <= 0.0f) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out[base + t] = NAN;
@@ -87,17 +87,17 @@ void tradjema_batch_f32(const float* __restrict__ high,
     const int warm  = first_valid + length - 1;
     const float alpha = 2.0f / (static_cast<float>(length) + 1.0f);
 
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    
+
     if (warm >= series_len || threadIdx.x != 0) return;
 
-    
-    
+
+
     extern __shared__ __align__(16) unsigned char smem[];
     float* min_vals = reinterpret_cast<float*>(smem);
     float* max_vals = min_vals + length;
@@ -109,7 +109,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
 
     auto minq_push = [&](float v, int idx) {
         int back = dec_wrap(min_tail, length);
-        
+
         while (min_tail != min_head && min_vals[back] > v) {
             min_tail = back;
             back = dec_wrap(min_tail, length);
@@ -120,7 +120,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
     };
     auto maxq_push = [&](float v, int idx) {
         int back = dec_wrap(max_tail, length);
-        
+
         while (max_tail != max_head && max_vals[back] < v) {
             max_tail = back;
             back = dec_wrap(max_tail, length);
@@ -130,7 +130,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
         max_tail = inc_wrap(max_tail, length);
     };
 
-    
+
     float last_tr = high[first_valid] - low[first_valid];
     minq_push(last_tr, first_valid);
     maxq_push(last_tr, first_valid);
@@ -148,13 +148,13 @@ void tradjema_batch_f32(const float* __restrict__ high,
     const float denom0 = tr_high - tr_low;
     const float tr_adj0 = (denom0 != 0.0f) ? ((last_tr - tr_low) / denom0) : 0.0f;
 
-    
+
     const float src0 = close[warm - 1];
     const float a0 = alpha * (1.0f + tr_adj0 * mult);
     float y = src0 * a0;
     out[base + warm] = y;
 
-    
+
     for (int i = warm + 1; i < series_len; ++i) {
         const int lim = i - length;
         while (min_head != min_tail && min_idx[min_head] <= lim) {
@@ -176,7 +176,7 @@ void tradjema_batch_f32(const float* __restrict__ high,
         const float tr_adj = (den != 0.0f) ? ((tr - lo_tr) / den) : 0.0f;
         const float a = alpha * (1.0f + tr_adj * mult);
 
-        const float src = prev_close; 
+        const float src = prev_close;
         y = fmaf(a, (src - y), y);
         out[base + i] = y;
     }
@@ -229,8 +229,8 @@ void tradjema_many_series_one_param_time_major_f32(
         return buf[row * num_series + col];
     };
 
-    
-    
+
+
     extern __shared__ __align__(16) unsigned char smem[];
     double* min_vals = reinterpret_cast<double*>(smem);
     double* max_vals = min_vals + length;
@@ -261,7 +261,7 @@ void tradjema_many_series_one_param_time_major_f32(
         max_tail = inc_wrap(max_tail, length);
     };
 
-    
+
     double last_tr =
         static_cast<double>(at(high_tm, first_valid, series))
         - static_cast<double>(at(low_tm, first_valid, series));

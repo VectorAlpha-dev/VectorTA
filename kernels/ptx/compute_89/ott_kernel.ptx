@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry ott_apply_single_f32(
 	.param .u64 ott_apply_single_f32_param_0,
@@ -283,7 +283,7 @@ $L__BB0_22:
 	ret;
 
 }
-	
+
 .visible .entry ott_from_var_batch_f32(
 	.param .u64 ott_from_var_batch_f32_param_0,
 	.param .u64 ott_from_var_batch_f32_param_1,
@@ -907,7 +907,7 @@ $L__BB1_40:
 	ret;
 
 }
-	
+
 .visible .entry ott_many_series_one_param_f32(
 	.param .u64 ott_many_series_one_param_f32_param_0,
 	.param .u32 ott_many_series_one_param_f32_param_1,
@@ -1209,7 +1209,7 @@ $L__BB2_21:
 	ret;
 
 }
-	
+
 .visible .entry ott_from_var_many_series_one_param_f32(
 	.param .u64 ott_from_var_many_series_one_param_f32_param_0,
 	.param .u32 ott_from_var_many_series_one_param_f32_param_1,

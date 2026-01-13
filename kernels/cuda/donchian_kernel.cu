@@ -128,7 +128,7 @@ extern "C" __global__ void donchian_batch_f32(const float* __restrict__ high,
     float* mo = out_middle + base;
     float* lo = out_lower + base;
 
-    
+
     if (UNLIKELY(period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) {
             uo[i] = DCH_NAN; mo[i] = DCH_NAN; lo[i] = DCH_NAN;
@@ -154,7 +154,7 @@ extern "C" __global__ void donchian_batch_f32(const float* __restrict__ high,
         return;
     }
 
-    
+
     for (int i = warm; i < series_len; ++i) {
         const int start = i + 1 - period;
         float maxv = -CUDART_INF_F;
@@ -234,9 +234,9 @@ extern "C" __global__ void donchian_batch_from_rmq_f32(
 
 
 extern "C" __global__ void donchian_many_series_one_param_f32(
-    const float* __restrict__ high_tm,   
+    const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
@@ -250,7 +250,7 @@ extern "C" __global__ void donchian_many_series_one_param_f32(
     int first_valid = first_valids ? first_valids[series] : 0;
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= series_len || period <= 0 || period > series_len || (series_len - first_valid) < period) {
-        
+
         int idx = series;
         for (int row = 0; row < series_len; ++row, idx += num_series) {
             upper_tm[idx] = DCH_NAN; middle_tm[idx] = DCH_NAN; lower_tm[idx] = DCH_NAN;
@@ -279,7 +279,7 @@ extern "C" __global__ void donchian_many_series_one_param_f32(
         float maxv = -CUDART_INF_F;
         float minv =  CUDART_INF_F;
         bool any_nan = false;
-        
+
         int idxk = (start * num_series) + series;
         for (int k = 0; k < period; ++k, idxk += num_series) {
             const float h = high_tm[idxk];

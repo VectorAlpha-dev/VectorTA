@@ -40,7 +40,7 @@ __inline__ __device__ float warp_reduce_sum(float v) {
 }
 
 __inline__ __device__ float block_reduce_sum(float v) {
-    __shared__ float warp_partials[32]; 
+    __shared__ float warp_partials[32];
     int lane = threadIdx.x & (warpSize - 1);
     int wid  = threadIdx.x >> 5;
 
@@ -108,17 +108,17 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
     const float inv_p = 1.0f / static_cast<float>(period);
     const int warm = first_valid + period - 1;
 
-    
+
     for (int i = threadIdx.x; i < warm; i += blockDim.x) out[base + i] = NAN;
     __syncthreads();
 
-    
+
     if (USE_CCI_SMEM_OPT && LIKELY(period <= CCI_SMEM_MAX)) {
         __shared__ float s_win_static[CCI_SMEM_MAX];
         __shared__ float s_sma;
         float* s_win = s_win_static;
 
-        
+
         {
             const float* p0 = prices + first_valid;
             for (int i = threadIdx.x; i < period; i += blockDim.x) {
@@ -127,17 +127,17 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         }
         __syncthreads();
 
-        
+
         float sum_local = 0.0f;
         for (int i = threadIdx.x; i < period; i += blockDim.x) sum_local += s_win[i];
         float sum_total = block_reduce_sum(sum_local);
 
         float sum = sum_total;
-        float csum = 0.0f; 
+        float csum = 0.0f;
         if (threadIdx.x == 0) s_sma = sum_total * inv_p;
         __syncthreads();
 
-        
+
         {
             const float sma = s_sma;
             float sum_abs_local = 0.0f;
@@ -153,7 +153,7 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         }
         __syncthreads();
 
-        
+
         int head = 0;
         for (int t = warm + 1; t < series_len; ++t) {
             if (threadIdx.x == 0) {
@@ -182,10 +182,10 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    if (threadIdx.x != 0) return; 
 
-    
+    if (threadIdx.x != 0) return;
+
+
     float sum = 0.0f;
     const float* p0 = prices + first_valid;
     for (int k = 0; k < period; ++k) sum += p0[k];
@@ -224,12 +224,12 @@ extern "C" __global__ void cci_batch_f32(const float* __restrict__ prices,
 
 
 extern "C" __global__ void cci_many_series_one_param_f32(
-    const float* __restrict__ prices_tm,   
+    const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
-    float* __restrict__ out_tm)            
+    float* __restrict__ out_tm)
 {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
@@ -254,7 +254,7 @@ extern "C" __global__ void cci_many_series_one_param_f32(
         return;
     }
 
-    
+
     const int warm = first_valid + period - 1;
     for (int r = 0; r < warm; ++r) col_out[r * num_series] = NAN;
 
@@ -264,7 +264,7 @@ extern "C" __global__ void cci_many_series_one_param_f32(
     for (int k = 0; k < period; ++k, p += num_series) kahan_add(*p, sum, csum);
     float sma = sum * inv_p;
 
-    
+
     {
         float sum_abs = 0.0f, cabs = 0.0f;
         const float* w = col_in + static_cast<size_t>(warm - period + 1) * num_series;
@@ -276,7 +276,7 @@ extern "C" __global__ void cci_many_series_one_param_f32(
         *(col_out + static_cast<size_t>(warm) * num_series) = (denom == 0.0f) ? 0.0f : (px - sma) / denom;
     }
 
-    
+
     const float* cur = col_in + static_cast<size_t>(warm + 1) * num_series;
     const float* old = col_in + static_cast<size_t>(first_valid) * num_series;
     float* dst       = col_out + static_cast<size_t>(warm + 1) * num_series;

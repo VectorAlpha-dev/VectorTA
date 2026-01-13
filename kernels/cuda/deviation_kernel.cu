@@ -26,7 +26,7 @@ __device__ __forceinline__ float dev_nan() { return __int_as_float(0x7fffffff); 
 
 
 
-struct twof { float hi, lo; }; 
+struct twof { float hi, lo; };
 
 
 __device__ __forceinline__ void two_sum(float a, float b, float &s, float &e) {
@@ -42,7 +42,7 @@ __device__ __forceinline__ void quick_two_sum(float a, float b, float &s, float 
 
 __device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
     p = a * b;
-    e = fmaf(a, b, -p); 
+    e = fmaf(a, b, -p);
 }
 
 __device__ __forceinline__ twof make_twof(float hi, float lo) { return {hi, lo}; }
@@ -69,7 +69,7 @@ __device__ __forceinline__ twof twof_scale(twof x, float k) {
 }
 
 __device__ __forceinline__ twof twof_sqr(twof x) {
-    
+
     float p, e; two_prod(x.hi, x.hi, p, e);
     e = fmaf(2.0f * x.hi, x.lo, e) + (x.lo * x.lo);
     float sh, sl; quick_two_sum(p, e, sh, sl);
@@ -87,14 +87,14 @@ __device__ __forceinline__ twof ld_twof(const float2* __restrict__ a, int idx) {
 
 
 extern "C" __global__ void deviation_batch_f32(
-    const float2* __restrict__ prefix_sum,     
-    const float2* __restrict__ prefix_sum_sq,  
-    const int*    __restrict__ prefix_nan,     
+    const float2* __restrict__ prefix_sum,
+    const float2* __restrict__ prefix_sum_sq,
+    const int*    __restrict__ prefix_nan,
     int len,
     int first_valid,
-    const int*    __restrict__ periods,        
+    const int*    __restrict__ periods,
     int n_combos,
-    float*        __restrict__ out)            
+    float*        __restrict__ out)
 {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -115,7 +115,7 @@ extern "C" __global__ void deviation_batch_f32(
     while (t < len) {
         float out_val = dev_nan();
         if (t >= warm) {
-            const int start = t + 1 - period; 
+            const int start = t + 1 - period;
             bool ok = true;
             if (any_nan_since_first) {
                 ok = (prefix_nan[t + 1] - prefix_nan[start]) == 0;
@@ -135,7 +135,7 @@ extern "C" __global__ void deviation_batch_f32(
                     const float mean = sum * inv_den;
                     const float ex2  = sum2 * inv_den;
                     float var_f = fmaf(-mean, mean, ex2);
-                    if (var_f < 0.0f) var_f = 0.0f; 
+                    if (var_f < 0.0f) var_f = 0.0f;
                     out_val = (var_f > 0.0f) ? sqrtf(var_f) : 0.0f;
                 }
             }
@@ -154,10 +154,10 @@ extern "C" __global__ void deviation_many_series_one_param_f32(
     const float2* __restrict__ prefix_sum_sq_tm,
     const int*    __restrict__ prefix_nan_tm,
     int period,
-    int num_series,   
-    int series_len,   
-    const int*    __restrict__ first_valids,   
-    float*        __restrict__ out_tm)         
+    int num_series,
+    int series_len,
+    const int*    __restrict__ first_valids,
+    float*        __restrict__ out_tm)
 {
     const int series = blockIdx.y;
     if (series >= num_series) return;
@@ -171,11 +171,11 @@ extern "C" __global__ void deviation_many_series_one_param_f32(
     const int stride = gridDim.x * blockDim.x;
 
     while (t < series_len) {
-        const int idx = t * num_series + series; 
+        const int idx = t * num_series + series;
         float out_val = dev_nan();
         if (t >= warm) {
-            const int wr = idx + 1;                      
-            const int wl = wr - period * num_series;     
+            const int wr = idx + 1;
+            const int wl = wr - period * num_series;
             const int bad = prefix_nan_tm[wr] - prefix_nan_tm[wl];
             if (bad == 0) {
                 if (is_one) {

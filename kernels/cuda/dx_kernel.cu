@@ -37,11 +37,11 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
     if (first_valid < 0 || first_valid + 1 >= series_len) return;
 
     const int i0 = first_valid;
-    const int warm_needed = p - 1; 
+    const int warm_needed = p - 1;
     const int warm = first_valid + p - 1;
     const float nanv = nanf("");
 
-    
+
     for (int i = 0; i < min(warm, series_len); ++i) {
         dst[i] = nanv;
     }
@@ -55,7 +55,7 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
 
     for (int i = i0 + 1; i < series_len; ++i) {
         if (carry[i] != 0) {
-            
+
             dst[i] = last_out;
             continue;
         }
@@ -77,13 +77,13 @@ void dx_batch_f32(const double* __restrict__ plus_dm,
                 last_out = (float)dx;
                 dst[i] = last_out;
             } else if (i >= warm) {
-                
+
                 dst[i] = nanv;
             }
             continue;
         }
 
-        
+
         s_plus  = s_plus  - (s_plus  * rp) + pdm;
         s_minus = s_minus - (s_minus * rp) + mdm;
         s_tr    = s_tr    - (s_tr    * rp) + t;
@@ -112,7 +112,7 @@ void dx_many_series_one_param_time_major_f32(
     int period,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     if (period <= 0) return;
@@ -147,7 +147,7 @@ void dx_many_series_one_param_time_major_f32(
             prev_h = ch; prev_l = cl; prev_c = cc;
             continue;
         }
-        
+
         if (isnan(prev_h) || isnan(prev_l) || isnan(prev_c)) {
             prev_h = ch; prev_l = cl; prev_c = cc;
             out_tm[at(t)] = nanv;
@@ -219,7 +219,7 @@ __device__ __forceinline__ void ds_scale_add_inplace_f(dsf32& s, float a, float 
 extern "C" __global__
 void dx_batch_f32_fast(const double* __restrict__ plus_dm,
                        const double* __restrict__ minus_dm,
-                       const double* __restrict__ /*tr_unused*/,
+                       const double* __restrict__ ,
                        const unsigned char* __restrict__ carry,
                        const int* __restrict__ periods,
                        int series_len,

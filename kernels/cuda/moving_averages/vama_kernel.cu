@@ -37,7 +37,7 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     const double alpha = 2.0 / (static_cast<double>(base_period) + 1.0);
     const double beta  = 1.0 - alpha;
     const int base_offset = combo * series_len;
@@ -46,9 +46,9 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    
-    
+
+
+
     for (int t = 0; t < first_valid; ++t) {
         out[base_offset + t] = NAN;
     }
@@ -68,12 +68,12 @@ void vama_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    
-    
-    
-    
-    
+
+
+
+
+
+
     extern __shared__ unsigned char smem_rb[];
     double* dq_max_vals = reinterpret_cast<double*>(smem_rb);
     int* dq_max_idx = reinterpret_cast<int*>(dq_max_vals + vol_period);
@@ -84,8 +84,8 @@ void vama_batch_f32(const float* __restrict__ prices,
     int headMax = 0, tailMax = 0;
     int headMin = 0, tailMin = 0;
 
-    
-    
+
+
     int i = first_valid;
     double ema_d = mean;
     double prev = mean;
@@ -148,7 +148,7 @@ void vama_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    
+
     for (; i < series_len; ++i) {
         const float price_f = prices[i];
         if (isfinite(price_f)) {
@@ -292,7 +292,7 @@ void vama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         return;
     }
 
-    
+
     extern __shared__ unsigned char smem_rb2[];
     float* dq_max_vals = reinterpret_cast<float*>(smem_rb2);
     int*   dq_max_idx  = reinterpret_cast<int*>(dq_max_vals + vol_period);

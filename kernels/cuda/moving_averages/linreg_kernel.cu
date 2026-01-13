@@ -10,7 +10,7 @@
 #endif
 
 #include <cuda_runtime.h>
-#include <math_functions.h>  
+#include <math_functions.h>
 
 #ifndef LINREG_NAN
 #define LINREG_NAN (__int_as_float(0x7fffffff))
@@ -47,8 +47,8 @@ extern "C" __global__ void linreg_exclusive_prefix_y_yi_f64(
     const float* __restrict__ prices,
     int series_len,
     int first_valid,
-    double* __restrict__ prefix_y,   
-    double* __restrict__ prefix_yi   
+    double* __restrict__ prefix_y,
+    double* __restrict__ prefix_yi
 ) {
     if (blockIdx.x != 0 || blockIdx.y != 0 || threadIdx.x != 0) return;
     if (series_len <= 0) return;
@@ -73,16 +73,16 @@ extern "C" __global__ void linreg_exclusive_prefix_y_yi_f64(
 extern "C" __global__
 __launch_bounds__(LINREG_LAUNCH_BOUNDS)
 void linreg_batch_from_prefix_f64(
-    const double* __restrict__ prefix_y,  
-    const double* __restrict__ prefix_yi, 
-    const int*   __restrict__ periods,    
-    const float* __restrict__ x_sums,     
-    const float* __restrict__ denom_invs, 
+    const double* __restrict__ prefix_y,
+    const double* __restrict__ prefix_yi,
+    const int*   __restrict__ periods,
+    const float* __restrict__ x_sums,
+    const float* __restrict__ denom_invs,
     const float* __restrict__ inv_periods,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out               
+    float* __restrict__ out
 ) {
     const int combo = static_cast<int>(blockIdx.y);
     if (combo >= n_combos) return;
@@ -113,7 +113,7 @@ void linreg_batch_from_prefix_f64(
 
     const int warm = first_valid + period - 1;
 
-    
+
     if (period == 1) {
         while (t < series_len) {
             if (t < warm) {
@@ -173,7 +173,7 @@ void linreg_batch_f32(const float* __restrict__ prices,
         const int base   = combo * series_len;
         const int period = periods[combo];
 
-        
+
         if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out[base + i] = LINREG_NAN;
             continue;
@@ -191,37 +191,37 @@ void linreg_batch_f32(const float* __restrict__ prices,
         const double denom_inv  = static_cast<double>(denom_invs[combo]);
         const double inv_period = static_cast<double>(inv_periods[combo]);
 
-        
+
         for (int i = 0; i < warm; ++i) out[base + i] = LINREG_NAN;
 
-        
+
         if (period == 1) {
-            
+
             for (int idx = warm; idx < series_len; ++idx) {
                 out[base + idx] = prices[idx];
             }
             continue;
         }
 
-        
+
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {
             const double val = static_cast<double>(prices[first_valid + k]);
             const double x   = static_cast<double>(k + 1);
             y_sum  += val;
-            xy_sum  = fma(val, x, xy_sum);  
+            xy_sum  = fma(val, x, xy_sum);
         }
 
-        
+
         double latest = static_cast<double>(prices[warm]);
 
-        
+
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum  += latest;
-            xy_sum  = fma(latest, period_f, xy_sum);  
+            xy_sum  = fma(latest, period_f, xy_sum);
 
-            const double b_num = fma(period_f, xy_sum, -x_sum * y_sum); 
+            const double b_num = fma(period_f, xy_sum, -x_sum * y_sum);
             const double b     = b_num * denom_inv;
             const double a     = (y_sum - b * x_sum) * inv_period;
 
@@ -258,7 +258,7 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
 {
     const int stride = blockDim.x * gridDim.x;
 
-    
+
     const double period_f   = static_cast<double>(period);
     const double x_sum      = static_cast<double>(x_sum_f);
     const double denom_inv  = static_cast<double>(denom_inv_f);
@@ -268,7 +268,7 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
          series < num_series;
          series += stride)
     {
-        
+
         if (period <= 0 || period > series_len) {
             for (int row = 0; row < series_len; ++row)
                 out_tm[tm_idx(row, num_series, series)] = LINREG_NAN;
@@ -291,11 +291,11 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
         const int warm = first_valid + period - 1;
 
-        
+
         for (int row = 0; row < warm; ++row)
             out_tm[tm_idx(row, num_series, series)] = LINREG_NAN;
 
-        
+
         if (period == 1) {
             for (int row = warm; row < series_len; ++row) {
                 out_tm[tm_idx(row, num_series, series)] = prices_tm[tm_idx(row, num_series, series)];
@@ -303,7 +303,7 @@ void linreg_many_series_one_param_f32(const float* __restrict__ prices_tm,
             continue;
         }
 
-        
+
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {

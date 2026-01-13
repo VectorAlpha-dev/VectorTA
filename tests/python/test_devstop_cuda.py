@@ -8,7 +8,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -27,7 +27,7 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, "devstop_cuda_batch_dev"):
         return False
-    
+
     try:
         h = np.array([np.nan, 2.0, 3.0], dtype=np.float32)
         l = np.array([np.nan, 1.0, 2.1], dtype=np.float32)
@@ -40,7 +40,7 @@ def _cuda_available() -> bool:
         )
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -59,7 +59,7 @@ class TestDevStopCuda:
         period = 20
         mult = 1.5
 
-        
+
         cpu = ti.devstop(high.astype(np.float32).astype(np.float64),
                          low.astype(np.float32).astype(np.float64),
                          period, mult, 0, "long", "sma")
@@ -76,7 +76,7 @@ class TestDevStopCuda:
         assert abs(meta["mults"].tolist()[0] - mult) < 1e-6
 
         gpu = cp.asnumpy(cp.asarray(handle))[0]
-        
+
         assert_close(gpu, cpu, rtol=1e-4, atol=2e-3, msg="DevStop CUDA batch vs CPU mismatch")
 
     def test_devstop_cuda_many_series_one_param_matches_cpu(self, data):
@@ -87,7 +87,7 @@ class TestDevStopCuda:
         high_tm = np.zeros((T, N), dtype=np.float64)
         low_tm = np.zeros((T, N), dtype=np.float64)
         for j in range(N):
-            
+
             high_tm[:, j] = h * (1.0 + 0.005 * j)
             low_tm[:, j] = l * (1.0 + 0.005 * j)
 

@@ -142,7 +142,7 @@ void linearreg_slope_batch_f32(const float* __restrict__ prices,
 
         for (int i = 0; i < warm; ++i) out[base + i] = LRS_NAN;
 
-        
+
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {
@@ -155,13 +155,13 @@ void linearreg_slope_batch_f32(const float* __restrict__ prices,
         double latest = static_cast<double>(prices[warm]);
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum  += latest;
-            xy_sum  = fma(latest, period_f, xy_sum); 
+            xy_sum  = fma(latest, period_f, xy_sum);
 
             const double b_num = fma(period_f, xy_sum, -x_sum * y_sum);
             const double b     = b_num * denom_inv;
             out[base + idx] = static_cast<float>(b);
 
-            xy_sum -= y_sum; 
+            xy_sum -= y_sum;
             const int oldest = idx - period + 1;
             y_sum  -= static_cast<double>(prices[oldest]);
             if (idx + 1 < series_len)

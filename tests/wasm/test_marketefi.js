@@ -1,14 +1,11 @@
-/**
- * WASM binding tests for MarketEFI indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { 
-    loadTestData, 
-    assertArrayClose, 
+import {
+    loadTestData,
+    assertArrayClose,
     assertClose,
     isNaN,
     assertAllNaN,
@@ -23,33 +20,33 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    
+
     try {
         const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        
+
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
     }
-    
+
     testData = loadTestData();
 });
 
 test('MarketEFI accuracy', async () => {
-    
+
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const volume = new Float64Array(testData.volume);
-    
+
     const result = wasm.marketefi_js(high, low, volume);
-    
+
     assert.strictEqual(result.length, high.length);
-    
-    
+
+
     const expectedLastFive = [
         2.8460112192104607,
         3.020938522420525,
@@ -57,8 +54,8 @@ test('MarketEFI accuracy', async () => {
         3.691017115591989,
         2.247810963176202,
     ];
-    
-    
+
+
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -66,133 +63,133 @@ test('MarketEFI accuracy', async () => {
         1e-6,
         "MarketEFI last 5 values mismatch"
     );
-    
-    
+
+
     await compareWithRust('marketefi', result, 'hlv', {});
 });
 
 test('MarketEFI NaN handling', () => {
-    
+
     const high = new Float64Array([NaN, 2.0, 3.0]);
     const low = new Float64Array([NaN, 1.0, 2.0]);
     const volume = new Float64Array([NaN, 1.0, 1.0]);
-    
+
     const result = wasm.marketefi_js(high, low, volume);
-    
+
     assert(isNaN(result[0]), "First value should be NaN");
-    
+
     assertClose(result[1], 1.0, 0, "Second value mismatch");
     assertClose(result[2], 1.0, 0, "Third value mismatch");
 });
 
 test('MarketEFI empty data', () => {
-    
+
     const high = new Float64Array([]);
     const low = new Float64Array([]);
     const volume = new Float64Array([]);
-    
+
     assert.throws(() => {
         wasm.marketefi_js(high, low, volume);
     }, /empty/i);
 });
 
 test('MarketEFI mismatched lengths', () => {
-    
+
     const high = new Float64Array([1.0, 2.0, 3.0]);
-    const low = new Float64Array([0.5, 1.5]); 
+    const low = new Float64Array([0.5, 1.5]);
     const volume = new Float64Array([1.0, 1.0, 1.0]);
-    
+
     assert.throws(() => {
         wasm.marketefi_js(high, low, volume);
     }, /Mismatched data length/);
 });
 
 test('MarketEFI zero volume', () => {
-    
+
     const high = new Float64Array([2.0, 3.0, 4.0]);
     const low = new Float64Array([1.0, 2.0, 3.0]);
-    const volume = new Float64Array([1.0, 0.0, 2.0]); 
-    
+    const volume = new Float64Array([1.0, 0.0, 2.0]);
+
     const result = wasm.marketefi_js(high, low, volume);
-    
+
     assertClose(result[0], 1.0, 0);
     assert(isNaN(result[1]), "Zero volume should produce NaN");
     assertClose(result[2], 0.5, 0);
 });
 
 test('MarketEFI all NaN input', () => {
-    
+
     const high = new Float64Array(10).fill(NaN);
     const low = new Float64Array(10).fill(NaN);
     const volume = new Float64Array(10).fill(NaN);
-    
+
     assert.throws(() => {
         wasm.marketefi_js(high, low, volume);
     }, /All values are NaN/);
 });
 
 test('MarketEFI batch single row', () => {
-    
-    const high = testData.high.slice(0, 100); 
+
+    const high = testData.high.slice(0, 100);
     const low = testData.low.slice(0, 100);
     const volume = testData.volume.slice(0, 100);
-    
-    const config = {}; 
+
+    const config = {};
     const batchResult = wasm.marketefi_batch(
         new Float64Array(high),
         new Float64Array(low),
         new Float64Array(volume),
         config
     );
-    
+
     assert(batchResult.values);
     assert.strictEqual(batchResult.rows, 1, "Should have 1 row (no parameter sweep)");
     assert.strictEqual(batchResult.cols, 100, "Should have 100 columns");
-    
-    
+
+
     const singleResult = wasm.marketefi_js(
         new Float64Array(high),
         new Float64Array(low),
         new Float64Array(volume)
     );
-    
-    
+
+
     const firstRow = batchResult.values.slice(0, 100);
     assertArrayClose(firstRow, singleResult, 1e-10, "Batch should match single result");
 });
 
 test('MarketEFI fast API (in-place)', () => {
-    
+
     const len = 3;
-    
-    
+
+
     const highPtr = wasm.marketefi_alloc(len);
     const lowPtr = wasm.marketefi_alloc(len);
     const volumePtr = wasm.marketefi_alloc(len);
-    
+
     try {
-        
+
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
-        
+
         highView.set([3.0, 4.0, 5.0]);
         lowView.set([2.0, 3.0, 3.0]);
         volumeView.set([1.0, 2.0, 2.0]);
-        
-        
+
+
         wasm.marketefi_into(
             highPtr,
             lowPtr,
             volumePtr,
-            highPtr,  
+            highPtr,
             len
         );
-        
-        
+
+
         const result = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
-        
-        
+
+
         assertClose(result[0], 1.0, 1e-8);
         assertClose(result[1], 0.5, 1e-8);
         assertClose(result[2], 1.0, 1e-8);
@@ -204,27 +201,27 @@ test('MarketEFI fast API (in-place)', () => {
 });
 
 test('MarketEFI fast API (separate buffers)', () => {
-    
+
     const len = 1000;
-    
-    
+
+
     const highPtr = wasm.marketefi_alloc(len);
     const lowPtr = wasm.marketefi_alloc(len);
     const volumePtr = wasm.marketefi_alloc(len);
     const outPtr = wasm.marketefi_alloc(len);
-    
+
     try {
-        
+
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, len);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, len);
         const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, len);
-        
+
         for (let i = 0; i < len; i++) {
             highView[i] = 100 + i * 0.1;
             lowView[i] = 99 + i * 0.1;
             volumeView[i] = 1000 + i;
         }
-        
+
         wasm.marketefi_into(
             highPtr,
             lowPtr,
@@ -232,11 +229,11 @@ test('MarketEFI fast API (separate buffers)', () => {
             outPtr,
             len
         );
-        
-        
+
+
         const result = new Float64Array(wasm.__wasm.memory.buffer, outPtr, len);
-        
-        
+
+
         const highArray = new Float64Array(highView);
         const lowArray = new Float64Array(lowView);
         const volumeArray = new Float64Array(volumeView);

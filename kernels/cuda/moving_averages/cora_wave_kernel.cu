@@ -46,7 +46,7 @@ void cora_wave_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     if (period <= 0) return;
 
-    extern __shared__ float shared_weights[]; 
+    extern __shared__ float shared_weights[];
     for (int i = threadIdx.x; i < period; i += blockDim.x) {
         shared_weights[i] = weights_flat[combo * max_period + i];
     }
@@ -64,7 +64,7 @@ void cora_wave_batch_f32(const float* __restrict__ prices,
         } else {
             const int start = t - period + 1;
             float s = 0.f;
-            
+
             float c = 0.f;
 #pragma unroll 4
             for (int k = 0; k < period; ++k) {
@@ -96,7 +96,7 @@ void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
 
     const int m = smooth_periods[combo];
     if (m <= 1) {
-        
+
         const int base = combo * series_len;
         int t = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -135,7 +135,7 @@ void cora_wave_batch_wma_from_y_f32(const float* __restrict__ y,
 extern "C" __global__
 void cora_wave_multi_series_one_param_time_major_f32(
     const float* __restrict__ prices_tm,
-    const float* __restrict__ weights, 
+    const float* __restrict__ weights,
     int period,
     float inv_norm,
     int num_series,
@@ -144,7 +144,7 @@ void cora_wave_multi_series_one_param_time_major_f32(
     float* __restrict__ out_tm) {
     if (period <= 0) return;
 
-    const int s = blockIdx.y; 
+    const int s = blockIdx.y;
     if (s >= num_series) return;
 
     const int warm = first_valids[s] + period - 1;
@@ -183,7 +183,7 @@ void cora_wave_ms1p_wma_time_major_f32(const float* __restrict__ y_tm,
                                        const int* __restrict__ warm0s,
                                        float* __restrict__ out_tm) {
     if (wma_period <= 1) {
-        
+
         int s = blockIdx.y;
         if (s >= num_series) return;
         int t = blockIdx.x * blockDim.x + threadIdx.x;

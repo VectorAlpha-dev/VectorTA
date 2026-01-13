@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .extern .shared .align 16 .b8 s_win[];
 
@@ -530,7 +530,7 @@ $L__BB0_65:
 	ret;
 
 }
-	
+
 .visible .entry percentile_nearest_rank_many_series_one_param_time_major_f32(
 	.param .u64 percentile_nearest_rank_many_series_one_param_time_major_f32_param_0,
 	.param .u32 percentile_nearest_rank_many_series_one_param_time_major_f32_param_1,
@@ -1071,7 +1071,7 @@ $L__BB1_66:
 	ret;
 
 }
-	
+
 .visible .entry percentile_nearest_rank_one_series_many_params_same_len_f32(
 	.param .u64 percentile_nearest_rank_one_series_many_params_same_len_f32_param_0,
 	.param .u32 percentile_nearest_rank_one_series_many_params_same_len_f32_param_1,
@@ -1086,7 +1086,7 @@ $L__BB1_66:
 	.reg .f32 	%f<28>;
 	.reg .b32 	%r<176>;
 	.reg .b64 	%rd<53>;
-	
+
 	.shared .align 4 .u32 _ZZ59percentile_nearest_rank_one_series_many_params_same_len_f32E9wl_shared;
 
 	ld.param.u64 	%rd13, [percentile_nearest_rank_one_series_many_params_same_len_f32_param_0];

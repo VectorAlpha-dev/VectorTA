@@ -58,8 +58,8 @@ struct lwma7_f32 {
     int   head;
     int   count;
     int   ticks;
-    float s1, c1;   
-    float s2, c2;   
+    float s1, c1;
+    float s2, c2;
 
     __device__ __forceinline__ void init() {
 #pragma unroll
@@ -72,28 +72,28 @@ struct lwma7_f32 {
             buf[head] = x;
             head++; if (head == 7) head = 0;
             count++;
-            
+
             kahan_add(x, s1, c1);
             kahan_add(__fmul_rn(static_cast<float>(count), x), s2, c2);
         } else {
-            const float old = buf[head];          
+            const float old = buf[head];
             buf[head] = x;
             head++; if (head == 7) head = 0;
 
-            const float s1_old = s1;              
+            const float s1_old = s1;
             kahan_add(__fmaf_rn(7.f, x, -s1_old), s2, c2);
 
-            kahan_add(x, s1, c1);                 
+            kahan_add(x, s1, c1);
             kahan_add(-old, s1, c1);
 
-            
+
             ticks++;
-            if ((ticks & 0x3FF) == 0) { 
+            if ((ticks & 0x3FF) == 0) {
                 float ns1 = 0.f, nc1 = 0.f;
                 float ns2 = 0.f, nc2 = 0.f;
 #pragma unroll
                 for (int i = 0; i < 7; ++i) {
-                    const int idx = (head + i) % 7;   
+                    const int idx = (head + i) % 7;
                     const float v = buf[idx];
                     kahan_add(v, ns1, nc1);
                     kahan_add(__fmul_rn(static_cast<float>(i + 1), v), ns2, nc2);
@@ -116,9 +116,9 @@ struct lwma4_ff {
     int   head;
     int   count;
     int   ticks;
-    
+
     float s1h, c1h, s2h, c2h;
-    
+
     float s1l, c1l, s2l, c2l;
 
     __device__ __forceinline__ void init() {
@@ -145,29 +145,29 @@ struct lwma4_ff {
             head++; if (head == 4) head = 0;
 
             const float s1h_old = s1h, s1l_old = s1l;
-            
+
             kahan_add(__fmaf_rn(4.f, p.hi, -s1h_old), s2h, c2h);
             kahan_add(p.hi, s1h, c1h);
             kahan_add(-old.hi, s1h, c1h);
-            
+
             kahan_add(__fmaf_rn(4.f, p.lo, -s1l_old), s2l, c2l);
             kahan_add(p.lo, s1l, c1l);
             kahan_add(-old.lo, s1l, c1l);
 
-            
+
             ticks++;
-            if ((ticks & 0x3FF) == 0) { 
+            if ((ticks & 0x3FF) == 0) {
                 float ns1h = 0.f, nc1h = 0.f, ns2h = 0.f, nc2h = 0.f;
                 float ns1l = 0.f, nc1l = 0.f, ns2l = 0.f, nc2l = 0.f;
 #pragma unroll
                 for (int i = 0; i < 4; ++i) {
-                    const int idx = (head + i) % 4;   
+                    const int idx = (head + i) % 4;
                     const ff v = buf[idx];
                     const float w = static_cast<float>(i + 1);
-                    
+
                     kahan_add(v.hi, ns1h, nc1h);
                     kahan_add(__fmul_rn(w, v.hi), ns2h, nc2h);
-                    
+
                     kahan_add(v.lo, ns1l, nc1l);
                     kahan_add(__fmul_rn(w, v.lo), ns2l, nc2l);
                 }
@@ -179,7 +179,7 @@ struct lwma4_ff {
 
     __device__ __forceinline__ bool full() const { return count >= 4; }
     __device__ __forceinline__ float value() const {
-        
+
         return __fmul_rn(__fadd_rn(s2h, s2l), 0.1f);
     }
 };
@@ -236,12 +236,12 @@ static __device__ __forceinline__ float trigger4_from_ff_ring(const ff pr[4], in
     const ff p1 = pr[(head + 1) % 4];
     const ff p2 = pr[(head + 2) % 4];
     const ff p3 = pr[(head + 3) % 4];
-    
+
     kahan_add_prod(1.f, p0.hi, s, c);
     kahan_add_prod(2.f, p1.hi, s, c);
     kahan_add_prod(3.f, p2.hi, s, c);
     kahan_add_prod(4.f, p3.hi, s, c);
-    
+
     kahan_add_prod(1.f, p0.lo, s, c);
     kahan_add_prod(2.f, p1.lo, s, c);
     kahan_add_prod(3.f, p2.lo, s, c);
@@ -266,7 +266,7 @@ static __device__ __forceinline__ void ehlers_pma_batch_core(
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= series_len) return;
 
-    
+
     const int warm_wma1    = first_valid + 7;
     const int warm_wma2    = first_valid + 13;
     const int warm_trigger = warm_wma2 + 3;
@@ -274,7 +274,7 @@ static __device__ __forceinline__ void ehlers_pma_batch_core(
     float* predict_row = out_predict + combo * series_len;
     float* trigger_row = out_trigger + combo * series_len;
 
-    
+
     {
         int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
         for (int i = 0; i < stop; ++i) { predict_row[i] = nan_f; }
@@ -284,24 +284,24 @@ static __device__ __forceinline__ void ehlers_pma_batch_core(
         for (int i = 0; i < stop; ++i) { trigger_row[i] = nan_f; }
     }
 
-    
+
     if (warm_wma1 >= series_len) return;
 
-    
-    lwma7_f32 price_w7;  price_w7.init();   
-    lwma7_f32 wma1_w7;   wma1_w7.init();    
-    lwma4_ff  trig_w4;   trig_w4.init();    
 
-    
+    lwma7_f32 price_w7;  price_w7.init();
+    lwma7_f32 wma1_w7;   wma1_w7.init();
+    lwma4_ff  trig_w4;   trig_w4.init();
+
+
     for (int idx = first_valid; idx < series_len; ++idx) {
 
-        
+
         float wma1_val = nan_f;
         if (price_w7.full()) {
-            wma1_val = price_w7.value();    
+            wma1_val = price_w7.value();
         }
 
-        
+
         if (idx >= warm_wma1) {
             wma1_w7.push(wma1_val);
 
@@ -312,7 +312,7 @@ static __device__ __forceinline__ void ehlers_pma_batch_core(
                 const ff     pred  = two_sum(two_m, -wma2_val);
                 predict_row[idx]   = __fadd_rn(pred.hi, pred.lo);
 
-                
+
                 trig_w4.push(pred);
                 if (trig_w4.full() && idx >= warm_trigger) {
                     trigger_row[idx] = trig_w4.value();
@@ -320,7 +320,7 @@ static __device__ __forceinline__ void ehlers_pma_batch_core(
             }
         }
 
-        
+
         const float p_new = prices[idx];
         price_w7.push(p_new);
     }
@@ -379,10 +379,10 @@ extern "C" __global__ void ehlers_pma_many_series_one_param_f32(
     if (first_valid >= series_len) return;
 
     const int warm_wma1 = first_valid + 7;
-    const int warm_wma2 = warm_wma1 + 6;     
+    const int warm_wma2 = warm_wma1 + 6;
     const int warm_trigger = warm_wma2 + 3;
 
-    
+
     {
         int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
         for (int row = 0; row < stop; ++row) {
@@ -420,13 +420,13 @@ extern "C" __global__ void ehlers_pma_many_series_one_param_f32(
                 out_predict_tm[idx] = __fadd_rn(pred.hi, pred.lo);
 
                 trig_w4.push(pred);
-                if (trig_w4.full() && row >= first_valid + 16) { 
+                if (trig_w4.full() && row >= first_valid + 16) {
                     out_trigger_tm[idx] = trig_w4.value();
                 }
             }
         }
 
-        
+
         const int pidx = row * stride + series;
         price_w7.push(prices_tm[pidx]);
     }
@@ -461,7 +461,7 @@ extern "C" __global__ void ehlers_pma_ms1p_tiled_f32_tx1_ty2(
     const int warm_trigger = warm_wma2 + 3;
     if (warm_wma1 >= series_len) { return; }
 
-    
+
     {
         int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
         for (int row = 0; row < stop; ++row) {
@@ -533,7 +533,7 @@ extern "C" __global__ void ehlers_pma_ms1p_tiled_f32_tx1_ty4(
     const int warm_trigger = warm_wma2 + 3;
     if (warm_wma1 >= series_len) { return; }
 
-    
+
     {
         int stop = (series_len < warm_wma2) ? series_len : warm_wma2;
         for (int row = 0; row < stop; ++row) {

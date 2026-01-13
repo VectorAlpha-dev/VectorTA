@@ -48,20 +48,20 @@ void mean_ad_batch_f32(const float* __restrict__ prices,
                        int first_valid,
                        int series_len,
                        int n_combos,
-                       int max_period,               
+                       int max_period,
                        float* __restrict__ out)
 {
     if (series_len <= 0 || n_combos <= 0) return;
 
-    
+
     const int lane             = threadIdx.x & 31;
     const int warp_in_block    = threadIdx.x >> 5;
     const int warps_per_block  = blockDim.x >> 5;
     const int warp_global      = blockIdx.x * warps_per_block + warp_in_block;
     const int total_warps_grid = gridDim.x * warps_per_block;
 
-    
-    extern __shared__ float s_ring[]; 
+
+    extern __shared__ float s_ring[];
     float* ring = s_ring + (size_t)warp_in_block * (size_t)max_period;
 
     for (int combo = warp_global; combo < n_combos; combo += total_warps_grid) {
@@ -72,16 +72,16 @@ void mean_ad_batch_f32(const float* __restrict__ prices,
         const int warm = warm_indices[combo];
         const size_t base = (size_t)combo * (size_t)series_len;
 
-        
+
         const int nan_end = (warm < series_len ? warm : series_len);
         for (int t = lane; t < nan_end; t += 32) {
             out[base + t] = qnan32();
         }
 
-        if (warm >= series_len) continue;             
+        if (warm >= series_len) continue;
         if (first_valid + period > series_len) continue;
 
-        
+
         float partial = 0.0f;
         for (int k = lane; k < period; k += 32) {
             partial += prices[first_valid + k];
@@ -92,16 +92,16 @@ void mean_ad_batch_f32(const float* __restrict__ prices,
         const float inv_p = 1.0f / (float)period;
         float sma = sum * inv_p;
 
-        
+
         if (lane == 0) {
             int head = 0;
             float residual_sum = 0.0f, c_res = 0.0f;
-            float c_sum = 0.0f; 
+            float c_sum = 0.0f;
 
             const int start_t = first_valid + period - 1;
             const int fill_end = min(start_t + period - 1, series_len - 1);
 
-            
+
             for (int t = start_t; t <= fill_end; ++t) {
                 const float r = fabsf(prices[t] - sma);
                 ring[head++] = r; if (head == period) head = 0;
@@ -116,10 +116,10 @@ void mean_ad_batch_f32(const float* __restrict__ prices,
                 }
             }
 
-            
+
             out[base + warm] = residual_sum * inv_p;
 
-            
+
             int t = start_t + period;
             int idx = head;
             while (t < series_len) {
@@ -128,7 +128,7 @@ void mean_ad_batch_f32(const float* __restrict__ prices,
                 ring[idx] = r;
                 idx += 1; if (idx == period) idx = 0;
 
-                
+
                 kahan_add(residual_sum, c_res,  r);
                 kahan_add(residual_sum, c_res, -old);
 
@@ -175,14 +175,14 @@ void mean_ad_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int warm = first + 2 * period - 2;
     const int stride = num_series;
 
-    
+
     const int nan_end = (warm < series_len ? warm : series_len);
     for (int t = 0; t < nan_end; ++t) {
         out_tm[(size_t)t * (size_t)stride + (size_t)series_idx] = qnan32();
     }
     if (warm >= series_len) return;
 
-    
+
     float sum = 0.0f, c_sum = 0.0f;
     size_t p = (size_t)first * (size_t)stride + (size_t)series_idx;
     for (int k = 0; k < period; ++k) {
@@ -192,11 +192,11 @@ void mean_ad_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float inv_p = 1.0f / (float)period;
     float sma = sum * inv_p;
 
-    
+
     float residual_sum = 0.0f, c_res = 0.0f;
     int head = 0;
 
-    
+
     float ring_reg[SMALL_PERIOD_MAX];
     float* ring = nullptr;
 
@@ -243,7 +243,7 @@ void mean_ad_many_series_one_param_f32(const float* __restrict__ prices_tm,
             ++t;
         }
     } else {
-        
+
         extern __shared__ float smem[];
         ring = smem + (size_t)threadIdx.x * (size_t)period;
 

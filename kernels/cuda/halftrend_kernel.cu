@@ -40,24 +40,24 @@ extern "C" {
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_f32(
-    const float* __restrict__ high,          
-    const float* __restrict__ low,           
-    const float* __restrict__ close,         
-    const float* __restrict__ atr_rows,      
-    const float* __restrict__ highma_rows,   
-    const float* __restrict__ lowma_rows,    
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    const float* __restrict__ atr_rows,
+    const float* __restrict__ highma_rows,
+    const float* __restrict__ lowma_rows,
     const float* __restrict__ roll_high_rows,
-    const float* __restrict__ roll_low_rows, 
-    const int*   __restrict__ warms,         
-    const float* __restrict__ chdevs,        
+    const float* __restrict__ roll_low_rows,
+    const int*   __restrict__ warms,
+    const float* __restrict__ chdevs,
     int n,
     int rows,
-    float* __restrict__ out_halftrend,       
-    float* __restrict__ out_trend,           
-    float* __restrict__ out_atr_high,        
-    float* __restrict__ out_atr_low,         
-    float* __restrict__ out_buy,             
-    float* __restrict__ out_sell)            
+    float* __restrict__ out_halftrend,
+    float* __restrict__ out_trend,
+    float* __restrict__ out_atr_high,
+    float* __restrict__ out_atr_low,
+    float* __restrict__ out_buy,
+    float* __restrict__ out_sell)
 {
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -81,14 +81,14 @@ void halftrend_batch_f32(
         const float ch_half = LDG(chdevs + row) * 0.5f;
         const float qnan = qnan_f();
 
-        
+
         #pragma unroll 8
         for (int i = 0; i < warm; ++i) {
             o_ht[i] = qnan; o_tr[i] = qnan; o_ah[i] = qnan; o_al[i] = qnan; o_bs[i] = qnan; o_ss[i] = qnan;
         }
         if (warm >= n) continue;
 
-        int   current_trend = 0; 
+        int   current_trend = 0;
         int   next_trend    = 0;
         int   prev_trend    = 0;
         float up   = 0.0f;
@@ -100,7 +100,7 @@ void halftrend_batch_f32(
         float min_high_price = prev_high;
 
         for (int i = warm; i < n; ++i) {
-            
+
             o_bs[i] = qnan; o_ss[i] = qnan;
 
             const float high_price = LDG(rhi + i);
@@ -129,7 +129,7 @@ void halftrend_batch_f32(
             const bool flipped = (i > warm) && (prev_trend != current_trend);
 
             if (current_trend == 0) {
-                if (flipped) {        
+                if (flipped) {
                     up = down;
                     o_bs[i] = up - atr2;
                 } else {
@@ -141,7 +141,7 @@ void halftrend_batch_f32(
                 o_al[i] = up - dev;
                 o_tr[i] = 0.0f;
             } else {
-                if (flipped) {        
+                if (flipped) {
                     down = up;
                     o_ss[i] = down + atr2;
                 } else {
@@ -169,21 +169,21 @@ void halftrend_batch_f32(
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_fused_f32(
-    const float* __restrict__ high,          
-    const float* __restrict__ low,           
-    const float* __restrict__ close,         
-    const int*   __restrict__ amps,          
-    const int*   __restrict__ atr_periods,   
-    const float* __restrict__ chdevs,        
-    int first,                                
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    const int*   __restrict__ amps,
+    const int*   __restrict__ atr_periods,
+    const float* __restrict__ chdevs,
+    int first,
     int n,
     int rows,
-    float* __restrict__ out_halftrend,       
-    float* __restrict__ out_trend,           
-    float* __restrict__ out_atr_high,        
-    float* __restrict__ out_atr_low,         
-    float* __restrict__ out_buy,             
-    float* __restrict__ out_sell)            
+    float* __restrict__ out_halftrend,
+    float* __restrict__ out_trend,
+    float* __restrict__ out_atr_high,
+    float* __restrict__ out_atr_low,
+    float* __restrict__ out_buy,
+    float* __restrict__ out_sell)
 {
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -194,7 +194,7 @@ void halftrend_batch_fused_f32(
         const int atr_p = LDG(atr_periods + row);
         const float ch_half = LDG(chdevs + row) * 0.5f;
 
-        
+
         if (amp <= 0 || atr_p <= 0 || amp > HT_FUSED_MAX_AMP) {
             const int base = row * n;
             float* __restrict__ o_ht = out_halftrend + base;
@@ -209,7 +209,7 @@ void halftrend_batch_fused_f32(
             continue;
         }
 
-        
+
         int warm = first + (amp > atr_p ? amp : atr_p) - 1;
         warm = (warm < n ? warm : n);
 
@@ -221,14 +221,14 @@ void halftrend_batch_fused_f32(
         float* __restrict__ o_bs = out_buy + base;
         float* __restrict__ o_ss = out_sell + base;
 
-        
+
         #pragma unroll 8
         for (int i = 0; i < warm; ++i) {
             o_ht[i] = qnan; o_tr[i] = qnan; o_ah[i] = qnan; o_al[i] = qnan; o_bs[i] = qnan; o_ss[i] = qnan;
         }
         if (warm >= n) continue;
 
-        
+
         float sum_high = 0.0f;
         float sum_low  = 0.0f;
         #pragma unroll 1
@@ -243,7 +243,7 @@ void halftrend_batch_fused_f32(
             sum_low  = sum_low  + LDG(low  + i) - LDG(low  + (i - amp));
         }
 
-        
+
         const float alpha = 1.0f / (float)atr_p;
         const int atr_warm = first + atr_p - 1;
         float sum_tr = LDG(high + first) - LDG(low + first);
@@ -272,7 +272,7 @@ void halftrend_batch_fused_f32(
             prev_c = LDG(close + i);
         }
 
-        
+
         int max_idx[HT_FUSED_MAX_AMP];
         int min_idx[HT_FUSED_MAX_AMP];
         int max_head = 0, max_tail = 0, max_cnt = 0;
@@ -312,8 +312,8 @@ void halftrend_batch_fused_f32(
             min_cnt += 1;
         }
 
-        
-        int   current_trend = 0; 
+
+        int   current_trend = 0;
         int   next_trend    = 0;
         int   prev_trend    = 0;
         float up   = 0.0f;
@@ -325,10 +325,10 @@ void halftrend_batch_fused_f32(
         float min_high_price = prev_high;
 
         for (int t = warm; t < n; ++t) {
-            
+
             o_bs[t] = qnan; o_ss[t] = qnan;
 
-            
+
             if (t > warm) {
                 const int wstart = t + 1 - cap;
                 while (max_cnt > 0 && max_idx[max_head] < wstart) {
@@ -402,7 +402,7 @@ void halftrend_batch_fused_f32(
             const bool flipped = (t > warm) && (prev_trend != current_trend);
 
             if (current_trend == 0) {
-                if (flipped) {        
+                if (flipped) {
                     up = down;
                     o_bs[t] = up - atr2;
                 } else {
@@ -414,7 +414,7 @@ void halftrend_batch_fused_f32(
                 o_al[t] = up - dev;
                 o_tr[t] = 0.0f;
             } else {
-                if (flipped) {        
+                if (flipped) {
                     down = up;
                     o_ss[t] = down + atr2;
                 } else {
@@ -427,7 +427,7 @@ void halftrend_batch_fused_f32(
                 o_tr[t] = 1.0f;
             }
 
-            
+
             const int ni = t + 1;
             if (ni < n) {
                 sum_high = sum_high + LDG(high + ni) - LDG(high + (ni - amp));
@@ -455,25 +455,25 @@ void halftrend_batch_fused_f32(
 
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
-void halftrend_batch_time_major_f32( 
-    const float* __restrict__ high,          
-    const float* __restrict__ low,           
-    const float* __restrict__ close,         
-    const float* __restrict__ atr_tm,        
-    const float* __restrict__ highma_tm,     
-    const float* __restrict__ lowma_tm,      
-    const float* __restrict__ roll_high_tm,  
-    const float* __restrict__ roll_low_tm,   
-    const int*   __restrict__ warms,         
-    const float* __restrict__ chdevs,        
+void halftrend_batch_time_major_f32(
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    const float* __restrict__ atr_tm,
+    const float* __restrict__ highma_tm,
+    const float* __restrict__ lowma_tm,
+    const float* __restrict__ roll_high_tm,
+    const float* __restrict__ roll_low_tm,
+    const int*   __restrict__ warms,
+    const float* __restrict__ chdevs,
     int n,
     int rows,
-    float* __restrict__ out_halftrend_tm,    
-    float* __restrict__ out_trend_tm,        
-    float* __restrict__ out_atr_high_tm,     
-    float* __restrict__ out_atr_low_tm,      
-    float* __restrict__ out_buy_tm,          
-    float* __restrict__ out_sell_tm)         
+    float* __restrict__ out_halftrend_tm,
+    float* __restrict__ out_trend_tm,
+    float* __restrict__ out_atr_high_tm,
+    float* __restrict__ out_atr_low_tm,
+    float* __restrict__ out_buy_tm,
+    float* __restrict__ out_sell_tm)
 {
     const int tid   = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride= blockDim.x * gridDim.x;
@@ -496,9 +496,9 @@ void halftrend_batch_time_major_f32(
         }
         if (warm >= n) continue;
 
-        int   current_trend = 0;   
+        int   current_trend = 0;
         int   next_trend    = 0;
-        int   prev_trend    = 0;   
+        int   prev_trend    = 0;
         float up   = 0.0f;
         float down = 0.0f;
 
@@ -538,7 +538,7 @@ void halftrend_batch_time_major_f32(
             const bool flipped = (t > warm) && (prev_trend != current_trend);
 
             if (current_trend == 0) {
-                if (flipped) {        
+                if (flipped) {
                     up = down;
                     out_buy_tm[idx] = up - atr2;
                 } else {
@@ -550,7 +550,7 @@ void halftrend_batch_time_major_f32(
                 out_atr_low_tm[idx]   = up - dev;
                 out_trend_tm[idx]     = 0.0f;
             } else {
-                if (flipped) {        
+                if (flipped) {
                     down = up;
                     out_sell_tm[idx] = down + atr2;
                 } else {
@@ -576,21 +576,21 @@ void halftrend_batch_time_major_f32(
 
 __global__ __launch_bounds__(HT_THREADS_PER_BLOCK, 2)
 void halftrend_batch_fused_time_major_f32(
-    const float* __restrict__ high,          
-    const float* __restrict__ low,           
-    const float* __restrict__ close,         
-    const int*   __restrict__ amps,          
-    const int*   __restrict__ atr_periods,   
-    const float* __restrict__ chdevs,        
-    int first,                                
+    const float* __restrict__ high,
+    const float* __restrict__ low,
+    const float* __restrict__ close,
+    const int*   __restrict__ amps,
+    const int*   __restrict__ atr_periods,
+    const float* __restrict__ chdevs,
+    int first,
     int n,
     int rows,
-    float* __restrict__ out_halftrend_tm,    
-    float* __restrict__ out_trend_tm,        
-    float* __restrict__ out_atr_high_tm,     
-    float* __restrict__ out_atr_low_tm,      
-    float* __restrict__ out_buy_tm,          
-    float* __restrict__ out_sell_tm)         
+    float* __restrict__ out_halftrend_tm,
+    float* __restrict__ out_trend_tm,
+    float* __restrict__ out_atr_high_tm,
+    float* __restrict__ out_atr_low_tm,
+    float* __restrict__ out_buy_tm,
+    float* __restrict__ out_sell_tm)
 {
     const int tid    = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -629,7 +629,7 @@ void halftrend_batch_fused_time_major_f32(
         }
         if (warm >= n) continue;
 
-        
+
         float sum_high = 0.0f;
         float sum_low  = 0.0f;
         for (int k = 0; k < amp; ++k) {
@@ -643,7 +643,7 @@ void halftrend_batch_fused_time_major_f32(
             sum_low  = sum_low  + LDG(low  + t) - LDG(low  + (t - amp));
         }
 
-        
+
         const float alpha = 1.0f / (float)atr_p;
         const int atr_warm = first + atr_p - 1;
         float sum_tr = LDG(high + first) - LDG(low + first);
@@ -672,7 +672,7 @@ void halftrend_batch_fused_time_major_f32(
             prev_c = LDG(close + t);
         }
 
-        
+
         int max_idx[HT_FUSED_MAX_AMP];
         int min_idx[HT_FUSED_MAX_AMP];
         int max_head = 0, max_tail = 0, max_cnt = 0;
@@ -856,12 +856,12 @@ void halftrend_many_series_one_param_time_major_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const float* __restrict__ atr_tm,        
-    const float* __restrict__ highma_tm,     
-    const float* __restrict__ lowma_tm,      
-    const float* __restrict__ roll_high_tm,  
-    const float* __restrict__ roll_low_tm,   
-    const int*   __restrict__ warms_cols,    
+    const float* __restrict__ atr_tm,
+    const float* __restrict__ highma_tm,
+    const float* __restrict__ lowma_tm,
+    const float* __restrict__ roll_high_tm,
+    const float* __restrict__ roll_low_tm,
+    const int*   __restrict__ warms_cols,
     float ch_dev,
     int cols,
     int rows,
@@ -872,7 +872,7 @@ void halftrend_many_series_one_param_time_major_f32(
     float* __restrict__ out_buy_tm,
     float* __restrict__ out_sell_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const float ch_half = ch_dev * 0.5f;
@@ -965,7 +965,7 @@ void halftrend_many_series_one_param_time_major_f32(
     }
 }
 
-} 
+}
 
 #undef AT_TM
 #undef HT_THREADS_PER_BLOCK

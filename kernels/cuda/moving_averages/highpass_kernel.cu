@@ -30,7 +30,7 @@ static __forceinline__ __device__ int lane_id() {
     return threadIdx.x & (WARP_SIZE - 1);
 }
 static __forceinline__ __device__ int first_active_lane(unsigned mask) {
-    
+
     return __ffs(mask) - 1;
 }
 
@@ -40,15 +40,15 @@ void hpf_coeffs_from_period(int period, double& c, double& oma, bool& ok) {
     ok = false;
     if (period <= 0) return;
 
-    
-    
+
+
     double s, co;
     sincospi(2.0 / static_cast<double>(period), &s, &co);
     if (fabs(co) < 1e-12) return;
 
     const double alpha = 1.0 + ((s - 1.0) / co);
-    c   = 1.0 - 0.5 * alpha;   
-    oma = 1.0 - alpha;         
+    c   = 1.0 - 0.5 * alpha;
+    oma = 1.0 - alpha;
     ok = true;
 }
 
@@ -59,7 +59,7 @@ void hpf_coeffs_from_period_f32(int period, float& c, float& oma, bool& ok) {
     if (period <= 0) return;
 
     float s, co;
-    
+
     sincospif(2.0f / static_cast<float>(period), &s, &co);
     if (fabsf(co) < 1e-6f) return;
 
@@ -100,7 +100,7 @@ void highpass_batch_warp_scan_f32(const float* __restrict__ prices,
     const unsigned mask = 0xffffffffu;
     const size_t base = (size_t)combo * (size_t)series_len;
 
-    
+
     for (int t = lane; t < fv; t += 32) {
         out[base + (size_t)t] = CUDART_NAN_F;
     }
@@ -129,7 +129,7 @@ void highpass_batch_warp_scan_f32(const float* __restrict__ prices,
             B = c * (x - xm1);
         }
 
-        
+
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A, offset);
@@ -163,7 +163,7 @@ void highpass_batch_f32(const float* __restrict__ prices,
 
     if (series_len <= 0 || n_combos <= 0) return;
 
-    
+
     for (int combo = blockIdx.x * blockDim.x + threadIdx.x;
          combo < n_combos;
          combo += blockDim.x * gridDim.x)
@@ -172,7 +172,7 @@ void highpass_batch_f32(const float* __restrict__ prices,
         double c, oma; bool ok;
         hpf_coeffs_from_period(period, c, oma, ok);
         if (!ok || period > series_len) {
-            
+
             continue;
         }
 
@@ -182,13 +182,13 @@ void highpass_batch_f32(const float* __restrict__ prices,
         if (fv < 0) fv = 0;
         if (fv > series_len) fv = series_len;
 
-        
+
         for (int t = 0; t < fv; ++t) {
             out[base + t] = CUDART_NAN_F;
         }
         if (fv >= series_len) continue;
 
-        
+
         unsigned mask  = __activemask();
         int leader     = first_active_lane(mask);
         float p0_f     = (lane_id() == leader) ? prices[fv] : 0.0f;
@@ -197,13 +197,13 @@ void highpass_batch_f32(const float* __restrict__ prices,
         double prev_y  = prev_x;
         out[base + fv] = static_cast<float>(prev_y);
 
-        
+
         for (int t = fv + 1; t < series_len; ++t) {
             float xf = (lane_id() == leader) ? prices[t] : 0.0f;
             xf       = __shfl_sync(mask, xf, leader);
             const double x    = static_cast<double>(xf);
             const double diff = x - prev_x;
-            const double y    = fma(oma, prev_y, c * diff); 
+            const double y    = fma(oma, prev_y, c * diff);
             out[base + t]     = static_cast<float>(y);
             prev_x = x;
             prev_y = y;
@@ -226,7 +226,7 @@ void highpass_many_series_one_param_time_major_f32(const float* __restrict__ pri
 
     const int stride = num_series;
 
-    
+
     for (int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
          series_idx < num_series;
          series_idx += blockDim.x * gridDim.x)
@@ -235,7 +235,7 @@ void highpass_many_series_one_param_time_major_f32(const float* __restrict__ pri
         if (fv < 0) fv = 0;
         if (fv > series_len) fv = series_len;
 
-        
+
         int idx = series_idx;
         for (int t = 0; t < fv; ++t) {
             out_tm[idx] = CUDART_NAN_F;
@@ -243,13 +243,13 @@ void highpass_many_series_one_param_time_major_f32(const float* __restrict__ pri
         }
         if (fv >= series_len) continue;
 
-        
+
         idx = fv * stride + series_idx;
         double prev_x = static_cast<double>(prices_tm[idx]);
         double prev_y = prev_x;
         out_tm[idx]   = static_cast<float>(prev_y);
 
-        
+
         for (int t = fv + 1; t < series_len; ++t) {
             idx += stride;
             const double x    = static_cast<double>(prices_tm[idx]);

@@ -47,7 +47,7 @@ def _is_ascii_hexdigit(b: int) -> bool:
 
 
 def _try_parse_rust_char_literal(data: bytes, start: int) -> Optional[int]:
-    
+
     n = len(data)
     if start >= n or data[start] != ord("'"):
         return None
@@ -58,23 +58,23 @@ def _try_parse_rust_char_literal(data: bytes, start: int) -> Optional[int]:
     if b1 in (ord("\n"), ord("\r")):
         return None
 
-    
+
     if b1 == ord("\\"):
         if start + 2 >= n:
             return None
         esc = data[start + 2]
-        
+
         if esc in (ord("n"), ord("r"), ord("t"), ord("0"), ord("\\"), ord("'"), ord('"')):
             end = start + 3
             if end < n and data[end] == ord("'"):
                 return end + 1
             return None
-        
+
         if esc == ord("x"):
             if start + 5 < n and _is_ascii_hexdigit(data[start + 3]) and _is_ascii_hexdigit(data[start + 4]) and data[start + 5] == ord("'"):
                 return start + 6
             return None
-        
+
         if esc == ord("u"):
             if start + 3 >= n or data[start + 3] != ord("{"):
                 return None
@@ -85,7 +85,7 @@ def _try_parse_rust_char_literal(data: bytes, start: int) -> Optional[int]:
                     return None
                 digits += 1
                 if digits > 6:
-                    
+
                     return None
                 j += 1
             if digits == 0:
@@ -97,14 +97,14 @@ def _try_parse_rust_char_literal(data: bytes, start: int) -> Optional[int]:
             return None
         return None
 
-    
+
     if b1 < 0x80:
         if _is_ascii_ident_char(b1) or (ord("0") <= b1 <= ord("9")) or b1 in (ord("_"),):
             end = start + 2
             if end < n and data[end] == ord("'"):
                 return end + 1
             return None
-        
+
         if b1 in (ord("'"), ord("\\")):
             return None
         end = start + 2
@@ -112,7 +112,7 @@ def _try_parse_rust_char_literal(data: bytes, start: int) -> Optional[int]:
             return end + 1
         return None
 
-    
+
     first = b1
     if 0xC2 <= first <= 0xDF:
         size = 2
@@ -144,10 +144,10 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
     in_double_quote = False
     in_backtick = False
 
-    
+
     rust_raw_hashes: Optional[int] = None
 
-    
+
     cpp_raw_delim: Optional[bytes] = None
 
     while i < n:
@@ -158,13 +158,13 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
                 in_line_comment = False
                 out.append(b)
             else:
-                
+
                 pass
             i += 1
             continue
 
         if in_block_comment:
-            
+
             out.append(b)
             if b == ord("*") and i + 1 < n and data[i + 1] == ord("/"):
                 out.append(data[i + 1])
@@ -177,7 +177,7 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
         if rust_raw_hashes is not None:
             out.append(b)
             if b == ord('"'):
-                
+
                 hashes = rust_raw_hashes
                 if hashes == 0:
                     rust_raw_hashes = None
@@ -192,12 +192,12 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
 
         if cpp_raw_delim is not None:
             out.append(b)
-            
+
             if b == ord(")") and cpp_raw_delim is not None:
                 delim = cpp_raw_delim
                 tail = b")" + delim + b'"'
                 if data[i : i + len(tail)] == tail:
-                    
+
                     out.extend(data[i + 1 : i + len(tail)])
                     i += len(tail)
                     cpp_raw_delim = None
@@ -238,7 +238,7 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
             i += 1
             continue
 
-        
+
         if b == ord("/") and i + 1 < n:
             nxt = data[i + 1]
             if nxt == ord("*"):
@@ -249,7 +249,7 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
                 continue
             if nxt == ord("/"):
                 if rust_mode and keep_rust_doc_comments:
-                    
+
                     if i + 3 <= n and data[i : i + 3] == b"///":
                         out.extend(b"///")
                         i += 3
@@ -262,12 +262,12 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
                 i += 2
                 continue
 
-        
+
         if rust_mode and b in (ord("b"), ord("r")):
             start_i = i
             j = i
 
-            
+
             if data[j] == ord("b"):
                 if j + 1 < n and data[j + 1] == ord("r"):
                     j += 2
@@ -282,7 +282,7 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
                     hashes += 1
                     j += 1
                 if j < n and data[j] == ord('"'):
-                    
+
                     prev = data[start_i - 1] if start_i > 0 else None
                     if prev is None or not _is_ascii_ident_char(prev):
                         out.extend(data[start_i : j + 1])
@@ -290,9 +290,9 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
                         rust_raw_hashes = hashes
                         continue
 
-        
+
         if b == ord("R") and i + 1 < n and data[i + 1] == ord('"'):
-            
+
             j = i + 2
             while j < n and data[j] != ord("(") and data[j] != ord("\n") and data[j] != ord("\r"):
                 j += 1
@@ -335,10 +335,10 @@ def _strip_double_slash_comments_c_like(data: bytes, *, rust_mode: bool, keep_ru
 
 
 def _is_encoding_cookie(line: bytes) -> bool:
-    
-    
-    
-    
+
+
+
+
     s = line.lstrip()
     if not s.startswith(b"#"):
         return False
@@ -347,7 +347,7 @@ def _is_encoding_cookie(line: bytes) -> bool:
 
 
 def _split_first_two_lines(data: bytes) -> tuple[bytes, bytes, int]:
-    
+
     n = len(data)
     if n == 0:
         return b"", b"", 0
@@ -368,10 +368,10 @@ def _split_first_two_lines(data: bytes) -> tuple[bytes, bytes, int]:
 
 
 def _strip_hash_comments_python(data: bytes) -> bytes:
-    
-    
-    
-    
+
+
+
+
     line1, line2, start_off = _split_first_two_lines(data)
 
     out = bytearray()
@@ -444,9 +444,9 @@ def _strip_hash_comments_python(data: bytes) -> bytes:
             i += 1
             continue
 
-        
+
         if b == ord("#"):
-            
+
             while i < n and data[i] != ord("\n"):
                 i += 1
             if i < n and data[i] == ord("\n"):

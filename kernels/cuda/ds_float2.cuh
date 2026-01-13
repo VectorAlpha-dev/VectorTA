@@ -13,7 +13,7 @@ __device__ __forceinline__ dsf ds_set(float x)        { return {x, 0.0f}; }
 __device__ __forceinline__ dsf ds_make(float hi, float lo){ return {hi, lo}; }
 
 __device__ __forceinline__ dsf ds_norm(float s, float e) {
-    
+
     float t  = s + e;
     float lo = e - (t - s);
     return {t, lo};

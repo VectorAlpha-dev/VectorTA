@@ -17,23 +17,23 @@ static __device__ __forceinline__ float nzf(float x) {
 
 extern "C" __global__
 void otto_batch_f32(
-    const float* __restrict__ prices,     
-    const float* __restrict__ cabs,       
+    const float* __restrict__ prices,
+    const float* __restrict__ cabs,
     const int*   __restrict__ ott_periods,
     const float* __restrict__ ott_percents,
     const int*   __restrict__ fast_vidyas,
     const int*   __restrict__ slow_vidyas,
-    const float* __restrict__ cocos,      
+    const float* __restrict__ cocos,
     int series_len,
     int n_combos,
-    int /*first_valid (reserved)*/,
-    float* __restrict__ hott_out,         
-    float* __restrict__ lott_out          
+    int ,
+    float* __restrict__ hott_out,
+    float* __restrict__ lott_out
 ) {
     const int combo = blockIdx.x;
     if (combo >= n_combos || threadIdx.x != 0) return;
 
-    
+
     const int slow = max(__ldg(slow_vidyas + combo), 1);
     const int fast = max(__ldg(fast_vidyas + combo), 1);
     const int p1 = max(slow / 2, 1);
@@ -56,9 +56,9 @@ void otto_batch_f32(
     float* __restrict__ hott_row = hott_out + combo * series_len;
     float* __restrict__ lott_row = lott_out + combo * series_len;
 
-    
+
     float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
-    
+
     const int CMO_P = 9;
     float ring_up[CMO_P];
     float ring_dn[CMO_P];
@@ -76,22 +76,22 @@ void otto_batch_f32(
         const float x = nzf(__ldg(prices + i));
         const float c_abs = __ldg(cabs + i);
 
-        
+
         const float a1 = a1_base * c_abs;
         const float a2 = a2_base * c_abs;
         const float a3 = a3_base * c_abs;
 
-        
+
         v1 = fmaf(a1, x, (1.0f - a1) * v1);
         v2 = fmaf(a2, x, (1.0f - a2) * v2);
         v3 = fmaf(a3, x, (1.0f - a3) * v3);
 
-        
+
         const float denom_l = (v2 - v3) + coco;
         const float lott = denom_l != 0.0f ? (v1 / denom_l) : 0.0f;
         lott_row[i] = lott;
 
-        
+
         if (i > 0) {
             const float d = lott - prev_lott;
             if (i >= CMO_P) {
@@ -138,9 +138,9 @@ void otto_batch_f32(
 
 extern "C" __global__
 void otto_many_series_one_param_f32(
-    const float* __restrict__ prices_tm, 
-    int cols,                            
-    int rows,                            
+    const float* __restrict__ prices_tm,
+    int cols,
+    int rows,
     int ott_period,
     float ott_percent_f,
     int fast_vidya,
@@ -165,7 +165,7 @@ void otto_many_series_one_param_f32(
     const float scale_up = (200.0f + ott_percent) / 200.0f;
     const float scale_dn = (200.0f - ott_percent) / 200.0f;
 
-    
+
     const int CMO_P = 9;
     float ring_up_p[CMO_P];
     float ring_dn_p[CMO_P];
@@ -176,7 +176,7 @@ void otto_many_series_one_param_f32(
     float v1 = 0.0f, v2 = 0.0f, v3 = 0.0f;
     float prev_price = 0.0f;
 
-    
+
     float ring_up_l[CMO_P];
     float ring_dn_l[CMO_P];
     #pragma unroll

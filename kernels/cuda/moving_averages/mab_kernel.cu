@@ -43,9 +43,9 @@ extern "C" __global__ void mab_batch_from_prefix_sma_f32(
     int len,
     int first_valid,
     int rows,
-    float* __restrict__ out_upper,  
-    float* __restrict__ out_middle, 
-    float* __restrict__ out_lower   
+    float* __restrict__ out_upper,
+    float* __restrict__ out_middle,
+    float* __restrict__ out_lower
 ) {
     const int row = (int)(blockIdx.x * blockDim.x + threadIdx.x);
     if (row >= rows) return;
@@ -115,16 +115,16 @@ extern "C" __global__ void mab_dev_from_ma_f32(
     int fast_period,
     int first_valid,
     int len,
-    float* __restrict__ dev_out 
+    float* __restrict__ dev_out
 ) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
     if (len <= 0 || fast_period <= 0) return;
 
-    const int first_output = first_valid + max(fast_period, 0) + fast_period - 1; 
-    
-    
+    const int first_output = first_valid + max(fast_period, 0) + fast_period - 1;
 
-    
+
+
+
     for (int t = 0; t < min(first_output, len); ++t) {
         dev_out[t] = qnan32();
     }
@@ -153,17 +153,17 @@ extern "C" __global__ void mab_dev_from_ma_f32(
 extern "C" __global__ void mab_apply_dev_shared_ma_batch_f32(
     const float* __restrict__ fast,
     const float* __restrict__ slow,
-    const float* __restrict__ dev, 
+    const float* __restrict__ dev,
     int fast_period,
     int slow_period,
     int first_valid,
     int len,
-    const float* __restrict__ devups, 
-    const float* __restrict__ devdns, 
+    const float* __restrict__ devups,
+    const float* __restrict__ devdns,
     int rows,
-    float* __restrict__ out_upper,  
-    float* __restrict__ out_middle, 
-    float* __restrict__ out_lower   
+    float* __restrict__ out_upper,
+    float* __restrict__ out_middle,
+    float* __restrict__ out_lower
 ) {
     const int row = blockIdx.y;
     if (row >= rows) return;
@@ -201,11 +201,11 @@ extern "C" __global__ void mab_single_row_from_ma_f32(
     int len,
     float devup,
     float devdn,
-    float* __restrict__ out_upper,  
+    float* __restrict__ out_upper,
     float* __restrict__ out_middle,
     float* __restrict__ out_lower
 ) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
     const int warm = first_valid + max(fast_period, slow_period) + fast_period - 1;
     const float nanf = qnan32();
 
@@ -216,7 +216,7 @@ extern "C" __global__ void mab_single_row_from_ma_f32(
     }
     if (warm >= len) return;
 
-    
+
     int start = (warm + 1) - fast_period;
     if (start < 0) start = 0;
     double sumsq = 0.0;
@@ -246,7 +246,7 @@ extern "C" __global__ void mab_single_row_from_ma_f32(
 extern "C" __global__ void mab_many_series_one_param_time_major_f32(
     const float* __restrict__ fast_tm,
     const float* __restrict__ slow_tm,
-    const int* __restrict__ first_valids, 
+    const int* __restrict__ first_valids,
     int cols,
     int rows,
     int fast_period,
@@ -262,7 +262,7 @@ extern "C" __global__ void mab_many_series_one_param_time_major_f32(
     const int fv = first_valids[s];
     const int warm = fv + max(fast_period, slow_period) + fast_period - 1;
 
-    if (threadIdx.x != 0 || blockIdx.x != 0) return; 
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
     const int stride = cols;
     const float nanf = qnan32();
 

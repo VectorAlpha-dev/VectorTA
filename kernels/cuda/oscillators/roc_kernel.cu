@@ -36,23 +36,23 @@ void roc_batch_f32(const float* __restrict__ prices,
     const int combo = blockIdx.x;
     if (combo >= n_combos) return;
 
-    
+
     float* __restrict__ out_row = out + combo * series_len;
 
-    
+
     const int period = periods[combo];
     if (period <= 0) {
-        
+
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_row[t] = qnanf();
         }
         return;
     }
 
-    
+
     const int warm = first_valid + period;
 
-    
+
     if (warm >= series_len) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_row[t] = qnanf();
@@ -60,20 +60,20 @@ void roc_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    
-    
+
+
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out_row[t] = qnanf();
     }
 
-    
-    
-    
-    
-    
+
+
+
+
+
     for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x) {
-        
+
         float cur  =
 #if __CUDA_ARCH__ >= 350
             __ldg(&prices[t]);
@@ -87,14 +87,14 @@ void roc_batch_f32(const float* __restrict__ prices,
             prices[t - period];
 #endif
 
-        
-        
+
+
         if (prev == 0.0f || isnan(prev)) {
             out_row[t] = 0.0f;
         } else {
-            
-            
-            const float inv_prev = 1.0f / prev;              
+
+
+            const float inv_prev = 1.0f / prev;
             const float rel      = fmaf(cur, inv_prev, -1.0f);
             out_row[t] = 100.0f * rel;
         }
@@ -117,7 +117,7 @@ void roc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (s >= cols) return;
 
     if (period <= 0) {
-        
+
         for (int t = 0; t < rows; ++t) {
             out_tm[t * cols + s] = qnanf();
         }
@@ -134,12 +134,12 @@ void roc_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int warm = fv + period;
 
-    
+
     for (int t = 0; t < warm && t < rows; ++t) {
         out_tm[t * cols + s] = qnanf();
     }
 
-    
+
     for (int t = max(0, warm); t < rows; ++t) {
         const int idx  = t * cols + s;
         const float cur =

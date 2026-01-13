@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry vidya_batch_f32(
 	.param .u64 vidya_batch_f32_param_0,
@@ -483,7 +483,7 @@ $L__BB0_39:
 	ret;
 
 }
-	
+
 .visible .entry vidya_batch_prefix_f32(
 	.param .u64 vidya_batch_prefix_f32_param_0,
 	.param .u64 vidya_batch_prefix_f32_param_1,
@@ -950,7 +950,7 @@ $L__BB1_38:
 	ret;
 
 }
-	
+
 .visible .entry vidya_many_series_one_param_f32(
 	.param .u64 vidya_many_series_one_param_f32_param_0,
 	.param .u64 vidya_many_series_one_param_f32_param_1,

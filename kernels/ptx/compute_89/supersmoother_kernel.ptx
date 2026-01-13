@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry supersmoother_batch_f32(
 	.param .u64 supersmoother_batch_f32_param_0,
@@ -319,7 +319,7 @@ $L__BB0_36:
 	ret;
 
 }
-	
+
 .visible .entry supersmoother_batch_warp_scan_f32(
 	.param .u64 supersmoother_batch_warp_scan_f32_param_0,
 	.param .u64 supersmoother_batch_warp_scan_f32_param_1,
@@ -960,7 +960,7 @@ $L__BB1_34:
 	bra.uni 	$L__BB1_63;
 
 }
-	
+
 .visible .entry supersmoother_many_series_one_param_f32(
 	.param .u64 supersmoother_many_series_one_param_f32_param_0,
 	.param .u64 supersmoother_many_series_one_param_f32_param_1,

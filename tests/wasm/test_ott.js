@@ -1,7 +1,4 @@
-/**
- * WASM binding tests for OTT indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -21,7 +18,7 @@ let wasm;
 let testData;
 
 test.before(async () => {
-  
+
   const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
   const importPath = process.platform === 'win32'
     ? 'file:///' + wasmPath.replace(/\\/g, '/')
@@ -49,7 +46,7 @@ test('OTT accuracy (matches Rust refs)', () => {
 
   assert.strictEqual(result.length, close.length);
 
-  
+
   const last5 = result.slice(-5);
   assertArrayClose(last5, expected.last5Values, 1e-8, 'OTT last 5 values mismatch');
 });
@@ -70,19 +67,19 @@ test('OTT reinput (apply twice) matches refs', () => {
 });
 
 test('OTT invalid inputs error', () => {
-  
+
   const data = new Float64Array([10, 20, 30]);
   assert.throws(() => wasm.ott_js(data, 0, 1.4, 'VAR'), /Invalid period/);
 
-  
+
   const empty = new Float64Array([]);
   assert.throws(() => wasm.ott_js(empty, 2, 1.4, 'VAR'), /Input data slice is empty/);
 
-  
+
   assert.throws(() => wasm.ott_js(data, 2, -1.0, 'VAR'), /Invalid percent/);
   assert.throws(() => wasm.ott_js(data, 2, NaN, 'VAR'), /Invalid percent/);
 
-  
+
   assert.throws(() => wasm.ott_js(data, 2, 1.4, 'INVALID'), /Invalid moving average|Invalid MA type|Unsupported/);
 });
 

@@ -28,7 +28,7 @@ extern "C" __global__ void wclprice_batch_f32(const float* __restrict__ high,
         if (!isfinite(h) || !isfinite(l) || !isfinite(c)) {
             out[i] = CUDART_NAN_F; continue;
         }
-        
+
         out[i] = c * 0.5f + (h + l) * 0.25f;
     }
 }
@@ -43,12 +43,12 @@ extern "C" __global__ void wclprice_many_series_one_param_time_major_f32(
     int rows,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= cols || cols <= 0 || rows <= 0) return;
     const int fv = max(0, first_valids[s]);
     const int tid = threadIdx.x;
     const int stride = blockDim.x;
-    
+
     for (int t0 = tid; t0 < rows; t0 += stride) {
         const int idx = t0 * cols + s;
         if (t0 < fv) { out_tm[idx] = CUDART_NAN_F; continue; }

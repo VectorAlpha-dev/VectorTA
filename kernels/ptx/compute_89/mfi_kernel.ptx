@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 .extern .shared .align 16 .b8 shared[];
@@ -435,7 +435,7 @@ $L__BB0_29:
 	ret;
 
 }
-	
+
 .visible .entry mfi_many_series_one_param_f32(
 	.param .u64 mfi_many_series_one_param_f32_param_0,
 	.param .u64 mfi_many_series_one_param_f32_param_1,
@@ -876,7 +876,7 @@ $L__BB1_31:
 	ret;
 
 }
-	
+
 .visible .entry mfi_prefix_stage1_transform_scan_ds(
 	.param .u64 mfi_prefix_stage1_transform_scan_ds_param_0,
 	.param .u64 mfi_prefix_stage1_transform_scan_ds_param_1,
@@ -892,9 +892,9 @@ $L__BB1_31:
 	.reg .f32 	%f<414>;
 	.reg .b32 	%r<224>;
 	.reg .b64 	%rd<28>;
-	
+
 	.shared .align 4 .b8 _ZZ35mfi_prefix_stage1_transform_scan_dsE12warp_tot_pos[256];
-	
+
 	.shared .align 4 .b8 _ZZ35mfi_prefix_stage1_transform_scan_dsE12warp_tot_neg[256];
 
 	ld.param.u32 	%r122, [mfi_prefix_stage1_transform_scan_ds_param_2];
@@ -1483,7 +1483,7 @@ $L__BB2_36:
 	ret;
 
 }
-	
+
 .visible .entry mfi_prefix_stage2_scan_block_totals(
 	.param .u64 mfi_prefix_stage2_scan_block_totals_param_0,
 	.param .u64 mfi_prefix_stage2_scan_block_totals_param_1,
@@ -1694,7 +1694,7 @@ $L__BB3_7:
 	ret;
 
 }
-	
+
 .visible .entry mfi_prefix_stage3_add_offsets(
 	.param .u64 mfi_prefix_stage3_add_offsets_param_0,
 	.param .u64 mfi_prefix_stage3_add_offsets_param_1,
@@ -1764,7 +1764,7 @@ $L__BB4_2:
 	ret;
 
 }
-	
+
 .visible .entry mfi_batch_from_prefix_ds_f32(
 	.param .u64 mfi_batch_from_prefix_ds_f32_param_0,
 	.param .u64 mfi_batch_from_prefix_ds_f32_param_1,

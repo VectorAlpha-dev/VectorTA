@@ -29,11 +29,11 @@ __constant__ float PRB_BINOM_SIGN[8][8] = {
 __device__ __forceinline__ float qnan32() { return __int_as_float(0x7fffffff); }
 
 __device__ __forceinline__ float horner_eval(const float* coeffs, int m, float x) {
-    
+
     float acc = 0.0f;
     #pragma unroll
     for (int p = m - 1; p >= 0; --p) {
-        acc = fmaf(acc, x, coeffs[p]); 
+        acc = fmaf(acc, x, coeffs[p]);
     }
     return acc;
 }
@@ -55,7 +55,7 @@ __device__ __forceinline__ void solve_coeffs_kahan(
     #pragma unroll
     for (int r = 0; r < m; ++r) {
         float acc = 0.0f, c = 0.0f;
-        const float* rowp = arow + r * max_m; 
+        const float* rowp = arow + r * max_m;
         #pragma unroll
         for (int cidx = 0; cidx < m; ++cidx) {
             acc = kahan_add(acc, rowp[cidx] * S[cidx], c);
@@ -64,20 +64,20 @@ __device__ __forceinline__ void solve_coeffs_kahan(
     }
 }
 
-__global__ void prb_batch_f32(   
-    const float* __restrict__ data,  
+__global__ void prb_batch_f32(
+    const float* __restrict__ data,
     const int len,
     const int first_valid,
-    const int* __restrict__ periods, 
-    const int* __restrict__ orders,  
-    const int* __restrict__ offsets, 
+    const int* __restrict__ periods,
+    const int* __restrict__ orders,
+    const int* __restrict__ offsets,
     const int combos,
-    const int max_m,                 
-    const float* __restrict__ a_inv, 
+    const int max_m,
+    const float* __restrict__ a_inv,
     const int a_stride,
-    const int* __restrict__ contig,  
+    const int* __restrict__ contig,
     const float ndev,
-    const int* __restrict__ row_indices, 
+    const int* __restrict__ row_indices,
     float* __restrict__ out_main,
     float* __restrict__ out_up,
     float* __restrict__ out_lo)
@@ -90,20 +90,20 @@ __global__ void prb_batch_f32(
     const int k = orders[row];
     const int m = k + 1;
     const int offset = offsets[row];
-    const float x_pos = float(n) - float(offset); 
+    const float x_pos = float(n) - float(offset);
 
-    const float* arow = a_inv + row * a_stride;   
+    const float* arow = a_inv + row * a_stride;
 
-    
+
     const int warm = first_valid + n - 1;
     const float nan = qnan32();
 
-    
+
     float npow[8]; npow[0] = 1.0f;
     #pragma unroll
     for (int r = 1; r <= k; ++r) npow[r] = npow[r-1] * float(n);
 
-    
+
     for (int i = 0; i < warm && i < len; ++i) {
         const int out_idx = abs_row * len + i;
         out_main[out_idx] = nan;
@@ -112,7 +112,7 @@ __global__ void prb_batch_f32(
     }
     if (warm >= len) return;
 
-    
+
     if (contig[warm] < n) {
         for (int i = warm; i < len; ++i) {
             const int out_idx = abs_row * len + i;
@@ -123,9 +123,9 @@ __global__ void prb_batch_f32(
         return;
     }
 
-    
-    float S[8];  
-    float cS[8]; 
+
+    float S[8];
+    float cS[8];
     #pragma unroll
     for (int r = 0; r < 8; ++r) { S[r] = 0.0f; cS[r] = 0.0f; }
 
@@ -135,11 +135,11 @@ __global__ void prb_batch_f32(
     const int base0 = warm - n + 1;
     for (int j = 1; j <= n; ++j) {
         const float y = data[base0 + j - 1];
-        
+
         sum   = kahan_add(sum, y, csum);
         sumsq = kahan_add(sumsq, y * y, csum2);
 
-        
+
         float pwr = float(j);
         #pragma unroll
         for (int r = 1; r <= k; ++r) {
@@ -149,7 +149,7 @@ __global__ void prb_batch_f32(
     }
     S[0] = sum;
 
-    
+
     {
         float coeffs[8];
         solve_coeffs_kahan(arow, max_m, m, S, coeffs);
@@ -166,7 +166,7 @@ __global__ void prb_batch_f32(
         out_lo[out_idx]   = reg - ndev * stdev;
     }
 
-    
+
     bool poisoned = false;
     float S_old[8];
 
@@ -181,21 +181,21 @@ __global__ void prb_batch_f32(
             continue;
         }
 
-        
+
         #pragma unroll
         for (int r = 0; r <= k; ++r) S_old[r] = S[r];
 
         const float y_old = data[i - n];
         const float y_new = data[i];
 
-        
+
         sum   = kahan_add(sum, -y_old, csum);
         sum   = kahan_add(sum,  y_new, csum);
         S[0]  = sum;
         sumsq = kahan_add(sumsq, -y_old * y_old, csum2);
         sumsq = kahan_add(sumsq,  y_new * y_new, csum2);
 
-        
+
         #pragma unroll
         for (int r = 1; r <= k; ++r) {
             float acc = 0.0f, c = 0.0f;
@@ -203,11 +203,11 @@ __global__ void prb_batch_f32(
             for (int p = 0; p <= r; ++p) {
                 acc = kahan_add(acc, PRB_BINOM_SIGN[r][p] * S_old[p], c);
             }
-            
+
             S[r] = fmaf(y_new, npow[r], acc);
         }
 
-        
+
         float coeffs[8];
         solve_coeffs_kahan(arow, max_m, m, S, coeffs);
         const float reg = horner_eval(coeffs, m, x_pos);
@@ -245,7 +245,7 @@ __global__ void prb_batch_chunked_f32(
     float* __restrict__ out_up,
     float* __restrict__ out_lo)
 {
-    (void)contig; 
+    (void)contig;
 
     const int row = (int)blockIdx.y;
     if (row >= combos) return;
@@ -260,18 +260,18 @@ __global__ void prb_batch_chunked_f32(
     const int k = orders[row];
     const int m = k + 1;
     const int offset = offsets[row];
-    const float x_pos = float(n) - float(offset); 
+    const float x_pos = float(n) - float(offset);
 
     const float* arow = a_inv + row * a_stride;
     const int warm = first_valid + n - 1;
     const float nan = qnan32();
 
-    
+
     float npow[8]; npow[0] = 1.0f;
     #pragma unroll
     for (int r = 1; r <= k; ++r) npow[r] = npow[r - 1] * float(n);
 
-    
+
     if (chunk_end <= warm) {
         for (int i = chunk_start; i < chunk_end; ++i) {
             const int out_idx = abs_row * len + i;
@@ -291,7 +291,7 @@ __global__ void prb_batch_chunked_f32(
     }
     if (i0 >= chunk_end) return;
 
-    
+
     float S[8];
     float cS[8];
     #pragma unroll
@@ -315,7 +315,7 @@ __global__ void prb_batch_chunked_f32(
     }
     S[0] = sum;
 
-    
+
     {
         float coeffs[8];
         solve_coeffs_kahan(arow, max_m, m, S, coeffs);
@@ -332,7 +332,7 @@ __global__ void prb_batch_chunked_f32(
         out_lo[out_idx]   = reg - ndev * stdev;
     }
 
-    
+
     float S_old[8];
     for (int i = i0 + 1; i < chunk_end; ++i) {
         const int out_idx = abs_row * len + i;
@@ -374,24 +374,24 @@ __global__ void prb_batch_chunked_f32(
     }
 }
 
-__global__ void prb_many_series_one_param_f32( 
-    const float* __restrict__ data_tm, 
+__global__ void prb_many_series_one_param_f32(
+    const float* __restrict__ data_tm,
     const int cols,
     const int rows,
     const int period,
     const int order,
     const int offset,
     const int max_m,
-    const float* __restrict__ a_inv, 
+    const float* __restrict__ a_inv,
     const int a_stride,
-    const int* __restrict__ contig_tm,    
-    const int* __restrict__ first_valids, 
+    const int* __restrict__ contig_tm,
+    const int* __restrict__ first_valids,
     const float ndev,
     float* __restrict__ out_main_tm,
     float* __restrict__ out_up_tm,
     float* __restrict__ out_lo_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const int n = period;
@@ -404,12 +404,12 @@ __global__ void prb_many_series_one_param_f32(
     const int fv = first_valids ? first_valids[s] : 0;
     const int warm = fv + n - 1;
 
-    
+
     float npow[8]; npow[0] = 1.0f;
     #pragma unroll
     for (int r = 1; r <= k; ++r) npow[r] = npow[r-1] * float(n);
 
-    
+
     for (int t = 0; t < rows && t < warm; ++t) {
         const int idx = t * cols + s;
         out_main_tm[idx] = nan;
@@ -418,7 +418,7 @@ __global__ void prb_many_series_one_param_f32(
     }
     if (warm >= rows) return;
 
-    
+
     if (contig_tm[warm * cols + s] < n) {
         for (int t = warm; t < rows; ++t) {
             const int idx = t * cols + s;
@@ -429,7 +429,7 @@ __global__ void prb_many_series_one_param_f32(
         return;
     }
 
-    
+
     float S[8];
     float cS[8];
     #pragma unroll
@@ -450,7 +450,7 @@ __global__ void prb_many_series_one_param_f32(
     }
     S[0] = sum;
 
-    
+
     {
         float coeffs[8];
         solve_coeffs_kahan(ainv, max_m, m, S, coeffs);
@@ -466,7 +466,7 @@ __global__ void prb_many_series_one_param_f32(
         out_lo_tm[idx]   = reg - ndev * stdev;
     }
 
-    
+
     bool poisoned = false;
     float S_old[8];
 
@@ -514,4 +514,4 @@ __global__ void prb_many_series_one_param_f32(
     }
 }
 
-} 
+}

@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -24,13 +24,13 @@ def _cuda_available() -> bool:
     if not hasattr(ti, 'atr_cuda_batch_dev'):
         return False
     try:
-        
+
         x = np.arange(0, 64, dtype=np.float32)
         x[:5] = np.nan
         handle = ti.atr_cuda_batch_dev(x, x, x, (14, 14, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as e:  
+    except Exception as e:
         msg = str(e).lower()
         if 'cuda not available' in msg or 'nvcc' in msg or 'ptx' in msg:
             return False

@@ -1,7 +1,7 @@
 # SIMD / Scalar Optimization Tracker
 
-Started: 2025-12-18  
-Branch: `simd`  
+Started: 2025-12-18
+Branch: `simd`
 Current HEAD: `0f10d459`
 
 This document is the long-running execution log + checklist for iteratively optimizing every indicator’s Rust kernels (scalar and SIMD where applicable) without sacrificing accuracy in regular unit tests.

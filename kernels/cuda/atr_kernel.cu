@@ -24,7 +24,7 @@ static __forceinline__ __device__ float warp_reduce_sum(float v) {
 }
 
 static __forceinline__ __device__ float block_reduce_sum(float v) {
-    __shared__ float warp_sums[32]; 
+    __shared__ float warp_sums[32];
     const int lane = threadIdx.x & (warpSize - 1);
     const int wid  = threadIdx.x >> 5;
 
@@ -38,7 +38,7 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
         block_sum = (lane < num_warps) ? warp_sums[lane] : 0.0f;
         block_sum = warp_reduce_sum(block_sum);
     }
-    return block_sum; 
+    return block_sum;
 }
 
 
@@ -145,13 +145,13 @@ void atr_batch_unified_f32(const float* __restrict__ high,
     const int base  = combo * series_len;
     const int start = first_valid;
 
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    
+
     float seed_mean = 0.0f;
     if (prefix2 != nullptr) {
         if (threadIdx.x == 0) {
@@ -164,7 +164,7 @@ void atr_batch_unified_f32(const float* __restrict__ high,
         __syncthreads();
     } else {
         float local = 0.0f;
-        const int end = start + period; 
+        const int end = start + period;
         for (int k = threadIdx.x; k < period; k += blockDim.x) {
             const int t = start + k;
             float tri;
@@ -183,7 +183,7 @@ void atr_batch_unified_f32(const float* __restrict__ high,
         __syncthreads();
     }
 
-    
+
     if (threadIdx.x == 0) {
         float y = seed_mean;
         out[base + warm] = y;
@@ -227,13 +227,13 @@ void atr_batch_f32(const float* __restrict__ high,
     const int base  = combo * series_len;
     const int start = first_valid;
 
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    
+
     float local = 0.0f;
     for (int k = threadIdx.x; k < period; k += blockDim.x) {
         const int t = start + k;
@@ -280,17 +280,17 @@ void atr_batch_from_tr_prefix_f32(const float* __restrict__ tr,
     const int base  = combo * series_len;
     const int start = first_valid;
 
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = NAN;
     }
     __syncthreads();
 
-    
+
     float seed_mean = 0.0f;
     if (prefix_tr != nullptr) {
         if (threadIdx.x == 0) {
-            
+
             const float a = (float)prefix_tr[warm + 1];
             const float b = (float)prefix_tr[start];
             seed_mean = (a - b) / (float)period;
@@ -344,16 +344,16 @@ void atr_many_series_one_param_f32(const float* __restrict__ high_tm,
 
         const int first_valid = first_valids[s];
         if (first_valid < 0 || first_valid >= series_len) continue;
-        const int warm_end = first_valid + period; 
+        const int warm_end = first_valid + period;
         if (warm_end > series_len) continue;
         const int warm = warm_end - 1;
 
-        
+
         for (int t = 0; t < warm; ++t) {
             out_tm[t * stride + s] = NAN;
         }
 
-        
+
         float sum = 0.0f;
         #pragma unroll 1
         for (int k = 0; k < period; ++k) {
@@ -367,7 +367,7 @@ void atr_many_series_one_param_f32(const float* __restrict__ high_tm,
         float y = sum / (float)period;
         out_tm[warm * stride + s] = y;
 
-        
+
         for (int t = warm + 1; t < series_len; ++t) {
             const float hi = high_tm[t * stride + s];
             const float lo = low_tm[t * stride + s];

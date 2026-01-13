@@ -30,7 +30,7 @@ struct fpair {
     __device__ __forceinline__ void add(float x) {
         float s  = hi + x;
         float bb = s - hi;
-        float e  = (hi - (s - bb)) + (x - bb);  
+        float e  = (hi - (s - bb)) + (x - bb);
         float t  = lo + e;
         float st = s + t;
         lo = t - (st - s);
@@ -46,11 +46,11 @@ static __device__ __forceinline__ float bcast_price(const float* __restrict__ pr
     int      leader = __ffs(mask) - 1;
     float    v      = 0.f;
     int      lane   = threadIdx.x & 31;
-    if (lane == leader) { v = __ldg(prices + t); } 
+    if (lane == leader) { v = __ldg(prices + t); }
     return __shfl_sync(mask, v, leader);
 }
 
-#endif 
+#endif
 
 
 
@@ -102,7 +102,7 @@ void wto_batch_f32(const float* __restrict__ prices,
 
     const float qnan = wto_nan();
 
-    
+
     if (chan <= 0 || avg <= 0 || first_valid < 0 || first_valid >= series_len || series_len <= 0) {
         for (int t = 0; t < series_len; ++t) {
             wt1_row[t]  = qnan;
@@ -121,29 +121,29 @@ void wto_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     const double alpha_ch = 2.0 / (double(chan) + 1.0);
     const double beta_ch  = 1.0 - alpha_ch;
     const double alpha_av = 2.0 / (double(avg) + 1.0);
     const double beta_av  = 1.0 - alpha_av;
 
-    
+
     bool   esa_init = false;
     double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    
+
     double ring[4] = {0.0, 0.0, 0.0, 0.0};
     double rsum = 0.0;
     int    rlen = 0;
     int    rpos = 0;
 
-    
+
     const unsigned mask   = __activemask();
     const int      lane   = threadIdx.x & 31;
     const int      leader = __ffs(mask) - 1;
 
     for (int t = 0; t < series_len; ++t) {
-        
+
         float price_f32 = 0.0f;
         if (lane == leader) {
             price_f32 = __ldg(prices + t);
@@ -152,7 +152,7 @@ void wto_batch_f32(const float* __restrict__ prices,
         const bool   priceFinite = isfinite(price_f32);
         const double price      = static_cast<double>(price_f32);
 
-        
+
         float wt1_f  = qnan;
         float wt2_f  = qnan;
         float hist_f = qnan;
@@ -186,7 +186,7 @@ void wto_batch_f32(const float* __restrict__ prices,
         }
 
         if (t == start_ci) {
-            
+
             const double absdiff0 = priceFinite ? fabs(diff) : __longlong_as_double(0x7ff8000000000000ULL);
             d = absdiff0;
             const double denom0 = 0.015 * d;
@@ -203,8 +203,8 @@ void wto_batch_f32(const float* __restrict__ prices,
             ring[0] = wt1;
             rsum = wt1;
             rlen = 1;
-            
-            
+
+
             rpos = 0;
         } else if (t > start_ci) {
             const double abs_diff = fabs(diff);
@@ -262,7 +262,7 @@ void wto_many_series_one_param_time_major_f32(
     float* wt2_col  = wt2_tm + series;
     float* hist_col = hist_tm + series;
 
-    
+
     const float qnan = wto_nan();
     for (int t = 0; t < rows; ++t) {
         wt1_col[t * cols]  = qnan;
@@ -285,7 +285,7 @@ void wto_many_series_one_param_time_major_f32(
     bool   esa_init = false, d_init = false, wt1_init = false;
     double esa = 0.0, d = 0.0, wt1 = 0.0;
 
-    
+
     double ring[4] = {0.0, 0.0, 0.0, 0.0};
     double rsum = 0.0;
     int    rlen = 0;

@@ -5,14 +5,14 @@ import * as wasm from '../../pkg/vector_ta.js';
 import { loadTestData, assertArrayClose } from './test_utils.js';
 
 describe('VWMACD WASM', () => {
-    
+
     const close = [
         42.15, 42.25, 42.35, 42.45, 42.55, 42.65, 42.75, 42.85, 42.95, 43.05,
         43.15, 43.25, 43.35, 43.45, 43.55, 43.65, 43.75, 43.85, 43.95, 44.05,
         44.15, 44.25, 44.35, 44.45, 44.55, 44.65, 44.75, 44.85, 44.95, 45.05,
         45.15, 45.25, 45.35, 45.45, 45.55
     ];
-    
+
     const volume = [
         1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800, 1900,
         2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900,
@@ -57,35 +57,35 @@ describe('VWMACD WASM', () => {
                 125.15561462,
             ];
 
-            const tol = 2e-4; 
+            const tol = 2e-4;
             assertArrayClose(last5(macd), expected_macd_last5, tol, 'macd last5');
             assertArrayClose(last5(signal), expected_signal_last5, tol, 'signal last5');
             assertArrayClose(last5(hist), expected_hist_last5, tol, 'hist last5');
         });
         it('should calculate VWMACD with default parameters', () => {
             const result = wasm.vwmacd_js(close, volume, 12, 26, 9, "sma", "sma", "ema");
-            
-            
+
+
             assert.strictEqual(result.length, close.length * 3);
-            
-            
+
+
             const macd = result.slice(0, close.length);
             const signal = result.slice(close.length, close.length * 2);
             const hist = result.slice(close.length * 2);
-            
-            
+
+
             assert(isNaN(macd[0]));
             assert(isNaN(signal[0]));
             assert(isNaN(hist[0]));
-            
-            
-            
-            
+
+
+
+
             assert(!isNaN(macd[30]));
             assert(!isNaN(signal[34]));
             assert(!isNaN(hist[34]));
-            
-            
+
+
             const tolerance = 1e-10;
             assert(Math.abs(hist[34] - (macd[34] - signal[34])) < tolerance);
         });
@@ -93,19 +93,19 @@ describe('VWMACD WASM', () => {
         it('should handle different MA types', () => {
             const result1 = wasm.vwmacd_js(close, volume, 12, 26, 9, "sma", "sma", "ema");
             const result2 = wasm.vwmacd_js(close, volume, 12, 26, 9, "ema", "ema", "sma");
-            
-            
+
+
             assert.notDeepStrictEqual(result1, result2);
         });
 
         it('should handle edge cases', () => {
-            
+
             assert.throws(() => wasm.vwmacd_js([], [], 12, 26, 9, "sma", "sma", "ema"));
-            
-            
+
+
             assert.throws(() => wasm.vwmacd_js(close, volume.slice(0, 10), 12, 26, 9, "sma", "sma", "ema"));
-            
-            
+
+
             assert.throws(() => wasm.vwmacd_js(close, volume, 0, 26, 9, "sma", "sma", "ema"));
             assert.throws(() => wasm.vwmacd_js(close, volume, 12, 0, 9, "sma", "sma", "ema"));
             assert.throws(() => wasm.vwmacd_js(close, volume, 12, 26, 0, "sma", "sma", "ema"));
@@ -115,42 +115,42 @@ describe('VWMACD WASM', () => {
     describe('Fast API', () => {
         it('should calculate VWMACD using pointers', () => {
             const len = close.length;
-            
-            
+
+
             const closePtr = wasm.vwmacd_alloc(len);
             const volumePtr = wasm.vwmacd_alloc(len);
             const macdPtr = wasm.vwmacd_alloc(len);
             const signalPtr = wasm.vwmacd_alloc(len);
             const histPtr = wasm.vwmacd_alloc(len);
-            
+
             try {
-                
+
                 const memory = new Float64Array(wasm.__wasm.memory.buffer);
                 memory.set(close, closePtr / 8);
                 memory.set(volume, volumePtr / 8);
-                
-                
+
+
                 wasm.vwmacd_into(closePtr, volumePtr, macdPtr, signalPtr, histPtr, len, 12, 26, 9, "sma", "sma", "ema");
-                
-                
+
+
                 const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
-                
-                
+
+
                 const macd = Array.from(memoryAfter.slice(macdPtr / 8, macdPtr / 8 + len));
                 const signal = Array.from(memoryAfter.slice(signalPtr / 8, signalPtr / 8 + len));
                 const hist = Array.from(memoryAfter.slice(histPtr / 8, histPtr / 8 + len));
-                
-                
+
+
                 const safeResult = wasm.vwmacd_js(close, volume, 12, 26, 9, "sma", "sma", "ema");
                 const safeMacd = Array.from(safeResult.slice(0, len));
                 const safeSignal = Array.from(safeResult.slice(len, len * 2));
                 const safeHist = Array.from(safeResult.slice(len * 2));
-                
+
                 assert.deepStrictEqual(macd, safeMacd);
                 assert.deepStrictEqual(signal, safeSignal);
                 assert.deepStrictEqual(hist, safeHist);
             } finally {
-                
+
                 wasm.vwmacd_free(closePtr, len);
                 wasm.vwmacd_free(volumePtr, len);
                 wasm.vwmacd_free(macdPtr, len);
@@ -162,30 +162,30 @@ describe('VWMACD WASM', () => {
         it('should handle aliasing correctly', () => {
             const len = close.length;
 
-            
+
             const closePtr = wasm.vwmacd_alloc(len);
             const volumePtr = wasm.vwmacd_alloc(len);
-            const outPtr = wasm.vwmacd_alloc(len); 
+            const outPtr = wasm.vwmacd_alloc(len);
 
             try {
-                
+
                 const memory = new Float64Array(wasm.__wasm.memory.buffer);
                 memory.set(close, closePtr / 8);
                 memory.set(volume, volumePtr / 8);
 
-                
+
                 wasm.vwmacd_into(closePtr, volumePtr, outPtr, outPtr, outPtr, len, 12, 26, 9, "sma", "sma", "ema");
 
-                
+
                 const memoryAfter = new Float64Array(wasm.__wasm.memory.buffer);
 
-                
+
                 const result = Array.from(memoryAfter.slice(outPtr / 8, outPtr / 8 + len));
 
-                
+
                 assert(!isNaN(result[34]));
             } finally {
-                
+
                 wasm.vwmacd_free(closePtr, len);
                 wasm.vwmacd_free(volumePtr, len);
                 wasm.vwmacd_free(outPtr, len);
@@ -196,40 +196,40 @@ describe('VWMACD WASM', () => {
     describe('Batch API', () => {
         it.skip('should calculate batch VWMACD', () => {
             const config = {
-                fast_range: [10, 14, 2],    
-                slow_range: [24, 28, 2],    
-                signal_range: [8, 10, 1],   
+                fast_range: [10, 14, 2],
+                slow_range: [24, 28, 2],
+                signal_range: [8, 10, 1],
                 fast_ma_type: "sma",
                 slow_ma_type: "sma",
                 signal_ma_type: "ema"
             };
-            
+
             const result = wasm.vwmacd_batch(close, volume, config);
-            
-            
+
+
             assert.strictEqual(result.rows, 27);
             assert.strictEqual(result.cols, close.length);
             assert.strictEqual(result.values.length, 27 * close.length);
             assert.strictEqual(result.combos.length, 27);
-            
-            
+
+
             assert.strictEqual(result.combos[0].fast_period, 10);
             assert.strictEqual(result.combos[0].slow_period, 24);
             assert.strictEqual(result.combos[0].signal_period, 8);
         });
 
         it.skip('should handle edge cases in batch API', () => {
-            
+
             const emptyConfig = {
-                fast_range: [12, 12, 1],    
-                slow_range: [26, 26, 1],    
-                signal_range: [9, 9, 1],    
+                fast_range: [12, 12, 1],
+                slow_range: [26, 26, 1],
+                signal_range: [9, 9, 1],
             };
-            
+
             const result = wasm.vwmacd_batch(close, volume, emptyConfig);
             assert.strictEqual(result.rows, 1);
-            
-            
+
+
             assert.throws(() => wasm.vwmacd_batch(close, volume, {}));
         });
     });

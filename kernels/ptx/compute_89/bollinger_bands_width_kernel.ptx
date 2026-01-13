@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry bbw_sma_prefix_f32(
 	.param .u64 bbw_sma_prefix_f32_param_0,
@@ -253,7 +253,7 @@ $L__BB0_22:
 	ret;
 
 }
-	
+
 .visible .entry bbw_multi_series_one_param_tm_f32(
 	.param .u64 bbw_multi_series_one_param_tm_f32_param_0,
 	.param .u64 bbw_multi_series_one_param_tm_f32_param_1,
@@ -491,7 +491,7 @@ $L__BB1_21:
 	ret;
 
 }
-	
+
 .visible .entry bbw_sma_prefix_ff_f32(
 	.param .u64 bbw_sma_prefix_ff_f32_param_0,
 	.param .u64 bbw_sma_prefix_ff_f32_param_1,
@@ -826,7 +826,7 @@ $L__BB2_15:
 	ret;
 
 }
-	
+
 .visible .entry bbw_sma_prefix_grouped_ff_f32(
 	.param .u64 bbw_sma_prefix_grouped_ff_f32_param_0,
 	.param .u64 bbw_sma_prefix_grouped_ff_f32_param_1,
@@ -1236,7 +1236,7 @@ $L__BB3_23:
 	ret;
 
 }
-	
+
 .visible .entry bbw_multi_series_one_param_tm_ff_f32(
 	.param .u64 bbw_multi_series_one_param_tm_ff_f32_param_0,
 	.param .u64 bbw_multi_series_one_param_tm_ff_f32_param_1,
@@ -1437,7 +1437,7 @@ $L__BB4_9:
 	ret;
 
 }
-	
+
 .visible .entry bbw_sma_streaming_f64(
 	.param .u64 bbw_sma_streaming_f64_param_0,
 	.param .u32 bbw_sma_streaming_f64_param_1,
@@ -1752,7 +1752,7 @@ $L__BB5_20:
 	ret;
 
 }
-	
+
 .visible .entry bbw_multi_series_one_param_tm_streaming_f64(
 	.param .u64 bbw_multi_series_one_param_tm_streaming_f64_param_0,
 	.param .u32 bbw_multi_series_one_param_tm_streaming_f64_param_1,

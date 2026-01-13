@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry vosc_batch_prefix_f32(
 	.param .u64 vosc_batch_prefix_f32_param_0,
@@ -374,7 +374,7 @@ $L__BB0_13:
 	ret;
 
 }
-	
+
 .visible .entry vosc_many_series_one_param_f32(
 	.param .u64 vosc_many_series_one_param_f32_param_0,
 	.param .u32 vosc_many_series_one_param_f32_param_1,
@@ -643,7 +643,7 @@ $L__BB1_19:
 	ret;
 
 }
-	
+
 .visible .entry pack_double_to_float2(
 	.param .u64 pack_double_to_float2_param_0,
 	.param .u64 pack_double_to_float2_param_1,
@@ -752,7 +752,7 @@ $L__BB2_7:
 	ret;
 
 }
-	
+
 .visible .entry vosc_batch_prefix_f32_ds(
 	.param .u64 vosc_batch_prefix_f32_ds_param_0,
 	.param .u32 vosc_batch_prefix_f32_ds_param_1,
@@ -1078,7 +1078,7 @@ $L__BB3_13:
 	ret;
 
 }
-	
+
 .visible .entry vosc_many_series_one_param_f32_ds_tm_coalesced(
 	.param .u64 vosc_many_series_one_param_f32_ds_tm_coalesced_param_0,
 	.param .u32 vosc_many_series_one_param_f32_ds_tm_coalesced_param_1,

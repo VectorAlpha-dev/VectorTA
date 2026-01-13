@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry alligator_batch_f32(
 	.param .u64 alligator_batch_f32_param_0,
@@ -276,9 +276,9 @@ $L__BB0_24:
 	@%p28 bra 	$L__BB0_24;
 
 $L__BB0_25:
-	
+
 	activemask.b32 %r164;
-	
+
 	max.s32 	%r165, %r272, %r271;
 	max.s32 	%r166, %r273, %r165;
 	mov.u32 	%r167, 2;
@@ -739,7 +739,7 @@ $L__BB0_96:
 	ret;
 
 }
-	
+
 .visible .entry alligator_many_series_one_param_f32(
 	.param .u64 alligator_many_series_one_param_f32_param_0,
 	.param .u32 alligator_many_series_one_param_f32_param_1,

@@ -4,12 +4,12 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  
+except ImportError:
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -31,10 +31,10 @@ def _cuda_available() -> bool:
             multiplier_range=(3.0, 3.0, 0.0),
             lookback_range=(5, 5, 0),
         )
-        _ = cp.asarray(handle["upper"])  
-        _ = cp.asarray(handle["lower"])  
+        _ = cp.asarray(handle["upper"])
+        _ = cp.asarray(handle["lower"])
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "device" in msg:
             return False
@@ -47,7 +47,7 @@ def _cuda_available() -> bool:
 class TestNweCuda:
     @pytest.fixture(scope="class")
     def close(self):
-        
+
         d = load_test_data()["close"].astype(np.float64)
         return d[:2048]
 
@@ -66,7 +66,7 @@ class TestNweCuda:
         up_gpu = cp.asnumpy(cp.asarray(gpu["upper"]))[0]
         lo_gpu = cp.asnumpy(cp.asarray(gpu["lower"]))[0]
 
-        
+
         assert_close(up_gpu, upper_cpu, rtol=1e-3, atol=2e-3, msg="NWE upper CUDA vs CPU mismatch")
         assert_close(lo_gpu, lower_cpu, rtol=1e-3, atol=2e-3, msg="NWE lower CUDA vs CPU mismatch")
 

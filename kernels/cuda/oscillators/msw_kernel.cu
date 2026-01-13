@@ -58,7 +58,7 @@ msw_build_weights_stride(float* __restrict__ cosw,
 {
     const float step = MSW_TWO_PI_F / (float)period;
 
-    
+
     float s_stride, c_stride;
     __sincosf(step * (float)blockDim.x, &s_stride, &c_stride);
 
@@ -66,14 +66,14 @@ msw_build_weights_stride(float* __restrict__ cosw,
     float s0, c0;
     __sincosf(step * (float)lane, &s0, &c0);
 
-    
+
     for (int j = lane; j < period; j += blockDim.x) {
         sinw[j] = s0;
         cosw[j] = c0;
 
-        
-        
-        
+
+
+
         float s_old = s0, c_old = c0;
         float s_new = fmaf(c_old, s_stride, s_old * c_stride);
         float c_new = fmaf(-s_old, s_stride, c_old * c_stride);
@@ -91,7 +91,7 @@ msw_dot_weighted_window(const float* __restrict__ tile,
                         float &rp, float &ip)
 {
     rp = 0.0f; ip = 0.0f;
-    float cr = 0.0f, ci = 0.0f; 
+    float cr = 0.0f, ci = 0.0f;
     #pragma unroll 4
     for (int k = 0; k < period; ++k) {
         const float w = tile[start + (period - 1 - k)];
@@ -145,7 +145,7 @@ static __device__ __forceinline__ float msw_phase_batch_from_dr_di(double dr, do
 {
     float phase;
     if (fabs(dr) > 1e-3) {
-        
+
         phase = atanf((float)(di / dr));
     } else {
         phase = ((di < 0.0) ? -CUDART_PI_F : CUDART_PI_F);
@@ -166,7 +166,7 @@ msw_dot_window_rotate(const float* __restrict__ tile,
                       float &rp, float &ip)
 {
     rp = 0.0f; ip = 0.0f;
-    float cr = 0.0f, ci = 0.0f; 
+    float cr = 0.0f, ci = 0.0f;
     float c = 1.0f, s = 0.0f;
     #pragma unroll 4
     for (int k = 0; k < period; ++k) {
@@ -175,7 +175,7 @@ msw_dot_window_rotate(const float* __restrict__ tile,
         const float ti = s * w;
         float yr = tr - cr; float sr = rp + yr; cr = (sr - rp) - yr; rp = sr;
         float yi = ti - ci; float si = ip + yi; ci = (si - ip) - yi; ip = si;
-        
+
         float c_old = c, s_old = s;
         float s_new = fmaf(c_old, s_step, s_old * c_step);
         float c_new = fmaf(-s_old, s_step, c_old * c_step);
@@ -230,7 +230,7 @@ void msw_batch_f32(const float* __restrict__ prices,
                    int series_len,
                    int n_combos,
                    int first_valid,
-                   float* __restrict__ out) 
+                   float* __restrict__ out)
 {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -244,7 +244,7 @@ void msw_batch_f32(const float* __restrict__ prices,
     const int base_sine = row_sine * series_len;
     const int base_lead = row_lead * series_len;
 
-    
+
     {
         int t = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -255,14 +255,14 @@ void msw_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    
-    
+
+
     extern __shared__ unsigned char shmem_raw[];
     double* __restrict__ cosw_d = reinterpret_cast<double*>(shmem_raw);
     double* __restrict__ sinw_d = cosw_d + period;
-    float* __restrict__ tile = reinterpret_cast<float*>(sinw_d + period); 
+    float* __restrict__ tile = reinterpret_cast<float*>(sinw_d + period);
 
-    
+
     const double step_d = 6.2831852 / (double)period;
     for (int j = threadIdx.x; j < period; j += blockDim.x) {
         const double ang = step_d * (double)j;
@@ -271,7 +271,7 @@ void msw_batch_f32(const float* __restrict__ prices,
     }
     __syncthreads();
 
-    
+
     const int stride2 = gridDim.x * blockDim.x;
     for (int base_t = blockIdx.x * blockDim.x; base_t < series_len; base_t += stride2) {
         const int t_begin = max(base_t, warm);
@@ -281,7 +281,7 @@ void msw_batch_f32(const float* __restrict__ prices,
         const int tile_in_start = t_begin - (period - 1);
         const int tile_len = (t_end - t_begin + 1) + (period - 1);
 
-        
+
         for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
             tile[i] = prices[tile_in_start + i];
         }
@@ -289,7 +289,7 @@ void msw_batch_f32(const float* __restrict__ prices,
 
         const int t = base_t + threadIdx.x;
         if (t >= t_begin && t <= t_end) {
-            const int start = t - t_begin; 
+            const int start = t - t_begin;
             double dr = 0.0, di = 0.0;
             #pragma unroll 1
             for (int j = 0; j < period; ++j) {
@@ -311,12 +311,12 @@ void msw_batch_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void msw_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm, 
+    const float* __restrict__ prices_tm,
     int period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm)           
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm)
 {
     if (period <= 0) return;
     const int series_idx = blockIdx.y;
@@ -326,7 +326,7 @@ void msw_many_series_one_param_time_major_f32(
     const int col_sine = series_idx;
     const int col_lead = series_idx + num_series;
 
-    
+
     {
         int t = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -337,7 +337,7 @@ void msw_many_series_one_param_time_major_f32(
         }
     }
 
-    
+
     const bool use_lut = true;
     extern __shared__ float shmem[];
     float* __restrict__ cosw = shmem;
@@ -363,7 +363,7 @@ void msw_many_series_one_param_time_major_f32(
         const int tile_in_start = t_begin - (period - 1);
         const int tile_len      = (t_end - t_begin + 1) + (period - 1);
 
-        
+
         for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
             const int tt = tile_in_start + i;
             tile[i] = prices_tm[tt * num_series + series_idx];

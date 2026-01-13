@@ -56,12 +56,12 @@ extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
 
     const int base = combo * len;
 
-    
+
     for (int i = threadIdx.x; i < first_valid; i += blockDim.x) {
         out[base + i] = NAN;
     }
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
 
     const float x0 = data[first_valid];
     out[base + first_valid] = x0;
@@ -70,19 +70,19 @@ extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
     int last_p = max_p;
     float last_val = x0;
 
-    
+
     for (int i = first_valid + 1; i < warm_end; ++i) {
         const float x = data[i];
         if (isfinite(x)) {
             const float sc = 2.0f / (float)(last_p + 1);
             last_val = fmaf_safe(x - last_val, sc, last_val);
         }
-        out[base + i] = NAN; 
+        out[base + i] = NAN;
     }
 
     if (warm_end >= len) return;
 
-    
+
     for (int i = warm_end; i < len; ++i) {
         const float x = data[i];
         if (!isfinite(x)) {
@@ -90,12 +90,12 @@ extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
             continue;
         }
 
-        
+
         const int t1 = i + 1;
         const int t0 = max(0, t1 - max_p);
         const int nan_cnt = prefix_nan[t1] - prefix_nan[t0];
 
-        float sc = 2.0f / (float)(last_p + 1); 
+        float sc = 2.0f / (float)(last_p + 1);
         if (nan_cnt == 0) {
             const double sum  = prefix_sum[t1]    - prefix_sum[t0];
             const double sum2 = prefix_sum_sq[t1] - prefix_sum_sq[t0];
@@ -105,7 +105,7 @@ extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
             if (var < 0.0) var = 0.0;
             const double dv   = sqrt(var);
 
-            
+
             const double d175 = dv * 1.75;
             const double d025 = dv * 0.25;
             const double a = m - d175;
@@ -115,7 +115,7 @@ extern "C" __global__ void vlma_batch_sma_std_prefix_f32(
 
             const int inc_fast = (x < a) || (x > d);
             const int inc_slow = (x >= b) && (x <= c);
-            const int delta = inc_slow - inc_fast; 
+            const int delta = inc_slow - inc_fast;
             int p_next = last_p + delta;
             if (p_next < min_p) p_next = min_p;
             if (p_next > max_p) p_next = max_p;
@@ -140,11 +140,11 @@ extern "C" __global__ void vlma_many_series_one_param_f32(
     const int*   __restrict__ first_valids,
     int min_period,
     int max_period,
-    int cols,           
-    int rows,           
+    int cols,
+    int rows,
     float* __restrict__ out_tm
 ) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= cols || rows <= 0) return;
 
     int min_p = max(1, min_period);
@@ -154,13 +154,13 @@ extern "C" __global__ void vlma_many_series_one_param_f32(
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= rows) return;
 
-    
+
     for (int t = threadIdx.x; t < first_valid; t += blockDim.x) {
         out_tm[t * cols + s] = NAN;
     }
     if (threadIdx.x != 0) return;
 
-    
+
     const float x0 = prices_tm[first_valid * cols + s];
     out_tm[first_valid * cols + s] = x0;
 
@@ -168,18 +168,18 @@ extern "C" __global__ void vlma_many_series_one_param_f32(
     int last_p = max_p;
     float last_val = x0;
 
-    
+
     for (int t = first_valid + 1; t < warm_end; ++t) {
         const float x = prices_tm[t * cols + s];
         if (isfinite(x)) {
             const float sc = 2.0f / (float)(last_p + 1);
             last_val = fmaf_safe(x - last_val, sc, last_val);
         }
-        out_tm[t * cols + s] = NAN; 
+        out_tm[t * cols + s] = NAN;
     }
     if (warm_end >= rows) return;
 
-    
+
     double sum = 0.0, sumsq = 0.0;
     int nan_cnt = 0;
     for (int k = 0; k < max_p; ++k) {
@@ -194,7 +194,7 @@ extern "C" __global__ void vlma_many_series_one_param_f32(
     }
     const double inv_n = 1.0 / (double)max_p;
 
-    
+
     for (int t = warm_end; t < rows; ++t) {
         const float x = prices_tm[t * cols + s];
         if (!isfinite(x)) {
@@ -227,9 +227,9 @@ extern "C" __global__ void vlma_many_series_one_param_f32(
             out_tm[t * cols + s] = last_val;
         }
 
-        
+
         if (t + 1 < rows) {
-            const int out_idx = t + 1 - max_p; 
+            const int out_idx = t + 1 - max_p;
             const float leaving = prices_tm[out_idx * cols + s];
             if (isfinite(leaving)) {
                 const double dl = (double)leaving;

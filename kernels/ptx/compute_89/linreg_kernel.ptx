@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry linreg_exclusive_prefix_y_yi_f64(
 	.param .u64 linreg_exclusive_prefix_y_yi_f64_param_0,
@@ -221,7 +221,7 @@ $L__BB0_15:
 	ret;
 
 }
-	
+
 .visible .entry linreg_batch_from_prefix_f64(
 	.param .u64 linreg_batch_from_prefix_f64_param_0,
 	.param .u64 linreg_batch_from_prefix_f64_param_1,
@@ -766,7 +766,7 @@ $L__BB1_53:
 	ret;
 
 }
-	
+
 .visible .entry linreg_batch_f32(
 	.param .u64 linreg_batch_f32_param_0,
 	.param .u64 linreg_batch_f32_param_1,
@@ -1427,7 +1427,7 @@ $L__BB2_77:
 	ret;
 
 }
-	
+
 .visible .entry linreg_many_series_one_param_f32(
 	.param .u64 linreg_many_series_one_param_f32_param_0,
 	.param .u64 linreg_many_series_one_param_f32_param_1,

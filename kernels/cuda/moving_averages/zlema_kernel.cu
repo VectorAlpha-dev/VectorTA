@@ -57,7 +57,7 @@ void zlema_batch_f32(const float* __restrict__ prices,
     const int   warm   = first_valid + period - 1;
     const size_t base  = (size_t)combo * (size_t)series_len;
 
-    
+
     for (int i = 0; i < warm && i < series_len; ++i) {
         out[base + i] = ZLEMA_NAN;
     }
@@ -65,12 +65,12 @@ void zlema_batch_f32(const float* __restrict__ prices,
 
     float last_ema = LDG(prices + first_valid);
 
-    
+
     if (warm <= first_valid) {
         out[base + first_valid] = last_ema;
     }
 
-    
+
     for (int t = first_valid + 1; t < series_len; ++t) {
         const float cur = LDG(prices + t);
         float val;
@@ -78,12 +78,12 @@ void zlema_batch_f32(const float* __restrict__ prices,
             val = cur;
         } else {
             const float lagged = LDG(prices + (t - lag));
-            
+
             val = fmaf(2.0f, cur, -lagged);
         }
 
-        
-        
+
+
         last_ema = fmaf(alpha, (val - last_ema), last_ema);
 
         if (t >= warm) {
@@ -124,19 +124,19 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     if (period <= 0) return;
 
-    const int lag = (period - 1) >> 1; 
+    const int lag = (period - 1) >> 1;
     const float alpha = 2.0f / (float(period) + 1.0f);
     const float one_minus_alpha = 1.0f - alpha;
 
     const int warm = first_valid + period - 1;
     const size_t base = (size_t)combo * (size_t)series_len;
 
-    
+
     for (int t = lane; t < warm && t < series_len; t += 32) {
         out[base + (size_t)t] = ZLEMA_NAN;
     }
 
-    
+
     if (period == 1) {
         for (int t = first_valid + lane; t < series_len; t += 32) {
             out[base + (size_t)t] = LDG(prices + t);
@@ -146,11 +146,11 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
 
     if (warm >= series_len) return;
 
-    
+
     float prev = 0.0f;
     if (lane == 0) {
         float ema = LDG(prices + first_valid);
-        const int end = warm; 
+        const int end = warm;
         for (int t = first_valid + 1; t < end; ++t) {
             const float cur = LDG(prices + t);
             float val;
@@ -171,7 +171,7 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
     for (int t0 = warm; t0 < series_len; t0 += 32) {
         const int t = t0 + lane;
 
-        
+
         float A = 1.0f;
         float B = 0.0f;
         if (t < series_len) {
@@ -182,8 +182,8 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
             B = alpha * val;
         }
 
-        
-        
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A, offset);
             const float B_prev = __shfl_up_sync(mask, B, offset);
@@ -213,7 +213,7 @@ void zlema_batch_warp_scan_f32(const float* __restrict__ prices,
 
 
 #ifndef ZLEMA_BATCH_TILE
-#define ZLEMA_BATCH_TILE 1024  
+#define ZLEMA_BATCH_TILE 1024
 #endif
 
 extern "C" __global__
@@ -224,10 +224,10 @@ void zlema_batch_f32_tiled_f32(const float* __restrict__ prices,
                                int series_len,
                                int n_combos,
                                int first_valid,
-                               int max_lag,                 
+                               int max_lag,
                                float* __restrict__ out)
 {
-    extern __shared__ float s_prices[]; 
+    extern __shared__ float s_prices[];
 
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -238,7 +238,7 @@ void zlema_batch_f32_tiled_f32(const float* __restrict__ prices,
     const int   warm   = first_valid + period - 1;
     const size_t base  = (size_t)combo * (size_t)series_len;
 
-    
+
     for (int i = 0; i < warm && i < series_len; ++i) {
         out[base + i] = ZLEMA_NAN;
     }
@@ -246,12 +246,12 @@ void zlema_batch_f32_tiled_f32(const float* __restrict__ prices,
 
     float last_ema = LDG(prices + first_valid);
 
-    
+
     if (warm <= first_valid) {
         out[base + first_valid] = last_ema;
     }
 
-    
+
     const int start_t = first_valid + 1;
     if (start_t >= series_len) return;
 
@@ -260,16 +260,16 @@ void zlema_batch_f32_tiled_f32(const float* __restrict__ prices,
         const int load_end   = ZL_MIN(tile_start + ZLEMA_BATCH_TILE, series_len);
         const int sh_len     = load_end - load_start;
 
-        
+
         for (int i = threadIdx.x; i < sh_len; i += blockDim.x) {
             s_prices[i] = LDG(prices + (load_start + i));
         }
         __syncthreads();
 
-        const int t_end = load_end; 
+        const int t_end = load_end;
 
-        
-        
+
+
         for (int t = tile_start; t < t_end; ++t) {
             const float cur = s_prices[t - load_start];
             float val;
@@ -313,19 +313,19 @@ void zlema_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int   warm  = first_valid + period - 1;
     const size_t col  = (size_t)series;
 
-    
+
     for (int row = 0; row < warm && row < series_len; ++row) {
         out_tm[(size_t)row * stride + col] = ZLEMA_NAN;
     }
 
     float last_ema = LDG(prices_tm + ((size_t)first_valid * stride + col));
 
-    
+
     if (warm <= first_valid) {
         out_tm[((size_t)first_valid * stride) + col] = last_ema;
     }
 
-    
+
     int t = first_valid + 1;
     const int prelag_end = ZL_MIN(series_len, first_valid + lag);
     for (; t < prelag_end; ++t) {
@@ -336,7 +336,7 @@ void zlema_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
 
-    
+
     for (; t < series_len; ++t) {
         const float cur    = LDG(prices_tm + ((size_t)t * stride + col));
         const float lagged = LDG(prices_tm + ((size_t)(t - lag) * stride + col));

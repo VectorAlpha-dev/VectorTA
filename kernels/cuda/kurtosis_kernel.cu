@@ -46,8 +46,8 @@ __device__ __forceinline__ dsf ds_sub(dsf a, dsf b) { return ds_add(a, ds_neg(b)
 
 __device__ __forceinline__ dsf ds_mul(dsf a, dsf b) {
     float p  = a.hi * b.hi;
-    float e  = fmaf(a.hi, b.hi, -p);                 
-    e += a.hi * b.lo + a.lo * b.hi;                  
+    float e  = fmaf(a.hi, b.hi, -p);
+    e += a.hi * b.lo + a.lo * b.hi;
     e += a.lo * b.lo;
     float hi = p + e;
     float lo = e - (hi - p);
@@ -80,16 +80,16 @@ __device__ __forceinline__ float qnan_f32() { return __int_as_float(0x7fffffff);
 
 
 extern "C" __global__ void kurtosis_batch_f32(
-    const float2* __restrict__ ps_x,    
-    const float2* __restrict__ ps_x2,   
-    const float2* __restrict__ ps_x3,   
-    const float2* __restrict__ ps_x4,   
-    const int*    __restrict__ ps_nan,  
+    const float2* __restrict__ ps_x,
+    const float2* __restrict__ ps_x2,
+    const float2* __restrict__ ps_x3,
+    const float2* __restrict__ ps_x4,
+    const int*    __restrict__ ps_nan,
     int len,
     int first_valid,
-    const int* __restrict__ periods,    
+    const int* __restrict__ periods,
     int n_combos,
-    float* __restrict__ out             
+    float* __restrict__ out
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -113,7 +113,7 @@ extern "C" __global__ void kurtosis_batch_f32(
 
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
-                
+
                 const float2 px_e  = ps_x[end];
                 const float2 px_s  = ps_x[start];
                 const float2 px2_e = ps_x2[end];
@@ -137,7 +137,7 @@ extern "C" __global__ void kurtosis_batch_f32(
                 const float m2 = Ex2 - mean2;
 
                 if (m2 > 0.0f) {
-                    
+
                     const float term1 = fmaf(-4.0f * mean, Ex3, Ex4);
                     const float term2 = fmaf(6.0f * mean2, Ex2, term1);
                     const float mean4 = mean2 * mean2;
@@ -159,18 +159,18 @@ extern "C" __global__ void kurtosis_batch_f32(
 
 
 extern "C" __global__ void kurtosis_many_series_one_param_f32(
-    const float* __restrict__ data_tm,    
+    const float* __restrict__ data_tm,
     const int*   __restrict__ first_valids,
     int period,
     int num_series,
     int series_len,
-    float* __restrict__ out_tm            
+    float* __restrict__ out_tm
 ) {
     const int series = blockIdx.x;
     if (series >= num_series || period <= 0) return;
     const int stride = num_series;
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = qnan_f32();
     }
@@ -184,7 +184,7 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
     const int warm = first_valid + period - 1;
     const float inv_n = 1.0f / (float)period;
 
-    
+
     dsf s1 = ds_from_float(0.0f), s2 = ds_from_float(0.0f),
         s3 = ds_from_float(0.0f), s4 = ds_from_float(0.0f);
     int nan_in_win = 0;
@@ -229,14 +229,14 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
         out_tm[warm * stride + series] = out0;
     }
 
-    
+
     for (int t = warm + 1; t < series_len; ++t) {
         const int old_idx = t - period;
         const float old_v = data_tm[old_idx * stride + series];
         const float new_v = data_tm[t * stride + series];
 
         if (isnan(old_v) || isnan(new_v)) {
-            
+
             s1 = ds_from_float(0.0f); s2 = ds_from_float(0.0f);
             s3 = ds_from_float(0.0f); s4 = ds_from_float(0.0f);
             nan_in_win = 0;
@@ -256,7 +256,7 @@ extern "C" __global__ void kurtosis_many_series_one_param_f32(
                 }
             }
         } else {
-            
+
             const float od  = old_v;
             const float nd  = new_v;
             const float od2 = fmaf(od, od, 0.0f);

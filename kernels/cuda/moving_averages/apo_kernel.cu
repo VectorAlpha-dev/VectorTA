@@ -41,25 +41,25 @@ void apo_batch_f32(const float* __restrict__ prices,
 
     const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    
+
     for (int i = threadIdx.x; i < first_valid; i += blockDim.x) {
         out[base + static_cast<size_t>(i)] = NAN;
     }
 
-    
+
     if (blockDim.x < 32) {
-        
+
         if (threadIdx.x != 0) return;
 
-        
+
         float se = prices[first_valid];
         float le = se;
         out[base + static_cast<size_t>(first_valid)] = 0.0f;
 
-        
+
         for (int i = first_valid + 1; i < series_len; ++i) {
             const float x = prices[i];
-            
+
             se = a_s * x + oma_s * se;
             le = a_l * x + oma_l * le;
             out[base + static_cast<size_t>(i)] = se - le;
@@ -67,11 +67,11 @@ void apo_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    
+
+
     if (threadIdx.x >= 32) return;
 
-    const unsigned lane = static_cast<unsigned>(threadIdx.x); 
+    const unsigned lane = static_cast<unsigned>(threadIdx.x);
     const unsigned mask = 0xffffffffu;
 
     float se_prev = prices[first_valid];
@@ -95,9 +95,9 @@ void apo_batch_f32(const float* __restrict__ prices,
             B_l = a_l * x;
         }
 
-        
-        
-        
+
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_s_prev = __shfl_up_sync(mask, A_s, offset);
             const float B_s_prev = __shfl_up_sync(mask, B_s, offset);
@@ -121,7 +121,7 @@ void apo_batch_f32(const float* __restrict__ prices,
             out[base + static_cast<size_t>(t)] = se - le;
         }
 
-        
+
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         se_prev = __shfl_sync(mask, se, last_lane);
@@ -141,11 +141,11 @@ void apo_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int series_len,
                                    float* __restrict__ out_tm)
 {
-    const int series_idx = blockIdx.x; 
+    const int series_idx = blockIdx.x;
     if (series_idx >= num_series || series_len <= 0) return;
     if (short_period <= 0 || long_period <= 0 || short_period >= long_period) return;
 
-    const int stride = num_series; 
+    const int stride = num_series;
     int fv = first_valids[series_idx];
     if (fv < 0) fv = 0;
     if (fv >= series_len) return;
@@ -155,13 +155,13 @@ void apo_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float oma_s = 1.0f - a_s;
     const float oma_l = 1.0f - a_l;
 
-    
+
     for (int t = threadIdx.x; t < fv; t += blockDim.x) {
         out_tm[t * stride + series_idx] = NAN;
     }
     if (threadIdx.x != 0) return;
 
-    
+
     float se = prices_tm[fv * stride + series_idx];
     float le = se;
     out_tm[fv * stride + series_idx] = 0.0f;

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 .visible .entry wilders_batch_f32(
@@ -28,7 +28,7 @@
 	.reg .f32 	%f<173>;
 	.reg .b32 	%r<375>;
 	.reg .b64 	%rd<42>;
-	
+
 	.shared .align 4 .b8 _ZZN48_INTERNAL_6426ee92_17_wilders_kernel_cu_bd62936916block_reduce_sumEfE9warp_sums[128];
 
 	ld.param.u64 	%rd18, [wilders_batch_f32_param_0];
@@ -799,7 +799,7 @@ $L__BB0_89:
 	ret;
 
 }
-	
+
 .visible .entry wilders_batch_warp_scan_f32(
 	.param .u64 wilders_batch_warp_scan_f32_param_0,
 	.param .u64 wilders_batch_warp_scan_f32_param_1,
@@ -1350,7 +1350,7 @@ $L__BB1_68:
 	ret;
 
 }
-	
+
 .visible .entry wilders_many_series_one_param_f32(
 	.param .u64 wilders_many_series_one_param_f32_param_0,
 	.param .u64 wilders_many_series_one_param_f32_param_1,

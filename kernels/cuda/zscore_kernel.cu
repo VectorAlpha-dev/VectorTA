@@ -31,16 +31,16 @@ __device__ __forceinline__ dsf load_dsf_f2(const float2* __restrict__ p, int idx
 
 
 extern "C" __global__ void zscore_sma_prefix_f32ds(
-    const float*  __restrict__ data,             
-    const float2* __restrict__ prefix_sum,       
-    const float2* __restrict__ prefix_sum_sq,    
-    const int*    __restrict__ prefix_nan,       
+    const float*  __restrict__ data,
+    const float2* __restrict__ prefix_sum,
+    const float2* __restrict__ prefix_sum_sq,
+    const int*    __restrict__ prefix_nan,
     int len,
     int first_valid,
-    const int*   __restrict__ periods,           
-    const float* __restrict__ nbdevs,            
+    const int*   __restrict__ periods,
+    const float* __restrict__ nbdevs,
     int n_combos,
-    float* __restrict__ out                      
+    float* __restrict__ out
 ) {
     const int group = blockIdx.y;
     const int co_base = group * ZSCORE_COMBO_TILE;
@@ -95,7 +95,7 @@ extern "C" __global__ void zscore_sma_prefix_f32ds(
                     if (start < 0) start = 0;
                     const int nan_count = end_bad - prefix_nan[start];
                     if (nan_count == 0) {
-                        
+
                         const dsf s1 = ds_sub(ex, load_dsf_f2(prefix_sum, start));
                         const dsf s2 = ds_sub(ex2, load_dsf_f2(prefix_sum_sq, start));
                         const dsf mean_ds = ds_scale(s1, invN);
@@ -227,19 +227,19 @@ extern "C" __global__ void zscore_sma_prefix_f32(
 
 
 extern "C" __global__ void zscore_many_series_one_param_f32(
-    const float* __restrict__ data_tm,    
-    const int* __restrict__ first_valids, 
+    const float* __restrict__ data_tm,
+    const int* __restrict__ first_valids,
     int period,
     float nbdev,
     int cols,
     int rows,
-    float* __restrict__ out_tm            
+    float* __restrict__ out_tm
 ) {
     const int series = blockIdx.x;
     if (series >= cols || period <= 0) return;
     const int stride = cols;
 
-    
+
     for (int t = threadIdx.x; t < rows; t += blockDim.x) {
         out_tm[t * stride + series] = __int_as_float(0x7fffffff);
     }
@@ -252,13 +252,13 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
 
     const int warm = first_valid + period - 1;
     if (nbdev == 0.0f) {
-        
+
         return;
     }
 
     const double inv_n = 1.0 / (double)period;
 
-    
+
     double s1 = 0.0, s2 = 0.0;
     int nan_in_win = 0;
     const int init_end = min(warm + 1, rows);
@@ -276,17 +276,17 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
             const double x = (double)data_tm[warm * stride + series];
             out_tm[warm * stride + series] = (float)((x - mean) / sd_nb);
         }
-        
+
     }
 
-    
+
     for (int t = warm + 1; t < rows; ++t) {
         const int old_idx = t - period;
         const float old_v = data_tm[old_idx * stride + series];
         const float new_v = data_tm[t * stride + series];
 
         if (isnan(old_v) || isnan(new_v)) {
-            
+
             s1 = 0.0; s2 = 0.0; nan_in_win = 0;
             const int start = t + 1 - period;
             for (int k = start; k <= t; ++k) {
@@ -295,7 +295,7 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
                 else { const double d = (double)vv; s1 += d; s2 += d * d; }
             }
         } else {
-            
+
             const double od = (double)old_v;
             const double nd = (double)new_v;
             s1 += nd - od;
@@ -310,10 +310,10 @@ extern "C" __global__ void zscore_many_series_one_param_f32(
                 const double x = (double)new_v;
                 out_tm[t * stride + series] = (float)((x - mean) / sd_nb);
             } else {
-                
+
             }
         } else {
-            
+
         }
     }
 }

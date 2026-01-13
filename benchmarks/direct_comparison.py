@@ -13,50 +13,50 @@ os.environ['NPY_RELAXED_STRIDES_CHECKING'] = '1'
 
 def benchmark_python_alma(data, iterations=100):
     """Benchmark Python ALMA binding."""
-    
+
     for _ in range(10):
         _ = my_project.alma(data, 9, 0.85, 6.0)
-    
+
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
         _ = my_project.alma(data, 9, 0.85, 6.0)
         end = time.perf_counter()
-        times.append((end - start) * 1000)  
-    
+        times.append((end - start) * 1000)
+
     return np.median(times)
 
 def get_rust_benchmark():
     """Run Rust benchmark and extract the time."""
-    
+
     cmd = [
-        "cargo", "bench", 
+        "cargo", "bench",
         "--features", "nightly-avx",
         "--bench", "indicator_benchmark",
         "--", "alma/1M/AVX-512", "--exact",
         "--output-format", "bencher"
     ]
-    
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         output = result.stdout
-        
-        
+
+
         for line in output.split('\n'):
             if 'alma/1M/AVX-512' in line and 'ns/iter' in line:
-                
+
                 parts = line.split()
                 for i, part in enumerate(parts):
                     if 'ns/iter' in part:
-                        
+
                         time_str = parts[i-1].replace(',', '')
-                        return float(time_str) / 1_000_000  
-        
-        
+                        return float(time_str) / 1_000_000
+
+
         cmd[-2] = "alma/1M/scalar"
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         output = result.stdout
-        
+
         for line in output.split('\n'):
             if 'alma/1M/scalar' in line and 'ns/iter' in line:
                 parts = line.split()
@@ -64,36 +64,36 @@ def get_rust_benchmark():
                     if 'ns/iter' in part:
                         time_str = parts[i-1].replace(',', '')
                         return float(time_str) / 1_000_000
-                        
+
     except subprocess.CalledProcessError as e:
         print(f"Error running Rust benchmark: {e}")
         return None
-    
+
     return None
 
 def main():
     print("Direct Rust vs Python ALMA Performance Comparison")
     print("=" * 60)
-    
-    
+
+
     sizes = [10_000, 100_000, 1_000_000]
-    
+
     for size in sizes:
         print(f"\nTesting with {size:,} elements:")
         print("-" * 40)
-        
-        
+
+
         data = np.random.randn(size).astype(np.float64)
-        
-        
+
+
         if not data.flags['C_CONTIGUOUS']:
             data = np.ascontiguousarray(data)
-        
-        
+
+
         python_time = benchmark_python_alma(data, iterations=100)
         print(f"Python ALMA: {python_time:.3f} ms")
-        
-        
+
+
         if size == 1_000_000:
             print("\nAttempting to run Rust benchmark...")
             rust_time = get_rust_benchmark()
@@ -103,15 +103,15 @@ def main():
                 print(f"Python overhead: {overhead:.1f}%")
             else:
                 print("Could not get Rust benchmark time")
-    
-    
+
+
     print("\n" + "=" * 60)
     print("Detailed 1M Element Analysis")
     print("=" * 60)
-    
+
     data_1m = np.random.randn(1_000_000).astype(np.float64)
-    
-    
+
+
     print("\nRunning 1000 iterations for accurate measurement...")
     times = []
     for _ in range(1000):
@@ -119,7 +119,7 @@ def main():
         _ = my_project.alma(data_1m, 9, 0.85, 6.0)
         end = time.perf_counter()
         times.append((end - start) * 1000)
-    
+
     times = np.array(times)
     print(f"Mean: {np.mean(times):.3f} ms")
     print(f"Median: {np.median(times):.3f} ms")

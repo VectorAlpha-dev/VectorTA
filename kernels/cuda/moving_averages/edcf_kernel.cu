@@ -30,7 +30,7 @@ __device__ __forceinline__ dsf ds_renorm_full(float s, float e) {
 }
 
 __device__ __forceinline__ dsf ds_add_full(dsf a, dsf b) {
-    
+
     float s  = a.hi + b.hi;
     float z  = s - a.hi;
     float e  = (a.hi - (s - z)) + (b.hi - z);
@@ -61,8 +61,8 @@ void edcf_compute_dist_f32(const float* __restrict__ prices,
                            int period,
                            int first_valid,
                            float* __restrict__ dist) {
-    
-    
+
+
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
     const int start = first_valid + period;
@@ -100,32 +100,32 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
     const int m = period - 1;
     if (m <= 0 || len <= 0) return;
 
-    const int start = first_valid + period;               
+    const int start = first_valid + period;
     const int base  = blockIdx.x * TILE;
     const int j1    = min(base + TILE - 1, len - 1);
 
-    
+
     if (j1 < start) {
         for (int k = base + threadIdx.x; k <= j1; k += blockDim.x) dist[k] = 0.0f;
         return;
     }
 
     const int j0 = max(start, base);
-    const int p_start = j0 - m;                           
-    const int p_len   = j1 - p_start + 1;                 
+    const int p_start = j0 - m;
+    const int p_len   = j1 - p_start + 1;
 
-    extern __shared__ float sh_prices[];                  
-    
+    extern __shared__ float sh_prices[];
+
     for (int t = threadIdx.x; t < p_len; t += blockDim.x) {
         sh_prices[t] = prices[p_start + t];
     }
     __syncthreads();
 
-    
+
     if (threadIdx.x == 0) {
-        
-        
-        
+
+
+
         dsf sum1 = ds_set(0.f);
         dsf sum2 = ds_set(0.f);
         #pragma unroll 1
@@ -136,10 +136,10 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
             sum2 = ds_add_full(sum2, ds_mul_full(dv, dv));
         }
 
-        
+
         for (int k = base; k < j0; ++k) if (k <= j1) dist[k] = 0.0f;
 
-        
+
         const int out_cnt = j1 - j0 + 1;
         #pragma unroll 1
         for (int u = 0; u < out_cnt; ++u) {
@@ -149,11 +149,11 @@ __device__ __forceinline__ void edcf_compute_dist_rolling_tiled_f32(const float*
             dsf w_ds = ds_add_full(ds_scale_full(xk2_ds, (float)m), sum2);
             w_ds = ds_add_full(w_ds, ds_scale_full(ds_mul_full(xk_ds, sum1), -2.f));
             float w = w_ds.hi + w_ds.lo;
-            
+
             w = fmaxf(w, 0.0f);
             dist[j0 + u] = w;
 
-            
+
             const float v_out  = sh_prices[u];
             sum1 = ds_add_full(sum1, ds_set(xk - v_out));
             const dsf v_out2_ds = ds_mul_full(ds_set(v_out), ds_set(v_out));
@@ -255,20 +255,20 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     const int base = blockIdx.x * TILE;
     if (base >= len) { return; }
 
-    
+
     extern __shared__ __align__(16) unsigned char smem_raw[];
     float* smem = reinterpret_cast<float*>(smem_raw);
-    const int tile_prices_elems = (TILE + m); 
+    const int tile_prices_elems = (TILE + m);
     float* sh_prices = smem;
-    const int sh_prices_aligned_elems = ((tile_prices_elems + 3) / 4) * 4; 
+    const int sh_prices_aligned_elems = ((tile_prices_elems + 3) / 4) * 4;
     float* sh_dist   = sh_prices + sh_prices_aligned_elems;
 
-    
+
     const int start = base - m;
     const int end_incl = min(base + TILE - 1, len - 1);
     const int tile_elems = (end_incl - start + 1);
 
-    
+
     const int vec_elems = (tile_elems / 4) * 4;
     for (int i = threadIdx.x * 4; i < vec_elems; i += blockDim.x * 4) {
         int gidx = start + i;
@@ -315,7 +315,7 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     }
     __syncthreads();
 
-    
+
     if (threadIdx.x == 0) {
         float a = 0.f, b = 0.f;
         #pragma unroll 1
@@ -324,8 +324,8 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
             const float p = sh_prices[i];
             a += w;
             b = __fmaf_rn(w, p, b);
-            sh_dist[i]   = a; 
-            sh_prices[i] = b; 
+            sh_dist[i]   = a;
+            sh_prices[i] = b;
         }
     }
     __syncthreads();
@@ -335,7 +335,7 @@ __device__ __forceinline__ void edcf_apply_weights_tiled_f32_impl(const float* _
     for (int off = threadIdx.x; off < TILE && (base + off) < len; off += blockDim.x) {
         const int j = base + off;
         if (j < warm) { out_row[j] = CUDART_NAN_F; continue; }
-        const int pos_j    = j - start; 
+        const int pos_j    = j - start;
         const int pos_prev = pos_j - P;
         const float pw  = sh_dist[pos_j]  - ((pos_prev >= 0) ? sh_dist[pos_prev]  : 0.f);
         const float pwv = sh_prices[pos_j]- ((pos_prev >= 0) ? sh_prices[pos_prev]: 0.f);
@@ -384,7 +384,7 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (series_idx >= num_series) { return; }
     const int stride = num_series;
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series_idx] = CUDART_NAN_F;
     }
@@ -398,35 +398,35 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int warm = first_valid + 2 * period;
     if (warm >= series_len) { return; }
 
-    
+
     extern __shared__ __align__(16) unsigned char local_raw[];
     float* local = reinterpret_cast<float*>(local_raw);
-    float* ring_p = local;            
-    float* ring_d = local + period;   
+    float* ring_p = local;
+    float* ring_d = local + period;
     for (int i = 0; i < period; ++i) { ring_p[i] = 0.f; ring_d[i] = 0.f; }
     int head = 0;
 
-    
+
     for (int t = first_valid; t < first_valid + period && t < series_len; ++t) {
         ring_p[head] = prices_tm[t * stride + series_idx];
         head = (head + 1) % period;
     }
 
-    
+
     float w_sum = 0.f;
     float wv_sum = 0.f;
 
-    
+
     for (int t = first_valid + period; t < series_len; ++t) {
         const float xk = prices_tm[t * stride + series_idx];
 
-        
+
         const float w_out = ring_d[head];
         const float p_out = ring_p[head];
         w_sum  -= w_out;
         wv_sum -= w_out * p_out;
 
-        
+
         float sum_h = 0.f, sum_c = 0.f;
         int pos = (head + period - 1) % period;
         for (int lb = 1; lb < period; ++lb) {
@@ -442,17 +442,17 @@ void edcf_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
         const float w_new = sum_h + sum_c;
 
-        
+
         ring_p[head] = xk;
         ring_d[head] = w_new;
 
-        
+
         w_sum  += w_new;
         wv_sum = __fmaf_rn(w_new, xk, wv_sum);
 
         head = (head + 1) % period;
 
-        
+
         if (t >= warm) {
             out_tm[t * stride + series_idx] = (w_sum != 0.f) ? (wv_sum / w_sum) : CUDART_NAN_F;
         }
@@ -478,53 +478,53 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
     if (tile_t0 >= rows || tile_s0 >= cols) { return; }
     const int stride = cols;
 
-    
-    const int prices_elems = TX + 2 * (period - 1); 
-    const int dist_elems   = TX + (period - 1);     
+
+    const int prices_elems = TX + 2 * (period - 1);
+    const int dist_elems   = TX + (period - 1);
     extern __shared__ __align__(16) unsigned char smem2_raw[];
     float* smem2 = reinterpret_cast<float*>(smem2_raw);
-    
+
     const int per_series = prices_elems + dist_elems;
     float* base_ptr = smem2 + threadIdx.y * per_series;
     float* sh_prices = base_ptr;
     float* sh_dist   = base_ptr + prices_elems;
 
-    
+
     const int s = tile_s0 + threadIdx.y;
     if (s >= cols) { return; }
 
-    
+
     const int first_valid = first_valids[s];
     const int warm = first_valid + 2 * period;
 
-    
+
     const int p_start = tile_t0 - 2 * (period - 1);
     const int p_end = min(tile_t0 + TX - 1, rows - 1);
     const int p_len = (p_end - p_start + 1);
 
-    
+
     for (int t = threadIdx.x; t < p_len; t += blockDim.x) {
         int ti = p_start + t;
         float v = 0.f;
         if (ti >= 0 && ti < rows) {
-            
-            
+
+
             v = (ti >= first_valid) ? prices_tm[ti * stride + s] : 0.f;
         }
         sh_prices[t] = v;
     }
     __syncthreads();
 
-    
+
     const int d_start = tile_t0 - (period - 1);
     const int d_end = min(tile_t0 + TX - 1, rows - 1);
     const int d_len = (d_end - d_start + 1);
 
     for (int u = threadIdx.x; u < d_len; u += blockDim.x) {
         int k = d_start + u;
-        
-        
-        
+
+
+
         const int start = first_valid + period;
         if (k < start) {
             sh_dist[u] = 0.f;
@@ -537,7 +537,7 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
             xk = 0.f;
         }
         float sum_h = 0.f, sum_c = 0.f;
-        
+
         #pragma unroll 4
         for (int lb = 1; lb < period; ++lb) {
             int idx = (k - lb) - p_start;
@@ -555,8 +555,8 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
     }
     __syncthreads();
 
-    
-    
+
+
     if (threadIdx.x == 0) {
         float a = 0.f, b = 0.f;
         #pragma unroll 1
@@ -566,18 +566,18 @@ __device__ __forceinline__ void edcf_ms1p_tiled_f32_impl(const float* __restrict
             const float p = (xp >= 0 && xp < p_len) ? sh_prices[xp] : 0.f;
             a += w;
             b = __fmaf_rn(w, p, b);
-            sh_dist[i]   = a;     
-            sh_prices[i] = b;     
+            sh_dist[i]   = a;
+            sh_prices[i] = b;
         }
     }
     __syncthreads();
 
-    
+
     for (int off = threadIdx.x; off < TX && (tile_t0 + off) < rows; off += blockDim.x) {
         const int j = tile_t0 + off;
         float y = CUDART_NAN_F;
         if (j >= warm) {
-            const int pos_j    = (j - d_start);      
+            const int pos_j    = (j - d_start);
             const int pos_prev = pos_j - period;
             const float pw  = sh_dist[pos_j]   - ((pos_prev >= 0) ? sh_dist[pos_prev]   : 0.f);
             const float pwv = sh_prices[pos_j] - ((pos_prev >= 0) ? sh_prices[pos_prev] : 0.f);

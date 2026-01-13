@@ -11,7 +11,7 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
-//////////////////////////////////////////////////////////////////////////////
+
 
 
 
@@ -24,7 +24,7 @@ static __device__ __forceinline__ float kst_qnan() {
 
 struct CompSum {
   float sum;
-  float c; 
+  float c;
   __device__ __forceinline__ void init() { sum = 0.f; c = 0.f; }
   __device__ __forceinline__ void add(float x) {
     float y = x - c;
@@ -39,14 +39,14 @@ struct CompSum {
 
 
 __device__ __forceinline__ float kst_safe_roc(float curr, float prev) {
-  if (prev != 0.0f && isfinite(curr) && isfinite(prev)) {  
+  if (prev != 0.0f && isfinite(curr) && isfinite(prev)) {
     const float inv100_prev = 100.0f / prev;
     return __fmaf_rn(curr, inv100_prev, -100.0f);
   }
   return 0.0f;
 }
 
-//////////////////////////////////////////////////////////////////////////////
+
 
 
 extern "C" __global__
@@ -99,7 +99,7 @@ void kst_batch_f32(const float* __restrict__ prices,
     float* __restrict__ line_row   = out_line   + combo * series_len;
     float* __restrict__ signal_row = out_signal + combo * series_len;
 
-    
+
     const int nan_end_line = (warm_line < series_len ? warm_line : series_len);
     for (int i = 0; i < nan_end_line; ++i) line_row[i] = nn;
     const int nan_end_sig = (warm_sig < series_len ? warm_sig : series_len);
@@ -133,22 +133,22 @@ void kst_batch_f32(const float* __restrict__ prices,
       }
 
       if (i >= warm_line) {
-        
+
         float k = __fmaf_rn(sum4.val(), w4,
                   __fmaf_rn(sum3.val(), w3,
                   __fmaf_rn(sum2.val(), w2, sum1.val() * inv1)));
 
         line_row[i] = k;
 
-        
-        
+
+
         ssum.add(k);
-        
-        
+
+
         if (sig > 0 && (i - sig) >= warm_line) {
           ssum.add(-line_row[i - sig]);
         }
-        
+
         if (i >= warm_sig) {
           signal_row[i] = ssum.val() * invSig;
         }
@@ -157,7 +157,7 @@ void kst_batch_f32(const float* __restrict__ prices,
   }
 }
 
-//////////////////////////////////////////////////////////////////////////////
+
 
 
 extern "C" __global__
@@ -248,7 +248,7 @@ void kst_many_series_one_param_f32(const float* __restrict__ prices_tm,
                   __fmaf_rn(sum2.val(), w2, sum1.val() * inv1)));
         out_line_tm[idx] = k;
 
-        
+
         ssum.add(k);
         if (sig > 0 && (t - sig) >= warm_line) {
           ssum.add(-out_line_tm[(t - sig) * num_series + s]);

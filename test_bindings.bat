@@ -1,31 +1,24 @@
 @echo off
-REM Windows batch file for testing Python and WASM bindings without parentheses blocks
 
 setlocal EnableExtensions EnableDelayedExpansion
 
-REM Get the directory where this batch file is located
 set "SCRIPT_DIR=%~dp0"
 
-REM Change to the script directory (remove trailing backslash)
 cd /d "%SCRIPT_DIR:~0,-1%"
 
-REM Store the project root directory name for display
 for %%I in ("%CD%") do set PROJECT_NAME=%%~nxI
 
 echo Working directory: %PROJECT_NAME% (%CD%)
 
-REM Defaults
 set "RUN_PYTHON=true"
 set "RUN_WASM=true"
 set "TEST_PATTERN="
 set "USE_NIGHTLY_AVX=true"
 set "FAILED=false"
 
-REM Parse args without parentheses blocks
 :parse_args
 if "%~1"=="" goto start_tests
 if /I "%~1"=="--python" set "RUN_WASM=false" & shift & goto parse_args
-REM common typo
 if /I "%~1"=="--pytohn" set "RUN_WASM=false" & shift & goto parse_args
 if /I "%~1"=="--wasm"   set "RUN_PYTHON=false" & shift & goto parse_args
 if /I "%~1"=="--avx"    set "USE_NIGHTLY_AVX=true" & shift & goto parse_args
@@ -59,7 +52,6 @@ goto after_python
 echo.
 echo Setting up Python environment...
 
-REM Clear conflicting global python envs that can point to WSL paths
 set "PYO3_PYTHON="
 set "MATURIN_PYTHON="
 set "PYTHONHOME="
@@ -81,16 +73,13 @@ py -3 -m venv .venv
 if errorlevel 1 goto venv_create_fail
 
 :venv_ready
-REM Prefer direct venv Python to avoid activation issues on some systems
 set "VENV_PY=.venv\Scripts\python.exe"
 
 call :ensure_venv_layout
 if errorlevel 1 goto venv_create_fail
 
-REM Try to activate for nice PATH/prompt, but continue even if it fails
 if exist ".venv\Scripts\activate.bat" call ".venv\Scripts\activate.bat" >nul 2>&1
 
-REM Ensure pyo3/maturin use the venv python, not any host overrides
 set "PYO3_PYTHON=%VENV_PY%"
 set "MATURIN_PYTHON=%VENV_PY%"
 set "PYTHON=%VENV_PY%"
@@ -121,7 +110,6 @@ if /I "%USE_NIGHTLY_AVX%"=="true" (
 ) else (
   cargo build --quiet --release --bin generate_references >nul 2>&1
 )
-REM Point tests to the prebuilt binary (nightly build if available)
 set "RUST_REF_BIN=%CD%\target\release\generate_references.exe"
 if not exist "%RUST_REF_BIN%" set "RUST_REF_BIN=%CD%\target-py\release\generate_references.exe"
 echo Using reference binary: %RUST_REF_BIN%
@@ -144,9 +132,6 @@ echo Failed to create virtual environment. Ensure Python is installed and on PAT
 set "FAILED=true"
 goto after_python
 
-REM ------------------------
-REM Subroutines
-REM ------------------------
 
 :ensure_venv_layout
 if exist ".venv\Scripts\python.exe" (

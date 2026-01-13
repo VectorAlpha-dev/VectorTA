@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry pma_batch_f32(
 	.param .u64 pma_batch_f32_param_0,
@@ -885,7 +885,7 @@ $L__BB0_33:
 	ret;
 
 }
-	
+
 .visible .entry pma_batch_tiled_f32_tile128(
 	.param .u64 pma_batch_tiled_f32_tile128_param_0,
 	.param .u32 pma_batch_tiled_f32_tile128_param_1,
@@ -1759,7 +1759,7 @@ $L__BB1_33:
 	ret;
 
 }
-	
+
 .visible .entry pma_batch_tiled_f32_tile256(
 	.param .u64 pma_batch_tiled_f32_tile256_param_0,
 	.param .u32 pma_batch_tiled_f32_tile256_param_1,
@@ -2633,7 +2633,7 @@ $L__BB2_33:
 	ret;
 
 }
-	
+
 .visible .entry pma_many_series_one_param_f32(
 	.param .u64 pma_many_series_one_param_f32_param_0,
 	.param .u32 pma_many_series_one_param_f32_param_1,
@@ -3545,7 +3545,7 @@ $L__BB3_37:
 	ret;
 
 }
-	
+
 .visible .entry pma_ms1p_tiled_f32_tx1_ty2(
 	.param .u64 pma_ms1p_tiled_f32_tx1_ty2_param_0,
 	.param .u32 pma_ms1p_tiled_f32_tx1_ty2_param_1,
@@ -4457,7 +4457,7 @@ $L__BB4_37:
 	ret;
 
 }
-	
+
 .visible .entry pma_ms1p_tiled_f32_tx1_ty4(
 	.param .u64 pma_ms1p_tiled_f32_tx1_ty4_param_0,
 	.param .u32 pma_ms1p_tiled_f32_tx1_ty4_param_1,

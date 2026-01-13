@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry otto_batch_f32(
 	.param .u64 otto_batch_f32_param_0,
@@ -59,25 +59,25 @@
 
 	mul.wide.s32 	%rd31, %r1, 4;
 	add.s64 	%rd26, %rd20, %rd31;
-	
+
 	ld.global.nc.s32 %r16, [%rd26];
-	
+
 	add.s64 	%rd27, %rd19, %rd31;
-	
+
 	ld.global.nc.s32 %r17, [%rd27];
-	
+
 	add.s64 	%rd28, %rd17, %rd31;
-	
+
 	ld.global.nc.s32 %r18, [%rd28];
-	
+
 	add.s64 	%rd29, %rd18, %rd31;
-	
+
 	ld.global.nc.f32 %f46, [%rd29];
-	
+
 	add.s64 	%rd30, %rd21, %rd31;
-	
+
 	ld.global.nc.f32 %f47, [%rd30];
-	
+
 	mov.f32 	%f48, 0f43480000;
 	sub.ftz.f32 	%f49, %f48, %f46;
 	add.ftz.f32 	%f50, %f46, 0f43480000;
@@ -150,15 +150,15 @@
 	mov.f32 	%f113, %f59;
 
 $L__BB0_3:
-	
+
 	ld.global.nc.f32 %f71, [%rd38];
-	
+
 	abs.ftz.f32 	%f74, %f71;
 	setp.geu.ftz.f32 	%p5, %f74, 0f7F800000;
 	selp.f32 	%f75, 0f00000000, %f71, %p5;
-	
+
 	ld.global.nc.f32 %f72, [%rd39];
-	
+
 	mul.ftz.f32 	%f76, %f10, %f72;
 	mul.ftz.f32 	%f77, %f9, %f72;
 	mul.ftz.f32 	%f78, %f8, %f72;
@@ -285,7 +285,7 @@ $L__BB0_19:
 	ret;
 
 }
-	
+
 .visible .entry otto_many_series_one_param_f32(
 	.param .u64 otto_many_series_one_param_f32_param_0,
 	.param .u32 otto_many_series_one_param_f32_param_1,

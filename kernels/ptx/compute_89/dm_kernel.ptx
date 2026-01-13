@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry dm_batch_f32(
 	.param .u64 dm_batch_f32_param_0,
@@ -327,13 +327,13 @@ $L__BB0_15:
 $L__BB0_16:
 	mul.wide.s32 	%rd81, %r76, 4;
 	add.s64 	%rd79, %rd57, %rd81;
-	
+
 	ld.global.nc.f32 %f359, [%rd79];
-	
+
 	add.s64 	%rd80, %rd58, %rd81;
-	
+
 	ld.global.nc.f32 %f358, [%rd80];
-	
+
 	setp.le.s32 	%p15, %r4, %r76;
 	mov.f32 	%f346, 0f00000000;
 	mov.f32 	%f347, %f346;
@@ -363,12 +363,12 @@ $L__BB0_16:
 $L__BB0_19:
 	.pragma "nounroll";
 	add.s32 	%r126, %r126, 1;
-	
+
 	ld.global.nc.f32 %f359, [%rd147];
-	
-	
+
+
 	ld.global.nc.f32 %f358, [%rd148];
-	
+
 	sub.ftz.f32 	%f128, %f359, %f320;
 	sub.ftz.f32 	%f129, %f321, %f358;
 	max.ftz.f32 	%f130, %f128, 0f00000000;
@@ -412,12 +412,12 @@ $L__BB0_22:
 	add.s64 	%rd150, %rd58, %rd86;
 
 $L__BB0_24:
-	
+
 	ld.global.nc.f32 %f139, [%rd149];
-	
-	
+
+
 	ld.global.nc.f32 %f140, [%rd150];
-	
+
 	sub.ftz.f32 	%f141, %f139, %f359;
 	sub.ftz.f32 	%f142, %f358, %f140;
 	max.ftz.f32 	%f143, %f141, 0f00000000;
@@ -443,13 +443,13 @@ $L__BB0_24:
 
 $L__BB0_26:
 	add.s64 	%rd89, %rd149, 4;
-	
+
 	ld.global.nc.f32 %f152, [%rd89];
-	
+
 	add.s64 	%rd90, %rd150, 4;
-	
+
 	ld.global.nc.f32 %f153, [%rd90];
-	
+
 	sub.ftz.f32 	%f154, %f152, %f139;
 	sub.ftz.f32 	%f155, %f140, %f153;
 	max.ftz.f32 	%f156, %f154, 0f00000000;
@@ -475,13 +475,13 @@ $L__BB0_26:
 
 $L__BB0_28:
 	add.s64 	%rd91, %rd149, 8;
-	
+
 	ld.global.nc.f32 %f165, [%rd91];
-	
+
 	add.s64 	%rd92, %rd150, 8;
-	
+
 	ld.global.nc.f32 %f166, [%rd92];
-	
+
 	sub.ftz.f32 	%f167, %f165, %f152;
 	sub.ftz.f32 	%f168, %f153, %f166;
 	max.ftz.f32 	%f169, %f167, 0f00000000;
@@ -508,13 +508,13 @@ $L__BB0_28:
 $L__BB0_30:
 	add.s32 	%r126, %r126, 4;
 	add.s64 	%rd93, %rd149, 12;
-	
+
 	ld.global.nc.f32 %f359, [%rd93];
-	
+
 	add.s64 	%rd94, %rd150, 12;
-	
+
 	ld.global.nc.f32 %f358, [%rd94];
-	
+
 	sub.ftz.f32 	%f180, %f359, %f165;
 	sub.ftz.f32 	%f181, %f166, %f358;
 	max.ftz.f32 	%f182, %f180, 0f00000000;
@@ -583,12 +583,12 @@ $L__BB0_33:
 
 $L__BB0_36:
 	.pragma "nounroll";
-	
+
 	ld.global.nc.f32 %f359, [%rd151];
-	
-	
+
+
 	ld.global.nc.f32 %f358, [%rd152];
-	
+
 	sub.ftz.f32 	%f200, %f359, %f360;
 	sub.ftz.f32 	%f201, %f361, %f358;
 	max.ftz.f32 	%f202, %f200, 0f00000000;
@@ -647,13 +647,13 @@ $L__BB0_37:
 
 $L__BB0_39:
 	add.s64 	%rd107, %rd57, %rd155;
-	
+
 	ld.global.nc.f32 %f220, [%rd107];
-	
+
 	add.s64 	%rd108, %rd58, %rd155;
-	
+
 	ld.global.nc.f32 %f221, [%rd108];
-	
+
 	sub.ftz.f32 	%f228, %f220, %f359;
 	sub.ftz.f32 	%f229, %f358, %f221;
 	max.ftz.f32 	%f230, %f228, 0f00000000;
@@ -684,13 +684,13 @@ $L__BB0_39:
 	st.global.f32 	[%rd115], %f250;
 	st.global.f32 	[%rd116], %f251;
 	add.s64 	%rd109, %rd42, %rd155;
-	
+
 	ld.global.nc.f32 %f222, [%rd109];
-	
+
 	add.s64 	%rd110, %rd39, %rd155;
-	
+
 	ld.global.nc.f32 %f223, [%rd110];
-	
+
 	sub.ftz.f32 	%f252, %f222, %f220;
 	sub.ftz.f32 	%f253, %f221, %f223;
 	max.ftz.f32 	%f254, %f252, 0f00000000;
@@ -719,13 +719,13 @@ $L__BB0_39:
 	st.global.f32 	[%rd115+4], %f274;
 	st.global.f32 	[%rd116+4], %f275;
 	add.s64 	%rd111, %rd41, %rd155;
-	
+
 	ld.global.nc.f32 %f224, [%rd111];
-	
+
 	add.s64 	%rd112, %rd38, %rd155;
-	
+
 	ld.global.nc.f32 %f225, [%rd112];
-	
+
 	sub.ftz.f32 	%f276, %f224, %f222;
 	sub.ftz.f32 	%f277, %f223, %f225;
 	max.ftz.f32 	%f278, %f276, 0f00000000;
@@ -754,13 +754,13 @@ $L__BB0_39:
 	st.global.f32 	[%rd115+8], %f298;
 	st.global.f32 	[%rd116+8], %f299;
 	add.s64 	%rd113, %rd40, %rd155;
-	
+
 	ld.global.nc.f32 %f359, [%rd113];
-	
+
 	add.s64 	%rd114, %rd37, %rd155;
-	
+
 	ld.global.nc.f32 %f358, [%rd114];
-	
+
 	sub.ftz.f32 	%f300, %f359, %f224;
 	sub.ftz.f32 	%f301, %f225, %f358;
 	max.ftz.f32 	%f302, %f300, 0f00000000;
@@ -797,7 +797,7 @@ $L__BB0_66:
 	ret;
 
 }
-	
+
 .visible .entry dm_many_series_one_param_time_major_f32(
 	.param .u64 dm_many_series_one_param_time_major_f32_param_0,
 	.param .u64 dm_many_series_one_param_time_major_f32_param_1,
@@ -972,13 +972,13 @@ $L__BB1_9:
 	mad.lo.s32 	%r67, %r2, %r54, %r1;
 	mul.wide.s32 	%rd46, %r67, 4;
 	add.s64 	%rd44, %rd26, %rd46;
-	
+
 	ld.global.nc.f32 %f359, [%rd44];
-	
+
 	add.s64 	%rd45, %rd27, %rd46;
-	
+
 	ld.global.nc.f32 %f358, [%rd45];
-	
+
 	setp.ge.s32 	%p12, %r2, %r4;
 	mov.f32 	%f346, 0f00000000;
 	mov.f32 	%f347, %f346;
@@ -1008,13 +1008,13 @@ $L__BB1_12:
 	add.s32 	%r94, %r94, 1;
 	mul.wide.s32 	%rd49, %r91, 4;
 	add.s64 	%rd47, %rd26, %rd49;
-	
+
 	ld.global.nc.f32 %f359, [%rd47];
-	
+
 	add.s64 	%rd48, %rd27, %rd49;
-	
+
 	ld.global.nc.f32 %f358, [%rd48];
-	
+
 	sub.ftz.f32 	%f128, %f359, %f320;
 	sub.ftz.f32 	%f129, %f321, %f358;
 	max.ftz.f32 	%f130, %f128, 0f00000000;
@@ -1061,13 +1061,13 @@ $L__BB1_17:
 	mad.lo.s32 	%r73, %r25, %r95, %r24;
 	mul.wide.s32 	%rd14, %r73, 4;
 	add.s64 	%rd50, %rd26, %rd14;
-	
+
 	ld.global.nc.f32 %f139, [%rd50];
-	
+
 	add.s64 	%rd51, %rd27, %rd14;
-	
+
 	ld.global.nc.f32 %f140, [%rd51];
-	
+
 	sub.ftz.f32 	%f141, %f139, %f359;
 	sub.ftz.f32 	%f142, %f358, %f140;
 	max.ftz.f32 	%f143, %f141, 0f00000000;
@@ -1094,13 +1094,13 @@ $L__BB1_17:
 $L__BB1_19:
 	add.s64 	%rd15, %rd13, %rd14;
 	add.s64 	%rd52, %rd26, %rd15;
-	
+
 	ld.global.nc.f32 %f152, [%rd52];
-	
+
 	add.s64 	%rd53, %rd27, %rd15;
-	
+
 	ld.global.nc.f32 %f153, [%rd53];
-	
+
 	sub.ftz.f32 	%f154, %f152, %f139;
 	sub.ftz.f32 	%f155, %f140, %f153;
 	max.ftz.f32 	%f156, %f154, 0f00000000;
@@ -1127,13 +1127,13 @@ $L__BB1_19:
 $L__BB1_21:
 	add.s64 	%rd16, %rd13, %rd15;
 	add.s64 	%rd54, %rd26, %rd16;
-	
+
 	ld.global.nc.f32 %f165, [%rd54];
-	
+
 	add.s64 	%rd55, %rd27, %rd16;
-	
+
 	ld.global.nc.f32 %f166, [%rd55];
-	
+
 	sub.ftz.f32 	%f167, %f165, %f152;
 	sub.ftz.f32 	%f168, %f153, %f166;
 	max.ftz.f32 	%f169, %f167, 0f00000000;
@@ -1161,13 +1161,13 @@ $L__BB1_23:
 	add.s32 	%r94, %r94, 4;
 	add.s64 	%rd58, %rd13, %rd16;
 	add.s64 	%rd56, %rd26, %rd58;
-	
+
 	ld.global.nc.f32 %f359, [%rd56];
-	
+
 	add.s64 	%rd57, %rd27, %rd58;
-	
+
 	ld.global.nc.f32 %f358, [%rd57];
-	
+
 	sub.ftz.f32 	%f180, %f359, %f165;
 	sub.ftz.f32 	%f181, %f166, %f358;
 	max.ftz.f32 	%f182, %f180, 0f00000000;
@@ -1229,13 +1229,13 @@ $L__BB1_29:
 	.pragma "nounroll";
 	mul.wide.s32 	%rd64, %r97, 4;
 	add.s64 	%rd62, %rd26, %rd64;
-	
+
 	ld.global.nc.f32 %f359, [%rd62];
-	
+
 	add.s64 	%rd63, %rd27, %rd64;
-	
+
 	ld.global.nc.f32 %f358, [%rd63];
-	
+
 	sub.ftz.f32 	%f200, %f359, %f360;
 	sub.ftz.f32 	%f201, %f361, %f358;
 	max.ftz.f32 	%f202, %f200, 0f00000000;
@@ -1287,13 +1287,13 @@ $L__BB1_30:
 $L__BB1_32:
 	mul.wide.s32 	%rd75, %r101, 4;
 	add.s64 	%rd67, %rd26, %rd75;
-	
+
 	ld.global.nc.f32 %f220, [%rd67];
-	
+
 	add.s64 	%rd68, %rd27, %rd75;
-	
+
 	ld.global.nc.f32 %f221, [%rd68];
-	
+
 	sub.ftz.f32 	%f228, %f220, %f359;
 	sub.ftz.f32 	%f229, %f358, %f221;
 	max.ftz.f32 	%f230, %f228, 0f00000000;
@@ -1324,13 +1324,13 @@ $L__BB1_32:
 	st.global.f32 	[%rd76], %f250;
 	st.global.f32 	[%rd77], %f251;
 	add.s64 	%rd69, %rd67, %rd17;
-	
+
 	ld.global.nc.f32 %f222, [%rd69];
-	
+
 	add.s64 	%rd70, %rd68, %rd17;
-	
+
 	ld.global.nc.f32 %f223, [%rd70];
-	
+
 	sub.ftz.f32 	%f252, %f222, %f220;
 	sub.ftz.f32 	%f253, %f221, %f223;
 	max.ftz.f32 	%f254, %f252, 0f00000000;
@@ -1361,13 +1361,13 @@ $L__BB1_32:
 	st.global.f32 	[%rd78], %f274;
 	st.global.f32 	[%rd79], %f275;
 	add.s64 	%rd71, %rd69, %rd17;
-	
+
 	ld.global.nc.f32 %f224, [%rd71];
-	
+
 	add.s64 	%rd72, %rd70, %rd17;
-	
+
 	ld.global.nc.f32 %f225, [%rd72];
-	
+
 	sub.ftz.f32 	%f276, %f224, %f222;
 	sub.ftz.f32 	%f277, %f223, %f225;
 	max.ftz.f32 	%f278, %f276, 0f00000000;
@@ -1398,13 +1398,13 @@ $L__BB1_32:
 	st.global.f32 	[%rd80], %f298;
 	st.global.f32 	[%rd81], %f299;
 	add.s64 	%rd73, %rd71, %rd17;
-	
+
 	ld.global.nc.f32 %f359, [%rd73];
-	
+
 	add.s64 	%rd74, %rd72, %rd17;
-	
+
 	ld.global.nc.f32 %f358, [%rd74];
-	
+
 	sub.ftz.f32 	%f300, %f359, %f224;
 	sub.ftz.f32 	%f301, %f225, %f358;
 	max.ftz.f32 	%f302, %f300, 0f00000000;

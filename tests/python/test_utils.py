@@ -7,7 +7,7 @@ from pathlib import Path
 def load_test_data():
     """Load the same CSV data used in Rust tests"""
     data_path = Path(__file__).parent.parent.parent / 'src/data/2018-09-01-2024-Bitfinex_Spot-4h.csv'
-    
+
     candles = {
         'timestamp': [],
         'open': [],
@@ -16,32 +16,32 @@ def load_test_data():
         'close': [],
         'volume': []
     }
-    
+
     with open(data_path, 'r') as f:
         reader = csv.reader(f)
         first_row = True
         for row in reader:
-            
+
             if first_row:
                 first_row = False
                 continue
             if len(row) < 6:
                 continue
-            
-            
+
+
             candles['timestamp'].append(int(row[0]))
             candles['open'].append(float(row[1]))
             candles['close'].append(float(row[2]))
             candles['high'].append(float(row[3]))
             candles['low'].append(float(row[4]))
             candles['volume'].append(float(row[5]))
-    
-    
+
+
     result = {k: np.array(v) for k, v in candles.items()}
-    
-    
+
+
     result['hl2'] = (result['high'] + result['low']) / 2.0
-    
+
     return result
 
 def assert_close(actual, expected, rtol=1e-8, atol=1e-10, msg=""):
@@ -71,15 +71,15 @@ def generate_otto_test_data():
     otto_config = EXPECTED_OUTPUTS['otto']['test_data_pattern']
     size = otto_config['size']
     data = np.zeros(size, dtype=np.float64)
-    
-    
+
+
     for i in range(size):
         data[i] = otto_config['formula'](i)
-    
-    
+
+
     last_30 = otto_config['last_30_override']
     data[-30:] = last_30
-    
+
     return data
 
 
@@ -93,12 +93,12 @@ EXPECTED_OUTPUTS = {
             59200.32,
             59117.04,
         ],
-        'warmup_period': 16,  
+        'warmup_period': 16,
     },
     'zscore': {
-        
+
         'default_params': {'period': 14, 'ma_type': 'sma', 'nbdev': 1.0, 'devtype': 0},
-        
+
         'last_5_values': [
             -0.3040683926967643,
             -0.41042159719064014,
@@ -116,7 +116,7 @@ EXPECTED_OUTPUTS = {
             59155.93381742,
             59026.92526112
         ],
-        
+
         'reinput_last_5': [
             59140.73195170,
             59211.58090986,
@@ -134,7 +134,7 @@ EXPECTED_OUTPUTS = {
             'correcting_constant': 100000,
             'ma_type': 'VAR'
         },
-        
+
         'last_5_hott': [
             0.6137310801679211,
             0.6136758137211143,
@@ -149,12 +149,12 @@ EXPECTED_OUTPUTS = {
             0.6114220222840161,
             0.6110393343841534
         ],
-        
+
         'warmup_period': 250
     },
     'percentile_nearest_rank': {
         'default_params': {'length': 15, 'percentage': 50.0},
-        
+
         'last_5_values': [
             59419.0,
             59419.0,
@@ -162,23 +162,23 @@ EXPECTED_OUTPUTS = {
             59285.0,
             59273.0
         ],
-        
+
         'basic_test': {
             'data': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             'length': 5,
             'percentage': 50.0,
-            'expected_at_4': 3.0,  
-            'expected_at_5': 4.0,  
+            'expected_at_4': 3.0,
+            'expected_at_5': 4.0,
         },
         'percentile_tests': {
             'data': [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             'length': 5,
-            'p25_at_4': 1.0,  
-            'p75_at_4': 4.0,  
-            'p100_at_4': 5.0,  
+            'p25_at_4': 1.0,
+            'p75_at_4': 4.0,
+            'p100_at_4': 5.0,
         },
-        
-        'warmup_period': 14,  
+
+        'warmup_period': 14,
     },
     'alphatrend': {
         'default_params': {'coeff': 1.0, 'period': 14, 'no_volume': False},
@@ -196,7 +196,7 @@ EXPECTED_OUTPUTS = {
             60243.00,
             60138.92857143,
         ],
-        'warmup_period': 13,  
+        'warmup_period': 13,
     },
     'chandelier_exit': {
         'default_params': {'period': 22, 'mult': 3.0, 'use_close': True},
@@ -207,7 +207,7 @@ EXPECTED_OUTPUTS = {
             67599.49972358,
             66883.02246342
         ],
-        'warmup_period': 21,  
+        'warmup_period': 21,
     },
     'sama': {
         'default_params': {'length': 200, 'maj_length': 14, 'min_length': 6},
@@ -264,7 +264,7 @@ EXPECTED_OUTPUTS = {
     'prb': {
         'default_params': {
             'smooth_data': False,
-            'smooth_period': 10, 
+            'smooth_period': 10,
             'regression_period': 100,
             'polynomial_order': 2,
             'regression_offset': 0,
@@ -277,9 +277,9 @@ EXPECTED_OUTPUTS = {
             58575.33291206,
             58376.00589983,
         ],
-        
+
         'reinput_last_5': [
-            59083.04826441,  
+            59083.04826441,
             58900.06593477,
             58722.13172976,
             58575.33291206,
@@ -312,7 +312,7 @@ EXPECTED_OUTPUTS = {
             -261.87532144673423,
             -698.9026088956363
         ],
-        
+
         'has_warmup': False,
         'warmup_length': 0
     },
@@ -351,7 +351,7 @@ EXPECTED_OUTPUTS = {
                 -5.02955265,
             ]
         },
-        'warmup_period': 20,  
+        'warmup_period': 20,
         'has_three_outputs': True
     },
     'nma': {
@@ -363,7 +363,7 @@ EXPECTED_OUTPUTS = {
             63966.35530620797,
             64039.04719192334
         ],
-        
+
         'batch_default_row': [
             64320.486018271724,
             64227.95719984426,
@@ -392,7 +392,7 @@ EXPECTED_OUTPUTS = {
             'center_type': 'dynamic',
             'tick_size': 0.0001
         },
-        
+
         'pinescript_dvdi': [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595],
         'pinescript_slow_tl': [356.29040696, -955.69385266, -951.82562405, -903.39071943, -903.39071943],
         'pinescript_fast_tl': [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895],
@@ -417,8 +417,8 @@ EXPECTED_OUTPUTS = {
             59048.71111114628,
             58803.44444447962
         ],
-        
-        
+
+
         'warmup_period': 5
     },
     'rocr': {
@@ -445,8 +445,8 @@ EXPECTED_OUTPUTS = {
             59218.23033661,
             59143.61473211
         ],
-        'warmup_period': 53,  
-        'test_data': None  
+        'warmup_period': 53,
+        'test_data': None
     },
     'devstop': {
         'default_params': {
@@ -473,7 +473,7 @@ EXPECTED_OUTPUTS = {
             0.3155080213903743,
             0.7308584686774942
         ],
-        
+
         'values_at_100_104': [
             0.2715789473684199,
             0.35274356103023446,
@@ -481,12 +481,12 @@ EXPECTED_OUTPUTS = {
             0.7715877437325899,
             0.6793743890518072
         ],
-        
-        'trending_data_values': [1.0] * 6,  
-        
-        'choppy_data_values': [0.14285714285714285] * 6,  
-        
-        'warmup_period': 4  
+
+        'trending_data_values': [1.0] * 6,
+
+        'choppy_data_values': [0.14285714285714285] * 6,
+
+        'warmup_period': 4
     },
     'pwma': {
         'default_params': {'period': 5},
@@ -497,20 +497,20 @@ EXPECTED_OUTPUTS = {
             59175.625,
             59094.875
         ],
-        'warmup_period': 244,  
-        
+        'warmup_period': 244,
+
         'reinput_periods': {'first': 5, 'second': 3},
-        'reinput_warmup': 246,  
-        
+        'reinput_warmup': 246,
+
         'constant_value': 50.0,
-        
+
         'formula_test': {
             'data': [1.0, 2.0, 3.0, 4.0, 5.0],
             'period': 3,
-            
+
             'expected': [float('nan'), float('nan'), 2.0, 3.0, 4.0]
         },
-        
+
         'batch_periods': [3, 5, 7, 9],
         'batch_range': (3, 10, 2)
     },
@@ -523,12 +523,12 @@ EXPECTED_OUTPUTS = {
             59175.218345941066,
             58934.24395798363
         ],
-        'warmup_period': 24  
+        'warmup_period': 24
     },
     'lrsi': {
         'default_params': {'alpha': 0.2},
-        
-        
+
+
     },
     'ift_rsi': {
         'default_params': {'rsi_period': 5, 'wma_period': 9},
@@ -539,7 +539,7 @@ EXPECTED_OUTPUTS = {
             -0.36321812798797737,
             -0.5843346528346959
         ],
-        'warmup_period': 13,  
+        'warmup_period': 13,
         'parameter_combinations': [
             {'rsi_period': 2, 'wma_period': 2},
             {'rsi_period': 3, 'wma_period': 5},
@@ -552,15 +552,15 @@ EXPECTED_OUTPUTS = {
     'cvi': {
         'default_params': {'period': 10},
         'accuracy_params': {'period': 5},
-        'last_5_values': [  
+        'last_5_values': [
             -52.96320026271643,
             -64.39616778235792,
             -59.4830094380472,
             -52.4690724045071,
             -11.858704179539174
         ],
-        'warmup_period': 19,  
-        'accuracy_warmup': 9  
+        'warmup_period': 19,
+        'accuracy_warmup': 9
     },
     'gaussian': {
         'default_params': {'period': 14, 'poles': 4},
@@ -638,7 +638,7 @@ EXPECTED_OUTPUTS = {
             3.6450956734739375,
             3.6748009093527125
         ],
-        'warmup_period': 20  
+        'warmup_period': 20
     },
     'tilson': {
         'default_params': {'period': 5, 'volume_factor': 0.0},
@@ -673,14 +673,14 @@ EXPECTED_OUTPUTS = {
     'rsmk': {
         'default_params': {'lookback': 90, 'period': 3, 'signal_period': 20},
         'indicator_last_5': [
-            0.0,  
+            0.0,
             0.0,
             0.0,
             0.0,
             0.0
         ],
         'signal_last_5': [
-            0.0,  
+            0.0,
             0.0,
             0.0,
             0.0,
@@ -689,7 +689,7 @@ EXPECTED_OUTPUTS = {
     },
     'ehlers_ecema': {
         'default_params': {'length': 20, 'gain_limit': 50},
-        
+
         'last_5_values': [
             59368.42792078,
             59311.07435861,
@@ -697,7 +697,7 @@ EXPECTED_OUTPUTS = {
             59221.59111692,
             58978.72640292
         ],
-        
+
         'pine_mode_last_5': [
             59368.42792078,
             59311.07435861,
@@ -705,7 +705,7 @@ EXPECTED_OUTPUTS = {
             59221.59111692,
             58978.72640292
         ],
-        
+
         'reinput_params': {'length': 10, 'gain_limit': 30},
         'reinput_last_5': [
             59324.20351585,
@@ -714,14 +714,14 @@ EXPECTED_OUTPUTS = {
             59194.22630265,
             59025.67038012
         ],
-        'warmup_period': 19,  
-        'pine_warmup_period': 0,  
-        
+        'warmup_period': 19,
+        'pine_warmup_period': 0,
+
         'batch_params': {
-            'length_range': (15, 25, 5),  
-            'gain_limit_range': (40, 60, 10)  
+            'length_range': (15, 25, 5),
+            'gain_limit_range': (40, 60, 10)
         },
-        'batch_combinations': 9  
+        'batch_combinations': 9
     },
     'trima': {
         'default_params': {'period': 30},
@@ -732,7 +732,7 @@ EXPECTED_OUTPUTS = {
             59665.2125,
             59581.612499999996
         ],
-        
+
         'reinput_last_5': [
             60750.01069444444,
             60552.44180555555,
@@ -750,7 +750,7 @@ EXPECTED_OUTPUTS = {
             58724.56154031242,
             58713.39965211639
         ],
-        'warmup_period': 21  
+        'warmup_period': 21
     },
     'mfi': {
         'default_params': {'period': 14},
@@ -765,14 +765,14 @@ EXPECTED_OUTPUTS = {
     'jsa': {
         'default_params': {'period': 30},
         'last_5_values': [61640.0, 61418.0, 61240.0, 61060.5, 60889.5],
-        'warmup_period': 30  
+        'warmup_period': 30
     },
     'donchian': {
         'default_params': {'period': 20},
         'last_5_upper': [61290.0, 61290.0, 61290.0, 61290.0, 61290.0],
         'last_5_middle': [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
         'last_5_lower': [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
-        
+
         'reinput_last_5_upper': [61700.0, 61700.0, 61700.0, 61642.5, 61642.5],
         'reinput_last_5_middle': [60641.5, 60641.5, 60641.5, 60612.75, 60612.75],
         'reinput_last_5_lower': [59583.0, 59583.0, 59583.0, 59583.0, 59583.0]
@@ -793,7 +793,7 @@ EXPECTED_OUTPUTS = {
             0.36030983330963545,
             -0.28983704937461496,
         ],
-        'warmup_period': 4  
+        'warmup_period': 4
     },
     'correl_hl': {
         'default_params': {'period': 5},
@@ -814,11 +814,11 @@ EXPECTED_OUTPUTS = {
             59100.6,
             58987.94285714286,
         ],
-        'warmup_period': 13,  
-        
+        'warmup_period': 13,
+
         'reinput_periods': {'first': 14, 'second': 10},
-        'reinput_warmup': 23,  
-        
+        'reinput_warmup': 23,
+
         'batch_periods': [10, 20, 30, 40],
         'batch_range': (10, 40, 10)
     },
@@ -851,7 +851,7 @@ EXPECTED_OUTPUTS = {
             59167.01279027576,
             59039.413552249636
         ],
-        
+
         'warmup_period': 13
     },
     'dema': {
@@ -883,9 +883,9 @@ EXPECTED_OUTPUTS = {
             59391.23,
             59372.19
         ],
-        
+
         'reinput_last_5': [
-            59638.12,  
+            59638.12,
             59497.26,
             59431.08,
             59391.23,
@@ -926,7 +926,7 @@ EXPECTED_OUTPUTS = {
             57137.18181818182,
             56516.09090909091
         ],
-        'warmup_period': 21,  
+        'warmup_period': 21,
         'batch_default_row': [
             56711.545454545456,
             57132.72727272727,
@@ -974,10 +974,10 @@ EXPECTED_OUTPUTS = {
             59171.22758152845,
             59127.859841077094
         ],
-        
-        
-        'reinput_last_5': None,  
-        'warmup_period': 13  
+
+
+        'reinput_last_5': None,
+        'warmup_period': 13
     },
     'wilders': {
         'default_params': {'period': 5},
@@ -1025,7 +1025,7 @@ EXPECTED_OUTPUTS = {
         'last_5_values_max': [60102.0, 60102.0, 60102.0, 60102.0, 60102.0]
     },
     'acosc': {
-        'default_params': {},  
+        'default_params': {},
         'last_5_osc': [
             273.30,
             383.72,
@@ -1191,9 +1191,9 @@ EXPECTED_OUTPUTS = {
             -39.05150631680948,
             -152.50523930896998
         ],
-        
+
         'reinput_last_5': [
-            -150.0,  
+            -150.0,
             -150.0,
             -150.0,
             -150.0,
@@ -1201,7 +1201,7 @@ EXPECTED_OUTPUTS = {
         ]
     },
     'bop': {
-        'default_params': {},  
+        'default_params': {},
         'last_5_values': [
             0.045454545454545456,
             -0.32398753894080995,
@@ -1251,7 +1251,7 @@ EXPECTED_OUTPUTS = {
         ]
     },
     'nvi': {
-        'default_params': {},  
+        'default_params': {},
         'last_5_values': [
             154243.6925373456,
             153973.11239019397,
@@ -1312,7 +1312,7 @@ EXPECTED_OUTPUTS = {
             'sed_std': 100,
             'threshold': 1.4
         },
-        
+
         'vol_last_5_values': [
             0.8539059,
             0.75935611,
@@ -1327,7 +1327,7 @@ EXPECTED_OUTPUTS = {
             1.13929192,
             1.12982407
         ],
-        
+
         'rust_vol_last_5_values': [
             0.9009485470514558,
             0.8333604467044887,
@@ -1342,7 +1342,7 @@ EXPECTED_OUTPUTS = {
             1.1403866079746106,
             1.1392919184055932
         ],
-        'warmup_period': 101  
+        'warmup_period': 101
     },
     'di': {
         'default_params': {'period': 14},
@@ -1406,7 +1406,7 @@ EXPECTED_OUTPUTS = {
         ]
     },
     'kst': {
-        'default_params': {'roclen1': 10, 'roclen2': 15, 'roclen3': 20, 'roclen4': 30, 
+        'default_params': {'roclen1': 10, 'roclen2': 15, 'roclen3': 20, 'roclen4': 30,
                           'smalen1': 10, 'smalen2': 10, 'smalen3': 10, 'smalen4': 15, 'siglen': 9},
         'last_5_line': [
             -47.38570195278667,
@@ -1444,9 +1444,9 @@ EXPECTED_OUTPUTS = {
         ]
     },
     'pivot': {
-        'default_params': {'mode': 3},  
+        'default_params': {'mode': 3},
         'last_5_r4': [59466.5, 59357.55, 59243.6, 59334.85, 59170.35],
-        
+
     },
     'correlation_cycle': {
         'default_params': {'period': 20, 'threshold': 9.0},
@@ -1483,7 +1483,7 @@ EXPECTED_OUTPUTS = {
             59720.60576365108,
             59673.9954445178
         ],
-        'warmup_period': 10,  
+        'warmup_period': 10,
         'batch_default_row': [
             59747.657115949725,
             59740.803138018055,
@@ -1519,7 +1519,7 @@ EXPECTED_OUTPUTS = {
     'sma': {
         'default_params': {'period': 9},
         'last_5_values': [59180.8, 59175.0, 59129.4, 59085.4, 59133.7],
-        'reinput_last_5': None  
+        'reinput_last_5': None
     },
     'mwdx': {
         'default_params': {'factor': 0.2},
@@ -1540,17 +1540,17 @@ EXPECTED_OUTPUTS = {
             59171.14999178,
             59053.74201623
         ],
-        'warmup_period': 22,  
-        
-        'no_smoothing_differs': True,  
-        'different_r_multi_differs': True,  
-        
+        'warmup_period': 22,
+
+        'no_smoothing_differs': True,
+        'different_r_multi_differs': True,
+
         'batch_periods': [15, 20, 25],
         'batch_r_multis': [1.5, 2.0, 2.5],
         'batch_range': {
             'period_range': (15, 25, 5),
             'r_multi_range': (1.5, 2.5, 0.5),
-            'smooth': False  
+            'smooth': False
         }
     },
     'dma': {
@@ -1567,18 +1567,18 @@ EXPECTED_OUTPUTS = {
             59153.22811529,
             58933.88503421
         ],
-        
+
         'warmup_period': 19,
-        
+
         'constant_value': 100.0,
-        
+
         'batch_hull_lengths': [5, 7, 9, 11],
-        'batch_hull_range': (5, 11, 2),  
-        'batch_ema_range': (20, 20, 0),  
-        'batch_gain_range': (50, 50, 0),  
-        
+        'batch_hull_range': (5, 11, 2),
+        'batch_ema_range': (20, 20, 0),
+        'batch_gain_range': (50, 50, 0),
+
         'hull_ma_types': ['WMA', 'EMA'],
-        
+
         'batch_default_row': [
             59404.62489256,
             59326.48766951,
@@ -1590,26 +1590,26 @@ EXPECTED_OUTPUTS = {
     'ehma': {
         'default_params': {'period': 14},
         'test_data': [
-            59500.0, 59450.0, 59420.0, 59380.0, 59350.0, 
+            59500.0, 59450.0, 59420.0, 59380.0, 59350.0,
             59320.0, 59310.0, 59300.0, 59280.0, 59260.0,
             59250.0, 59240.0, 59230.0, 59220.0, 59210.0,
             59200.0, 59190.0, 59180.0
         ],
-        'expected_value_at_13': 59309.748,  
-        'warmup_period': 13,  
-        
-        'period_10_warmup': 9,  
-        
+        'expected_value_at_13': 59309.748,
+        'warmup_period': 13,
+
+        'period_10_warmup': 9,
+
         'batch_periods': [10, 14, 20, 28],
-        'batch_range': (10, 30, 10),  
-        
+        'batch_range': (10, 30, 10),
+
         'streaming_matches_batch': True,
-        
+
         'consistency_test': True
     },
     'ott': {
         'default_params': {'period': 2, 'percent': 1.4, 'ma_type': 'VAR'},
-        'accuracy_params': {'period': 2, 'percent': 1.4, 'ma_type': 'VAR'},  
+        'accuracy_params': {'period': 2, 'percent': 1.4, 'ma_type': 'VAR'},
         'last_5_values': [
             59719.89457348,
             59719.89457348,
@@ -1617,8 +1617,8 @@ EXPECTED_OUTPUTS = {
             59719.89457348,
             59649.80599569
         ],
-        'warmup_period': 1,  
-        
+        'warmup_period': 1,
+
         'reinput_last_5': [
             60132.08843846,
             60132.08843846,
@@ -1646,7 +1646,7 @@ EXPECTED_OUTPUTS = {
             0.13180921580477045,
             -0.7201884654964374
         ],
-        'warmup_period': 33  
+        'warmup_period': 33
     },
     'lpc': {
         'default_params': {
@@ -1656,7 +1656,7 @@ EXPECTED_OUTPUTS = {
             'cycle_mult': 1.0,
             'tr_mult': 1.0
         },
-        
+
         'last_5_filter': [
             59346.30519969,
             59327.59393858,
@@ -1678,7 +1678,7 @@ EXPECTED_OUTPUTS = {
             58534.26453184,
             58488.71820303
         ],
-        'warmup_period': 1  
+        'warmup_period': 1
     },
     'qqe': {
         'default_params': {'rsi_period': 14, 'smoothing_factor': 5, 'fast_factor': 4.236},
@@ -1696,8 +1696,8 @@ EXPECTED_OUTPUTS = {
             36.64790896,
             36.64790896
         ],
-        'warmup_period': 17,  
-        
+        'warmup_period': 17,
+
         'batch_default_row_fast': [
             42.68548144,
             42.68200826,
@@ -1715,7 +1715,7 @@ EXPECTED_OUTPUTS = {
     },
     'vama': {
         'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'fast_values': [  
+        'fast_values': [
             58881.58124494,
             58866.67951208,
             58873.34641238,
@@ -1723,18 +1723,18 @@ EXPECTED_OUTPUTS = {
             58696.37821343
         ],
         'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'slow_values': [  
+        'slow_values': [
             60338.30226444,
             60327.06967012,
             60318.07491767,
             60324.78454609,
             60305.94922998
         ],
-        'warmup_period': 12  
+        'warmup_period': 12
     },
-    'volume_adjusted_ma': {  
+    'volume_adjusted_ma': {
         'default_params': {'length': 13, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'fast_values': [  
+        'fast_values': [
             60249.34558277224,
             60283.79398716032,
             60173.3929697517,
@@ -1742,14 +1742,14 @@ EXPECTED_OUTPUTS = {
             60226.095375540506
         ],
         'slow_params': {'length': 55, 'vi_factor': 0.67, 'strict': True, 'sample_period': 0},
-        'slow_values': [  
+        'slow_values': [
             60943.90131552854,
             60929.79497887764,
             60912.66617792769,
             60900.71462347596,
             60844.41271673433
         ],
-        'warmup_period': 12  
+        'warmup_period': 12
     },
     'ehlers_kama': {
         'default_params': {'period': 20},
@@ -1766,7 +1766,7 @@ EXPECTED_OUTPUTS = {
         'test_indices': [15570, 15571, 15574, 15575, 15576],
         'expected_halftrend': [59763.0, 59763.0, 59763.0, 59310.0, 59310.0],
         'expected_trend': [0.0, 0.0, 1.0, 1.0, 1.0],
-        'warmup_period': 99,  
+        'warmup_period': 99,
         'has_warmup': True
     },
     'reverse_rsi': {
@@ -1774,7 +1774,7 @@ EXPECTED_OUTPUTS = {
         'last_5_values': [
             60124.655535277416, 60064.68013990046, 60001.56012990757, 59932.80583491417, 59877.248275277445
         ],
-        'warmup_period': 27,  
+        'warmup_period': 27,
         'has_warmup': True,
         'note': 'These are values at positions -6 to -2 in the full dataset'
     }

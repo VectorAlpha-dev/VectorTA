@@ -20,26 +20,26 @@ static __forceinline__ __device__ float warp_reduce_sum(float v) {
 }
 
 static __forceinline__ __device__ float block_reduce_sum(float v) {
-    
+
     __shared__ float warp_sums[32];
     const int lane = threadIdx.x & (warpSize - 1);
-    const int wid  = threadIdx.x >> 5; 
+    const int wid  = threadIdx.x >> 5;
 
-    
+
     v = warp_reduce_sum(v);
 
-    
+
     if (lane == 0) warp_sums[wid] = v;
     __syncthreads();
 
-    
+
     float block_sum = 0.0f;
     if (wid == 0) {
         const int num_warps = (blockDim.x + warpSize - 1) / warpSize;
         block_sum = (lane < num_warps) ? warp_sums[lane] : 0.0f;
         block_sum = warp_reduce_sum(block_sum);
     }
-    return block_sum; 
+    return block_sum;
 }
 
 extern "C" __global__
@@ -62,13 +62,13 @@ void wilders_batch_f32(const float* __restrict__ prices,
 
     const int base = combo * series_len;
 
-    
+
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
         out[base + idx] = NAN;
     }
     __syncthreads();
 
-    
+
     const int start      = first_valid;
     const int window_end = start + period;
 
@@ -80,10 +80,10 @@ void wilders_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    
+
     const float sum = block_reduce_sum(local_sum);
 
-    
+
     if (threadIdx.x != 0) return;
 
     if (window_end > series_len) return;
@@ -92,7 +92,7 @@ void wilders_batch_f32(const float* __restrict__ prices,
     float value = sum * inv_period;
     out[base + warm] = value;
 
-    
+
     for (int t = warm + 1; t < series_len; ++t) {
         const float price = prices[t];
         value = __fmaf_rn(price - value, alpha, value);
@@ -129,13 +129,13 @@ void wilders_batch_warp_scan_f32(const float* __restrict__ prices,
     const int lane = threadIdx.x & 31;
     const size_t base = (size_t)combo * (size_t)series_len;
 
-    
+
     for (int t = lane; t < warm; t += 32) {
         out[base + (size_t)t] = NAN;
     }
     if (warm < 0 || warm >= series_len) return;
 
-    
+
     float y_prev = 0.0f;
     if (lane == 0) {
         float sum = 0.0f;
@@ -159,7 +159,7 @@ void wilders_batch_warp_scan_f32(const float* __restrict__ prices,
         float A = valid ? one_m_alpha : 1.0f;
         float B = valid ? (alpha * prices[t]) : 0.0f;
 
-        
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A, offset);
             const float B_prev = __shfl_up_sync(mask, B, offset);
@@ -200,34 +200,34 @@ void wilders_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int stride = num_series;
 
-    
-    const int lane            = threadIdx.x & (warpSize - 1);
-    const int warp_in_block   = threadIdx.x >> 5; 
-    const int warps_per_block = blockDim.x >> 5;  
-    if (warps_per_block == 0) return;            
 
-    
+    const int lane            = threadIdx.x & (warpSize - 1);
+    const int warp_in_block   = threadIdx.x >> 5;
+    const int warps_per_block = blockDim.x >> 5;
+    if (warps_per_block == 0) return;
+
+
     int warp_idx    = blockIdx.x * warps_per_block + warp_in_block;
     const int wstep = gridDim.x * warps_per_block;
 
     for (int series_idx = warp_idx; series_idx < num_series; series_idx += wstep) {
         const int first_valid = first_valids[series_idx];
 
-        
+
         for (int t = lane; t < series_len; t += warpSize) {
             out_tm[t * stride + series_idx] = NAN;
         }
 
         if (first_valid < 0 || first_valid >= series_len) {
-            continue; 
+            continue;
         }
 
         const int warm_end = first_valid + period;
         if (warm_end > series_len) {
-            continue; 
+            continue;
         }
 
-        
+
         float local = 0.0f;
         for (int k = lane; k < period; k += warpSize) {
             const int idx = (first_valid + k) * stride + series_idx;
@@ -235,7 +235,7 @@ void wilders_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
         float sum = warp_reduce_sum(local);
 
-        
+
         if (lane == 0) {
             const float inv_period = 1.0f / static_cast<float>(period);
             float y = sum * inv_period;
@@ -248,6 +248,6 @@ void wilders_many_series_one_param_f32(const float* __restrict__ prices_tm,
                 out_tm[t * stride + series_idx] = y;
             }
         }
-        
+
     }
 }

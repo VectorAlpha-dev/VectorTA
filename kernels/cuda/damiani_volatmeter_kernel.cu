@@ -54,17 +54,17 @@ __device__ __forceinline__ float2 ff_sub(float2 x, float2 y){ return ff_add(x, f
 
 __device__ __forceinline__ float2 ff_two_prod(float a, float b){
     float p = a * b;
-    float e = fmaf(a, b, -p); 
+    float e = fmaf(a, b, -p);
     return make_float2(p, e);
 }
 
 __device__ __forceinline__ float2 ff_scale(float2 x, float s){
-    
+
     return ff_two_sum(x.x * s, x.y * s);
 }
 
 __device__ __forceinline__ float2 ff_mul(float2 x, float2 y){
-    
+
     float2 p  = ff_two_prod(x.x, y.x);
     float cross = x.x * y.y + x.y * y.x;
     float2 s  = ff_two_sum(p.x, cross);
@@ -76,7 +76,7 @@ __device__ __forceinline__ float ff_to_f32(float2 x){ return x.x + x.y; }
 
 
 __device__ __forceinline__ float safe_pos_den(float x){
-    const float EPS = 1.1920929e-7f; 
+    const float EPS = 1.1920929e-7f;
     return (finite_f32(x) && x > 0.0f) ? x : EPS;
 }
 
@@ -140,12 +140,12 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
 
         const int warm_end = min(series_len, first_valid + needed - 1);
 
-        
+
         float atr_vis = NAN, atr_sed = NAN;
         float sum_vis = 0.0f, c_vis = 0.0f;
         float sum_sed = 0.0f, c_sed = 0.0f;
 
-        
+
         float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
         const float lag_s = 0.5f;
 
@@ -153,7 +153,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
             const float tr_t = LDG(&tr[t]);
             const int k = t - first_valid;
 
-            
+
             if (k < p_vis_atr) {
                 kahan_add(sum_vis, c_vis, tr_t);
                 if (k == p_vis_atr - 1) atr_vis = sum_vis / (float)p_vis_atr;
@@ -162,7 +162,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                 atr_vis = fmaf(atr_vis, (1.0f - alpha), tr_t * alpha);
             }
 
-            
+
             if (k < p_sed_atr) {
                 kahan_add(sum_sed, c_sed, tr_t);
                 if (k == p_sed_atr - 1) atr_sed = sum_sed / (float)p_sed_atr;
@@ -171,16 +171,16 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                 atr_sed = fmaf(atr_sed, (1.0f - alpha), tr_t * alpha);
             }
 
-            
+
             if (k >= needed - 1) {
                 const float inv_sed = 1.0f / safe_pos_den(atr_sed);
                 const float base    = atr_vis * inv_sed;
                 const float vol_t   = fmaf(lag_s, (vh1 - vh3), base);
                 out[base_vol + (size_t)t] = vol_t;
-                
+
                 vh3 = vh2; vh2 = vh1; vh1 = vol_t;
 
-                
+
                 if (k >= max(p_vis_std, p_sed_std) - 1) {
                     const int prev_v = t - p_vis_std;
                     const int prev_s = t - p_sed_std;
@@ -200,7 +200,7 @@ void damiani_volatmeter_batch_f32(const float* __restrict__ prices,
                 }
             }
         }
-        
+
         for (int t = 0; t <= warm_end && t < series_len; ++t) {
             out[base_vol + (size_t)t] = nan_f32();
             out[base_anti + (size_t)t] = nan_f32();
@@ -251,7 +251,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
         float prev_close = NAN;
         bool have_prev = false;
 
-        
+
         float vh1 = 0.0f, vh2 = 0.0f, vh3 = 0.0f;
 
         for (int t = fv; t < series_len; ++t) {
@@ -272,7 +272,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
             }
             if (finite_f32(c)) { prev_close = c; have_prev = true; }
 
-            
+
             if (k < vis_atr) {
                 kahan_add(sum_vis, c_vis, tr);
                 if (k == vis_atr - 1) atr_vis = sum_vis / (float)vis_atr;
@@ -281,7 +281,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
                 atr_vis = fmaf(atr_vis, (1.0f - alpha), tr * alpha);
             }
 
-            
+
             if (k < sed_atr) {
                 kahan_add(sum_sed, c_sed, tr);
                 if (k == sed_atr - 1) atr_sed = sum_sed / (float)sed_atr;
@@ -299,7 +299,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
 
                 vh3 = vh2; vh2 = vh1; vh1 = vol_t;
 
-                
+
                 if (k >= max(vis_std, sed_std) - 1) {
                     const int prev_v = t - vis_std;
                     const int prev_s = t - sed_std;
@@ -320,7 +320,7 @@ void damiani_volatmeter_many_series_one_param_time_major_f32(
                 }
             }
         }
-        
+
         for (int t = 0; t <= warm_end && t < series_len; ++t) {
             const size_t out_row = (size_t)t * (size_t)(2 * stride);
             out_tm[out_row + (size_t)series] = nan_f32();

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry wto_fill_nan3_f32(
 	.param .u64 wto_fill_nan3_f32_param_0,
@@ -59,7 +59,7 @@ $L__BB0_3:
 	ret;
 
 }
-	
+
 .visible .entry wto_batch_f32(
 	.param .u64 wto_batch_f32_param_0,
 	.param .u64 wto_batch_f32_param_1,
@@ -266,9 +266,9 @@ $L__BB1_3:
 	mov.f64 	%fd80, 0d0000000000000000;
 	st.local.v2.f64 	[%rd4], {%fd80, %fd80};
 	st.local.v2.f64 	[%rd4+16], {%fd80, %fd80};
-	
+
 	activemask.b32 %r48;
-	
+
 	brev.b32 	%r52, %r48;
 	bfind.shiftamt.u32 	%r7, %r52;
 	and.b32  	%r8, %r1, 31;
@@ -291,9 +291,9 @@ $L__BB1_4:
 	mov.f32 	%f23, 0f00000000;
 	@%p13 bra 	$L__BB1_6;
 
-	
+
 	ld.global.nc.f32 %f23, [%rd72];
-	
+
 
 $L__BB1_6:
 	ld.param.u32 	%r73, [wto_batch_f32_param_5];
@@ -485,7 +485,7 @@ $L__BB1_50:
 	ret;
 
 }
-	
+
 .visible .entry wto_many_series_one_param_time_major_f32(
 	.param .u64 wto_many_series_one_param_time_major_f32_param_0,
 	.param .u32 wto_many_series_one_param_time_major_f32_param_1,
@@ -650,9 +650,9 @@ $L__BB2_8:
 	mov.f64 	%fd70, %fd73;
 
 $L__BB2_11:
-	
+
 	ld.global.nc.f32 %f2, [%rd69];
-	
+
 	abs.ftz.f32 	%f1, %f2;
 	cvt.ftz.f64.f32 	%fd9, %f2;
 	setp.lt.s32 	%p11, %r62, %r11;

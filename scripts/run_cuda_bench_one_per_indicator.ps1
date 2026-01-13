@@ -32,8 +32,8 @@ function Resolve-EstimatesPath([string]$CriterionRoot, [string]$Id) {
     $indicator = $parts[$parts.Count - 1]
     $prefix = @($parts[0..($parts.Count - 2)])
 
-    # Criterion stores results under <group>/<bench_id>/<indicator>/new/estimates.json,
-    # but group and bench_id can themselves contain '/' which Criterion sanitizes to '_'.
+
+
     for ($k = 1; $k -lt $prefix.Count; $k++) {
         $groupRaw = ($prefix[0..($k - 1)] -join "/")
         $benchRaw = ($prefix[$k..($prefix.Count - 1)] -join "/")
@@ -240,8 +240,8 @@ foreach ($indicator in $indicators) {
         $outLog = Join-Path $LogDir ("{0}.out.txt" -f $safe)
         $errLog = Join-Path $LogDir ("{0}.err.txt" -f $safe)
 
-        # Always quote the benchmark id so paths containing spaces / unicode (e.g. "100k x 64" or "1m × 5 modes")
-        # are passed as a single argument to the bench binary.
+
+
         $idArg = '"' + ($id -replace '"', '""') + '"'
 
         $args = @(

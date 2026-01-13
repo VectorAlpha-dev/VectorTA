@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -75,15 +75,15 @@
 	.reg .f32 	%f<290>;
 	.reg .b32 	%r<416>;
 	.reg .b64 	%rd<88>;
-	
+
 	.shared .align 16 .b8 _ZZ14vwap_batch_f32E8scan_tmp[3488];
-	
+
 	.shared .align 8 .b8 _ZZ14vwap_batch_f32E6sh_gid[2048];
-	
+
 	.shared .align 4 .f32 _ZZ14vwap_batch_f32E9carry_vol;
-	
+
 	.shared .align 4 .f32 _ZZ14vwap_batch_f32E8carry_pv;
-	
+
 	.shared .align 8 .u64 _ZZ14vwap_batch_f32E9carry_gid;
 
 	ld.param.u64 	%rd37, [vwap_batch_f32_param_0];
@@ -288,9 +288,9 @@ $L__BB0_13:
 	add.s64 	%rd82, %rd37, %rd65;
 	add.s64 	%rd81, %rd39, %rd64;
 	add.s64 	%rd80, %rd38, %rd64;
-	
+
 	mov.u32 %r203, %laneid;
-	
+
 	mov.u32 	%r381, %r5;
 
 $L__BB0_14:
@@ -301,12 +301,12 @@ $L__BB0_14:
 	mov.f32 	%f236, %f235;
 	@%p21 bra 	$L__BB0_22;
 
-	
+
 	ld.global.nc.f32 %f235, [%rd80];
-	
-	
+
+
 	ld.global.nc.f32 %f208, [%rd81];
-	
+
 	mov.f32 	%f209, 0f00000000;
 	fma.rn.ftz.f32 	%f236, %f235, %f208, %f209;
 	@%p18 bra 	$L__BB0_19;
@@ -318,9 +318,9 @@ $L__BB0_19:
 	mov.u32 	%r384, 0;
 	@%p24 bra 	$L__BB0_21;
 
-	
+
 	ld.global.nc.s32 %r384, [%rd83];
-	
+
 
 $L__BB0_21:
 	div.s32 	%r201, %r384, %r18;
@@ -328,9 +328,9 @@ $L__BB0_21:
 	bra.uni 	$L__BB0_22;
 
 $L__BB0_16:
-	
+
 	ld.global.nc.s64 %rd69, [%rd82];
-	
+
 	or.b64  	%rd71, %rd69, %rd10;
 	and.b64  	%rd72, %rd71, -4294967296;
 	setp.eq.s64 	%p23, %rd72, 0;
@@ -490,15 +490,15 @@ $L__BB0_39:
 	mov.u32 	%r216, 1;
 	mov.u32 	%r217, 0;
 	mov.u32 	%r218, -1;
-	
+
 	shfl.sync.up.b32 %r204, %r205, %r216, %r217, %r218;
-	
-	
+
+
 	shfl.sync.up.b32 %r209, %r210, %r216, %r217, %r218;
-	
-	
+
+
 	shfl.sync.up.b32 %r214, %r393, %r216, %r217, %r218;
-	
+
 	setp.eq.s32 	%p38, %r393, 0;
 	mov.f32 	%f253, %f251;
 	mov.f32 	%f254, %f252;
@@ -522,15 +522,15 @@ $L__BB0_41:
 	mov.b32 	%r225, %f256;
 	mov.b32 	%r220, %f255;
 	mov.u32 	%r231, 2;
-	
+
 	shfl.sync.up.b32 %r219, %r220, %r231, %r217, %r218;
-	
-	
+
+
 	shfl.sync.up.b32 %r224, %r225, %r231, %r217, %r218;
-	
-	
+
+
 	shfl.sync.up.b32 %r229, %r395, %r231, %r217, %r218;
-	
+
 	setp.eq.s32 	%p40, %r395, 0;
 	mov.f32 	%f257, %f255;
 	mov.f32 	%f258, %f256;
@@ -556,15 +556,15 @@ $L__BB0_43:
 	mov.u32 	%r246, 4;
 	mov.u32 	%r247, 0;
 	mov.u32 	%r248, -1;
-	
+
 	shfl.sync.up.b32 %r234, %r235, %r246, %r247, %r248;
-	
-	
+
+
 	shfl.sync.up.b32 %r239, %r240, %r246, %r247, %r248;
-	
-	
+
+
 	shfl.sync.up.b32 %r244, %r397, %r246, %r247, %r248;
-	
+
 	setp.eq.s32 	%p42, %r397, 0;
 	mov.f32 	%f261, %f259;
 	mov.f32 	%f262, %f260;
@@ -588,15 +588,15 @@ $L__BB0_45:
 	mov.b32 	%r255, %f264;
 	mov.b32 	%r250, %f263;
 	mov.u32 	%r261, 8;
-	
+
 	shfl.sync.up.b32 %r249, %r250, %r261, %r247, %r248;
-	
-	
+
+
 	shfl.sync.up.b32 %r254, %r255, %r261, %r247, %r248;
-	
-	
+
+
 	shfl.sync.up.b32 %r259, %r399, %r261, %r247, %r248;
-	
+
 	setp.eq.s32 	%p44, %r399, 0;
 	mov.f32 	%f265, %f263;
 	mov.f32 	%f266, %f264;
@@ -622,15 +622,15 @@ $L__BB0_47:
 	mov.u32 	%r276, 16;
 	mov.u32 	%r277, 0;
 	mov.u32 	%r278, -1;
-	
+
 	shfl.sync.up.b32 %r264, %r265, %r276, %r277, %r278;
-	
-	
+
+
 	shfl.sync.up.b32 %r269, %r270, %r276, %r277, %r278;
-	
-	
+
+
 	shfl.sync.up.b32 %r274, %r401, %r276, %r277, %r278;
-	
+
 	setp.eq.s32 	%p46, %r401, 0;
 	mov.f32 	%f269, %f267;
 	mov.f32 	%f270, %f268;
@@ -654,15 +654,15 @@ $L__BB0_49:
 	mov.b32 	%r285, %f225;
 	mov.b32 	%r280, %f224;
 	mov.u32 	%r291, 1;
-	
+
 	shfl.sync.up.b32 %r279, %r280, %r291, %r277, %r278;
-	
-	
+
+
 	shfl.sync.up.b32 %r284, %r285, %r291, %r277, %r278;
-	
-	
+
+
 	shfl.sync.up.b32 %r289, %r290, %r291, %r277, %r278;
-	
+
 	add.s32 	%r328, %r187, 16;
 	ld.shared.f32 	%f271, [%r328+-12];
 	add.s32 	%r329, %r187, 16;
@@ -896,7 +896,7 @@ $L__BB0_81:
 	ret;
 
 }
-	
+
 .visible .entry vwap_multi_series_one_param_f32(
 	.param .u64 vwap_multi_series_one_param_f32_param_0,
 	.param .u64 vwap_multi_series_one_param_f32_param_1,
@@ -1038,9 +1038,9 @@ $L__BB1_30:
 	mov.u32 	%r75, 0;
 	@%p26 bra 	$L__BB1_32;
 
-	
+
 	ld.global.nc.s32 %r75, [%rd84];
-	
+
 
 $L__BB1_32:
 	setp.eq.s32 	%p27, %r72, -1;
@@ -1060,9 +1060,9 @@ $L__BB1_32:
 	bra.uni 	$L__BB1_36;
 
 $L__BB1_13:
-	
+
 	ld.global.nc.s64 %rd63, [%rd85];
-	
+
 	setp.eq.s32 	%p16, %r72, -1;
 	@%p16 bra 	$L__BB1_26;
 
@@ -1169,13 +1169,13 @@ $L__BB1_36:
 	cvt.s64.s32 	%rd40, %r71;
 	mul.wide.s32 	%rd79, %r71, 4;
 	add.s64 	%rd77, %rd44, %rd79;
-	
+
 	ld.global.nc.f32 %f23, [%rd77];
-	
+
 	add.s64 	%rd78, %rd45, %rd79;
-	
+
 	ld.global.nc.f32 %f24, [%rd78];
-	
+
 	add.ftz.f32 	%f30, %f30, %f23;
 	fma.rn.ftz.f32 	%f31, %f23, %f24, %f31;
 	setp.leu.ftz.f32 	%p29, %f30, 0f00000000;
@@ -1200,7 +1200,7 @@ $L__BB1_39:
 	ret;
 
 }
-	
+
 .visible .entry _ZN3cub17CUB_300001_SM_8906detail11EmptyKernelIvEEvv()
 {
 

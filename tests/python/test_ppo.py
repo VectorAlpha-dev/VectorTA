@@ -9,7 +9,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    
+
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -23,223 +23,223 @@ class TestPpo:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_ppo_partial_params(self, test_data):
         """Test PPO with partial parameters (None values) - mirrors check_ppo_partial_params"""
         close = test_data['close']
-        
-        
-        result = ta_indicators.ppo(close)  
+
+
+        result = ta_indicators.ppo(close)
         assert len(result) == len(close)
-    
+
     def test_ppo_accuracy(self, test_data):
         """Test PPO matches expected values from Rust tests - mirrors check_ppo_accuracy"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['ppo']
-        
+
         result = ta_indicators.ppo(
             close,
             fast_period=expected['default_params']['fast_period'],
             slow_period=expected['default_params']['slow_period'],
             ma_type=expected['default_params']['ma_type']
         )
-        
+
         assert len(result) == len(close)
-        
-        
+
+
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected['last_5_values'],
             rtol=1e-8,
             msg="PPO last 5 values mismatch"
         )
-        
-        
+
+
         compare_with_rust('ppo', result, 'close', expected['default_params'])
-    
+
     def test_ppo_default_candles(self, test_data):
         """Test PPO with default parameters - mirrors check_ppo_default_candles"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.ppo(close, fast_period=12, slow_period=26, ma_type='sma')
         assert len(result) == len(close)
-    
+
     def test_ppo_zero_period(self):
         """Test PPO fails with zero period - mirrors check_ppo_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.ppo(input_data, fast_period=0, slow_period=26, ma_type='sma')
-    
+
     def test_ppo_period_exceeds_length(self):
         """Test PPO fails when period exceeds data length - mirrors check_ppo_period_exceeds_length"""
         data_small = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.ppo(data_small, fast_period=12, slow_period=26, ma_type='sma')
-    
+
     def test_ppo_very_small_dataset(self):
         """Test PPO fails with insufficient data - mirrors check_ppo_very_small_dataset"""
         single_point = np.array([42.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.ppo(single_point, fast_period=12, slow_period=26, ma_type='sma')
-    
+
     def test_ppo_empty_input(self):
         """Test PPO fails with empty input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Empty data"):
             ta_indicators.ppo(empty, fast_period=12, slow_period=26, ma_type='sma')
-    
+
     def test_ppo_nan_handling(self, test_data):
         """Test PPO handles NaN values correctly - mirrors check_ppo_nan_handling"""
         close = test_data['close']
-        
+
         result = ta_indicators.ppo(close, fast_period=12, slow_period=26, ma_type='sma')
         assert len(result) == len(close)
-        
-        
+
+
         if len(result) > 30:
             assert not np.any(np.isnan(result[30:])), "Found unexpected NaN after warmup period"
-    
+
     def test_ppo_streaming(self, test_data):
         """Test PPO streaming matches batch calculation - mirrors check_ppo_streaming"""
         close = test_data['close']
         fast_period = 12
         slow_period = 26
         ma_type = 'sma'
-        
-        
+
+
         batch_result = ta_indicators.ppo(close, fast_period=fast_period, slow_period=slow_period, ma_type=ma_type)
-        
-        
+
+
         stream = ta_indicators.PpoStream(fast_period=fast_period, slow_period=slow_period, ma_type=ma_type)
         stream_values = []
-        
+
         for price in close:
             result = stream.update(price)
             stream_values.append(result if result is not None else np.nan)
-        
+
         stream_values = np.array(stream_values)
-        
-        
+
+
         assert len(batch_result) == len(stream_values)
-        
-        
+
+
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            assert_close(b, s, rtol=1e-9, atol=1e-9, 
+            assert_close(b, s, rtol=1e-9, atol=1e-9,
                         msg=f"PPO streaming mismatch at index {i}")
-    
+
     def test_ppo_batch(self, test_data):
         """Test PPO batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
-        
+
         result = ta_indicators.ppo_batch(
             close,
-            fast_period_range=(12, 12, 0),  
-            slow_period_range=(26, 26, 0),  
-            ma_type='sma'  
+            fast_period_range=(12, 12, 0),
+            slow_period_range=(26, 26, 0),
+            ma_type='sma'
         )
-        
+
         assert 'values' in result
         assert 'fast_periods' in result
         assert 'slow_periods' in result
         assert 'ma_types' in result
-        
-        
-        assert result['values'].shape[0] == 1  
+
+
+        assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
-        
-        
+
+
         assert result['fast_periods'][0] == 12
         assert result['slow_periods'][0] == 26
         assert result['ma_types'][0] == 'sma'
-        
-        
+
+
         single_result = ta_indicators.ppo(close, fast_period=12, slow_period=26, ma_type='sma')
         assert_close(
-            result['values'][0], 
-            single_result, 
+            result['values'][0],
+            single_result,
             rtol=1e-9,
             msg="PPO batch vs single calculation mismatch"
         )
-    
+
     def test_ppo_batch_multiple_params(self, test_data):
         """Test PPO batch processing with multiple parameter combinations"""
         close = test_data['close']
-        
+
         result = ta_indicators.ppo_batch(
             close,
-            fast_period_range=(10, 14, 2),  
-            slow_period_range=(24, 28, 2),  
+            fast_period_range=(10, 14, 2),
+            slow_period_range=(24, 28, 2),
             ma_type='ema'
         )
-        
-        
+
+
         assert result['values'].shape[0] == 9
         assert result['values'].shape[1] == len(close)
         assert len(result['fast_periods']) == 9
         assert len(result['slow_periods']) == 9
         assert len(result['ma_types']) == 9
-        
-        
+
+
         expected_combinations = [
             (10, 24), (10, 26), (10, 28),
             (12, 24), (12, 26), (12, 28),
             (14, 24), (14, 26), (14, 28)
         ]
-        
+
         for i, (fast, slow) in enumerate(expected_combinations):
             assert result['fast_periods'][i] == fast
             assert result['slow_periods'][i] == slow
             assert result['ma_types'][i] == 'ema'
-    
+
     def test_ppo_kernel_parameter(self, test_data):
         """Test PPO with different kernel parameters"""
         close = test_data['close']
-        
-        
+
+
         result_auto = ta_indicators.ppo(close, kernel=None)
         assert len(result_auto) == len(close)
-        
-        
+
+
         result_scalar = ta_indicators.ppo(close, kernel='scalar')
         assert len(result_scalar) == len(close)
-        
-        
+
+
         assert_close(
-            result_auto, 
-            result_scalar, 
+            result_auto,
+            result_scalar,
             rtol=1e-9,
             msg="PPO kernel results mismatch"
         )
-    
+
     def test_ppo_different_ma_types(self, test_data):
         """Test PPO with different moving average types"""
         close = test_data['close']
-        
+
         ma_types = ['sma', 'ema', 'wma']
         results = {}
-        
+
         for ma_type in ma_types:
             results[ma_type] = ta_indicators.ppo(
-                close, 
-                fast_period=12, 
-                slow_period=26, 
+                close,
+                fast_period=12,
+                slow_period=26,
                 ma_type=ma_type
             )
             assert len(results[ma_type]) == len(close)
-        
-        
+
+
         assert not np.array_equal(results['sma'], results['ema'])
         assert not np.array_equal(results['sma'], results['wma'])
         assert not np.array_equal(results['ema'], results['wma'])
 
 
 if __name__ == "__main__":
-    
+
     pytest.main([__file__, "-v"])

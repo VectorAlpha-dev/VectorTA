@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry emv_batch_f32(
 	.param .u64 emv_batch_f32_param_0,
@@ -101,9 +101,9 @@ $L__BB0_7:
 	@%p10 bra 	$L__BB0_7;
 
 $L__BB0_8:
-	
+
 	activemask.b32 %r65;
-	
+
 	brev.b32 	%r68, %r65;
 	bfind.shiftamt.u32 	%r14, %r68;
 	and.b32  	%r15, %r1, 31;
@@ -405,7 +405,7 @@ $L__BB0_19:
 	bra.uni 	$L__BB0_21;
 
 }
-	
+
 .visible .entry emv_many_series_one_param_f32(
 	.param .u64 emv_many_series_one_param_f32_param_0,
 	.param .u64 emv_many_series_one_param_f32_param_1,

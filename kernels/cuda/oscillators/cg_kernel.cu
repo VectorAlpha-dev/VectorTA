@@ -26,7 +26,7 @@
 
 
 static __device__ __forceinline__ bool cg_bad_den(float den) {
-    return (!isfinite(den)) || fabsf(den) <= 1.1920929e-7f; 
+    return (!isfinite(den)) || fabsf(den) <= 1.1920929e-7f;
 }
 
 
@@ -62,7 +62,7 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
     const int base   = combo * series_len;
     float* __restrict__ out_ptr = out + base;
 
-    
+
     if (UNLIKELY(period <= 0 || period > series_len ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_ptr[i] = CG_NAN;
@@ -74,24 +74,24 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int warm   = first_valid + period;   
-    const int window = period - 1;             
+    const int warm   = first_valid + period;
+    const int window = period - 1;
 
-    
+
     for (int i = 0; i < warm; ++i) out_ptr[i] = CG_NAN;
 
     if (window <= 0) {
-        
+
         for (int i = warm; i < series_len; ++i) out_ptr[i] = 0.0f;
         return;
     }
 
-    
-    
+
+
     CompSum S_acc, T_acc;
     int nan_count = 0;
 
-    
+
     for (int k = 0; k < window; ++k) {
         const float p = prices[warm - k];
         if (isfinite(p)) {
@@ -102,38 +102,38 @@ extern "C" __global__ void cg_batch_f32(const float* __restrict__ prices,
         }
     }
 
-    
+
     {
         const float S = S_acc.val();
         out_ptr[warm] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
     }
 
-    
-    
-    
-    
+
+
+
+
     const int REFRESH_EVERY = 512;
     int since_refresh = 0;
     for (int i = warm; i < series_len - 1; ++i) {
-        const float add  = prices[i + 1];               
-        const float drop = prices[i - window + 1];      
+        const float add  = prices[i + 1];
+        const float drop = prices[i - window + 1];
 
         if (isfinite(add))  S_acc.add(add); else ++nan_count;
         if (isfinite(drop)) S_acc.sub(drop); else --nan_count;
 
-        
+
         T_acc.add(S_acc.val());
-        
+
         if (isfinite(drop)) T_acc.sub((float)window * drop);
 
-        
+
         const float S = S_acc.val();
         out_ptr[i + 1] = (nan_count > 0 || cg_bad_den(S)) ? 0.0f : (-T_acc.val() / S);
 
-        
+
         if (++since_refresh >= REFRESH_EVERY) {
             since_refresh = 0;
-            
+
             CompSum S_new, T_new;
             int nc = 0;
             const int cur = i + 1;
@@ -168,7 +168,7 @@ extern "C" __global__ void cg_many_series_one_param_f32(
     float*       __restrict__ col_out = out_tm    + series;
 
     if (UNLIKELY(period <= 0 || period > series_len)) {
-        
+
         for (int row = 0; row < series_len; ++row)
             col_out[(size_t)row * num_series] = CG_NAN;
         return;
@@ -191,7 +191,7 @@ extern "C" __global__ void cg_many_series_one_param_f32(
     const int warm   = first_valid + period;
     const int window = period - 1;
 
-    
+
     for (int row = 0; row < warm; ++row)
         col_out[(size_t)row * num_series] = CG_NAN;
 
@@ -201,7 +201,7 @@ extern "C" __global__ void cg_many_series_one_param_f32(
         return;
     }
 
-    
+
     CompSum S_acc, T_acc;
     int nan_count = 0;
     for (int k = 0; k < window; ++k) {
@@ -268,7 +268,7 @@ extern "C" __global__ void cg_prefix_prepare_f32(const float* __restrict__ price
                                                  float* __restrict__ Q,
                                                  int*   __restrict__ C)
 {
-    
+
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
     float ps = 0.0f;
@@ -290,7 +290,7 @@ extern "C" __global__ void cg_prefix_prepare_f32(const float* __restrict__ price
 
 
 extern "C" __global__ void cg_batch_f32_from_prefix(
-    const float* __restrict__ /*prices*/,   
+    const float* __restrict__ ,
     const int*   __restrict__ periods,
     int series_len,
     int n_combos,
@@ -320,14 +320,14 @@ extern "C" __global__ void cg_batch_f32_from_prefix(
     const int warm   = first_valid + period;
     const int window = period - 1;
 
-    
+
     for (int i = 0; i < warm; ++i) out_ptr[i] = CG_NAN;
     if (window <= 0) {
         for (int i = warm; i < series_len; ++i) out_ptr[i] = 0.0f;
         return;
     }
 
-    
+
     for (int i = warm; i < series_len; ++i) {
         const int a = i - window + 1;
         const int b = i;
@@ -339,7 +339,7 @@ extern "C" __global__ void cg_batch_f32_from_prefix(
         if (nans > 0 || cg_bad_den(sumP)) {
             out_ptr[i] = 0.0f;
         } else {
-            
+
             const float num = fmaf((float)(i + 1), sumP, -sumQ);
             out_ptr[i] = -num / sumP;
         }

@@ -66,7 +66,7 @@ __device__ inline float willr_close_only(const float* __restrict__ close,
     if (rng == 0.f) return CUDART_NAN_F;
     return 60.f * (close[idx] - hi) / rng + 80.f;
 }
-} 
+}
 
 
 
@@ -74,7 +74,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
-    const float* __restrict__ volume, 
+    const float* __restrict__ volume,
     int len,
     int first_valid,
     int n_rows,
@@ -89,8 +89,8 @@ extern "C" __global__ void mod_god_mode_batch_f32(
     const int row0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
 
-    
-    const int MAX_RING = 2048; 
+
+    const int MAX_RING = 2048;
 
     for (int row = row0; row < n_rows; row += stride) {
         const int n1 = n1s[row];
@@ -120,39 +120,39 @@ extern "C" __global__ void mod_god_mode_batch_f32(
         if (warm > len) warm = len;
         const int sig_start = warm + 6 - 1;
 
-        
+
         float ema1_c = 0.f, ema2_abs = 0.f, ema3_ci = 0.f;
         bool seed_e1 = false, seed_e2 = false, seed_e3 = false;
 
-        
+
         float rs_avg_gain = 0.f, rs_avg_loss = 0.f; bool rsi_seeded = false; int rs_init = 0;
         float prev_close = (first_valid < len) ? close[first_valid] : 0.f;
 
-        
+
         LaguerreRSI lrsi;
 
-        
+
         const int rsi_mod = (n2 > 0 && n2 < MAX_RING) ? n2 : MAX_RING;
         float rsi_ring[MAX_RING];
         for (int i = 0; i < rsi_mod; ++i) rsi_ring[i] = CUDART_NAN_F;
         int rsi_head = 0;
         float rsi_ema = 0.f; bool rsi_ema_seed = false;
 
-        
+
         const int mf_mod = (n3 > 0 && n3 < MAX_RING) ? n3 : MAX_RING;
         float mf_ring_mf[MAX_RING];
         signed char mf_ring_sgn[MAX_RING];
         for (int i = 0; i < mf_mod; ++i) { mf_ring_mf[i] = 0.f; mf_ring_sgn[i] = 0; }
         float mf_pos_sum = 0.f, mf_neg_sum = 0.f; int mf_head = 0; bool tp_has_prev = false; float tp_prev = 0.f;
 
-        
+
         float tsi_m_s = 0.f, tsi_m_l = 0.f, tsi_a_s = 0.f, tsi_a_l = 0.f; bool tsi_seed_s = false, tsi_seed_l = false;
         float csi_num_e1 = 0.f, csi_num_e2 = 0.f, csi_den_e1 = 0.f, csi_den_e2 = 0.f; bool csi_seed_e1 = false, csi_seed_e2 = false;
 
         for (int i = first_valid; i < len; ++i) {
             const float c = close[i];
 
-            
+
             if (!seed_e1) { ema1_c = c; seed_e1 = true; }
             else { ema1_c = ema_step(c, ema1_c, a1, b1); }
             float abs_dev = fabsf(c - ema1_c);
@@ -166,7 +166,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 tci_val = ema3_ci + 50.f;
             }
 
-            
+
             float rsi_val = CUDART_NAN_F;
             if (i == first_valid) {
                 rs_avg_gain = 0.f; rs_avg_loss = 0.f; rs_init = 0; rsi_seeded = false;
@@ -191,10 +191,10 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 }
             }
 
-            
+
             float lrsi_val = lrsi.update(c);
 
-            
+
             float mf_val = CUDART_NAN_F;
             if (use_volume_flag && volume != nullptr) {
                 float tp = (high[i] + low[i] + c) * (1.f / 3.f);
@@ -222,12 +222,12 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 mf_val = rsi_val;
             }
 
-            
+
             float cbci_val = CUDART_NAN_F;
             if (rsi_seeded) {
                 int oldi = rsi_head % rsi_mod;
                 float old_rsi = rsi_ring[oldi];
-                rsi_ring[oldi] = rsi_val; 
+                rsi_ring[oldi] = rsi_val;
                 rsi_head = (rsi_head + 1);
                 float mom = (is_finite(old_rsi) && is_finite(rsi_val)) ? (rsi_val - old_rsi) : CUDART_NAN_F;
                 if (!rsi_ema_seed && is_finite(rsi_val)) { rsi_ema = rsi_val; rsi_ema_seed = true; }
@@ -235,10 +235,10 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 if (is_finite(mom) && rsi_ema_seed) cbci_val = mom + rsi_ema;
             }
 
-            
+
             float csi_val = CUDART_NAN_F;
             float csi_mg_val = CUDART_NAN_F;
-            
+
             if (i > first_valid) {
                 float mom = c - prev_close; float am = fabsf(mom);
                 if (!tsi_seed_s) { tsi_m_s = mom; tsi_a_s = am; tsi_seed_s = true; }
@@ -251,7 +251,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 }
             }
 
-            
+
             if (i > first_valid) {
                 float pc = c - prev_close; float apc = fabsf(pc);
                 if (!csi_seed_e1) { csi_num_e1 = pc; csi_den_e1 = apc; csi_seed_e1 = true; }
@@ -264,20 +264,20 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 }
             }
 
-            
+
             if (i >= warm) {
                 float sum = 0.f; int cnt = 0;
-                if (mode == 0) { 
+                if (mode == 0) {
                     if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                     if (is_finite(csi_val)) { sum += csi_val; cnt++; }
                     if (is_finite(mf_val)) { sum += mf_val; cnt++; }
                     float wil = willr_close_only(close, i, n2);
                     if (is_finite(wil)) { sum += wil; cnt++; }
-                } else if (mode == 1) { 
+                } else if (mode == 1) {
                     if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                     if (is_finite(mf_val)) { sum += mf_val; cnt++; }
                     if (is_finite(rsi_val)) { sum += rsi_val; cnt++; }
-                } else if (mode == 2) { 
+                } else if (mode == 2) {
                     if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                     if (is_finite(csi_mg_val)) { sum += csi_mg_val; cnt++; }
                     if (is_finite(mf_val)) { sum += mf_val; cnt++; }
@@ -285,7 +285,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                     if (is_finite(wil)) { sum += wil; cnt++; }
                     if (is_finite(cbci_val)) { sum += cbci_val; cnt++; }
                     if (is_finite(lrsi_val)) { sum += lrsi_val; cnt++; }
-                } else { 
+                } else {
                     if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                     if (is_finite(mf_val)) { sum += mf_val; cnt++; }
                     if (is_finite(rsi_val)) { sum += rsi_val; cnt++; }
@@ -295,7 +295,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                 if (cnt > 0) {
                     float wt = sum / (float)cnt;
                     wt_row[i] = wt;
-                
+
                 if (i >= sig_start) {
                     float s = 0.f; int ready = 1;
                     for (int k = 0; k < 6; ++k) {
@@ -306,10 +306,10 @@ extern "C" __global__ void mod_god_mode_batch_f32(
                     if (ready) {
                         float sig = s / 6.f;
                         sig_row[i] = sig;
-                        
+
                         float d = (wt - sig) * 2.f + 50.f;
                         if (!is_finite(hist_row[i - 1])) {
-                            hist_row[i] = d; 
+                            hist_row[i] = d;
                         } else {
                             hist_row[i] = ema_step(d, hist_row[i - 1], a3, b3);
                         }
@@ -318,7 +318,7 @@ extern "C" __global__ void mod_god_mode_batch_f32(
             }
             prev_close = c;
         }
-        
+
     }
 }
 
@@ -330,13 +330,13 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
     const float* __restrict__ volume_tm,
-    int cols, 
-    int rows, 
+    int cols,
+    int rows,
     int n1, int n2, int n3, int mode, int use_volume_flag,
     float* __restrict__ wt_tm,
     float* __restrict__ sig_tm,
     float* __restrict__ hist_tm) {
-    int s = blockIdx.x; 
+    int s = blockIdx.x;
     if (s >= cols) return;
     if (threadIdx.x != 0) return;
 
@@ -344,7 +344,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
 
     auto idx = [cols](int t, int s) { return t * cols + s; };
 
-    
+
     int first_valid = 0; bool found = false;
     for (int t = 0; t < rows; ++t) {
         float v = close_tm[idx(t, s)];
@@ -364,7 +364,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
     if (warm > rows) warm = rows;
     const int sig_start = warm + 6 - 1;
 
-    
+
     for (int t = 0; t < rows; ++t) {
         wt_tm[idx(t, s)] = CUDART_NAN_F;
         sig_tm[idx(t, s)] = CUDART_NAN_F;
@@ -384,13 +384,13 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
     for (int i=0;i<mf_mod;++i){ mf_ring_mf[i]=0.f; mf_ring_sgn[i]=0; }
     float mf_pos_sum=0.f, mf_neg_sum=0.f; int mf_head=0; bool tp_has_prev=false; float tp_prev=0.f;
 
-    
+
     float tsi_m_s=0.f, tsi_m_l=0.f, tsi_a_s=0.f, tsi_a_l=0.f; bool tsi_seed_s=false, tsi_seed_l=false;
     float csi_num_e1=0.f, csi_num_e2=0.f, csi_den_e1=0.f, csi_den_e2=0.f; bool csi_seed_e1=false, csi_seed_e2=false;
 
     for (int t = first_valid; t < rows; ++t) {
         float c = close_tm[idx(t, s)];
-        
+
         if (!seed_e1) { ema1_c=c; seed_e1=true; } else { ema1_c = ema_step(c, ema1_c, a1, b1); }
         float abs_dev = fabsf(c - ema1_c);
         if (!seed_e2) { ema2_abs=abs_dev; seed_e2=true; } else { ema2_abs = ema_step(abs_dev, ema2_abs, a1, b1); }
@@ -400,7 +400,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
             if (!seed_e3) { ema3_ci=ci; seed_e3=true; } else { ema3_ci = ema_step(ci, ema3_ci, a2, b2); }
             tci_val = ema3_ci + 50.f;
         }
-        
+
         float rsi_val = CUDART_NAN_F;
         if (t == first_valid) { rs_avg_gain=0.f; rs_avg_loss=0.f; rs_init=0; }
         else {
@@ -432,7 +432,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
             tp_prev = tp; tp_has_prev = true;
         } else { mf_val = rsi_val; }
 
-        
+
         float cbci_val = CUDART_NAN_F;
         if (rsi_seeded) {
             int old = rsi_head % rsi_mod; float old_r = rsi_ring[old]; rsi_ring[old] = rsi_val; rsi_head++;
@@ -445,7 +445,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
         float csi_val = CUDART_NAN_F, csi_mg_val = CUDART_NAN_F;
         if (t > first_valid) {
             float mom = c - prev_close; float am = fabsf(mom);
-            
+
             if (!tsi_seed_s) { tsi_m_s=mom; tsi_a_s=am; tsi_seed_s=true; }
             else { tsi_m_s = ema_step(mom, tsi_m_s, a1, b1); tsi_a_s = ema_step(am, tsi_a_s, a1, b1); }
             if (!tsi_seed_l && tsi_seed_s) { tsi_m_l=tsi_m_s; tsi_a_l=tsi_a_s; tsi_seed_l=true; }
@@ -453,7 +453,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
             if (tsi_seed_l && tsi_a_l != 0.f && isfinite(tsi_a_l) && is_finite(rsi_val)) {
                 float tsi = 100.f * (tsi_m_l / tsi_a_l); csi_val = 0.5f * (rsi_val + (tsi * 0.5f + 50.f));
             }
-            
+
             if (!csi_seed_e1) { csi_num_e1=mom; csi_den_e1=am; csi_seed_e1=true; }
             else { csi_num_e1 = ema_step(mom, csi_num_e1, a1, b1); csi_den_e1 = ema_step(am, csi_den_e1, a1, b1); }
             if (!csi_seed_e2 && csi_seed_e1) { csi_num_e2=csi_num_e1; csi_den_e2=csi_den_e1; csi_seed_e2=true; }
@@ -465,7 +465,7 @@ extern "C" __global__ void mod_god_mode_many_series_one_param_time_major_f32(
 
         float sum = 0.f; int cnt = 0;
         if (t >= warm) {
-            if (mode == 0) { 
+            if (mode == 0) {
                 if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                 if (is_finite(csi_val)) { sum += csi_val; cnt++; }
                 if (is_finite(mf_val)) { sum += mf_val; cnt++; }
@@ -563,13 +563,13 @@ struct MonoDeque {
     }
 };
 
-} 
+}
 
 extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
-    const float* __restrict__ high,   
+    const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
-    const float* __restrict__ volume, 
+    const float* __restrict__ volume,
     int len,
     int first_valid,
     int n_rows,
@@ -582,17 +582,17 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
     float* __restrict__ signal_out,
     float* __restrict__ histogram_out)
 {
-    
+
     const int tid    = threadIdx.x;
     const int row0   = blockIdx.x * blockDim.x + tid;
     const int stride = blockDim.x * gridDim.x;
 
-    
+
     extern __shared__ unsigned char smem_raw[];
-    const int  cap   = pow2_cap();          
+    const int  cap   = pow2_cap();
     const int  mask  = pow2_mask();
 
-    
+
     unsigned char* p = smem_raw;
 
     float* rsi_base = reinterpret_cast<float*>(p);
@@ -601,7 +601,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
     float* mfi_mf_base = reinterpret_cast<float*>(p);
     p += sizeof(float) * cap * blockDim.x;
 
-    
+
     size_t off = reinterpret_cast<size_t>(p);
     off = (off + 3u) & ~size_t(3u);
     p = reinterpret_cast<unsigned char*>(off);
@@ -617,16 +617,16 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
     p += sizeof(int) * cap * blockDim.x;
 
     int* dq_min_base = reinterpret_cast<int*>(p);
-    
 
-    
+
+
     float*       rsi_ring  = rsi_base     + tid * cap;
     float*       mfi_mf    = mfi_mf_base  + tid * cap;
     signed char* mfi_sgn   = mfi_sgn_base + tid * cap;
     int*         dq_max    = dq_max_base  + tid * cap;
     int*         dq_min    = dq_min_base  + tid * cap;
 
-    
+
     for (int k = 0; k < cap; ++k) {
         rsi_ring[k] = CUDART_NAN_F;
         mfi_mf[k]   = 0.f;
@@ -634,7 +634,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
         dq_max[k]   = 0;
         dq_min[k]   = 0;
     }
-    __syncthreads(); 
+    __syncthreads();
 
     for (int row = row0; row < n_rows; row += stride) {
         const int n1   = n1s[row];
@@ -642,9 +642,9 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
         const int n3   = n3s[row];
         const int mode = modes[row];
 
-        
+
         if (n2 > cap || n3 > cap) {
-            
+
             continue;
         }
 
@@ -652,7 +652,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
         float* sig_row  = signal_out     + (size_t)row * len;
         float* hist_row = histogram_out  + (size_t)row * len;
 
-        
+
         for (int i = 0; i < len; ++i) {
             wt_row[i]   = CUDART_NAN_F;
             sig_row[i]  = CUDART_NAN_F;
@@ -673,39 +673,39 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
         if (warm > len) warm = len;
         const int sig_start = warm + 6 - 1;
 
-        
+
         float ema1_c=0.f, ema2_abs=0.f, ema3_ci=0.f; bool seed_e1=false, seed_e2=false, seed_e3=false;
-        
+
         float rs_avg_gain=0.f, rs_avg_loss=0.f; bool rsi_seeded=false; int rs_init=0;
         float prev_close = (first_valid < len) ? close[first_valid] : 0.f;
-        
+
         LaguerreRSI lrsi;
 
-        
+
         int   rsi_head = 0, rsi_count = 0;
         float rsi_ema  = 0.f; bool rsi_ema_seed = false;
 
-        
+
         Kahan mf_pos_sum, mf_neg_sum;
         int   mf_head = 0, mf_count = 0; bool tp_has_prev=false; float tp_prev=0.f;
 
-        
+
         float tsi_m_s=0.f, tsi_m_l=0.f, tsi_a_s=0.f, tsi_a_l=0.f; bool tsi_seed_s=false, tsi_seed_l=false;
         float csi_num_e1=0.f, csi_num_e2=0.f, csi_den_e1=0.f, csi_den_e2=0.f; bool csi_seed_e1=false, csi_seed_e2=false;
 
-        
+
         MonoDeque dqHi, dqLo;
         dqHi.init(dq_max, mask);
         dqLo.init(dq_min, mask);
 
-        
+
         float sig_sum6 = 0.f; bool sig_seeded=false;
 
-        
+
         for (int i = first_valid; i < len; ++i) {
             const float c = close[i];
 
-            
+
             if (!seed_e1) { ema1_c = c; seed_e1 = true; }
             else          { ema1_c = fmaf(b1, ema1_c, a1 * c); }
             float abs_dev = fabsf(c - ema1_c);
@@ -719,7 +719,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 tci_val = ema3_ci + 50.f;
             }
 
-            
+
             float rsi_val = CUDART_NAN_F;
             if (i == first_valid) {
                 rs_avg_gain=0.f; rs_avg_loss=0.f; rs_init=0; rsi_seeded=false;
@@ -744,10 +744,10 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 }
             }
 
-            
+
             float lrsi_val = lrsi.update(c);
 
-            
+
             float mf_val = CUDART_NAN_F;
             if (use_volume_flag && volume != nullptr) {
                 float tp = (high[i] + low[i] + c) * (1.f/3.f);
@@ -755,7 +755,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                     signed char sign = (tp > tp_prev) ? 1 : ((tp < tp_prev) ? -1 : 0);
                     float mf_raw = tp * volume[i];
 
-                    
+
                     if (rsi_seeded && mf_count >= n3) {
                         int ev = mf_head & mask;
                         float old_mf = mfi_mf[ev];
@@ -779,13 +779,13 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 }
                 tp_prev = tp; tp_has_prev = true;
             } else {
-                mf_val = rsi_val; 
+                mf_val = rsi_val;
             }
 
-            
+
             float cbci_val = CUDART_NAN_F;
             if (rsi_seeded) {
-                
+
                 rsi_ring[rsi_head & mask] = rsi_val;
                 rsi_head++; rsi_count++;
 
@@ -801,7 +801,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 if (is_finite(mom) && rsi_ema_seed) cbci_val = mom + rsi_ema;
             }
 
-            
+
             float csi_val = CUDART_NAN_F;
             if (i > first_valid) {
                 float mom = c - prev_close; float am = fabsf(mom);
@@ -817,7 +817,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 }
             }
 
-            
+
             float csi_mg_val = CUDART_NAN_F;
             if (i > first_valid) {
                 float pc  = c - prev_close; float apc = fabsf(pc);
@@ -833,12 +833,12 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 }
             }
 
-            
+
             float wil = CUDART_NAN_F;
-            
+
             dqHi.push_back_max(close, i);
             dqLo.push_back_min(close, i);
-            
+
             int oldest = i - n2 + 1;
             if (oldest < 0) oldest = 0;
             dqHi.expire(oldest);
@@ -850,26 +850,26 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 if (rng != 0.f) wil = 60.f * (c - hi) / rng + 80.f;
             }
 
-            
+
             if (i >= warm) {
                 float sum = 0.f; int cnt = 0;
-                if (mode == 0) { 
+                if (mode == 0) {
                     if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                     if (is_finite(csi_val)) { sum += csi_val; cnt++; }
                     if (is_finite(mf_val))  { sum += mf_val;  cnt++; }
                     if (is_finite(wil))     { sum += wil;     cnt++; }
-                } else if (mode == 1) { 
+                } else if (mode == 1) {
                     if (is_finite(tci_val)) { sum += tci_val; cnt++; }
                     if (is_finite(mf_val))  { sum += mf_val;  cnt++; }
                     if (is_finite(rsi_val)) { sum += rsi_val; cnt++; }
-                } else if (mode == 2) { 
+                } else if (mode == 2) {
                     if (is_finite(tci_val))     { sum += tci_val;     cnt++; }
                     if (is_finite(csi_mg_val))  { sum += csi_mg_val;  cnt++; }
                     if (is_finite(mf_val))      { sum += mf_val;      cnt++; }
                     if (is_finite(wil))         { sum += wil;         cnt++; }
                     if (is_finite(cbci_val))    { sum += cbci_val;    cnt++; }
                     if (is_finite(lrsi_val))    { sum += lrsi_val;    cnt++; }
-                } else { 
+                } else {
                     if (is_finite(tci_val))  { sum += tci_val;  cnt++; }
                     if (is_finite(mf_val))   { sum += mf_val;   cnt++; }
                     if (is_finite(rsi_val))  { sum += rsi_val;  cnt++; }
@@ -880,7 +880,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                     float wt = sum / (float)cnt;
                     wt_row[i] = wt;
 
-                
+
                 if (i >= sig_start) {
                     if (!sig_seeded) {
                         float s = 0.f; bool ok = true;
@@ -894,7 +894,7 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                         float old_w = wt_row[i - 6];
                         if (is_finite(old_w)) sig_sum6 += wt - old_w;
                         else {
-                            
+
                             float s = 0.f; bool ok = true;
                             for (int k = 0; k < 6; ++k) {
                                 float x = wt_row[i - (6 - 1) + k];
@@ -914,8 +914,8 @@ extern "C" __global__ void mod_god_mode_batch_f32_shared_fast(
                 }
             }
             prev_close = c;
-        } 
-    } 
+        }
+    }
 }
 
 }

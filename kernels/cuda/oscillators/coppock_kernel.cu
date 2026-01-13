@@ -17,13 +17,13 @@
 
 
 __device__ __forceinline__ bool any_nan3(float a, float b, float c) {
-    
+
     return __isnanf(a) | __isnanf(b) | __isnanf(c);
 }
 
 __device__ __forceinline__ float roc_sum_times100(float c, float inv_s, float inv_l) {
-    
-    
+
+
     float inv_sum = inv_s + inv_l;
     return fmaf(c, inv_sum, -2.0f) * 100.0f;
 }
@@ -37,7 +37,7 @@ __device__ __forceinline__ void comp_add(float x, float &sum, float &comp) {
 }
 
 __device__ __forceinline__ void comp_sub(float x, float &sum, float &comp) {
-    
+
     comp_add(-x, sum, comp);
 }
 
@@ -45,15 +45,15 @@ __device__ __forceinline__ void comp_sub(float x, float &sum, float &comp) {
 
 
 extern "C" __global__ void coppock_batch_f32(
-    const float* __restrict__ price, 
-    const float* __restrict__ inv,   
+    const float* __restrict__ price,
+    const float* __restrict__ inv,
     int len,
     int first_valid,
-    const int* __restrict__ shorts,      
-    const int* __restrict__ longs,       
-    const int* __restrict__ ma_periods,  
+    const int* __restrict__ shorts,
+    const int* __restrict__ longs,
+    const int* __restrict__ ma_periods,
     int n_combos,
-    float* __restrict__ out              
+    float* __restrict__ out
 )
 {
     int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -67,17 +67,17 @@ extern "C" __global__ void coppock_batch_f32(
 
     float* row_out = out + (size_t)row * (size_t)len;
 
-    
+
     const int pre = warm < len ? warm : len;
     for (int t = 0; t < pre; ++t) row_out[t] = XNAN;
     if (warm >= len) return;
 
-    
+
     const float denom_w = 0.5f * (float)m * (float)(m + 1);
 
-    
-    float sum = 0.0f, sum_c = 0.0f;     
-    float wsum = 0.0f, wsum_c = 0.0f;   
+
+    float sum = 0.0f, sum_c = 0.0f;
+    float wsum = 0.0f, wsum_c = 0.0f;
     int bad_count = 0;
 
     int w = 1;
@@ -86,7 +86,7 @@ extern "C" __global__ void coppock_batch_f32(
         const int js = j - s;
         const int jl = j - l;
 
-        
+
         const float c  = price[j];
         const float ps = price[js];
         const float pl = price[jl];
@@ -96,7 +96,7 @@ extern "C" __global__ void coppock_batch_f32(
 
         const float v = roc_sum_times100(c, inv[js], inv[jl]);
 
-        
+
         comp_add(v, sum, sum_c);
         comp_add(v * (float)w, wsum, wsum_c);
     }
@@ -104,19 +104,19 @@ extern "C" __global__ void coppock_batch_f32(
     if (bad_count > 0) {
         row_out[warm] = XNAN;
     } else {
-        
+
         const float sum_eff  = sum + sum_c;
         const float wsum_eff = wsum + wsum_c;
-        (void)sum_eff; 
+        (void)sum_eff;
         row_out[warm] = wsum_eff / denom_w;
     }
 
-    
+
     bool state_valid = (bad_count == 0);
 
-    
+
     for (int t = warm + 1; t < len; ++t) {
-        
+
         const int jn  = t;
         const int jns = jn - s;
         const int jnl = jn - l;
@@ -125,10 +125,10 @@ extern "C" __global__ void coppock_batch_f32(
         const float pnl = price[jnl];
         const bool inv_new = any_nan3(cn, pns, pnl);
 
-        float v_new = 0.0f; 
+        float v_new = 0.0f;
         if (!inv_new) v_new = roc_sum_times100(cn, inv[jns], inv[jnl]);
 
-        
+
         const int jo  = t - m;
         const int jos = jo - s;
         const int jol = jo - l;
@@ -140,12 +140,12 @@ extern "C" __global__ void coppock_batch_f32(
         float v_old = 0.0f;
         if (!inv_old) v_old = roc_sum_times100(co, inv[jos], inv[jol]);
 
-        
+
         bad_count += (int)inv_new - (int)inv_old;
 
         if (bad_count == 0) {
             if (!state_valid) {
-                
+
                 sum = 0.0f; sum_c = 0.0f;
                 wsum = 0.0f; wsum_c = 0.0f;
                 int ww = 1;
@@ -156,21 +156,21 @@ extern "C" __global__ void coppock_batch_f32(
                     const float c2  = price[j];
                     const float ps2 = price[js2];
                     const float pl2 = price[jl2];
-                    (void)ps2; (void)pl2; 
-                    
+                    (void)ps2; (void)pl2;
+
                     const float v2 = roc_sum_times100(c2, inv[js2], inv[jl2]);
                     comp_add(v2, sum, sum_c);
                     comp_add(v2 * (float)ww, wsum, wsum_c);
                 }
                 state_valid = true;
             } else {
-                
-                
-                const float sum_prev = sum + sum_c; 
-                
+
+
+                const float sum_prev = sum + sum_c;
+
                 comp_add((float)m * v_new, wsum, wsum_c);
                 comp_sub(sum_prev,            wsum, wsum_c);
-                
+
                 comp_add(v_new, sum, sum_c);
                 comp_sub(v_old, sum, sum_c);
             }
@@ -190,15 +190,15 @@ extern "C" __global__ void coppock_batch_f32(
 
 
 extern "C" __global__ void coppock_batch_time_parallel_f32(
-    const float* __restrict__ price, 
-    const float* __restrict__ inv,   
+    const float* __restrict__ price,
+    const float* __restrict__ inv,
     int len,
     int first_valid,
-    const int* __restrict__ shorts,      
-    const int* __restrict__ longs,       
-    const int* __restrict__ ma_periods,  
+    const int* __restrict__ shorts,
+    const int* __restrict__ longs,
+    const int* __restrict__ ma_periods,
     int n_combos,
-    float* __restrict__ out              
+    float* __restrict__ out
 )
 {
     const int row = (int)blockIdx.y;
@@ -214,7 +214,7 @@ extern "C" __global__ void coppock_batch_time_parallel_f32(
 
     float* row_out = out + (size_t)row * (size_t)len;
 
-    
+
     const float denom_w = 0.5f * (float)m * (float)(m + 1);
     const float inv_denom = __fdividef(1.0f, denom_w);
 
@@ -228,12 +228,12 @@ extern "C" __global__ void coppock_batch_time_parallel_f32(
             float wsum = 0.0f;
             bool bad = false;
 
-            
+
             int w = 1;
             for (int j = start; j <= t; ++j, ++w) {
                 const int js = j - s;
                 const int jl = j - l;
-                
+
                 const float c  = price[j];
                 const float ps = price[js];
                 const float pl = price[jl];
@@ -254,15 +254,15 @@ extern "C" __global__ void coppock_batch_time_parallel_f32(
 
 
 extern "C" __global__ void coppock_many_series_one_param_f32(
-    const float* __restrict__ price_tm,   
-    const float* __restrict__ inv_tm,     
-    const int* __restrict__ first_valids, 
+    const float* __restrict__ price_tm,
+    const float* __restrict__ inv_tm,
+    const int* __restrict__ first_valids,
     int cols, int rows,
     int short_p, int long_p, int ma_period,
-    float* __restrict__ out_tm            
+    float* __restrict__ out_tm
 )
 {
-    int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const int first_valid = first_valids[s];
@@ -271,14 +271,14 @@ extern "C" __global__ void coppock_many_series_one_param_f32(
     const int warm = first_valid + largest + (m - 1);
     const float denom_w = 0.5f * (float)m * (float)(m + 1);
 
-    
+
     const int pre = warm < rows ? warm : rows;
     for (int t = 0; t < pre; ++t) {
         out_tm[(size_t)t * (size_t)cols + s] = XNAN;
     }
     if (warm >= rows) return;
 
-    
+
     float sum = 0.0f, sum_c = 0.0f;
     float wsum = 0.0f, wsum_c = 0.0f;
     int bad_count = 0;
@@ -313,9 +313,9 @@ extern "C" __global__ void coppock_many_series_one_param_f32(
 
     bool state_valid = (bad_count == 0);
 
-    
+
     for (int t = warm + 1; t < rows; ++t) {
-        
+
         const int jn = t;
         const int jns = jn - short_p;
         const int jnl = jn - long_p;
@@ -332,7 +332,7 @@ extern "C" __global__ void coppock_many_series_one_param_f32(
         float v_new = 0.0f;
         if (!inv_new) v_new = roc_sum_times100(cn, inv_tm[idxjns], inv_tm[idxjnl]);
 
-        
+
         const int jo = t - m;
         const int jos = jo - short_p;
         const int jol = jo - long_p;
@@ -354,7 +354,7 @@ extern "C" __global__ void coppock_many_series_one_param_f32(
         float* dst = out_tm + (size_t)t * (size_t)cols + s;
         if (bad_count == 0) {
             if (!state_valid) {
-                
+
                 sum = 0.0f; sum_c = 0.0f;
                 wsum = 0.0f; wsum_c = 0.0f;
                 int ww = 1;
@@ -388,4 +388,4 @@ extern "C" __global__ void coppock_many_series_one_param_f32(
     }
 }
 
-#endif 
+#endif

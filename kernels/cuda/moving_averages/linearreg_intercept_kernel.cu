@@ -93,7 +93,7 @@ void linearreg_intercept_batch_from_prefix_f64(
 
     const int warm = first_valid + period - 1;
 
-    
+
     if (period == 1) {
         while (t < series_len) {
             if (t < warm) {
@@ -153,7 +153,7 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
         const int base   = combo * series_len;
         const int period = periods[combo];
 
-        
+
         if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out[base + i] = LINREG_INTERCEPT_NAN;
             continue;
@@ -169,18 +169,18 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
         const double x_sum      = static_cast<double>(x_sums[combo]);
         const double denom_inv  = static_cast<double>(denom_invs[combo]);
         const double inv_period = static_cast<double>(inv_periods[combo]);
-        const double k          = 1.0 - x_sum * inv_period; 
+        const double k          = 1.0 - x_sum * inv_period;
 
-        
+
         for (int i = 0; i < warm; ++i) out[base + i] = LINREG_INTERCEPT_NAN;
 
-        
+
         if (period == 1) {
             for (int idx = warm; idx < series_len; ++idx) out[base + idx] = prices[idx];
             continue;
         }
 
-        
+
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int kx = 0; kx < period - 1; ++kx) {
@@ -194,11 +194,11 @@ void linearreg_intercept_batch_f32(const float* __restrict__ prices,
 
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum += latest;
-            xy_sum = fma(latest, period_f, xy_sum); 
+            xy_sum = fma(latest, period_f, xy_sum);
 
             const double b_num = fma(period_f, xy_sum, -x_sum * y_sum);
             const double b     = b_num * denom_inv;
-            const double y     = y_sum * inv_period + b * k; 
+            const double y     = y_sum * inv_period + b * k;
             out[base + idx] = static_cast<float>(y);
 
             xy_sum -= y_sum;

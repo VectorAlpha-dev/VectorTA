@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry vlma_batch_sma_std_prefix_f32(
 	.param .u64 vlma_batch_sma_std_prefix_f32_param_0,
@@ -492,7 +492,7 @@ $L__BB0_44:
 	ret;
 
 }
-	
+
 .visible .entry vlma_many_series_one_param_f32(
 	.param .u64 vlma_many_series_one_param_f32_param_0,
 	.param .u64 vlma_many_series_one_param_f32_param_1,

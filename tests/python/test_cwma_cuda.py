@@ -4,8 +4,8 @@ import numpy as np
 
 try:
     import cupy as cp
-except Exception:  
-    
+except Exception:
+
     cp = None
 
 try:

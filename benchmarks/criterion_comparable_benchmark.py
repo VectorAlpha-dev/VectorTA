@@ -27,39 +27,39 @@ os.environ['NUMEXPR_NUM_THREADS'] = '1'
 
 class CriterionComparableBenchmark:
     """Benchmark harness that matches Criterion's methodology."""
-    
+
     def __init__(self, data_size: str = '1M', filter_indicator: str = None):
         self.data_size = data_size
         self.filter_indicator = filter_indicator
         self.rust_results = {}
         self.python_results = {}
-        
-        
-        self.warmup_target_ns = 150_000_000  
-        self.sample_count = 10  
-        self.min_iterations = 10  
-        
+
+
+        self.warmup_target_ns = 150_000_000
+        self.sample_count = 10
+        self.min_iterations = 10
+
     def load_csv_data(self) -> Dict[str, np.ndarray]:
         """Load CSV data once, outside of timing loops."""
         csv_path = Path(__file__).parent.parent / 'src/data/1MillionCandles.csv'
-        
-        
+
+
         with open(csv_path, 'r') as f:
-            f.readline()  
-            
+            f.readline()
+
             line_count = sum(1 for _ in f)
-        
-        
+
+
         timestamps = np.empty(line_count, dtype=np.int64)
         opens = np.empty(line_count, dtype=np.float64)
         highs = np.empty(line_count, dtype=np.float64)
         lows = np.empty(line_count, dtype=np.float64)
         closes = np.empty(line_count, dtype=np.float64)
         volumes = np.empty(line_count, dtype=np.float64)
-        
-        
+
+
         with open(csv_path, 'r') as f:
-            f.readline()  
+            f.readline()
             import csv
             reader = csv.reader(f)
             valid_count = 0
@@ -75,8 +75,8 @@ class CriterionComparableBenchmark:
                         valid_count += 1
                     except ValueError:
                         continue
-        
-        
+
+
         data = {
             'timestamps': np.ascontiguousarray(timestamps[:valid_count]),
             'open': np.ascontiguousarray(opens[:valid_count]),
@@ -85,21 +85,21 @@ class CriterionComparableBenchmark:
             'close': np.ascontiguousarray(closes[:valid_count]),
             'volume': np.ascontiguousarray(volumes[:valid_count])
         }
-        
+
         print(f"Loaded {valid_count} candles")
         return data
-    
+
     def parse_criterion_json(self):
         """Parse Criterion's JSON output files for accurate medians."""
         criterion_dir = Path(__file__).parent.parent / 'target/criterion'
         if not criterion_dir.exists():
             print("Warning: No Criterion results found. Run Rust benchmarks first.")
             return
-        
+
         print("\nParsing Criterion JSON results...")
         print("-" * 80)
-        
-        
+
+
         indicators_to_find = [
             'alma', 'alligator', 'alphatrend', 'aroonosc', 'avsl', 'bollinger_bands', 'ao', 'dma', 'range_filter', 'sama', 'buff_averages', 'vpwma', 'volume_adjusted_ma', 'vwma', 'vwmacd', 'wilders', 'willr', 'wma', 'zlema', 'ad', 'adx', 'acosc', 'adosc', 'apo',
             'bandpass', 'vwap', 'cwma', 'dema', 'deviation', 'dpo', 'er', 'edcf', 'ehlers_ecema', 'ehlers_itrend', 'ehlers_kama', 'ema', 'epma', 'eri',
@@ -109,133 +109,133 @@ class CriterionComparableBenchmark:
             'supersmoother_3_pole', 'supersmoother', 'supertrend', 'ultosc', 'swma', 'tema', 'tilson', 'tradjema',
             'trendflex', 'ttm_trend', 'trima', 'uma', 'vidya', 'vlma', 'vqwma', 'vwmacd', 'adxr', 'aroon', 'bollinger_bands_width', 'atr', 'cci', 'bop',
             'cg', 'cfo', 'chandelier_exit', 'coppock', 'correl_hl', 'marketefi', 'midpoint', 'vi', 'vpt', 'cmo', 'dec_osc', 'macd', 'mfi', 'natr', 'ppo', 'rsi', 'var', 'vpci', 'wclprice', 'damiani_volatmeter', 'emd', 'gatorosc', 'wavetrend', 'chop', 'cvi', 'di', 'dm', 'efi', 'fosc', 'ui', 'vosc', 'dti', 'dx', 'keltner', 'rvi',
-            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama', 'squeeze_momentum'  
+            'cci_cycle', 'fvg_trailing_stop', 'halftrend', 'net_myrsi', 'reverse_rsi', 'vama', 'squeeze_momentum'
         ]
-        
+
         size_map = {'10k': '10k', '100k': '100k', '1M': '1m'}
         target_size = size_map.get(self.data_size, '1m')
-        
-        
-        batch_indicators = ['alma_batch', 'aroonosc_batch', 'avsl_batch', 'bollinger_bands_batch', 'ao_batch', 'ad_batch', 'dma_batch', 'range_filter_batch', 'sama_batch', 'buff_averages_batch', 'volume_adjusted_ma_batch', 'vpwma_batch', 'vwmacd_batch', 'wilders_batch', 'vwap_batch', 'willr_batch', 'voss_batch', 'wma_batch', 'zlema_batch', 
-                           'sma_batch', 'stddev_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'deviation_batch', 'dti_batch', 'dm_batch', 'edcf_batch', 'ehlers_ecema_batch', 'ehlers_itrend_batch', 'ehlers_pma_batch', 'eri_batch', 'tema_batch', 'uma_batch', 'chandelier_exit_batch', 'percentile_nearest_rank_batch', 
+
+
+        batch_indicators = ['alma_batch', 'aroonosc_batch', 'avsl_batch', 'bollinger_bands_batch', 'ao_batch', 'ad_batch', 'dma_batch', 'range_filter_batch', 'sama_batch', 'buff_averages_batch', 'volume_adjusted_ma_batch', 'vpwma_batch', 'vwmacd_batch', 'wilders_batch', 'vwap_batch', 'willr_batch', 'voss_batch', 'wma_batch', 'zlema_batch',
+                           'sma_batch', 'stddev_batch', 'ema_batch', 'dema_batch', 'dpo_batch', 'er_batch', 'deviation_batch', 'dti_batch', 'dm_batch', 'edcf_batch', 'ehlers_ecema_batch', 'ehlers_itrend_batch', 'ehlers_pma_batch', 'eri_batch', 'tema_batch', 'uma_batch', 'chandelier_exit_batch', 'percentile_nearest_rank_batch',
                            'hma_batch', 'ift_rsi_batch', 'kvo_batch', 'kst_batch', 'lrsi_batch', 'mean_ad_batch', 'mom_batch', 'pivot_batch', 'rocp_batch', 'stochf_batch', 'cwma_batch', 'adxr_batch', 'adx_batch', 'acosc_batch', 'adosc_batch', 'aroon_batch', 'linearreg_intercept_batch',
-                           'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 'cmo_batch', 'correl_hl_batch', 
+                           'bollinger_bands_width_batch', 'apo_batch', 'bandpass_batch', 'atr_batch', 'cci_batch', 'bop_batch', 'cmo_batch', 'correl_hl_batch',
                            'trendflex_batch', 'mass_batch', 'midprice_batch', 'obv_batch', 'qstick_batch', 'stc_batch', 'tsi_batch', 'vidya_batch',
                            'cci_cycle_batch', 'dvdiqqe_batch', 'fvg_trailing_stop_batch', 'halftrend_batch', 'net_myrsi_batch', 'reverse_rsi_batch', 'vama_batch', 'damiani_volatmeter_batch']
         all_indicators = indicators_to_find + batch_indicators
-        
+
         for indicator in all_indicators:
             if self.filter_indicator and not indicator.startswith(self.filter_indicator):
                 continue
-                
-            
+
+
             best_time = float('inf')
             best_kernel = None
-            
-            
+
+
             possible_dirs = [indicator, f"{indicator}_bench"]
-            
+
             for dir_name in possible_dirs:
                 dir_path = criterion_dir / dir_name
                 if not dir_path.exists():
                     continue
-                    
-                
+
+
                 if indicator.endswith('_batch'):
                     kernels_to_check = ['avx512batch', 'avx2batch', 'scalarbatch', '']
                 else:
                     kernels_to_check = ['avx512', 'avx2', 'scalar', '']
-                    
+
                 for kernel in kernels_to_check:
                     if kernel:
-                        
+
                         bench_name = f"{indicator}_{kernel}"
                         json_path = dir_path / bench_name / target_size / 'new' / 'estimates.json'
                     else:
-                        
-                        
+
+
                         json_path = dir_path / 'scalar' / target_size / 'new' / 'estimates.json'
                         if not json_path.exists():
-                            
+
                             json_path = dir_path / target_size / 'new' / 'estimates.json'
-                    
+
                     if json_path.exists():
                         try:
                             with open(json_path, 'r') as f:
                                 data = json.load(f)
                                 median_ns = data['median']['point_estimate']
                                 median_ms = median_ns / 1_000_000
-                                
+
                                 if median_ms < best_time:
                                     best_time = median_ms
                                     best_kernel = kernel or 'auto'
                         except Exception as e:
                             print(f"  Error reading {json_path}: {e}")
-            
+
             if best_time < float('inf'):
                 self.rust_results[indicator] = best_time
                 print(f"  {indicator}: {best_time:.3f} ms (kernel: {best_kernel})")
-    
+
     def benchmark_function(self, func: Callable, name: str) -> float:
         """
         Benchmark a function using Criterion-like methodology.
         Returns median time in milliseconds.
         """
-        
+
         gc_was_enabled = gc.isenabled()
         gc.disable()
-        
+
         try:
-            
+
             warmup_elapsed = 0
             warmup_iterations = 0
-            
+
             while warmup_elapsed < self.warmup_target_ns:
                 start = time.perf_counter_ns()
                 func()
                 end = time.perf_counter_ns()
                 warmup_elapsed += (end - start)
                 warmup_iterations += 1
-            
-            
+
+
             samples = []
-            
+
             for _ in range(self.sample_count):
-                
+
                 iterations = max(self.min_iterations, warmup_iterations // 10)
-                
+
                 start = time.perf_counter_ns()
                 for _ in range(iterations):
                     func()
                 end = time.perf_counter_ns()
-                
-                
+
+
                 time_per_iter = (end - start) / iterations
                 samples.append(time_per_iter)
-            
-            
+
+
             median_ns = np.median(samples)
-            return median_ns / 1_000_000  
-            
+            return median_ns / 1_000_000
+
         finally:
-            
+
             if gc_was_enabled:
                 gc.enable()
-    
+
     def run_python_benchmarks(self):
         """Run Python benchmarks with pre-allocated buffers."""
         print("\n\nRunning Python benchmarks (Criterion-comparable)...")
         print("-" * 80)
-        
+
         data = self.load_csv_data()
-        
-        
+
+
         output_buffers = {
             'single': np.empty_like(data['close']),
-            'multi': np.empty((4, len(data['close'])), dtype=np.float64),  
+            'multi': np.empty((4, len(data['close'])), dtype=np.float64),
         }
-        
-        
+
+
         indicators = [
             ('alma', lambda: my_project.alma(data['close'], 9, 0.85, 6.0)),
             ('avsl', lambda: my_project.avsl(data['close'], 14, 10.0)),
@@ -431,13 +431,13 @@ class CriterionComparableBenchmark:
             ('reverse_rsi', lambda: my_project.reverse_rsi(data['close'], 14, 50.0)),
             ('vama', lambda: my_project.vama(data['close'], 9, 2.0)),
         ]
-        
-        
+
+
         if self.filter_indicator:
-            indicators = [(name, func) for name, func in indicators 
+            indicators = [(name, func) for name, func in indicators
                          if name.startswith(self.filter_indicator)]
-        
-        
+
+
         for name, func in indicators:
             try:
                 median_time = self.benchmark_function(func, name)
@@ -445,8 +445,8 @@ class CriterionComparableBenchmark:
                 print(f"  {name}: {median_time:.3f} ms")
             except Exception as e:
                 print(f"  {name}: FAILED - {str(e)[:50]}...")
-        
-        
+
+
         print("\n  Batch operations (232 combos - matching Rust defaults):")
         batch_indicators = [
             ('alma_batch', lambda: my_project.alma_batch(data['close'], (9, 240, 1), (0.85, 0.85, 0.0), (6.0, 6.0, 0.0))),
@@ -599,12 +599,12 @@ class CriterionComparableBenchmark:
             ('reverse_rsi_batch', lambda: my_project.reverse_rsi_batch(data['close'], (14, 14, 0), (50.0, 50.0, 0.0))),
             ('pvi_batch', lambda: my_project.pvi_batch(data['close'], data['volume'], (1000.0, 1000.0, 0.0))),
         ]
-        
-        
+
+
         if self.filter_indicator:
-            batch_indicators = [(name, func) for name, func in batch_indicators 
+            batch_indicators = [(name, func) for name, func in batch_indicators
                                if name.startswith(self.filter_indicator)]
-        
+
         for name, func in batch_indicators:
             try:
                 median_time = self.benchmark_function(func, name)
@@ -612,7 +612,7 @@ class CriterionComparableBenchmark:
                 print(f"  {name}: {median_time:.3f} ms")
             except Exception as e:
                 print(f"  {name}: FAILED - {str(e)[:50]}...")
-    
+
     def compare_results(self):
         """Compare Python and Rust results."""
         print("\n\n" + "=" * 80)
@@ -620,18 +620,18 @@ class CriterionComparableBenchmark:
         print("=" * 80)
         print(f"{'Indicator':25} {'Python (ms)':>12} {'Rust (ms)':>12} {'Overhead':>12} {'Status':>10}")
         print("-" * 80)
-        
+
         comparisons = []
-        
+
         for indicator in sorted(self.python_results.keys()):
             python_time = self.python_results[indicator]
-            
+
             if indicator in self.rust_results:
                 rust_time = self.rust_results[indicator]
                 overhead_ms = python_time - rust_time
                 overhead_pct = (python_time / rust_time - 1) * 100
-                
-                
+
+
                 if overhead_pct <= 15:
                     status = "EXCELLENT"
                 elif overhead_pct <= 30:
@@ -640,10 +640,10 @@ class CriterionComparableBenchmark:
                     status = "OK"
                 else:
                     status = "HIGH"
-                
+
                 print(f"{indicator:25} {python_time:12.2f} {rust_time:12.2f} "
                       f"{overhead_pct:11.1f}% {status}")
-                
+
                 comparisons.append({
                     'indicator': indicator,
                     'python_ms': python_time,
@@ -653,22 +653,22 @@ class CriterionComparableBenchmark:
                 })
             else:
                 print(f"{indicator:25} {python_time:12.2f} {'N/A':>12} {'N/A':>12}")
-        
-        
+
+
         if comparisons:
             avg_overhead = np.mean([c['overhead_pct'] for c in comparisons])
             median_overhead = np.median([c['overhead_pct'] for c in comparisons])
             print("\n" + "-" * 80)
             print(f"Average overhead: {avg_overhead:.1f}%")
             print(f"Median overhead: {median_overhead:.1f}%")
-        
-        
+
+
         print("\n\n" + "=" * 80)
         print("BATCH vs SINGLE ANALYSIS")
         print("=" * 80)
         print(f"{'Indicator':20} {'Single (ms)':>12} {'Batch (ms)':>12} {'Overhead':>12} {'Status':>10}")
         print("-" * 80)
-        
+
         batch_comparisons = []
         for base_name in ['alma', 'aroonosc', 'ao', 'avsl', 'dma', 'range_filter', 'vpwma', 'wma', 'zlema', 'sma', 'ema', 'dema', 'dpo', 'er', 'tema', 'hma', 'ift_rsi', 'kvo', 'kst', 'lrsi', 'macz', 'mean_ad', 'pivot', 'rocp', 'stochf', 'cwma', 'keltner', 'adxr', 'adx', 'adosc', 'aroon', 'bollinger_bands_width', 'apo', 'bandpass', 'atr', 'cg', 'cci', 'cfo', 'linearreg_intercept', 'mass', 'midprice', 'natr', 'net_myrsi', 'obv', 'ott', 'qstick', 'stc', 'tsi', 'midpoint', 'cmo', 'dec_osc', 'donchian', 'mfi', 'ppo', 'rsi', 'var', 'vpci', 'gatorosc', 'kurtosis', 'mab', 'msw', 'supertrend', 'cvi', 'di', 'wad', 'correlation_cycle', 'pfe', 'roc', 'rvi', 'minmax', 'squeeze_momentum']:
             if base_name in self.python_results and f"{base_name}_batch" in self.python_results:
@@ -676,25 +676,25 @@ class CriterionComparableBenchmark:
                 batch_time = self.python_results[f"{base_name}_batch"]
                 overhead_ms = batch_time - single_time
                 overhead_pct = (batch_time / single_time - 1) * 100
-                
+
                 if overhead_pct <= 10:
                     status = "OK"
                 elif overhead_pct <= 20:
                     status = "MODERATE"
                 else:
                     status = "HIGH"
-                
+
                 print(f"{base_name:20} {single_time:12.2f} {batch_time:12.2f} "
                       f"{overhead_pct:11.1f}% {status}")
-                
+
                 batch_comparisons.append({
                     'indicator': base_name,
                     'single_ms': single_time,
                     'batch_ms': batch_time,
                     'overhead_pct': overhead_pct
                 })
-        
-        
+
+
         results = {
             'methodology': 'criterion-comparable',
             'warmup_ms': self.warmup_target_ns / 1_000_000,
@@ -707,11 +707,11 @@ class CriterionComparableBenchmark:
             'comparisons': comparisons,
             'batch_comparisons': batch_comparisons
         }
-        
+
         output_path = Path(__file__).parent / 'criterion_comparable_results.json'
         with open(output_path, 'w') as f:
             json.dump(results, f, indent=2)
-        
+
         print(f"\nResults saved to benchmarks/criterion_comparable_results.json")
 
 
@@ -722,7 +722,7 @@ def main():
     parser.add_argument('--size', default='1M', choices=['10k', '100k', '1M'],
                        help='Data size to use (default: 1M)')
     args = parser.parse_args()
-    
+
     print("Criterion-Comparable Python Benchmark")
     print("=" * 80)
     print("Features:")
@@ -734,19 +734,19 @@ def main():
     print(f"\nData size: {args.size}")
     if args.filter:
         print(f"Filtering for: {args.filter}")
-    
+
     benchmark = CriterionComparableBenchmark(
         data_size=args.size,
         filter_indicator=args.filter
     )
-    
-    
+
+
     benchmark.parse_criterion_json()
-    
-    
+
+
     benchmark.run_python_benchmarks()
-    
-    
+
+
     benchmark.compare_results()
 
 

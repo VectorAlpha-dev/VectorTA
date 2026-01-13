@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 .visible .entry di_batch_from_precomputed_f32(
@@ -30,7 +30,7 @@
 	.reg .f32 	%f<282>;
 	.reg .b32 	%r<103>;
 	.reg .b64 	%rd<63>;
-	
+
 	.shared .align 4 .b8 _ZZN43_INTERNAL_f6a03fef_12_di_kernel_cu_ec9da2fa16block_reduce_sumEfE9warp_sums[128];
 
 	ld.param.u64 	%rd30, [di_batch_from_precomputed_f32_param_0];
@@ -584,7 +584,7 @@ $L__BB0_64:
 	ret;
 
 }
-	
+
 .visible .entry di_many_series_one_param_f32(
 	.param .u64 di_many_series_one_param_f32_param_0,
 	.param .u64 di_many_series_one_param_f32_param_1,

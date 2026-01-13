@@ -20,7 +20,7 @@ class TestVidya:
         return candles["close"]
 
     def test_accuracy_last5_matches_rust(self, close):
-        
+
         expected_last5 = np.array([
             59553.42785306692,
             59503.60445032524,
@@ -32,13 +32,13 @@ class TestVidya:
         out = ta.vidya(close.astype(np.float64), 2, 5, 0.2)
         assert len(out) == len(close)
 
-        
+
         last5 = np.asarray(out)[-5:]
         assert_close(last5, expected_last5, rtol=0.0, atol=1e-1, msg="VIDYA last5")
 
     def test_warmup_and_nans(self, close):
         out = ta.vidya(close.astype(np.float64), 2, 5, 0.2)
-        
+
         assert np.isnan(out[0]) and np.isnan(out[1]) and np.isnan(out[2])
         assert not np.any(np.isnan(out[3:])), "No NaN after warmup"
 
@@ -47,15 +47,15 @@ class TestVidya:
         with pytest.raises(Exception):
             ta.vidya(np.array([], dtype=np.float64), 2, 5, 0.2)
         with pytest.raises(Exception):
-            ta.vidya(data, 0, 5, 0.2)          
+            ta.vidya(data, 0, 5, 0.2)
         with pytest.raises(Exception):
-            ta.vidya(data, 3, 2, 0.2)          
+            ta.vidya(data, 3, 2, 0.2)
         with pytest.raises(Exception):
-            ta.vidya(data, 2, 5, -0.1)         
+            ta.vidya(data, 2, 5, -0.1)
         with pytest.raises(Exception):
-            ta.vidya(data, 2, 5, 1.1)          
+            ta.vidya(data, 2, 5, 1.1)
         with pytest.raises(Exception):
-            ta.vidya(np.array([1.0, 2.0], dtype=np.float64), 2, 5, 0.2)  
+            ta.vidya(np.array([1.0, 2.0], dtype=np.float64), 2, 5, 0.2)
 
     def test_reinput_len_matches(self, close):
         first = ta.vidya(close.astype(np.float64), 2, 5, 0.2)
@@ -64,4 +64,4 @@ class TestVidya:
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-q"]) 
+    pytest.main([__file__, "-q"])

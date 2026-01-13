@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -25,7 +25,7 @@ def _cuda_available() -> bool:
         return False
     try:
         x = np.arange(0, 64, dtype=np.float32)
-        x[:5] = np.nan  
+        x[:5] = np.nan
         handle = ti.ao_cuda_batch_dev(x, (5, 5, 0), (34, 34, 0))
         _ = cp.asarray(handle)
         return True

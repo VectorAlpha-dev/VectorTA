@@ -539,29 +539,6 @@ fn fast_div(num: f64, den: f64) -> f64 {
     num / den
 }
 
-/*  If you want a faster (approximate) division, you can enable a feature
-    and use a Newton–Raphson reciprocal seeded from f32. This replaces a costly
-    f64 divide with: 1 f32 divide + 2 f64 muls + 1 f64 add (+ casts).
-
-    Accuracy: after one NR step the relative error is typically < 1e-7 for well-scaled inputs,
-    which is more than sufficient for smoothing indicators. Add a second iteration if you
-    want ~full f64 precision at still-lower latency than a hardware f64 divide on many CPUs.
-
-    Uncomment and compile with `--cfg fast_math_edcf` to use.
-
-#[inline(always)]
-#[cfg(fast_math_edcf)]
-fn fast_div(num: f64, den: f64) -> f64 {
-    // initial guess from single-precision reciprocal
-    let mut r = (1.0f32 / den as f32) as f64;
-    // one Newton step: r <- r * (2 - den*r)
-    r = r * (2.0 - den * r);
-    // OPTIONAL second step for near-IEEE accuracy:
-    // r = r * (2.0 - den * r);
-    num * r
-}
-*/
-
 #[derive(Clone, Debug)]
 #[cfg_attr(
     all(target_arch = "wasm32", feature = "wasm"),

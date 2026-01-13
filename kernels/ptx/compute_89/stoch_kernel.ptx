@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 .visible .entry stoch_k_raw_from_hhll_f32(
@@ -404,7 +404,7 @@ $L__BB0_56:
 	bra.uni 	$L__BB0_57;
 
 }
-	
+
 .visible .entry stoch_many_series_one_param_f32(
 	.param .u64 stoch_many_series_one_param_f32_param_0,
 	.param .u64 stoch_many_series_one_param_f32_param_1,
@@ -1387,7 +1387,7 @@ $L__BB1_9:
 	bra.uni 	$L__BB1_9;
 
 }
-	
+
 .visible .entry stoch_one_series_many_params_f32(
 	.param .u64 stoch_one_series_many_params_f32_param_0,
 	.param .u64 stoch_one_series_many_params_f32_param_1,
@@ -2072,7 +2072,7 @@ $L__BB2_89:
 	bra.uni 	$L__BB2_90;
 
 }
-	
+
 .visible .entry pack_row_broadcast_rowmajor_f32(
 	.param .u64 pack_row_broadcast_rowmajor_f32_param_0,
 	.param .u32 pack_row_broadcast_rowmajor_f32_param_1,
@@ -2206,7 +2206,7 @@ $L__BB3_11:
 	ret;
 
 }
-	
+
 .visible .entry transpose_tm_to_rm_f32(
 	.param .u64 transpose_tm_to_rm_f32_param_0,
 	.param .u32 transpose_tm_to_rm_f32_param_1,
@@ -2218,7 +2218,7 @@ $L__BB3_11:
 	.reg .f32 	%f<9>;
 	.reg .b32 	%r<33>;
 	.reg .b64 	%rd<49>;
-	
+
 	.shared .align 4 .b8 _ZZ22transpose_tm_to_rm_f32E4tile[4224];
 
 	ld.param.u64 	%rd8, [transpose_tm_to_rm_f32_param_0];

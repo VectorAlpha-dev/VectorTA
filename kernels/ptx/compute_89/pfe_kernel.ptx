@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry pfe_batch_f32(
 	.param .u64 pfe_batch_f32_param_0,
@@ -353,7 +353,7 @@ $L__BB0_38:
 	ret;
 
 }
-	
+
 .visible .entry pfe_batch_prefix_f32(
 	.param .u64 pfe_batch_prefix_f32_param_0,
 	.param .u64 pfe_batch_prefix_f32_param_1,
@@ -528,7 +528,7 @@ $L__BB1_15:
 	ret;
 
 }
-	
+
 .visible .entry pfe_many_series_one_param_time_major_f32(
 	.param .u64 pfe_many_series_one_param_time_major_f32_param_0,
 	.param .u64 pfe_many_series_one_param_time_major_f32_param_1,
@@ -868,7 +868,7 @@ $L__BB2_23:
 	bra.uni 	$L__BB2_32;
 
 }
-	
+
 .visible .entry pfe_build_steps_f32(
 	.param .u64 pfe_build_steps_f32_param_0,
 	.param .u32 pfe_build_steps_f32_param_1,
@@ -923,7 +923,7 @@ $L__BB3_5:
 	ret;
 
 }
-	
+
 .visible .entry pfe_build_prefix_float2_serial(
 	.param .u64 pfe_build_prefix_float2_serial_param_0,
 	.param .u32 pfe_build_prefix_float2_serial_param_1,
@@ -1066,7 +1066,7 @@ $L__BB4_8:
 	ret;
 
 }
-	
+
 .visible .entry pfe_many_params_prefix_f32(
 	.param .u64 pfe_many_params_prefix_f32_param_0,
 	.param .u64 pfe_many_params_prefix_f32_param_1,

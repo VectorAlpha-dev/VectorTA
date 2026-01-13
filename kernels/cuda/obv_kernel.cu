@@ -29,12 +29,12 @@
 #endif
 
 
-struct FPair { float hi, lo; };  
+struct FPair { float hi, lo; };
 
 __device__ __forceinline__ FPair make_zero_pair() { return {0.0f, 0.0f}; }
 
 __device__ __forceinline__ FPair two_sum_fp32(float a, float b) {
-    
+
     float s  = a + b;
     float bb = s - a;
     float err = (a - (s - bb)) + (b - bb);
@@ -60,7 +60,7 @@ __device__ __forceinline__ float fp_collapse(FPair x) { return x.hi + x.lo; }
 
 __device__ __forceinline__ FPair warp_inclusive_scan(FPair v, unsigned mask) {
     int lane = threadIdx.x & 31;
-    
+
     #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
         float hi = __shfl_up_sync(mask, v.hi, offset);
@@ -80,21 +80,21 @@ FPair block_exclusive_offset(FPair thread_total, FPair* warp_buf) {
     int wid   = threadIdx.x >> 5;
 
     FPair incl = warp_inclusive_scan(thread_total, full);
-    
+
     if (lane == 31) warp_buf[wid] = incl;
     __syncthreads();
 
-    
+
     if (wid == 0) {
         FPair x = (lane < NUM_WARPS) ? warp_buf[lane] : make_zero_pair();
         FPair x_incl = warp_inclusive_scan(x, full);
-        
+
         FPair x_excl = fp_sub_pair(x_incl, x);
         if (lane < NUM_WARPS) warp_buf[lane] = x_excl;
     }
     __syncthreads();
 
-    
+
     FPair warp_off = warp_buf[wid];
     FPair excl_intra = fp_sub_pair(incl, thread_total);
     return fp_add_pair(warp_off, excl_intra);
@@ -108,16 +108,16 @@ void obv_batch_f32_pass1_tilescan(
     const float* __restrict__ close,
     const float* __restrict__ volume,
     int series_len,
-    int /*n_combos*/,   
+    int ,
     int first_valid,
     float* __restrict__ out,
-    FPair* __restrict__ block_sums,   
-    int tiles_per_row                  
+    FPair* __restrict__ block_sums,
+    int tiles_per_row
 ){
     const int tid  = threadIdx.x;
-    const int bid  = blockIdx.x;  
-    
-    const int base = 0; 
+    const int bid  = blockIdx.x;
+
+    const int base = 0;
 
     if (series_len <= 0 || bid >= tiles_per_row) return;
     const int fv = first_valid < 0 ? 0 : first_valid;
@@ -127,40 +127,40 @@ void obv_batch_f32_pass1_tilescan(
     const int tile_beg  = bid * tile_size;
     const int tile_end  = min(series_len, tile_beg + tile_size);
 
-    
+
     constexpr int NUM_WARPS = (OBV_BLOCK_SIZE + 31) / 32;
     __shared__ FPair warp_buf[NUM_WARPS];
     __shared__ FPair seg_sum_shared;
 
-    
+
     FPair seg_base = make_zero_pair();
 
     int lane  = tid & 31;
     unsigned full = 0xFFFFFFFFu;
 
-    
+
     #pragma unroll
     for (int j = 0; j < ITEMS; ++j) {
         int i = tile_beg + j * blockDim.x + tid;
         float inc = 0.0f;
 
-        
-        
-        
+
+
+
         float ci = 0.0f;
         if (i < series_len) ci = close[i];
         float cim1_warp = __shfl_up_sync(full, ci, 1);
 
         if (i < series_len) {
             if (i < fv) {
-                out[base + i] = CUDART_NAN_F;  
+                out[base + i] = CUDART_NAN_F;
             } else if (i == fv) {
                 out[base + i] = 0.0f;
             } else {
-                
-                
+
+
                 float cim1 = (lane > 0) ? cim1_warp : ((i > 0) ? close[i - 1] : ci);
-                
+
                 int gt = (ci > cim1);
                 int lt = (ci < cim1);
                 float sgn = static_cast<float>(gt - lt);
@@ -168,7 +168,7 @@ void obv_batch_f32_pass1_tilescan(
             }
         }
 
-        
+
         FPair v = {inc, 0.0f};
         FPair excl = block_exclusive_offset<NUM_WARPS>(v, warp_buf);
         FPair incl = fp_add_pair(excl, v);
@@ -178,7 +178,7 @@ void obv_batch_f32_pass1_tilescan(
             out[base + i] = fp_collapse(full_prefix);
         }
 
-        
+
         if (tid == (blockDim.x - 1)) {
             seg_sum_shared = incl;
         }
@@ -186,7 +186,7 @@ void obv_batch_f32_pass1_tilescan(
         seg_base = fp_add_pair(seg_base, seg_sum_shared);
     }
 
-    
+
     if (tid == 0) {
         block_sums[bid] = seg_base;
     }
@@ -195,16 +195,16 @@ void obv_batch_f32_pass1_tilescan(
 
 extern "C" __global__
 void obv_batch_f32_pass2_scan_block_sums(
-    const FPair* __restrict__ block_sums,   
+    const FPair* __restrict__ block_sums,
     int num_tiles,
-    FPair* __restrict__ block_offsets       
+    FPair* __restrict__ block_offsets
 ){
     if (num_tiles <= 0) return;
     int lane = threadIdx.x & 31;
     if (lane == 0) {
         FPair acc = make_zero_pair();
         for (int b = 0; b < num_tiles; ++b) {
-            block_offsets[b] = acc;            
+            block_offsets[b] = acc;
             acc = fp_add_pair(acc, block_sums[b]);
         }
     }
@@ -214,7 +214,7 @@ void obv_batch_f32_pass2_scan_block_sums(
 extern "C" __global__
 void obv_batch_f32_pass3_add_offsets(
     int series_len,
-    int /*n_combos*/,
+    int ,
     int first_valid,
     float* __restrict__ out,
     const FPair* __restrict__ block_offsets,
@@ -235,8 +235,8 @@ void obv_batch_f32_pass3_add_offsets(
     for (int j = 0; j < ITEMS; ++j) {
         int i = tile_beg + j * blockDim.x + tid;
         if (i >= series_len) break;
-        if (i <= fv) continue; 
-        
+        if (i <= fv) continue;
+
         FPair s = two_sum_fp32(out[i], off.hi);
         s = two_sum_fp32(s.hi, s.lo + off.lo);
         out[i] = fp_collapse(s);
@@ -249,7 +249,7 @@ void obv_batch_f32_replicate_rows(
     const float* __restrict__ row0,
     int series_len,
     int n_combos,
-    float* __restrict__ out 
+    float* __restrict__ out
 ){
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -286,7 +286,7 @@ void obv_batch_f32_serial_ref(
         const int base = combo * series_len;
         if (fv < series_len) {
             out[base + fv] = 0.0f;
-            
+
             FPair obv = make_zero_pair();
             float prev_close = close[fv];
             for (int i = fv + 1; i < series_len; ++i) {
@@ -308,11 +308,11 @@ extern "C" __global__ void obv_many_series_one_param_time_major_f32(
     const float* __restrict__ close_tm,
     const float* __restrict__ volume_tm,
     const int*   __restrict__ first_valids,
-    int cols, 
-    int rows, 
+    int cols,
+    int rows,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols || rows <= 0) return;
 
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
@@ -325,7 +325,7 @@ extern "C" __global__ void obv_many_series_one_param_time_major_f32(
     int idx0 = fv * cols + s;
     out_tm[idx0] = 0.0f;
 
-    
+
     FPair obv = make_zero_pair();
     float prev_close = close_tm[idx0];
     for (int t = fv + 1; t < rows; ++t) {

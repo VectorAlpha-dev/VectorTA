@@ -36,7 +36,7 @@ static __device__ __forceinline__ float qNaNf() {
 
 
 
-struct fpair { float hi, lo; }; 
+struct fpair { float hi, lo; };
 
 static __device__ __forceinline__ fpair make_fpair(float x) { return {x, 0.0f}; }
 
@@ -53,7 +53,7 @@ static __device__ __forceinline__ void quick_two_sum(float a, float b, float &s,
 
 static __device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
     p = a * b;
-    e = fmaf(a, b, -p); 
+    e = fmaf(a, b, -p);
 }
 
 
@@ -97,7 +97,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
     if (rsi_start >= N) return;
     const int warm = first_valid + rsi_p + ema_p - 2;
 
-    
+
     float avg_gain = 0.0f, avg_loss = 0.0f;
     bool bad = false;
     const int init_end = min(first_valid + rsi_p, N - 1);
@@ -109,7 +109,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         if (delta > 0.0f) avg_gain += delta;
         else if (delta < 0.0f) avg_loss -= delta;
     }
-    if (bad) return; 
+    if (bad) return;
 
     const float inv_rsi  = 1.0f / (float)rsi_p;
     const float beta_rsi = 1.0f - inv_rsi;
@@ -117,34 +117,34 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
     avg_gain *= inv_rsi;
     avg_loss *= inv_rsi;
 
-    
+
     float rsi;
     {
         float denom = avg_gain + avg_loss;
         rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_gain / denom);
     }
-    
+
     out_fast[rsi_start] = rsi;
-    
+
     if (warm <= rsi_start) out_slow[rsi_start] = rsi;
 
-    
+
     float running_mean = rsi;
     const float ema_alpha = 2.0f / ((float)ema_p + 1.0f);
     const float ema_beta  = 1.0f - ema_alpha;
     float prev_ema = rsi;
 
-    
+
     const float atr_alpha = 1.0f / 14.0f;
     const float atr_beta  = 1.0f - atr_alpha;
     float wwma = 0.0f;
     float atrrsi = 0.0f;
     float prev_fast_val = rsi;
 
-    
+
 #pragma unroll 1
     for (int i = rsi_start + 1; i < N; ++i) {
-        
+
         float di   = ld_ro(&prices[i]);
         float dim1 = ld_ro(&prices[i - 1]);
         float delta = di - dim1;
@@ -157,7 +157,7 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         float denom = avg_gain + avg_loss;
         rsi = (denom == 0.0f) ? 50.0f : (100.0f * avg_gain / denom);
 
-        
+
         float fast_i;
         if (i < rsi_start + ema_p) {
             float n = (float)(i - rsi_start + 1);
@@ -171,10 +171,10 @@ static __device__ __forceinline__ void qqe_compute_series_f32(
         out_fast[i] = fast_i;
 
         if (i == warm) {
-            out_slow[i] = fast_i; 
+            out_slow[i] = fast_i;
             prev_fast_val = fast_i;
         } else if (i > warm) {
-            
+
             float tr = fabsf(fast_i - prev_fast_val);
             wwma   = fmaf(atr_beta,  wwma,  atr_alpha * tr);
             atrrsi = fmaf(atr_beta, atrrsi, atr_alpha * wwma);
@@ -225,7 +225,7 @@ extern "C" __global__ void qqe_batch_f32(
     float* __restrict__ out_fast = out + row_fast * series_len;
     float* __restrict__ out_slow = out + row_slow * series_len;
 
-    
+
     int warm = first_valid + rsi_p + ema_p - 2;
     if (warm > series_len) warm = series_len;
     const float nanv = qNaNf();
@@ -233,9 +233,9 @@ extern "C" __global__ void qqe_batch_f32(
         out_fast[idx] = nanv;
         out_slow[idx] = nanv;
     }
-    __syncthreads(); 
+    __syncthreads();
 
-    
+
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         qqe_compute_series_f32(prices, series_len, first_valid, rsi_p, ema_p, fast_k, out_fast, out_slow);
     }
@@ -263,7 +263,7 @@ extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
 
     const int fv = first_valids[s];
 
-    
+
     int warm = fv + rsi_period + ema_period - 2;
     if (warm > series_len) warm = series_len;
     const int pitch = 2 * num_series;
@@ -279,7 +279,7 @@ extern "C" __global__ void qqe_many_series_one_param_time_major_f32(
     const int rsi_start = fv + rsi_period;
     if (rsi_start >= series_len) return;
 
-    
+
     float avg_gain_f = 0.0f, avg_loss_f = 0.0f;
     bool bad = false;
     const int init_end = min(fv + rsi_period, series_len - 1);

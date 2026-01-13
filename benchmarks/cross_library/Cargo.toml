@@ -7,7 +7,7 @@ edition = "2021"
 default = []
 talib = []
 nightly-avx = ["my_project/nightly-avx"]
-# Enable HTML reports on demand to avoid system fontconfig dependency by default
+
 html-reports = ["criterion/html_reports", "dep:plotters"]
 
 [dependencies]

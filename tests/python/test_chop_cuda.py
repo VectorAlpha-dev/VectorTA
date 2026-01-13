@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -24,7 +24,7 @@ def _cuda_available() -> bool:
     if not hasattr(ti, "chop_cuda_batch_dev"):
         return False
     try:
-        
+
         n = 64
         h = np.linspace(1, 2, n, dtype=np.float32)
         l = np.linspace(0.5, 1.5, n, dtype=np.float32)
@@ -32,7 +32,7 @@ def _cuda_available() -> bool:
         handle = ti.chop_cuda_batch_dev(h, l, c, (5, 5, 0), (100.0, 100.0, 0.0), (1, 1, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False

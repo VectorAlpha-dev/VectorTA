@@ -44,14 +44,14 @@ extern "C" __global__ void vwmacd_batch_f32(
 
     const int base = row * len;
 
-    
+
     for (int i = 0; i < len; ++i) {
         out_macd[base + i] = f32_nan();
         out_signal[base + i] = f32_nan();
         out_hist[base + i] = f32_nan();
     }
 
-    
+
     for (int t = warm_macd; t < len; ++t) {
         const int prev_f = t - f;
         const int prev_s = t - s;
@@ -79,7 +79,7 @@ extern "C" __global__ void vwmacd_batch_f32(
         out_macd[base + t] = macd_val;
     }
 
-    
+
     if (warm_macd < len) {
         const float alpha = 2.0f / (float)(g + 1);
         const float beta  = 1.0f - alpha;
@@ -92,7 +92,7 @@ extern "C" __global__ void vwmacd_batch_f32(
             int count = 1;
             for (int i = start + 1; i < warm_end; ++i) {
                 const float x = out_macd[base + i];
-                
+
                 const double m = ((double)(count) * (double)mean + (double)x) / (double)(count + 1);
                 mean = (float)m;
                 out_signal[base + i] = mean;
@@ -108,7 +108,7 @@ extern "C" __global__ void vwmacd_batch_f32(
         }
     }
 
-    
+
     for (int i = 0; i < min(warm_hist, len); ++i) {
         out_signal[base + i] = f32_nan();
         out_hist[base + i] = f32_nan();
@@ -129,8 +129,8 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
     int fast,
     int slow,
     int signal,
-    int cols,  
-    int rows,  
+    int cols,
+    int rows,
     float* __restrict__ out_macd_tm,
     float* __restrict__ out_signal_tm,
     float* __restrict__ out_hist_tm)
@@ -142,7 +142,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
     const int warm_macd = fv + (fast > slow ? fast : slow) - 1;
     const int warm_hist = warm_macd + signal - 1;
 
-    
+
     for (int r = 0; r < rows; ++r) {
         const int idx = r * cols + series;
         out_macd_tm[idx] = f32_nan();
@@ -150,7 +150,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         out_hist_tm[idx] = f32_nan();
     }
 
-    
+
     for (int r = warm_macd; r < rows; ++r) {
         const int prev_f = r - fast;
         const int prev_s = r - slow;
@@ -180,7 +180,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         out_macd_tm[idx] = macd_val;
     }
 
-    
+
     if (warm_macd < rows) {
         const float alpha = 2.0f / (float)(signal + 1);
         const float beta  = 1.0f - alpha;
@@ -206,7 +206,7 @@ extern "C" __global__ void vwmacd_many_series_one_param_time_major_f32(
         }
     }
 
-    
+
     for (int r = 0; r < min(warm_hist, rows); ++r) {
         out_signal_tm[r * cols + series] = f32_nan();
         out_hist_tm[r * cols + series] = f32_nan();

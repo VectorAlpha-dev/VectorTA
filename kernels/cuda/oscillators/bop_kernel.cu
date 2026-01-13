@@ -35,24 +35,24 @@ extern "C" __global__ void bop_batch_f32(const float* __restrict__ open,
                                          int first_valid,
                                          float* __restrict__ out)
 {
-    
+
     const int combo = blockIdx.y;
     if (UNLIKELY(combo > 0)) return;
 
-    
-    
+
+
     constexpr int ILP = 4;
 
     const int tid   = threadIdx.x;
     const int bdim  = blockDim.x;
     const int gdim  = gridDim.x;
 
-    
+
     int base = blockIdx.x * bdim * ILP;
     const int step = gdim * bdim * ILP;
 
     for (; base < len; base += step) {
-        
+
         #pragma unroll
         for (int k = 0; k < ILP; ++k) {
             const int t = base + tid + k * bdim;
@@ -82,32 +82,32 @@ extern "C" __global__ void bop_many_series_one_param_f32(
     int series_len,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_series) return;
 
     const int fv = first_valids[s];
     if (UNLIKELY(fv < 0 || fv >= series_len)) {
-        
+
         float* o = out_tm + s;
         for (int t = 0; t < series_len; ++t, o += num_series) { *o = BOP_NAN_F; }
         return;
     }
 
-    
+
     {
         float* o = out_tm + s;
         for (int t = 0; t < fv; ++t, o += num_series) { *o = BOP_NAN_F; }
     }
 
-    
+
     const float* po = open_tm  + (size_t)fv * num_series + s;
     const float* ph = high_tm  + (size_t)fv * num_series + s;
     const float* pl = low_tm   + (size_t)fv * num_series + s;
     const float* pc = close_tm + (size_t)fv * num_series + s;
     float*       pd = out_tm   + (size_t)fv * num_series + s;
 
-    
-    
+
+
     #pragma unroll 4
     for (int t = fv; t < series_len; ++t) {
         const float v = bop_core(*po, *ph, *pl, *pc);

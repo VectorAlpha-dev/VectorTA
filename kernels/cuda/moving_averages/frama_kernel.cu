@@ -258,12 +258,12 @@ extern "C" __global__ void frama_batch_f32(const float* __restrict__ high,
         }
     }
 
-    
+
     const float sc_f     = (float)sc;
     const float fc_f     = (float)fc;
     const float inv_half = 1.0f / (float)half;
     const float inv_win  = 1.0f / (float)win;
-    const float log2_k   = FRAMA_LOG2F(2.0f / (sc_f + 1.0f)); 
+    const float log2_k   = FRAMA_LOG2F(2.0f / (sc_f + 1.0f));
     const float sc_lim   = 2.0f / (sc_f + 1.0f);
     const bool  sc_is_one = (sc == 1);
 
@@ -312,7 +312,7 @@ extern "C" __global__ void frama_batch_f32(const float* __restrict__ high,
         const float prev    = row_out[i - 1];
 
         if (!isnan(hi_i) && !isnan(lo_i) && !isnan(close_i) && !isnan(prev)) {
-            
+
             const float n1 = (right.maxv - right.minv) * inv_half;
             const float n2 = (left .maxv - left .minv) * inv_half;
             const float n3 = (full .maxv - full .minv) * inv_win;
@@ -323,7 +323,7 @@ extern "C" __global__ void frama_batch_f32(const float* __restrict__ high,
             }
             d_prev = d_cur;
 
-            
+
             float alpha0 = FRAMA_EXP2F(log2_k * (d_cur - 1.0f));
             alpha0 = frama_clampf(alpha0, 0.1f, 1.0f);
 
@@ -335,7 +335,7 @@ extern "C" __global__ void frama_batch_f32(const float* __restrict__ high,
             float alpha = 2.0f / (new_n + 1.0f);
             alpha = frama_clampf(alpha, sc_lim, 1.0f);
 
-            
+
             row_out[i] = fmaf(alpha, (close_i - prev), prev);
         } else {
             row_out[i] = prev;
@@ -446,7 +446,7 @@ extern "C" __global__ void frama_many_series_one_param_f32(
         }
     }
 
-    
+
     const float sc_f     = (float)sc;
     const float fc_f     = (float)fc;
     const float inv_half = 1.0f / (float)half;

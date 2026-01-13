@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
         handle = ti.vosc_cuda_batch_dev(x, (2, 2, 0), (3, 3, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -61,7 +61,7 @@ class TestVoscCuda:
             v_tm[:, j] = base * (1.0 + 0.02 * j)
 
         s, l = 5, 34
-        
+
         cpu_tm = np.zeros_like(v_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.vosc(v_tm[:, j].astype(np.float32).astype(np.float64), s, l)

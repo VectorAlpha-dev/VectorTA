@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -23,7 +23,7 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, "emv_cuda_batch_dev"):
         return False
-    
+
     try:
         h = np.array([np.nan, 2.0, 3.0], dtype=np.float32)
         l = np.array([np.nan, 1.0, 1.5], dtype=np.float32)
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
         handle = ti.emv_cuda_batch_dev(h, l, v)
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -50,7 +50,7 @@ class TestEmvCuda:
         close = test_data["close"].astype(np.float64)
         volume = test_data["volume"].astype(np.float64)
 
-        
+
         cpu = ti.emv(
             high.astype(np.float32).astype(np.float64),
             low.astype(np.float32).astype(np.float64),
@@ -65,7 +65,7 @@ class TestEmvCuda:
         )
         gpu = cp.asnumpy(cp.asarray(handle))[0]
 
-        
+
         assert_close(gpu, cpu, rtol=1e-5, atol=1e-5, msg="CUDA EMV batch mismatch")
 
     def test_emv_cuda_many_series_one_param_matches_cpu(self, test_data):
@@ -78,11 +78,11 @@ class TestEmvCuda:
             data_tm[:, j] = base * (1.0 + 0.01 * j)
             vol_tm[:, j] = test_data["volume"][:T] * (1.0 + 0.05 * j)
 
-        
+
         high_tm = data_tm + 0.15
         low_tm = data_tm - 0.15
 
-        
+
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.emv(

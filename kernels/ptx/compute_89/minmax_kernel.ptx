@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -238,7 +238,7 @@ $L__BB0_22:
 	ret;
 
 }
-	
+
 .visible .entry minmax_many_series_one_param_time_major_f32(
 	.param .u64 minmax_many_series_one_param_time_major_f32_param_0,
 	.param .u64 minmax_many_series_one_param_time_major_f32_param_1,
@@ -460,7 +460,7 @@ $L__BB1_19:
 	ret;
 
 }
-	
+
 .visible .entry st_init_level0_minmax_valid_f32(
 	.param .u64 st_init_level0_minmax_valid_f32_param_0,
 	.param .u64 st_init_level0_minmax_valid_f32_param_1,
@@ -525,7 +525,7 @@ $L__BB2_2:
 	ret;
 
 }
-	
+
 .visible .entry st_build_level_k_minmax_valid_f32(
 	.param .u32 st_build_level_k_minmax_valid_f32_param_0,
 	.param .u32 st_build_level_k_minmax_valid_f32_param_1,
@@ -605,7 +605,7 @@ $L__BB3_2:
 	ret;
 
 }
-	
+
 .visible .entry minmax_batch_rmq_f32(
 	.param .u64 minmax_batch_rmq_f32_param_0,
 	.param .u64 minmax_batch_rmq_f32_param_1,
@@ -828,7 +828,7 @@ $L__BB4_19:
 	ret;
 
 }
-	
+
 .visible .entry forward_fill_two_streams_f32(
 	.param .u64 forward_fill_two_streams_f32_param_0,
 	.param .u64 forward_fill_two_streams_f32_param_1,
@@ -842,9 +842,9 @@ $L__BB4_19:
 	.reg .f32 	%f<142>;
 	.reg .b32 	%r<165>;
 	.reg .b64 	%rd<15>;
-	
+
 	.shared .align 4 .b8 _ZZ28forward_fill_two_streams_f32E15warp_totals_min[128];
-	
+
 	.shared .align 4 .b8 _ZZ28forward_fill_two_streams_f32E15warp_totals_max[128];
 
 	ld.param.u64 	%rd5, [forward_fill_two_streams_f32_param_0];

@@ -38,7 +38,7 @@
 
 
 static __forceinline__ __device__ float fin_or_prev(float x, float prev) {
-    
+
     return isfinite(x) ? x : prev;
 }
 
@@ -58,7 +58,7 @@ static __forceinline__ __device__ dsfloat ds_make(float x) {
 }
 
 static __forceinline__ __device__ dsfloat ds_add(dsfloat a, dsfloat b) {
-    
+
     float s  = a.hi + b.hi;
     float bp = s - a.hi;
     float t  = ((b.hi - bp) + (a.hi - (s - bp))) + a.lo + b.lo;
@@ -68,9 +68,9 @@ static __forceinline__ __device__ dsfloat ds_add(dsfloat a, dsfloat b) {
 }
 
 static __forceinline__ __device__ dsfloat ds_mul_f(dsfloat a, float b) {
-    
+
     float p   = a.hi * b;
-    float err = fmaf(a.hi, b, -p);     
+    float err = fmaf(a.hi, b, -p);
     float lo  = a.lo * b;
     float s   = p + lo;
     float bp  = s - p;
@@ -82,9 +82,9 @@ static __forceinline__ __device__ dsfloat ds_mul_f(dsfloat a, float b) {
 
 
 static __forceinline__ __device__ void ema_update_ds(dsfloat &s, float a, float x) {
-    
+
     dsfloat term1 = ds_mul_f(s, 1.0f - a);
-    
+
     float ax_hi = a * x;
     float ax_lo = fmaf(a, x, -ax_hi);
     dsfloat term2; term2.hi = ax_hi; term2.lo = ax_lo;
@@ -99,7 +99,7 @@ static __forceinline__ __device__ void ema_update_ds(dsfloat &s, float a, float 
 
 
 extern "C" __global__ void gatorosc_batch_f32(
-    const float* __restrict__ data, 
+    const float* __restrict__ data,
     const int    len,
     const int    first_valid,
     const int*   __restrict__ jlens,
@@ -109,11 +109,11 @@ extern "C" __global__ void gatorosc_batch_f32(
     const int*   __restrict__ llens,
     const int*   __restrict__ lshifts,
     const int    n_combos,
-    const int    ring_len_max, 
-    float* __restrict__ out_upper,        
-    float* __restrict__ out_lower,        
-    float* __restrict__ out_upper_change, 
-    float* __restrict__ out_lower_change  
+    const int    ring_len_max,
+    float* __restrict__ out_upper,
+    float* __restrict__ out_lower,
+    float* __restrict__ out_upper_change,
+    float* __restrict__ out_lower_change
 ) {
     const int combo = blockIdx.x;
     if (combo >= n_combos) return;
@@ -138,35 +138,35 @@ extern "C" __global__ void gatorosc_batch_f32(
     float* __restrict__ uchn  = out_upper_change + (size_t)combo * len;
     float* __restrict__ lchn  = out_lower_change + (size_t)combo * len;
 
-    
-    
+
+
     const int lane = threadIdx.x & 31;
     if (threadIdx.x >= 32) return;
     const unsigned mask = 0xffffffffu;
 
-    
+
     const float ja   = 2.0f / (float)(jl + 1);
     const float ta   = 2.0f / (float)(tl + 1);
     const float la   = 2.0f / (float)(ll + 1);
 
-    
+
     extern __shared__ float s[];
     float* jring = s;
     float* tring = s + ring_len_max;
     float* lring = s + 2 * ring_len_max;
     const int rlen = ring_len_max;
 
-    
-    
+
+
     const int maxlen = max(jl, max(tl, ll));
     const bool use_ds = (maxlen >= DS_LEN_THRESHOLD);
-    
-    
+
+
     if (use_ds || blockDim.x < 32 || first_valid >= len || rlen < 32 || (rlen & 31) != 0 || js < 0 || ts < 0 || ls < 0 ||
         js >= rlen || ts >= rlen || ls >= rlen) {
         if (lane != 0) return;
 
-        
+
         for (int i = 0; i < len; ++i) {
             upper[i] = GATOR_NAN_F;
             lower[i] = GATOR_NAN_F;
@@ -176,13 +176,13 @@ extern "C" __global__ void gatorosc_batch_f32(
 
         if (first_valid >= len) return;
 
-        
+
         float seed = isfinite(data[first_valid]) ? data[first_valid] : 0.0f;
 
         float  jema_f = seed, tema_f = seed, lema_f = seed;
         dsfloat jema_ds = ds_make(seed), tema_ds = ds_make(seed), lema_ds = ds_make(seed);
 
-        
+
         for (int k = 0; k < rlen; ++k) {
             jring[k] = seed; tring[k] = seed; lring[k] = seed;
         }
@@ -236,19 +236,19 @@ extern "C" __global__ void gatorosc_batch_f32(
         return;
     }
 
-    
 
-    
+
+
     float seed = isfinite(data[first_valid]) ? data[first_valid] : 0.0f;
 
-    
+
     for (int k = lane; k < rlen; k += 32) {
         jring[k] = seed;
         tring[k] = seed;
         lring[k] = seed;
     }
 
-    
+
     const int up_pref  = (uwarm  < len) ? uwarm  : len;
     const int lo_pref  = (lwarm  < len) ? lwarm  : len;
     const int uc_pref  = (ucwarm < len) ? ucwarm : len;
@@ -258,16 +258,16 @@ extern "C" __global__ void gatorosc_batch_f32(
     for (int i = lane; i < uc_pref; i += 32) { uchn[i]  = GATOR_NAN_F; }
     for (int i = lane; i < lc_pref; i += 32) { lchn[i]  = GATOR_NAN_F; }
 
-    
+
     float prev_j = seed;
     float prev_t = seed;
     float prev_l = seed;
 
-    float prev_u = 0.0f;   
-    float prev_lo = 0.0f;  
+    float prev_u = 0.0f;
+    float prev_lo = 0.0f;
 
-    
-    
+
+
     int rbase = 0;
 
     const float oma_j = 1.0f - ja;
@@ -280,11 +280,11 @@ extern "C" __global__ void gatorosc_batch_f32(
         const int last_lane = (remaining >= 32) ? 31 : (remaining - 1);
         const int tile_end  = t0 + last_lane;
 
-        
+
         const float xi = (t < len) ? data[t] : GATOR_NAN_F;
         const bool xi_finite = (t < len) && isfinite(xi);
 
-        
+
         float Aj = xi_finite ? oma_j : 1.0f;
         float Bj = xi_finite ? (ja * xi) : 0.0f;
         #pragma unroll
@@ -302,12 +302,12 @@ extern "C" __global__ void gatorosc_batch_f32(
         const float yj = fmaf(Aj, pj, Bj);
         prev_j = __shfl_sync(mask, yj, last_lane);
 
-        
+
         float jaws_prev = __shfl_up_sync(mask, yj, 1);
         if (lane == 0) jaws_prev = pj;
         const float x_eff = xi_finite ? xi : jaws_prev;
 
-        
+
         float At = (t < len) ? oma_t : 1.0f;
         float Bt = (t < len) ? (ta * x_eff) : 0.0f;
         #pragma unroll
@@ -325,7 +325,7 @@ extern "C" __global__ void gatorosc_batch_f32(
         const float yt = fmaf(At, pt, Bt);
         prev_t = __shfl_sync(mask, yt, last_lane);
 
-        
+
         float Al = (t < len) ? oma_l : 1.0f;
         float Bl = (t < len) ? (la * x_eff) : 0.0f;
         #pragma unroll
@@ -343,14 +343,14 @@ extern "C" __global__ void gatorosc_batch_f32(
         const float yl = fmaf(Al, pl, Bl);
         prev_l = __shfl_sync(mask, yl, last_lane);
 
-        
-        const int rpos = rbase + lane; 
+
+        const int rpos = rbase + lane;
         jring[rpos] = yj;
         tring[rpos] = yt;
         lring[rpos] = yl;
         __syncwarp();
 
-        
+
         float u = GATOR_NAN_F;
         float lo = GATOR_NAN_F;
         if (t < len) {
@@ -379,7 +379,7 @@ extern "C" __global__ void gatorosc_batch_f32(
             }
         }
 
-        
+
         if (tile_end >= uwarm) {
             prev_u = __shfl_sync(mask, u, last_lane);
         }
@@ -387,7 +387,7 @@ extern "C" __global__ void gatorosc_batch_f32(
             prev_lo = __shfl_sync(mask, lo, last_lane);
         }
 
-        
+
         rbase += 32;
         if (rbase == rlen) rbase = 0;
     }
@@ -397,7 +397,7 @@ extern "C" __global__ void gatorosc_batch_f32(
 
 extern "C" __global__ void gatorosc_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     const int    cols,
     const int    rows,
     const int    jl,
@@ -412,7 +412,7 @@ extern "C" __global__ void gatorosc_many_series_one_param_f32(
     float* __restrict__ out_upper_change_tm,
     float* __restrict__ out_lower_change_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const int first_valid = first_valids[s];
@@ -423,7 +423,7 @@ extern "C" __global__ void gatorosc_many_series_one_param_f32(
     const int ucwarm = uwarm + 1;
     const int lcwarm = lwarm + 1;
 
-    
+
     for (int t = 0; t < rows; ++t) {
         out_upper_tm[(size_t)t * cols + s] = GATOR_NAN_F;
         out_lower_tm[(size_t)t * cols + s] = GATOR_NAN_F;
@@ -433,12 +433,12 @@ extern "C" __global__ void gatorosc_many_series_one_param_f32(
 
     if (first_valid >= rows || jl <= 0 || tl <= 0 || ll <= 0) return;
 
-    
+
     const float ja = 2.0f / (float)(jl + 1);
     const float ta = 2.0f / (float)(tl + 1);
     const float la = 2.0f / (float)(ll + 1);
 
-    
+
     extern __shared__ float smem[];
     float* base  = smem + (size_t)threadIdx.x * 3 * ring_len;
     float* jring = base;
@@ -446,7 +446,7 @@ extern "C" __global__ void gatorosc_many_series_one_param_f32(
     float* lring = base + 2 * ring_len;
     int rpos = 0;
 
-    
+
     float seed = isfinite(prices_tm[(size_t)first_valid * cols + s]) ? prices_tm[(size_t)first_valid * cols + s] : 0.0f;
 
     const int maxlen = max(jl, max(tl, ll));
@@ -455,7 +455,7 @@ extern "C" __global__ void gatorosc_many_series_one_param_f32(
     float  jema_f = seed, tema_f = seed, lema_f = seed;
     dsfloat jema_ds = ds_make(seed), tema_ds = ds_make(seed), lema_ds = ds_make(seed);
 
-    
+
     for (int k = 0; k < ring_len; ++k) { jring[k] = seed; tring[k] = seed; lring[k] = seed; }
 
     float u_prev = 0.0f, l_prev = 0.0f; bool have_u = false, have_l = false;

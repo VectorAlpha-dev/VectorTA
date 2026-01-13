@@ -38,13 +38,13 @@ for _ in range(10):
 python_times = {}
 for ma_type in ["sma", "ema", "wma", "alma", "hma"]:
     times = []
-    for _ in range(10):  
+    for _ in range(10):
         start = time.perf_counter()
         _ = ta.ma(data, ma_type, 14)
         times.append((time.perf_counter() - start) * 1000)
-    
+
     times.sort()
-    python_times[ma_type] = times[len(times) // 2]  
+    python_times[ma_type] = times[len(times) // 2]
 
 print("\nPython benchmark times:")
 for ma_type, time_ms in python_times.items():
@@ -60,7 +60,7 @@ all_pass = True
 for ma_type in ["sma", "ema", "wma", "alma", "hma"]:
     rust_time = rust_times.get(ma_type, 0)
     python_time = python_times.get(ma_type, 0)
-    
+
     if rust_time > 0:
         overhead = ((python_time - rust_time) / rust_time) * 100
         status = "PASS" if overhead < 10 else "FAIL"

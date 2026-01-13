@@ -52,18 +52,18 @@ static __device__ __forceinline__ void kahan_add(float x, float& sum, float& c) 
 }
 
 extern "C" __global__ void reverse_rsi_batch_f32(
-    const float* __restrict__ prices,   
-    const int*   __restrict__ lengths,  
-    const float* __restrict__ levels,   
+    const float* __restrict__ prices,
+    const int*   __restrict__ lengths,
+    const float* __restrict__ levels,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out             
+    float* __restrict__ out
 ) {
 #if __CUDA_ARCH__ >= 800
-    
-    
-    
+
+
+
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (combo < n_combos);
 
@@ -95,28 +95,28 @@ extern "C" __global__ void reverse_rsi_batch_f32(
         if (tail <= ema_len) {
             valid = false;
         } else {
-            warm_end = first_valid + ema_len; 
+            warm_end = first_valid + ema_len;
             warm_idx = warm_end - 1;
 
-            
-            alpha = 1.0f / float(n); 
+
+            alpha = 1.0f / float(n);
             const float inv = 100.0f - L;
-            const float rs_target = L / inv; 
-            neg_scale = inv / L;             
+            const float rs_target = L / inv;
+            neg_scale = inv / L;
             n_minus_1 = float(n - 1);
             rs_coeff = n_minus_1 * rs_target;
         }
     }
 
-    
-    
-    
-    constexpr int TILE = 256; 
 
-    
-    
-    
-    
+
+
+    constexpr int TILE = 256;
+
+
+
+
+
     extern __shared__ float smem[];
     float* prices_buf = smem;
     float* up_buf     = smem + 2 * TILE;
@@ -124,12 +124,12 @@ extern "C" __global__ void reverse_rsi_batch_f32(
 
     const int num_tiles = (series_len + TILE - 1) / TILE;
 
-    
+
     float sum_up = 0.f, c_up = 0.f;
     float sum_dn = 0.f, c_dn = 0.f;
     float up_ema = 0.f, dn_ema = 0.f;
 
-    
+
     __shared__ float    prev_carry;
     __shared__ unsigned prev_carry_is_finite;
     if (threadIdx.x == 0) { prev_carry = 0.0f; prev_carry_is_finite = 1u; }
@@ -138,15 +138,15 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     for (int t = 0; t < num_tiles; ++t) {
         const int start = t * TILE;
         const int len   = min(TILE, series_len - start);
-        float* p = prices_buf; 
+        float* p = prices_buf;
 
-        
+
         for (int i = threadIdx.x; i < len; i += blockDim.x) {
             p[i] = prices[start + i];
         }
         __syncthreads();
 
-        
+
         if (threadIdx.x == 0) {
             float    prev = prev_carry;
             unsigned pfin = prev_carry_is_finite;
@@ -156,7 +156,7 @@ extern "C" __global__ void reverse_rsi_batch_f32(
                 const unsigned cfin = is_finite_bits(cur);
                 float d = 0.0f;
                 if (r >= first_valid) {
-                    
+
                     const float    prev_used = (r == first_valid) ? 0.0f : prev;
                     const unsigned p_used_ok = (r == first_valid) ? 1u   : pfin;
                     d = (cfin & p_used_ok) ? (cur - prev_used) : 0.0f;
@@ -176,18 +176,18 @@ extern "C" __global__ void reverse_rsi_batch_f32(
 
         if (active) {
             if (!valid) {
-                
+
                 for (int j = 0; j < len; ++j) {
                     out_row[start + j] = RRSI_NAN;
                 }
             } else {
-                
+
                 for (int j = 0; j < len; ++j) {
                     const int r = start + j;
 
                     if (r < warm_end) {
-                        
-                        
+
+
                         kahan_add(up_buf[j], sum_up, c_up);
                         kahan_add(dn_buf[j], sum_dn, c_dn);
 
@@ -204,7 +204,7 @@ extern "C" __global__ void reverse_rsi_batch_f32(
                             out_row[r] = RRSI_NAN;
                         }
                     } else {
-                        
+
                         up_ema = fmaf(alpha, (up_buf[j] - up_ema), up_ema);
                         dn_ema = fmaf(alpha, (dn_buf[j] - dn_ema), dn_ema);
 
@@ -217,7 +217,7 @@ extern "C" __global__ void reverse_rsi_batch_f32(
                 }
             }
         }
-        
+
         __syncthreads();
     }
 
@@ -225,12 +225,12 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
 
-    
+
     const int n = lengths[combo];
     const float L = levels[combo];
     float* out_row = out + (size_t)combo * (size_t)series_len;
 
-    
+
     if (UNLIKELY(n <= 0 || !(L > 0.0f && L < 100.0f) || !is_finite_bits(L))) {
         for (int i = 0; i < series_len; ++i) out_row[i] = RRSI_NAN;
         return;
@@ -247,26 +247,26 @@ extern "C" __global__ void reverse_rsi_batch_f32(
         return;
     }
 
-    
-    const int warm_end = first_valid + ema_len; 
+
+    const int warm_end = first_valid + ema_len;
     const int warm_idx = warm_end - 1;
 
-    
-    const float alpha = 1.0f / float(n);       
+
+    const float alpha = 1.0f / float(n);
     const float inv   = 100.0f - L;
-    const float rs_target = L / inv;           
-    const float neg_scale = inv / L;           
+    const float rs_target = L / inv;
+    const float neg_scale = inv / L;
     const float n_minus_1 = float(n - 1);
     const float rs_coeff  = n_minus_1 * rs_target;
 
-    
-    
+
+
     for (int i = 0; i < warm_idx; ++i) out_row[i] = RRSI_NAN;
 
     float sum_up = 0.f, c_up = 0.f;
     float sum_dn = 0.f, c_dn = 0.f;
 
-    float prev = 0.0f; 
+    float prev = 0.0f;
     for (int r = first_valid; r < warm_end; ++r) {
         const float cur = prices[r];
         const unsigned ok = (is_finite_bits(cur) & is_finite_bits(prev));
@@ -278,7 +278,7 @@ extern "C" __global__ void reverse_rsi_batch_f32(
     float up_ema = sum_up / float(ema_len);
     float dn_ema = sum_dn / float(ema_len);
 
-    
+
     {
         const float x = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
         const float m = (x >= 0.0f) ? 1.0f : 0.0f;
@@ -310,12 +310,12 @@ extern "C" __global__ void reverse_rsi_batch_f32(
 
 extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int rsi_length,
     float rsi_level,
-    float* __restrict__ out_tm 
+    float* __restrict__ out_tm
 ) {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
@@ -334,26 +334,26 @@ extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
         return;
     }
 
-    const int warm_end = fv + ema_len; 
+    const int warm_end = fv + ema_len;
     const int warm_idx = warm_end - 1;
 
-    
+
     {
         float* o = out_tm + series;
         for (int r = 0; r < warm_idx; ++r, o += num_series) *o = RRSI_NAN;
     }
 
-    
-    
+
+
     const float nf = static_cast<float>(rsi_length);
     const float n_minus_1 = nf - 1.0f;
     const float inv = 100.0f - rsi_level;
     const float rs_target = rsi_level / inv;
     const float rs_coeff = n_minus_1 * rs_target;
     const float neg_scale = inv / rsi_level;
-    const float alpha = 1.0f / nf; 
+    const float alpha = 1.0f / nf;
 
-    
+
     float sum_up = 0.0f, c_up = 0.0f;
     float sum_dn = 0.0f, c_dn = 0.0f;
     float prev = 0.0f;
@@ -370,7 +370,7 @@ extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
     float up_ema = sum_up / static_cast<float>(ema_len);
     float dn_ema = sum_dn / static_cast<float>(ema_len);
 
-    
+
     {
         const float base = *(prices_tm + static_cast<size_t>(warm_idx) * num_series + series);
         const float x0 = fmaf(rs_coeff, dn_ema, -n_minus_1 * up_ema);
@@ -381,7 +381,7 @@ extern "C" __global__ void reverse_rsi_many_series_one_param_f32(
             (is_finite_bits(v0) || x0 >= 0.0f) ? v0 : 0.0f;
     }
 
-    
+
     float prevd = *(prices_tm + static_cast<size_t>(warm_idx) * num_series + series);
     for (int r = warm_end; r < series_len; ++r) {
         const float cf = *(prices_tm + static_cast<size_t>(r) * num_series + series);

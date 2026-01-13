@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -51,10 +51,10 @@ class TestPrbCuda:
     def test_prb_cuda_batch_matches_cpu(self, test_data):
         close = test_data['close']
         n, k, ro = 50, 2, 0
-        
+
         cpu_main, cpu_up, cpu_lo = ti.prb(close, False, 10, n, k, ro, 2.0)
 
-        
+
         main, up, lo = ti.prb_cuda_batch_dev(
             close.astype(np.float32),
             smooth_data=False,
@@ -67,7 +67,7 @@ class TestPrbCuda:
         g_up   = cp.asnumpy(cp.asarray(up))[0]
         g_lo   = cp.asnumpy(cp.asarray(lo))[0]
 
-        
+
         assert_close(g_main, cpu_main, rtol=1e-2, atol=1e-3)
         assert_close(g_up,   cpu_up,   rtol=1e-2, atol=1e-3)
         assert_close(g_lo,   cpu_lo,   rtol=1e-2, atol=1e-3)

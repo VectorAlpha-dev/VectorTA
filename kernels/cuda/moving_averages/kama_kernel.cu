@@ -14,14 +14,14 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
-#include <math_constants.h> 
+#include <math_constants.h>
 
 namespace {
 
 constexpr int WARP = 32;
 
 __device__ __forceinline__ double kama_const_max() {
-    return 2.0 / 31.0; 
+    return 2.0 / 31.0;
 }
 
 __device__ __forceinline__ double kama_const_diff() {
@@ -37,7 +37,7 @@ __device__ __forceinline__ double warp_sum(double v) {
     return v;
 }
 
-} 
+}
 
 
 
@@ -56,7 +56,7 @@ void kama_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     const int base   = combo * series_len;
 
-    
+
     const bool invalid =
         (period <= 0) ||
         (first_valid < 0 || first_valid >= series_len) ||
@@ -66,29 +66,29 @@ void kama_batch_f32(const float* __restrict__ prices,
     const float nan_f = CUDART_NAN_F;
 
     if (invalid) {
-        
+
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
             out[base + i] = nan_f;
         }
         return;
     }
 
-    
+
     const int initial_idx = first_valid + period;
 
-    
+
     for (int i = threadIdx.x; i < initial_idx; i += blockDim.x) {
         out[base + i] = nan_f;
     }
 
-    
-    
+
+
     double sum_roc1 = 0.0;
     if (threadIdx.x < WARP) {
         const int lane = threadIdx.x;
         double local = 0.0;
         const int start = first_valid;
-        const int end   = first_valid + period; 
+        const int end   = first_valid + period;
         for (int j = start + lane; j < end; j += WARP) {
             const double a = static_cast<double>(prices[j]);
             const double b = static_cast<double>(prices[j + 1]);
@@ -98,10 +98,10 @@ void kama_batch_f32(const float* __restrict__ prices,
         if (lane == 0) sum_roc1 = local;
     }
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     double prev_price = static_cast<double>(prices[initial_idx]);
     double prev_kama  = prev_price;
     out[base + initial_idx] = static_cast<float>(prev_kama);
@@ -116,25 +116,25 @@ void kama_batch_f32(const float* __restrict__ prices,
         const double price         = static_cast<double>(prices[i]);
         const double next_trailing = static_cast<double>(prices[trailing_idx + 1]);
 
-        
+
         sum_roc1 += fabs(price - prev_price) - fabs(next_trailing - trailing_value);
 
-        
+
         trailing_value = next_trailing;
         trailing_idx  += 1;
 
-        
+
         const double direction = fabs(price - trailing_value);
         const double er = (sum_roc1 == 0.0) ? 0.0 : (direction / sum_roc1);
 
         double sc = er * cdiff + cmax;
         sc *= sc;
 
-        
+
         prev_kama = fma(price - prev_kama, sc, prev_kama);
         out[base + i] = static_cast<float>(prev_kama);
 
-        
+
         prev_price = price;
     }
 }
@@ -159,7 +159,7 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     const int base   = combo * series_len;
 
-    const int initial_idx = first_valid + period; 
+    const int initial_idx = first_valid + period;
     const float nan_f = CUDART_NAN_F;
 
     const bool invalid =
@@ -183,9 +183,9 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
         out[base + initial_idx] = prices[initial_idx];
     }
 
-    
-    
-    
+
+
+
     const int lane = threadIdx.x;
     if (lane >= WARP) return;
 
@@ -223,7 +223,7 @@ void kama_batch_prefix_f32(const float* __restrict__ prices,
         prev_kama = __shfl_sync(m, x, WARP - 1);
     }
 
-    
+
     if (lane == 0) {
         float kama = prev_kama;
         for (int t = chunk_start; t < series_len; ++t) {
@@ -261,12 +261,12 @@ void kama_many_series_one_param_time_major_f32(
     const int initial_idx = first_valid + period;
     const float nan_f = CUDART_NAN_F;
 
-    
+
     auto at = [num_series](const float* buf, int row, int col) {
         return buf[row * num_series + col];
     };
 
-    
+
     if (invalid || initial_idx >= series_len) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_tm[t * num_series + series] = nan_f;
@@ -274,18 +274,18 @@ void kama_many_series_one_param_time_major_f32(
         return;
     }
 
-    
+
     for (int t = threadIdx.x; t < initial_idx; t += blockDim.x) {
         out_tm[t * num_series + series] = nan_f;
     }
 
-    
+
     double sum_roc1 = 0.0;
     if (threadIdx.x < WARP) {
         const int lane = threadIdx.x;
         double local = 0.0;
         const int start = first_valid;
-        const int end   = first_valid + period; 
+        const int end   = first_valid + period;
         for (int j = start + lane; j < end; j += WARP) {
             const double a = static_cast<double>(at(prices_tm, j,     series));
             const double b = static_cast<double>(at(prices_tm, j + 1, series));

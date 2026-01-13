@@ -11,7 +11,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError as exc:  
+except ImportError as exc:
     raise SystemExit(
         "CuPy is required for CUDA benchmarks. Install with `pip install cupy-cuda12x`."
     ) from exc

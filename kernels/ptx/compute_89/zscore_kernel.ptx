@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -37,13 +37,13 @@
 	.reg .f32 	%f<375>;
 	.reg .b32 	%r<74>;
 	.reg .b64 	%rd<75>;
-	
+
 	.shared .align 4 .b8 _ZZ23zscore_sma_prefix_f32dsE8s_period[16];
-	
+
 	.shared .align 4 .b8 _ZZ23zscore_sma_prefix_f32dsE6s_warm[16];
-	
+
 	.shared .align 4 .b8 _ZZ23zscore_sma_prefix_f32dsE7s_inv_n[16];
-	
+
 	.shared .align 4 .b8 _ZZ23zscore_sma_prefix_f32dsE8s_inv_nb[16];
 
 	ld.param.u64 	%rd28, [zscore_sma_prefix_f32ds_param_0];
@@ -634,7 +634,7 @@ $L__BB0_44:
 	ret;
 
 }
-	
+
 .visible .entry pack_prefix_double_to_float2(
 	.param .u64 pack_prefix_double_to_float2_param_0,
 	.param .u64 pack_prefix_double_to_float2_param_1,
@@ -674,7 +674,7 @@ $L__BB1_2:
 	ret;
 
 }
-	
+
 .visible .entry zscore_sma_prefix_f32(
 	.param .u64 zscore_sma_prefix_f32_param_0,
 	.param .u64 zscore_sma_prefix_f32_param_1,
@@ -693,13 +693,13 @@ $L__BB1_2:
 	.reg .b32 	%r<79>;
 	.reg .f64 	%fd<69>;
 	.reg .b64 	%rd<82>;
-	
+
 	.shared .align 4 .b8 _ZZ21zscore_sma_prefix_f32E8s_period[16];
-	
+
 	.shared .align 4 .b8 _ZZ21zscore_sma_prefix_f32E6s_warm[16];
-	
+
 	.shared .align 8 .b8 _ZZ21zscore_sma_prefix_f32E7s_inv_n[32];
-	
+
 	.shared .align 4 .b8 _ZZ21zscore_sma_prefix_f32E7s_nbdev[16];
 
 	ld.param.u64 	%rd29, [zscore_sma_prefix_f32_param_0];
@@ -1073,7 +1073,7 @@ $L__BB2_38:
 	ret;
 
 }
-	
+
 .visible .entry zscore_many_series_one_param_f32(
 	.param .u64 zscore_many_series_one_param_f32_param_0,
 	.param .u64 zscore_many_series_one_param_f32_param_1,

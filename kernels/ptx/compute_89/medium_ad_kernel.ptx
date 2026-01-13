@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry medium_ad_batch_f32(
 	.param .u64 medium_ad_batch_f32_param_0,
@@ -700,7 +700,7 @@ $L__BB0_107:
 	ret;
 
 }
-	
+
 .visible .entry medium_ad_many_series_one_param_f32(
 	.param .u64 medium_ad_many_series_one_param_f32_param_0,
 	.param .u32 medium_ad_many_series_one_param_f32_param_1,

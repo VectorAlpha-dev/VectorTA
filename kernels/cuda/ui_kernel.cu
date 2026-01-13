@@ -45,43 +45,43 @@ extern "C" __global__ void ui_single_series_f32(
     float* __restrict__ out)
 {
     if (series_len <= 0 || period <= 0) return;
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
-    
-    
-    
+
+
+
     extern __shared__ __align__(16) unsigned char shraw[];
     unsigned char* base = shraw;
     const int p = period;
-    
+
     int* deq_idx = reinterpret_cast<int*>(base);
-    
+
     size_t off = static_cast<size_t>(p) * sizeof(int);
     const size_t a = sizeof(double) - 1;
     off = (off + a) & ~a;
-    
+
     double* sq_ring = reinterpret_cast<double*>(base + off);
-    
+
     unsigned char* valid_ring = reinterpret_cast<unsigned char*>(base + off + static_cast<size_t>(p) * sizeof(double));
 
     const int fv = first_valid < 0 ? 0 : first_valid;
     const int warm_end = fv + (2 * p - 2);
 
-    
+
     for (int i = 0; i < p; ++i) { sq_ring[i] = 0.0; valid_ring[i] = 0u; }
-    
+
     const int warm_write = (warm_end < series_len) ? warm_end : series_len;
     for (int i = 0; i < warm_write; ++i) out[i] = CUDART_NAN_F;
 
     int head = 0, tail = 0, dsize = 0;
     int ring_idx = 0;
-    double sum = 0.0; 
+    double sum = 0.0;
     int count = 0;
 
     for (int i = fv; i < series_len; ++i) {
         const int start = (i + 1 >= p) ? (i + 1 - p) : 0;
 
-        
+
         while (dsize != 0 && deq_idx[head] < start) {
             head = (head + 1); if (head == p) head = 0; dsize--;
         }
@@ -89,7 +89,7 @@ extern "C" __global__ void ui_single_series_f32(
         const float xi = prices[i];
         const bool xi_finite = isfinite(xi);
         if (xi_finite) {
-            
+
             while (dsize != 0) {
                 int back = (tail == 0) ? (p - 1) : (tail - 1);
                 const int j = deq_idx[back];
@@ -97,12 +97,12 @@ extern "C" __global__ void ui_single_series_f32(
                 if (xj <= xi) { tail = back; dsize--; }
                 else break;
             }
-            
+
             deq_idx[tail] = i;
             tail += 1; if (tail == p) tail = 0; dsize++;
         }
 
-        
+
         unsigned char new_valid = 0u;
         float new_sq = 0.0f;
         if (i + 1 >= fv + p && dsize != 0) {
@@ -114,13 +114,13 @@ extern "C" __global__ void ui_single_series_f32(
             }
         }
 
-        
+
         if (new_valid)             { sum += (double)new_sq; count++; }
         if (valid_ring[ring_idx])  { sum -= sq_ring[ring_idx]; count--; }
         sq_ring[ring_idx] = (double)new_sq; valid_ring[ring_idx] = new_valid;
         ring_idx += 1; if (ring_idx == p) ring_idx = 0;
 
-        
+
         if (i >= warm_end) {
             if (count == p) {
                 double avg_d = sum / (double)p;
@@ -164,11 +164,11 @@ extern "C" __global__ void ui_many_series_one_param_time_major_f32(
     float scalar,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x;               
+    const int s = blockIdx.x;
     if (s >= cols || rows <= 0 || period <= 0) return;
-    if (threadIdx.x != 0) return;            
+    if (threadIdx.x != 0) return;
 
-    
+
     extern __shared__ __align__(16) unsigned char shraw[];
     unsigned char* base = shraw;
     const int p = period;
@@ -241,12 +241,12 @@ extern "C" __global__ void ui_many_series_one_param_time_major_f32(
 extern "C" __global__ void ui_one_series_many_params_f32(
     const float* __restrict__ prices,
     int series_len,
-    const int*  __restrict__ periods,   
-    const float* __restrict__ scalars,  
+    const int*  __restrict__ periods,
+    const float* __restrict__ scalars,
     int n_params,
     int first_valid,
-    int max_period,                     
-    float* __restrict__ out)            
+    int max_period,
+    float* __restrict__ out)
 {
     const int lane = threadIdx.x & (WARP_SIZE - 1);
     const int warp = threadIdx.x / WARP_SIZE;
@@ -254,9 +254,9 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     int param_id = blockIdx.x * warps_per_block + warp;
     if (param_id >= n_params) return;
 
-    
-    
-    
+
+
+
     extern __shared__ __align__(16) unsigned char shraw[];
     unsigned char* base = shraw;
 
@@ -269,7 +269,7 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     float* sq_ring_base = reinterpret_cast<float*>(base + off + stride_i * sizeof(float));
     unsigned char* valid_base = reinterpret_cast<unsigned char*>(base + off + stride_i * sizeof(double));
 
-    
+
     int*   deq_idx = deq_idx_base + warp * max_period;
     float* deq_val = deq_val_base + warp * max_period;
     float* sq_ring = sq_ring_base + warp * max_period;
@@ -280,14 +280,14 @@ extern "C" __global__ void ui_one_series_many_params_f32(
     const int fv = first_valid < 0 ? 0 : first_valid;
     const int warm_end = fv + (2 * p - 2);
 
-    
+
     for (int k = lane; k < p; k += WARP_SIZE) { sq_ring[k] = 0.0f; valid_ring[k] = 0u; }
-    
+
     float* out_row = out + (size_t)param_id * (size_t)series_len;
     for (int i = lane; i < series_len && i < warm_end; i += WARP_SIZE) { out_row[i] = CUDART_NAN_F; }
     __syncwarp();
 
-    
+
     if (lane == 0) {
         int head = 0, tail = 0, dsize = 0;
         int ring_idx = 0;

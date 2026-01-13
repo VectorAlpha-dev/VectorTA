@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 .visible .entry pivot_batch_f32(
@@ -30,7 +30,7 @@
 	.reg .f32 	%f<619>;
 	.reg .b32 	%r<89>;
 	.reg .b64 	%rd<117>;
-	
+
 	.shared .align 1 .u8 _ZZ15pivot_batch_f32E15s_need_open_any;
 
 	ld.param.u64 	%rd18, [pivot_batch_f32_param_0];
@@ -1123,7 +1123,7 @@ $L__BB0_100:
 	ret;
 
 }
-	
+
 .visible .entry pivot_many_series_one_param_time_major_f32(
 	.param .u64 pivot_many_series_one_param_time_major_f32_param_0,
 	.param .u64 pivot_many_series_one_param_time_major_f32_param_1,

@@ -4,12 +4,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  
+except ImportError:
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -24,7 +24,7 @@ def _cuda_available() -> bool:
     if not hasattr(ti, "ultosc_cuda_batch_dev"):
         return False
     try:
-        
+
         h = np.array([np.nan, 2.0, 3.0, 4.0, 5.0], dtype=np.float32)
         l = np.array([np.nan, 1.0, 2.5, 3.5, 4.0], dtype=np.float32)
         c = np.array([np.nan, 1.5, 2.8, 3.8, 4.5], dtype=np.float32)
@@ -34,7 +34,7 @@ def _cuda_available() -> bool:
         )
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -89,7 +89,7 @@ class TestUltoscCuda:
 
         p1, p2, p3 = 7, 14, 28
 
-        
+
         cpu = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
             series_h, series_l, series_c = h[:, s], l[:, s], c[:, s]

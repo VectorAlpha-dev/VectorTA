@@ -2,7 +2,7 @@
 
 ## Currently Benchmarked (10)
 1. SMA - Simple Moving Average
-2. EMA - Exponential Moving Average  
+2. EMA - Exponential Moving Average
 3. RSI - Relative Strength Index
 4. Bollinger Bands
 5. MACD

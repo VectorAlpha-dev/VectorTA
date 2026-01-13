@@ -23,11 +23,11 @@
 #include <stdint.h>
 
 
-#ifndef CWMA_USE_ASYNC_COPY       
+#ifndef CWMA_USE_ASYNC_COPY
 #define CWMA_USE_ASYNC_COPY 1
 #endif
 
-#ifndef CWMA_WEIGHTS_OLDEST_FIRST 
+#ifndef CWMA_WEIGHTS_OLDEST_FIRST
 #define CWMA_WEIGHTS_OLDEST_FIRST 1
 #endif
 
@@ -188,7 +188,7 @@ void cwma_batch_f32(const float* __restrict__ prices,
         } else {
             float s = 0.0f, c = 0.0f;
 #if CWMA_WEIGHTS_OLDEST_FIRST
-            
+
             const int start = t - weight_len + 1;
             #pragma unroll 4
             for (int k = 0; k < weight_len; ++k) {
@@ -240,21 +240,21 @@ struct CwmaBatchTiledPrecomputed1x {
     const int t0 = blockIdx.x * TILE;
     if (t0 >= series_len) return;
 
-    
+
     const int total = TILE + wlen - 1;
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w = reinterpret_cast<float*>(shraw + off);            
+    float* w = reinterpret_cast<float*>(shraw + off);
     off = cwma_align_up(off + size_t(wlen) * sizeof(float), 16);
-    float* tile = reinterpret_cast<float*>(shraw + off);         
+    float* tile = reinterpret_cast<float*>(shraw + off);
 
-    
+
     const float* wsrc = weights_flat + combo * max_period;
-    
+
     for (int i = threadIdx.x; i < wlen; i += TILE) { w[i] = wsrc[i]; }
     __syncthreads();
 #if !CWMA_WEIGHTS_OLDEST_FIRST
-    
+
     for (int i = threadIdx.x; i < (wlen >> 1); i += TILE) {
       float tmp = w[i];
       int j = wlen - 1 - i;
@@ -267,13 +267,13 @@ struct CwmaBatchTiledPrecomputed1x {
     const int warm = first_valid + wlen;
     const int combo_base = combo * series_len;
 
-    
-    const int p0 = t0 - (wlen - 1); 
+
+    const int p0 = t0 - (wlen - 1);
     for (int dt = threadIdx.x; dt < total; dt += TILE) {
       int t = p0 + dt;
       float val = 0.f;
       if (t >= 0 && t < series_len) val = prices[t];
-      tile[dt] = val; 
+      tile[dt] = val;
     }
     __syncthreads();
 
@@ -285,10 +285,10 @@ struct CwmaBatchTiledPrecomputed1x {
       return;
     }
 
-    
-    int start = threadIdx.x; 
+
+    int start = threadIdx.x;
     float acc = cwma_dot(&tile[start], w, wlen);
-    
+
     out[out_idx] = __fmul_rn(acc, inv_norms[combo]);
   }
 };
@@ -308,7 +308,7 @@ struct CwmaBatchTiledPrecomputed2x {
            int first_valid,
            float* __restrict__ out) {
     static_assert(TILE > 0, "TILE must be positive");
-    if ((blockDim.x * 2) != TILE) return; 
+    if ((blockDim.x * 2) != TILE) return;
 
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -322,16 +322,16 @@ struct CwmaBatchTiledPrecomputed2x {
     const int total = TILE + wlen - 1;
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w = reinterpret_cast<float*>(shraw + off);            
+    float* w = reinterpret_cast<float*>(shraw + off);
     off = cwma_align_up(off + size_t(wlen) * sizeof(float), 16);
-    float* tile = reinterpret_cast<float*>(shraw + off);         
+    float* tile = reinterpret_cast<float*>(shraw + off);
 
-    
+
     const float* wsrc = weights_flat + combo * max_period;
     for (int i = threadIdx.x; i < wlen; i += blockDim.x) w[i] = wsrc[i];
     __syncthreads();
 #if !CWMA_WEIGHTS_OLDEST_FIRST
-    
+
     for (int i = threadIdx.x; i < (wlen >> 1); i += blockDim.x) {
       float tmp = w[i];
       int j = wlen - 1 - i;
@@ -344,7 +344,7 @@ struct CwmaBatchTiledPrecomputed2x {
     const int warm = first_valid + wlen;
     const int combo_base = combo * series_len;
 
-    
+
     const int p0 = t0 - (wlen - 1);
     for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
       int tcur = p0 + dt;
@@ -361,8 +361,8 @@ struct CwmaBatchTiledPrecomputed2x {
     int out_even = combo_base + t_even;
     int out_odd  = combo_base + t_odd;
 
-    
-    int start = lane * 2; 
+
+    int start = lane * 2;
     float s0 = 0.f, s1 = 0.f;
     cwma_dot2_shared(tile, start, w, wlen, s0, s1);
     float out0 = NAN, out1 = NAN;
@@ -410,7 +410,7 @@ DEFINE_CWMA_BATCH_TILED_2X(cwma_batch_tiled_f32_2x_tile256, 256)
 
 
 
-template<int TILE, int STAGES /*2 recommended*/>
+template<int TILE, int STAGES >
 struct CwmaBatchTiledPrecomputed2xAsync {
   static __device__ __forceinline__
   void run(const float* __restrict__ prices,
@@ -424,7 +424,7 @@ struct CwmaBatchTiledPrecomputed2xAsync {
            float* __restrict__ out) {
 
 #if !CWMA_USE_ASYNC_COPY || (__CUDA_ARCH__ < 800)
-    
+
     CwmaBatchTiledPrecomputed2x<TILE>::run(prices, weights_flat, periods, inv_norms,
                                            max_period, series_len, n_combos, first_valid, out);
     return;
@@ -444,13 +444,13 @@ struct CwmaBatchTiledPrecomputed2xAsync {
 
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w = reinterpret_cast<float*>(shraw + off);               
+    float* w = reinterpret_cast<float*>(shraw + off);
     off = cwma_align_up(off + size_t(wlen) * sizeof(float), 16);
-    
-    float* tile = reinterpret_cast<float*>(shraw + off);            
+
+    float* tile = reinterpret_cast<float*>(shraw + off);
     const int tile_span = total;
 
-    
+
     const float* wsrc = weights_flat + combo * max_period;
     for (int i = threadIdx.x; i < wlen; i += blockDim.x) w[i] = wsrc[i];
     __syncthreads();
@@ -471,36 +471,36 @@ struct CwmaBatchTiledPrecomputed2xAsync {
     int t_base = blockIdx.x * TILE;
     int stage  = 0;
 
-    
+
     for (int s = 0; s < STAGES; ++s) {
       pipe.producer_acquire();
       const int t0 = t_base + s * grid_tile_stride;
       const int p0 = t0 - (wlen - 1);
-      
+
       for (int dt = lane; dt < tile_span; dt += blockDim.x) {
         const int tcur = p0 + dt;
         if (tcur >= 0 && tcur < series_len) {
           cuda::memcpy_async(&tile[s * tile_span + dt], &prices[tcur], sizeof(float), pipe);
         } else {
-          
+
           tile[s * tile_span + dt] = 0.f;
         }
       }
       pipe.producer_commit();
     }
 
-    
+
     while (t_base < series_len) {
-      
+
       pipe.consumer_wait();
       __syncthreads();
 
-      
+
       const float* tbuf = &tile[stage * tile_span];
       const int t_even  = t_base + (lane * 2);
       const int t_odd   = t_even + 1;
       if (t_even < series_len) {
-        int start = lane * 2;  
+        int start = lane * 2;
         float s0 = 0.f, s1 = 0.f;
         cwma_dot2_shared(tbuf, start, w, wlen, s0, s1);
 
@@ -513,13 +513,13 @@ struct CwmaBatchTiledPrecomputed2xAsync {
       }
 
       __syncthreads();
-      pipe.consumer_release();  
+      pipe.consumer_release();
 
-      
+
       pipe.producer_acquire();
       const int next_t0 = t_base + STAGES * grid_tile_stride;
       const int next_p0 = next_t0 - (wlen - 1);
-      const int next_stage = stage;  
+      const int next_stage = stage;
 
       for (int dt = lane; dt < tile_span; dt += blockDim.x) {
         const int tcur = next_p0 + dt;
@@ -531,7 +531,7 @@ struct CwmaBatchTiledPrecomputed2xAsync {
       }
       pipe.producer_commit();
 
-      
+
       t_base += grid_tile_stride;
       stage   = (stage + 1) % STAGES;
     }
@@ -589,7 +589,7 @@ void cwma_multi_series_one_param_time_major_f32(
         } else {
             float s = 0.0f, c = 0.0f;
 #if CWMA_WEIGHTS_OLDEST_FIRST
-            
+
             const int start = t - weight_len + 1;
             #pragma unroll 4
             for (int k = 0; k < weight_len; ++k) {
@@ -637,24 +637,24 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
 
   if (t0 >= series_len || s0 >= num_series) return;
 
-  
+
   const int total = TX_ + wlen - 1;
   extern __shared__ __align__(16) unsigned char shraw[];
   size_t off = 0;
   float* w = reinterpret_cast<float*>(shraw + off);
   off = cwma_align_up(off + size_t(wlen) * sizeof(float), 16);
-  
+
   constexpr int PAD = (CWMA_PAD_2D && (32 % TY_ == 0)) ? 1 : 0;
   const int STRIDE = TY_ + PAD;
-  float* tile = reinterpret_cast<float*>(shraw + off); 
+  float* tile = reinterpret_cast<float*>(shraw + off);
 
-  
-  
+
+
   for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < wlen; i += blockDim.x * blockDim.y) {
     w[i] = weights[i];
   }
   __syncthreads();
-  
+
 #if !CWMA_WEIGHTS_OLDEST_FIRST
   for (int i = threadIdx.y * blockDim.x + threadIdx.x; i < (wlen >> 1); i += blockDim.x * blockDim.y) {
     float tmp = w[i];
@@ -665,15 +665,15 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   __syncthreads();
 #endif
 
-  
+
   const bool vec_ok = (TY_ == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
 
-  const int p0 = t0 - (wlen - 1); 
+  const int p0 = t0 - (wlen - 1);
   for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
     int t = p0 + dt;
     if (t >= 0 && t < series_len) {
       if (vec_ok && threadIdx.y == 0) {
-        
+
         const float4* src4 = reinterpret_cast<const float4*>(&prices_tm[t * num_series + s0]);
         float4 v = src4[0];
         tile[dt * STRIDE + 0] = v.x;
@@ -693,7 +693,7 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
   }
   __syncthreads();
 
-  
+
   int s = s0 + threadIdx.y;
   int t = t0 + threadIdx.x;
   if (s >= num_series || t >= series_len) return;
@@ -706,9 +706,9 @@ void cwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     return;
   }
 
-  int start = threadIdx.x; 
+  int start = threadIdx.x;
   const float* xptr = &tile[start * STRIDE + threadIdx.y];
-  
+
   float s_acc = 0.f, c_acc = 0.f;
   #pragma unroll 4
   for (int i = 0; i < wlen; ++i) {
@@ -749,7 +749,7 @@ void cwma_precompute_weights_f32(const int* __restrict__ periods,
   const int wlen   = max(0, period - 1);
   const int off    = combo * max_period;
 
-  
+
   for (int i = threadIdx.x; i < wlen; i += blockDim.x) {
     float t = float(period - i);
     float w = t * t * t;
@@ -757,7 +757,7 @@ void cwma_precompute_weights_f32(const int* __restrict__ periods,
   }
   __syncthreads();
 
-  
+
   if (threadIdx.x == 0) {
     float s = 0.f, c = 0.f;
     for (int i = 0; i < wlen; ++i) {
@@ -772,14 +772,14 @@ void cwma_precompute_weights_f32(const int* __restrict__ periods,
       weights_flat[off + i] = __fmul_rn(weights_flat[off + i], inv);
     }
 
-    
+
     if (wlen > 0) {
       float s2 = 0.f;
       for (int i = 0; i < wlen; ++i) s2 = __fadd_rn(s2, weights_flat[off + i]);
       weights_flat[off + 0] = __fadd_rn(weights_flat[off + 0], __fsub_rn(1.0f, s2));
     }
 
-    inv_norms[combo] = 1.0f; 
+    inv_norms[combo] = 1.0f;
   }
 }
 
@@ -798,7 +798,7 @@ void cwma_precompute_weights_oldest_first_f32(const int* __restrict__ periods,
   const int wlen   = max(0, period - 1);
   const int off    = combo * max_period;
 
-  
+
   for (int i = threadIdx.x; i < wlen; i += blockDim.x) {
     float t = float(i + 2);
     float w = t * t * t;
@@ -806,7 +806,7 @@ void cwma_precompute_weights_oldest_first_f32(const int* __restrict__ periods,
   }
   __syncthreads();
 
-  
+
   if (threadIdx.x == 0) {
     float s = 0.f, c = 0.f;
     for (int i = 0; i < wlen; ++i) {
@@ -817,11 +817,11 @@ void cwma_precompute_weights_oldest_first_f32(const int* __restrict__ periods,
     float inv = __frcp_rn(s);
     for (int i = 0; i < wlen; ++i) weights_flat[off + i] = __fmul_rn(weights_flat[off + i], inv);
 
-    
+
     if (wlen > 0) {
       float s2 = 0.f; for (int i = 0; i < wlen; ++i) s2 = __fadd_rn(s2, weights_flat[off + i]);
       weights_flat[off + (wlen - 1)] = __fadd_rn(weights_flat[off + (wlen - 1)], __fsub_rn(1.0f, s2));
     }
-    inv_norms[combo] = 1.0f; 
+    inv_norms[combo] = 1.0f;
   }
 }

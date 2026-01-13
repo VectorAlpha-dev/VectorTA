@@ -44,7 +44,7 @@ __device__ __forceinline__ float stoch_from_tables(
 ) {
     const int start = t - fast_k + 1;
 
-    
+
     if (nan_psum[t + 1] - nan_psum[start]) return STOCHF_QNAN;
 
     const int k           = log2_tbl[fast_k];
@@ -57,19 +57,19 @@ __device__ __forceinline__ float stoch_from_tables(
     const float l = fminf(st_min[idx_a], st_min[idx_b]);
     const float c = close[t];
 
-    
+
     if (!(h == h) || !(l == l) || !(c == c)) return STOCHF_QNAN;
 
     const float den = h - l;
     if (den == 0.0f) {
-        
+
         return (c == h) ? 100.0f : 0.0f;
     }
     return 100.0f * ((c - l) / den);
 }
 
 extern "C" __global__ void stochf_batch_f32(
-    
+
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
@@ -80,12 +80,12 @@ extern "C" __global__ void stochf_batch_f32(
     const int*   __restrict__ nan_psum,
     const int*   __restrict__ fastk_arr,
     const int*   __restrict__ fastd_arr,
-    const int*   __restrict__ matype_arr, 
+    const int*   __restrict__ matype_arr,
     int series_len,
     int first_valid,
     int level_count,
     int n_combos,
-    
+
     float* __restrict__ out_k,
     float* __restrict__ out_d
 ) {
@@ -104,31 +104,31 @@ extern "C" __global__ void stochf_batch_f32(
     const int d_warm = k_warm + fd - 1;
 
     if (UNLIKELY(k_warm >= series_len)) {
-        
+
         for (int t = threadIdx.x; t < min(series_len, d_warm); t += blockDim.x)
             out_d[base + t] = STOCHF_QNAN;
         return;
     }
 
-    
+
     for (int t = threadIdx.x; t < k_warm; t += blockDim.x) out_k[base + t] = STOCHF_QNAN;
     for (int t = threadIdx.x; t < min(series_len, d_warm); t += blockDim.x) out_d[base + t] = STOCHF_QNAN;
 
     __syncthreads();
 
-    
+
     for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x) {
         out_k[base + t] = stoch_from_tables(t, fk, close, log2_tbl, level_offsets, st_max, st_min, nan_psum);
     }
 
-    __syncthreads(); 
+    __syncthreads();
 
-    
-    
-    
+
+
+
     if (mt == 0) {
         if (fd == 1) {
-            
+
             for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x)
                 out_d[base + t] = out_k[base + t];
         } else {
@@ -145,7 +145,7 @@ extern "C" __global__ void stochf_batch_f32(
             }
         }
     } else {
-        
+
     }
 }
 
@@ -155,12 +155,12 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int fast_k,
     int fast_d,
-    int matype, 
+    int matype,
     float* __restrict__ k_out_tm,
     float* __restrict__ d_out_tm
 ) {
@@ -169,7 +169,7 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
 
     const int fv = first_valids[series];
 
-    
+
     for (int t = 0; t < series_len; ++t) {
         *(k_out_tm + (size_t)t * num_series + series) = STOCHF_QNAN;
         *(d_out_tm + (size_t)t * num_series + series) = STOCHF_QNAN;
@@ -187,7 +187,7 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
     auto stoch_naive = [&](int t)->float {
         const int start = t - fast_k + 1;
 
-        
+
         float h = load_tm(high_tm, start);
         float l = load_tm(low_tm,  start);
         if (!(h == h) || !(l == l)) return STOCHF_QNAN;
@@ -207,13 +207,13 @@ extern "C" __global__ void stochf_many_series_one_param_f32(
         return 100.0f * ((c - l) / den);
     };
 
-    
+
     for (int t = k_warm; t < series_len; ++t) {
         float kv = stoch_naive(t);
         *(k_out_tm + (size_t)t * num_series + series) = kv;
     }
 
-    
+
     if (matype == 0) {
         float sum = 0.0f, comp = 0.0f; int consec = 0;
         auto kahan_add = [](float &s, float x, float &c){ float y=x-c; float t=s+y; c=(t-s)-y; s=t; };

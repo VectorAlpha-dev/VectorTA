@@ -32,7 +32,7 @@ export const App: React.FC = () => {
   const [selected, setSelected] = useState<{ fast: number; slow: number } | null>(null)
 
   const series = useMemo(() => {
-    
+
     const T = len
     const s = new Array(T).fill(NaN)
     for (let i = 3; i < T; i++) { const x = i; s[i] = Math.sin(x * 0.001) + 0.0001 * x }
@@ -64,14 +64,14 @@ export const App: React.FC = () => {
     setSlicers(new Array(ax.length).fill(0))
     const rows = meta.rows, cols = meta.cols, M = 5
     const out: BacktestResult[] = []
-    
+
     const extraAxes = (meta.axes || []).filter(a => a.name !== 'fast_period' && a.name !== 'slow_period')
     const extraLens = extraAxes.map(a => a.values.length)
-    
+
     const layerIndex = extraLens.length === 0 ? 0 : (() => {
       const idxs = (meta.axes || []).map((a, i) => ({ name: a.name, idx: slicers[i] || 0 }))
       const extras = idxs.filter(x => x.name !== 'fast_period' && x.name !== 'slow_period').map(x => x.idx)
-      
+
       let mul = 1, idx = 0
       for (let k = extraLens.length - 1; k >= 0; k--) { idx += (extras[k] || 0) * mul; mul *= extraLens[k] }
       return idx
@@ -249,7 +249,7 @@ export const App: React.FC = () => {
         </div>
 
         <div style={{ flex: 1 }}>
-          {/* Slicers for extra axes */}
+          { }
           {(axes.length > 2) && (
             <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8, flexWrap: 'wrap' }}>
               {axes.map((a, idx) => (a.name === 'fast_period' || a.name === 'slow_period') ? null : (
@@ -277,7 +277,7 @@ export const App: React.FC = () => {
             fastType={fastType}
             slowType={slowType}
           />
-          {/* Top-10 by selected metric */}
+          { }
           {results.length > 0 && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontWeight: 600, marginBottom: 6 }}>Top 10 by {metric}</div>

@@ -56,16 +56,16 @@ extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
     const int s = shorts[combo];
     const int l = longs[combo];
     if (UNLIKELY(s <= 0 || l <= 0 || s >= l)) {
-        
+
         const int base = combo * len;
         for (int t = 0; t < len; ++t) out[base + t] = AO_NAN_F;
         return;
     }
 
-    const int warm = first_valid + l - 1; 
+    const int warm = first_valid + l - 1;
     const int row_off = combo * len;
 
-    
+
     int t = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = gridDim.x * blockDim.x;
 
@@ -79,7 +79,7 @@ extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
             int start_l = t + 1 - l;
             if (start_s < 0) start_s = 0;
             if (start_l < 0) start_l = 0;
-            
+
             dsf head   = load_dsf(prefix_ds, t + 1);
             dsf tail_s = load_dsf(prefix_ds, start_s);
             dsf tail_l = load_dsf(prefix_ds, start_l);
@@ -94,7 +94,7 @@ extern "C" __global__ void ao_batch_f32(const float2* __restrict__ prefix_ds,
 }
 
 extern "C" __global__ void ao_many_series_one_param_f32(
-    const float* __restrict__ prices_tm, 
+    const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
@@ -105,7 +105,7 @@ extern "C" __global__ void ao_many_series_one_param_f32(
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
-    
+
     if (UNLIKELY(short_p <= 0 || long_p <= 0 || short_p >= long_p)) {
         float* o = out_tm + series;
         for (int row = 0; row < series_len; ++row, o += num_series) *o = AO_NAN_F;
@@ -121,20 +121,20 @@ extern "C" __global__ void ao_many_series_one_param_f32(
 
     const int warm = first_valid + long_p - 1;
 
-    
+
     if (UNLIKELY(warm >= series_len)) {
         float* o = out_tm + series;
         for (int row = 0; row < series_len; ++row, o += num_series) *o = AO_NAN_F;
         return;
     }
 
-    
+
     {
         float* o = out_tm + series;
         for (int row = 0; row < warm; ++row, o += num_series) *o = AO_NAN_F;
     }
 
-    
+
     dsf sum_s = ds_set(0.0f);
     dsf sum_l = ds_set(0.0f);
 
@@ -149,11 +149,11 @@ extern "C" __global__ void ao_many_series_one_param_f32(
     const float inv_s = 1.0f / (float)short_p;
     const float inv_l = 1.0f / (float)long_p;
 
-    
+
     *(out_tm + (size_t)warm * (size_t)num_series + series) =
         ds_to_f(ds_sub(ds_scale(sum_s, inv_s), ds_scale(sum_l, inv_l)));
 
-    
+
     const float* cur   = prices_tm + ((size_t)warm + 1) * (size_t)num_series + series;
     const float* old_s = prices_tm + ((size_t)first_valid + (long_p - short_p)) * (size_t)num_series + series;
     const float* old_l = prices_tm + ((size_t)first_valid) * (size_t)num_series + series;

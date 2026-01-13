@@ -1,22 +1,22 @@
 [build]
-# rustc-wrapper = "sccache"
 
-# Limit test parallelism to prevent crashes from memory exhaustion
+
+
 [test]
 threads = 4
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
   "-C", "target-cpu=native",
-#  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
+
 ]
 
 [target.x86_64-pc-windows-msvc]
 rustflags = [
   "-Zdylib-lto",
   "-C", "target-cpu=native",
-#  "-C", "target-feature=+avx512f,+avx512bw,+avx512dq,+avx512vl,+fma",
-#  "-C", "linker=lld-link",
+
+
 ]
 
 [target.wasm32-unknown-unknown]
@@ -27,6 +27,6 @@ rustflags = [
 ]
 
 [env]
-# Target Ada (RTX 4090 = CC 8.9) for CUDA builds by default.
-# build.rs passes this through to nvcc as `-arch=compute_89` when generating PTX.
+
+
 CUDA_ARCH = "compute_89"

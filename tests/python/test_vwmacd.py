@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta
 except ImportError:
-    
+
     try:
         import my_project as ta
     except ImportError:
@@ -23,21 +23,21 @@ class TestVwmacd:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_vwmacd_partial_params(self, test_data):
         """Test VWMACD with default parameters - mirrors check_vwmacd_partial_params"""
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         macd, signal, hist = ta.vwmacd(
-            close, volume, 
+            close, volume,
             12, 26, 9
         )
         assert len(macd) == len(close)
         assert len(signal) == len(close)
         assert len(hist) == len(close)
-    
+
     def test_vwmacd_accuracy(self, test_data):
         """Matches Rust unit test reference values (last 5, tol=2e-4)."""
         close = test_data['close']
@@ -45,7 +45,7 @@ class TestVwmacd:
 
         macd, signal, hist = ta.vwmacd(close, volume, 12, 26, 9)
 
-        
+
         expected_macd_last5 = np.array([
             -394.95161155,
             -508.29106210,
@@ -72,207 +72,207 @@ class TestVwmacd:
         signal_last5 = np.asarray(signal[-5:])
         hist_last5 = np.asarray(hist[-5:])
 
-        
+
         assert_close(macd_last5, expected_macd_last5, rtol=0.0, atol=2e-4, msg="macd last5")
         assert_close(signal_last5, expected_signal_last5, rtol=0.0, atol=2e-4, msg="signal last5")
         assert_close(hist_last5, expected_hist_last5, rtol=0.0, atol=2e-4, msg="hist last5")
-    
+
     def test_vwmacd_default_candles(self, test_data):
         """Test VWMACD with default parameters - mirrors check_vwmacd_default_candles"""
         close = test_data['close']
         volume = test_data['volume']
-        
+
         macd, signal, hist = ta.vwmacd(close, volume, 12, 26, 9)
         assert len(macd) == len(close)
         assert len(signal) == len(close)
         assert len(hist) == len(close)
-    
+
     def test_vwmacd_zero_fast_period(self):
         """Test VWMACD fails with zero fast period - mirrors check_vwmacd_zero_fast_period"""
         data = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(data, volume, 0, 26, 9)
-    
+
     def test_vwmacd_zero_slow_period(self):
         """Test VWMACD fails with zero slow period - mirrors check_vwmacd_zero_slow_period"""
         data = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(data, volume, 12, 0, 9)
-    
+
     def test_vwmacd_zero_signal_period(self):
         """Test VWMACD fails with zero signal period - mirrors check_vwmacd_zero_signal_period"""
         data = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(data, volume, 12, 26, 0)
-    
+
     def test_vwmacd_fast_exceeds_slow(self):
         """Test VWMACD fails when fast >= slow - mirrors check_vwmacd_fast_exceeds_slow"""
         data = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(data, volume, 26, 12, 9)
-    
+
     def test_vwmacd_period_exceeds_data(self):
         """Test VWMACD fails when period exceeds data length - mirrors check_vwmacd_period_exceeds_data"""
         small_data = np.array([10.0, 20.0, 30.0])
         small_volume = np.array([100.0, 200.0, 300.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(small_data, small_volume, 12, 26, 9)
-    
+
     def test_vwmacd_very_small_dataset(self):
         """Test VWMACD fails with insufficient data - mirrors check_vwmacd_very_small_dataset"""
         single_point = np.array([42.0])
         single_volume = np.array([100.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta.vwmacd(single_point, single_volume, 12, 26, 9)
-    
+
     def test_vwmacd_mismatched_input_lengths(self):
         """Test VWMACD fails with mismatched input lengths - mirrors check_vwmacd_mismatched_input_lengths"""
         close = np.array([10.0, 20.0, 30.0])
-        volume = np.array([100.0, 200.0])  
-        
+        volume = np.array([100.0, 200.0])
+
         with pytest.raises(ValueError, match="length mismatch|Output length mismatch|mismatched"):
             ta.vwmacd(close, volume, 12, 26, 9)
-    
+
     def test_vwmacd_empty_inputs(self):
         """Test VWMACD fails with empty inputs - mirrors check_vwmacd_empty_inputs"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="empty|Empty"):
             ta.vwmacd(empty, empty, 12, 26, 9)
-    
+
     def test_vwmacd_reinput(self, test_data):
         """Test VWMACD applied twice (re-input) - mirrors check_vwmacd_reinput"""
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         macd1, signal1, hist1 = ta.vwmacd(close, volume, 12, 26, 9)
         assert len(macd1) == len(close)
-        
-        
+
+
         macd2, signal2, hist2 = ta.vwmacd(close, volume, 10, 20, 7)
         assert len(macd2) == len(close)
-        
-        
+
+
         assert not np.allclose(macd1[50:], macd2[50:], equal_nan=True)
-    
+
     def test_vwmacd_nan_handling(self, test_data):
         """Test VWMACD handles NaN values correctly - mirrors check_vwmacd_nan_handling"""
         close = test_data['close']
         volume = test_data['volume']
-        
+
         macd, signal, hist = ta.vwmacd(close, volume, 12, 26, 9)
         assert len(macd) == len(close)
-        
-        
+
+
         warmup = 26 - 1
         if len(macd) > warmup + 10:
             for i in range(warmup + 10, len(macd)):
                 assert not np.isnan(macd[i]), f"Found unexpected NaN in MACD at index {i}"
                 assert not np.isnan(signal[i]), f"Found unexpected NaN in signal at index {i}"
                 assert not np.isnan(hist[i]), f"Found unexpected NaN in histogram at index {i}"
-    
+
     def test_vwmacd_all_nan_inputs(self):
         """Test VWMACD with all NaN values"""
         all_nan = np.full(100, np.nan)
-        
+
         with pytest.raises(ValueError, match="All values are NaN"):
             ta.vwmacd(all_nan, all_nan, 12, 26, 9)
-    
+
     def test_vwmacd_all_zero_volume(self, test_data):
         """When volume is all zero, outputs should remain NaN (no crash)."""
         close = test_data['close'][:200]
         zero_volume = np.zeros_like(close)
 
         macd, signal, hist = ta.vwmacd(close, zero_volume, 12, 26, 9)
-        
+
         assert np.all(np.isnan(macd))
         assert np.all(np.isnan(signal))
         assert np.all(np.isnan(hist))
-    
+
     def test_vwmacd_streaming_basic(self, test_data):
         """Test VWMACD streaming functionality"""
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
-        
-        
+
+
         stream = ta.VwmacdStream(fast_period=12, slow_period=26, signal_period=9)
-        
-        
+
+
         stream_results = []
         for i in range(len(close)):
             result = stream.update(close[i], volume[i])
             if result is not None:
                 stream_results.append(result)
-        
-        
+
+
         assert len(stream_results) > 0
-    
+
     def test_vwmacd_batch_single_params(self, test_data):
         """Test VWMACD batch with single parameter set"""
         close = test_data['close'][:100]
         volume = test_data['volume'][:100]
-        
-        
+
+
         result = ta.vwmacd_batch(
             close, volume,
             fast_range=(12, 12, 0),
             slow_range=(26, 26, 0),
             signal_range=(9, 9, 0)
         )
-        
-        
+
+
         assert 'macd' in result
         assert 'signal' in result
         assert 'hist' in result
         assert 'fast_periods' in result
         assert 'slow_periods' in result
         assert 'signal_periods' in result
-        
+
         assert result['macd'].shape == (1, len(close))
         assert result['signal'].shape == (1, len(close))
         assert result['hist'].shape == (1, len(close))
-    
+
     def test_vwmacd_batch_multiple_params(self, test_data):
         """Test VWMACD batch with multiple parameter combinations"""
         close = test_data['close'][:50]
         volume = test_data['volume'][:50]
-        
+
         result = ta.vwmacd_batch(
             close, volume,
-            fast_range=(10, 12, 2),  
-            slow_range=(20, 26, 6),  
-            signal_range=(7, 9, 2)   
+            fast_range=(10, 12, 2),
+            slow_range=(20, 26, 6),
+            signal_range=(7, 9, 2)
         )
-        
-        
+
+
         assert result['macd'].shape == (8, len(close))
         assert result['signal'].shape == (8, len(close))
         assert result['hist'].shape == (8, len(close))
-        
-        
+
+
         expected_combos = [
             (10, 20, 7), (10, 20, 9),
             (10, 26, 7), (10, 26, 9),
             (12, 20, 7), (12, 20, 9),
             (12, 26, 7), (12, 26, 9)
         ]
-        
+
         fast_periods = result['fast_periods']
         slow_periods = result['slow_periods']
         signal_periods = result['signal_periods']
-        
+
         for i, expected in enumerate(expected_combos):
             assert fast_periods[i] == expected[0]
             assert slow_periods[i] == expected[1]

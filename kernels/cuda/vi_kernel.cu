@@ -24,17 +24,17 @@
 
 
 extern "C" __global__ void vi_batch_f32(
-    const float* __restrict__ pfx_tr,   
-    const float* __restrict__ pfx_vp,   
-    const float* __restrict__ pfx_vm,   
-    const int*   __restrict__ periods,  
+    const float* __restrict__ pfx_tr,
+    const float* __restrict__ pfx_vp,
+    const float* __restrict__ pfx_vm,
+    const int*   __restrict__ periods,
     int series_len,
     int n_rows,
     int first_valid,
-    float* __restrict__ out_plus,       
-    float* __restrict__ out_minus       
+    float* __restrict__ out_plus,
+    float* __restrict__ out_minus
 ) {
-    
+
     if (gridDim.y > 1) {
         const int t   = (int)(blockIdx.x * blockDim.x + threadIdx.x);
         const int row = (int)blockIdx.y;
@@ -76,7 +76,7 @@ extern "C" __global__ void vi_batch_f32(
         return;
     }
 
-    
+
     const size_t tid = (size_t)blockIdx.x * (size_t)blockDim.x + (size_t)threadIdx.x;
     const size_t total = (size_t)n_rows * (size_t)series_len;
     if (tid >= total) {
@@ -123,9 +123,9 @@ extern "C" __global__ void vi_many_series_one_param_f32(
     const float* __restrict__ pfx_tr_tm,
     const float* __restrict__ pfx_vp_tm,
     const float* __restrict__ pfx_vm_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
-    int series_len, 
+    int series_len,
     int period,
     float* __restrict__ plus_tm,
     float* __restrict__ minus_tm

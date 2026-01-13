@@ -64,7 +64,7 @@ extern "C" __global__
 void dvdiqqe_batch_f32(
     const float* __restrict__ open,
     const float* __restrict__ close,
-    const float* __restrict__ volume, 
+    const float* __restrict__ volume,
     const int   has_volume,
     const int*  __restrict__ periods,
     const int*  __restrict__ smoothings,
@@ -74,7 +74,7 @@ void dvdiqqe_batch_f32(
     const int   series_len,
     const int   first_valid,
     const float tick_size,
-    const int   center_dynamic, 
+    const int   center_dynamic,
     float* __restrict__ out_dvdi,
     float* __restrict__ out_fast,
     float* __restrict__ out_slow,
@@ -98,12 +98,12 @@ void dvdiqqe_batch_f32(
     float* slow_row = out_slow  + combo * series_len;
     float* cent_row = out_center+ combo * series_len;
 
-    
+
     const float a_p = 2.0f / (float)(period + 1);
     const float a_s = 2.0f / (float)(smoothing + 1);
     const float a_r = 2.0f / (float)(wper + 1);
 
-    
+
     float pvi_sum = 0.0f, pvi_c = 0.0f;
     float nvi_sum = 0.0f, nvi_c = 0.0f;
 
@@ -120,7 +120,7 @@ void dvdiqqe_batch_f32(
     float prev_close = 0.0f;
     float tickrng_prev = tick_size;
 
-    
+
     if (threadIdx.x == 0)
     {
         #pragma unroll 1
@@ -129,10 +129,10 @@ void dvdiqqe_batch_f32(
             const float ci = close[t];
             if (!isfinite(ci)) { continue; }
 
-            
+
             const float tick_vol = dvdiqqe_tick_volume(oi, ci, tick_size, tickrng_prev);
             const float real_vol = has_volume ? volume[t] : NAN;
-            const float sel_vol  = select_volume(real_vol, tick_vol, /*use_tick_only*/ 0);
+            const float sel_vol  = select_volume(real_vol, tick_vol,  0);
 
             if (t == 0) { prev_close = ci; prev_vol = sel_vol; }
 
@@ -141,12 +141,12 @@ void dvdiqqe_batch_f32(
             if (sel_vol < prev_vol) { kahan_add(nvi_sum, nvi_c, -dpc); }
             prev_close = ci; prev_vol = sel_vol;
 
-            
+
             if (t >= first_valid) {
                 const float pvi_val = pvi_sum + pvi_c;
                 const float nvi_val = nvi_sum + nvi_c;
                 if (pvi_cnt < period) {
-                    
+
                     pvi_cnt += 1;
                     const float inv = 1.0f / (float)pvi_cnt;
                     pvi_ema = __fmaf_rn((pvi_val - pvi_ema), inv, pvi_ema);
@@ -160,7 +160,7 @@ void dvdiqqe_batch_f32(
             const float pdiv = (pvi_sum + pvi_c) - pvi_ema;
             const float ndiv = (nvi_sum + nvi_c) - nvi_ema;
 
-            
+
             if (t >= first_valid) {
                 if (div_cnt < smoothing) {
                     div_cnt += 1;
@@ -174,9 +174,9 @@ void dvdiqqe_batch_f32(
             }
 
             const float dv = pdiv_ema - ndiv_ema;
-            dvdi_row[t] = dv;  
+            dvdi_row[t] = dv;
 
-            
+
             if (!dvdi_inited) { dvdi_prev = dv; dvdi_inited = true; }
             const float abs_delta = fabsf(dv - dvdi_prev);
             if (t >= first_valid + 1) {
@@ -197,7 +197,7 @@ void dvdiqqe_batch_f32(
                 }
             }
 
-            
+
             if (t == warm && rng2_cnt >= 1) {
                 fast_row[t] = dv; slow_row[t] = dv;
             } else if (t > warm && rng2_cnt >= wper) {
@@ -223,10 +223,10 @@ void dvdiqqe_batch_f32(
                 }
             }
 
-            
+
             if (t >= warm) {
                 if (center_dynamic) {
-                    
+
                     center_cnt += 1;
                     const float invc = 1.0f / (float)center_cnt;
                     center_mean = __fmaf_rn((dv - center_mean), invc, center_mean);
@@ -240,9 +240,9 @@ void dvdiqqe_batch_f32(
         }
     }
 
-    __syncthreads(); 
+    __syncthreads();
 
-    
+
     const float qnan = qnan_f32();
     for (int i = threadIdx.x; i < series_len && i < warm; i += blockDim.x) {
         dvdi_row[i] = qnan;
@@ -260,7 +260,7 @@ void dvdiqqe_many_series_one_param_f32(
     const float* __restrict__ close_tm,
     const float* __restrict__ volume_tm,
     const int   has_volume,
-    const int*  __restrict__ first_valids, 
+    const int*  __restrict__ first_valids,
     const int   period,
     const int   smoothing,
     const float fast_mult,
@@ -293,7 +293,7 @@ void dvdiqqe_many_series_one_param_f32(
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int first_valid = first_valids[s];
         if (first_valid < 0 || first_valid >= series_len) {
-            
+
             const float qnan = qnan_f32();
             for (int t = lane; t < series_len; t += warpSize) {
                 const int idx = t * cols + s;
@@ -304,7 +304,7 @@ void dvdiqqe_many_series_one_param_f32(
 
         const int warm = first_valid + wper;
 
-        
+
         float pvi_sum = 0.0f, pvi_c = 0.0f;
         float nvi_sum = 0.0f, nvi_c = 0.0f;
 
@@ -331,7 +331,7 @@ void dvdiqqe_many_series_one_param_f32(
 
                 const float tick_vol = dvdiqqe_tick_volume(oi, ci, tick_size, tickrng_prev);
                 const float vol_tm   = has_volume ? volume_tm[idx] : NAN;
-                const float sel_vol  = select_volume(vol_tm, tick_vol, /*use_tick_only*/ 0);
+                const float sel_vol  = select_volume(vol_tm, tick_vol,  0);
 
                 if (t == 0) { prev_close = ci; prev_vol = sel_vol; }
 
@@ -422,7 +422,7 @@ void dvdiqqe_many_series_one_param_f32(
             }
         }
 
-        
+
         const float qnan = qnan_f32();
         for (int t = lane; t < series_len && t < warm; t += warpSize) {
             const int idx = t * cols + s;

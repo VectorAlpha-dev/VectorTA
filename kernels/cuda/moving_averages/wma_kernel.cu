@@ -17,7 +17,7 @@
 
 
 #ifndef WMA_MAX_PERIOD
-#define WMA_MAX_PERIOD 8192   
+#define WMA_MAX_PERIOD 8192
 #endif
 
 
@@ -58,7 +58,7 @@ void wma_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     extern __shared__ float shmem[];
     float* sh_ramp = shmem;
     const bool need_sh = (period > WMA_MAX_PERIOD);
@@ -117,7 +117,7 @@ void wma_batch_rolling_f32(const float* __restrict__ prices,
     const int   warm     = first_valid + period - 1;
     const int   base_out = combo * series_len;
 
-    
+
     {
         int t = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -129,13 +129,13 @@ void wma_batch_rolling_f32(const float* __restrict__ prices,
     }
     __syncthreads();
 
-    
+
     const int thread_linear = blockIdx.x * blockDim.x + threadIdx.x;
     int seg0 = warm + thread_linear * WMA_ROLLING_CHUNK;
     if (seg0 >= series_len) return;
     const int segN = min(series_len, seg0 + WMA_ROLLING_CHUNK);
 
-    
+
     int t = seg0;
     int start = t - period + 1;
     const float* __restrict__ p0 = prices + start;
@@ -185,8 +185,8 @@ void wma_batch_prefix_f32(const float* __restrict__ pref_a,
         if (t < warm) {
             out[out_idx] = f32_qnan();
         } else {
-            
-            const int start = t + 1 - period; 
+
+            const int start = t + 1 - period;
             const float s_a = pref_a[t + 1] - pref_a[start];
             const float s_b = pref_b[t + 1] - pref_b[start];
             const float wsum = fmaf(-float(t - period), s_a, s_b);
@@ -208,7 +208,7 @@ void wma_multi_series_one_param_time_major_f32(
         return;
     }
 
-    
+
     extern __shared__ float shmem[];
     float* sh_ramp = shmem;
     const bool need_sh = (period > WMA_MAX_PERIOD);

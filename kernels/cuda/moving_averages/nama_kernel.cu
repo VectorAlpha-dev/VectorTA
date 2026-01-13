@@ -118,25 +118,25 @@ void nama_batch_f32(const float* __restrict__ prices,
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    
+
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) out[base + idx] = NAN;
     __syncthreads();
 
     if (threadIdx.x != 0 || warm >= series_len) return;
 
-    
+
     extern __shared__ int shared_i[];
-    const int cap = period + 1;                    
-    int* dq_max = shared_i;                        
-    int* dq_min = shared_i + cap;                  
-    float* tr_ring = reinterpret_cast<float*>(shared_i + 2*cap); 
+    const int cap = period + 1;
+    int* dq_max = shared_i;
+    int* dq_min = shared_i + cap;
+    float* tr_ring = reinterpret_cast<float*>(shared_i + 2*cap);
 
     int max_front = 0, max_size = 0;
     int min_front = 0, min_size = 0;
 
-    
+
     double eff_sum = 0.0;
-    int wr = 0; 
+    int wr = 0;
 
     if (has_ohlc) {
         float prev_c = 0.0f;
@@ -189,7 +189,7 @@ void nama_batch_f32(const float* __restrict__ prices,
     double prev = alpha * static_cast<double>(prices[warm]);
     out[base + warm] = static_cast<float>(prev);
 
-    
+
     if (has_ohlc) {
         float prev_c = close[warm];
         for (int i = warm + 1; i < series_len; ++i) {
@@ -200,7 +200,7 @@ void nama_batch_f32(const float* __restrict__ prices,
             dq_pop_older(win_start, cap, dq_max, max_front, max_size);
             dq_pop_older(win_start, cap, dq_min, min_front, min_size);
 
-            
+
             float tr_new;
             {
                 const float h = high[i], l = low[i];
@@ -234,7 +234,7 @@ void nama_batch_f32(const float* __restrict__ prices,
             dq_pop_older(win_start, cap, dq_max, max_front, max_size);
             dq_pop_older(win_start, cap, dq_min, min_front, min_size);
 
-            
+
             const float cur = prices[i];
             const float tr_new = fabsf(cur - prev_p);
             const float tr_old = tr_ring[wr];
@@ -284,7 +284,7 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    
+
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
         out[base + idx] = NAN;
     }
@@ -304,7 +304,7 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     int min_front = 0;
     int min_size = 0;
 
-    
+
     for (int j = first_valid; j <= warm; ++j) {
         dq_push_max(j, capacity, dq_max, max_front, max_size, prices);
         dq_push_min(j, capacity, dq_min, min_front, min_size, prices);
@@ -314,8 +314,8 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    
+
+
     double eff_sum = static_cast<double>(prefix_tr[warm] - prefix_tr[first_valid]);
 
     const double hi = static_cast<double>(prices[dq_max[max_front]]);
@@ -328,18 +328,18 @@ void nama_batch_prefix_f32(const float* __restrict__ prices,
     out[base + warm] = static_cast<float>(prev);
 
     for (int i = warm + 1; i < series_len; ++i) {
-        
+
         dq_push_max(i, capacity, dq_max, max_front, max_size, prices);
         dq_push_min(i, capacity, dq_min, min_front, min_size, prices);
 
-        
+
         const int win_start = i + 1 - period;
         dq_pop_older(win_start, capacity, dq_max, max_front, max_size);
         dq_pop_older(win_start, capacity, dq_min, min_front, min_size);
 
-        
-        
-        
+
+
+
         const double tr_add = static_cast<double>(prefix_tr[i] - prefix_tr[i - 1]);
         const double tr_sub = static_cast<double>(prefix_tr[i - period] - prefix_tr[i - period - 1]);
         eff_sum = eff_sum + tr_add - tr_sub;
@@ -453,7 +453,7 @@ void nama_many_series_one_param_time_major_f32(
         min_size += 1;
     };
 
-    
+
     double eff_sum = 0.0;
     int wr = 0;
 

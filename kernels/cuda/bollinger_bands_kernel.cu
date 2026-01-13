@@ -93,8 +93,8 @@ extern "C" __global__ void bollinger_bands_sma_prefix_f32(
     const float nanf = qnan32();
     const float invP = 1.0f / (float)period;
 
-    
-    
+
+
     const int nan_base = prefix_nan[first_valid];
     const bool any_nan_since_first = (prefix_nan[len] - nan_base) != 0;
 
@@ -110,11 +110,11 @@ extern "C" __global__ void bollinger_bands_sma_prefix_f32(
                 ok = (nan_since_first == 0);
             }
             if (ok) {
-                
+
                 const int t1 = t + 1;
                 const int s = t1 - period;
 
-                
+
                 const float2 ps_e  = prefix_sum[t1];
                 const float2 ps_s  = prefix_sum[s];
                 const float2 ps2_e = prefix_sum_sq[t1];
@@ -143,24 +143,24 @@ extern "C" __global__ void bollinger_bands_sma_prefix_f32(
 
 
 extern "C" __global__ void bollinger_bands_many_series_one_param_f32(
-    const float2* __restrict__ prefix_sum_tm,   
+    const float2* __restrict__ prefix_sum_tm,
     const float2* __restrict__ prefix_sum_sq_tm,
-    const int* __restrict__ prefix_nan_tm,      
+    const int* __restrict__ prefix_nan_tm,
     int period,
     float devup,
     float devdn,
-    int num_series,  
-    int series_len,  
-    const int* __restrict__ first_valids,       
-    float* __restrict__ out_upper_tm,           
-    float* __restrict__ out_middle_tm,          
-    float* __restrict__ out_lower_tm) {         
+    int num_series,
+    int series_len,
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_upper_tm,
+    float* __restrict__ out_middle_tm,
+    float* __restrict__ out_lower_tm) {
     const int s = blockIdx.y;
     if (s >= num_series) return;
     if (period <= 0) return;
     const int fv = first_valids[s];
     const int warm = fv + period - 1;
-    const int stride = num_series; 
+    const int stride = num_series;
     const float invP = 1.0f / (float)period;
     const int nan_base = prefix_nan_tm[fv * stride + s];
     const bool any_nan_since_first = (prefix_nan_tm[series_len * stride + s] - nan_base) != 0;
@@ -186,8 +186,8 @@ extern "C" __global__ void bollinger_bands_many_series_one_param_f32(
                 const dsf sum_ds  = ds_sub(load_dsf(prefix_sum_tm,    p_idx), load_dsf(prefix_sum_tm,    s_idx));
                 const dsf sum2_ds = ds_sub(load_dsf(prefix_sum_sq_tm, p_idx), load_dsf(prefix_sum_sq_tm, s_idx));
 
-                
-                
+
+
                 const double sum_d  = (double)sum_ds.hi  + (double)sum_ds.lo;
                 const double sum2_d = (double)sum2_ds.hi + (double)sum2_ds.lo;
                 const double invPd = 1.0 / (double)period;

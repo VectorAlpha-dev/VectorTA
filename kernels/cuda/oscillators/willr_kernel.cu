@@ -30,7 +30,7 @@ void willr_batch_f32(const float* __restrict__ close,
     const int base = combo * series_len;
     float* __restrict__ out_row = out + base;
 
-    
+
     const int period = periods[combo];
     if (period <= 0 || first_valid >= series_len) {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x)
@@ -40,14 +40,14 @@ void willr_batch_f32(const float* __restrict__ close,
 
     const int warm = first_valid + period - 1;
 
-    
+
     const int warm_clamped = (warm < series_len) ? warm : series_len;
     for (int i = threadIdx.x; i < warm_clamped; i += blockDim.x)
         out_row[i] = NAN;
 
     if (warm >= series_len) return;
 
-    
+
     const int k = log2_tbl[period];
     if (k < 0 || k >= level_count) {
         for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x)
@@ -57,20 +57,20 @@ void willr_batch_f32(const float* __restrict__ close,
     const int offset     = 1 << k;
     const int level_base = level_offsets[k];
 
-    
+
     for (int t = warm + threadIdx.x; t < series_len; t += blockDim.x) {
         const float c = close[t];
         if (isnan(c)) { out_row[t] = NAN; continue; }
 
         const int start = t - period + 1;
 
-        
+
         if (nan_psum[t + 1] - nan_psum[start] != 0) {
             out_row[t] = NAN;
             continue;
         }
 
-        
+
         const int idx_a  = level_base + start;
         const int idx_b  = level_base + (t + 1 - offset);
         const float hmax = fmaxf(st_max[idx_a], st_max[idx_b]);
@@ -97,7 +97,7 @@ void willr_many_series_one_param_time_major_f32(
     if (series >= cols) return;
 
     if (period <= 0) {
-        
+
         for (int t = 0; t < rows; ++t) out_tm[t * cols + series] = NAN;
         return;
     }
@@ -105,7 +105,7 @@ void willr_many_series_one_param_time_major_f32(
     const int first_valid = first_valids[series];
     const int warm = first_valid + period - 1;
 
-    
+
     const int wclamp = (warm < rows) ? warm : rows;
     for (int t = 0; t < wclamp; ++t)
         out_tm[t * cols + series] = NAN;
@@ -121,7 +121,7 @@ void willr_many_series_one_param_time_major_f32(
         float h = -INFINITY, l = INFINITY;
         bool any_nan = false;
 
-        
+
         for (int j = start; j <= t; ++j) {
             const int jidx = j * cols + series;
             const float hj = high_tm[jidx];

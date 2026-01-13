@@ -7,7 +7,7 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -33,15 +33,15 @@ def _cuda_available() -> bool:
             fast_limit_range=(0.5, 0.5, 0.0),
             slow_limit_range=(0.05, 0.05, 0.0),
         )
-        
+
         _ = cp.asarray(m)
         _ = cp.asarray(f)
         return True
-    except Exception as e:  
+    except Exception as e:
         msg = str(e).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
-        
+
         return True
 
 
@@ -57,10 +57,10 @@ class TestMamaCuda:
         close = test_data["close"][:2048].astype(np.float64)
         fast, slow = 0.5, 0.05
 
-        
+
         cpu_m, cpu_f = ti.mama(close, fast, slow)
 
-        
+
         m_handle, f_handle = ti.mama_cuda_batch_dev(
             close.astype(np.float32),
             fast_limit_range=(fast, fast, 0.0),
@@ -83,7 +83,7 @@ class TestMamaCuda:
 
         fast, slow = 0.45, 0.06
 
-        
+
         cpu_m_tm = np.zeros_like(data_tm)
         cpu_f_tm = np.zeros_like(data_tm)
         for j in range(N):
@@ -91,7 +91,7 @@ class TestMamaCuda:
             cpu_m_tm[:, j] = m
             cpu_f_tm[:, j] = f
 
-        
+
         m_handle, f_handle = ti.mama_cuda_many_series_one_param_dev(
             data_tm.astype(np.float32), fast, slow
         )

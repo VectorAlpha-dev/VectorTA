@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry rmq_init_level0_f32(
 	.param .u64 rmq_init_level0_f32_param_0,
@@ -46,7 +46,7 @@ $L__BB0_2:
 	ret;
 
 }
-	
+
 .visible .entry rmq_init_nan_mask_u8(
 	.param .u64 rmq_init_nan_mask_u8_param_0,
 	.param .u64 rmq_init_nan_mask_u8_param_1,
@@ -110,7 +110,7 @@ $L__BB1_6:
 	ret;
 
 }
-	
+
 .visible .entry rmq_build_level_max_f32(
 	.param .u64 rmq_build_level_max_f32_param_0,
 	.param .u64 rmq_build_level_max_f32_param_1,
@@ -168,7 +168,7 @@ $L__BB2_6:
 	ret;
 
 }
-	
+
 .visible .entry rmq_build_level_min_f32(
 	.param .u64 rmq_build_level_min_f32_param_0,
 	.param .u64 rmq_build_level_min_f32_param_1,
@@ -226,7 +226,7 @@ $L__BB3_6:
 	ret;
 
 }
-	
+
 .visible .entry rmq_build_level_or_u8(
 	.param .u64 rmq_build_level_or_u8_param_0,
 	.param .u64 rmq_build_level_or_u8_param_1,
@@ -278,7 +278,7 @@ $L__BB4_4:
 	ret;
 
 }
-	
+
 .visible .entry donchian_batch_f32(
 	.param .u64 donchian_batch_f32_param_0,
 	.param .u64 donchian_batch_f32_param_1,
@@ -792,7 +792,7 @@ $L__BB5_52:
 	bra.uni 	$L__BB5_52;
 
 }
-	
+
 .visible .entry donchian_batch_from_rmq_f32(
 	.param .u64 donchian_batch_from_rmq_f32_param_0,
 	.param .u32 donchian_batch_from_rmq_f32_param_1,
@@ -975,12 +975,12 @@ $L__BB6_14:
 $L__BB6_13:
 	.pragma "nounroll";
 	add.s32 	%r106, %r106, 1;
-	
+
 	ld.global.nc.u8 %r72, [%rd200];
-	
-	
+
+
 	ld.global.nc.u8 %r73, [%rd201];
-	
+
 	cvt.u16.u32 	%rs1, %r72;
 	cvt.u16.u32 	%rs2, %r73;
 	or.b16  	%rs3, %rs2, %rs1;
@@ -991,22 +991,22 @@ $L__BB6_13:
 
 $L__BB6_15:
 	add.s64 	%rd140, %rd35, %rd202;
-	
+
 	ld.global.nc.f32 %f1, [%rd140];
-	
+
 	add.s64 	%rd141, %rd32, %rd202;
-	
+
 	ld.global.nc.f32 %f2, [%rd141];
-	
+
 	max.ftz.f32 	%f5, %f1, %f2;
 	add.s64 	%rd142, %rd34, %rd202;
-	
+
 	ld.global.nc.f32 %f3, [%rd142];
-	
+
 	add.s64 	%rd143, %rd30, %rd202;
-	
+
 	ld.global.nc.f32 %f4, [%rd143];
-	
+
 	min.ftz.f32 	%f6, %f3, %f4;
 	st.global.f32 	[%rd203], %f5;
 	st.global.f32 	[%rd204], %f6;
@@ -1088,12 +1088,12 @@ $L__BB6_29:
 	bra.uni 	$L__BB6_31;
 
 $L__BB6_19:
-	
+
 	ld.global.nc.u8 %r78, [%rd206];
-	
-	
+
+
 	ld.global.nc.u8 %r79, [%rd207];
-	
+
 	cvt.u16.u32 	%rs5, %r78;
 	cvt.u16.u32 	%rs6, %r79;
 	or.b16  	%rs7, %rs6, %rs5;
@@ -1103,19 +1103,19 @@ $L__BB6_19:
 	bra.uni 	$L__BB6_20;
 
 $L__BB6_21:
-	
+
 	ld.global.nc.f32 %f9, [%rd211];
-	
-	
+
+
 	ld.global.nc.f32 %f10, [%rd212];
-	
+
 	max.ftz.f32 	%f13, %f9, %f10;
-	
+
 	ld.global.nc.f32 %f11, [%rd213];
-	
-	
+
+
 	ld.global.nc.f32 %f12, [%rd214];
-	
+
 	min.ftz.f32 	%f14, %f11, %f12;
 	st.global.f32 	[%rd208], %f13;
 	st.global.f32 	[%rd210], %f14;
@@ -1125,13 +1125,13 @@ $L__BB6_21:
 
 $L__BB6_22:
 	add.s64 	%rd166, %rd206, 1;
-	
+
 	ld.global.nc.u8 %r81, [%rd166];
-	
+
 	add.s64 	%rd167, %rd207, 1;
-	
+
 	ld.global.nc.u8 %r82, [%rd167];
-	
+
 	cvt.u16.u32 	%rs9, %r81;
 	cvt.u16.u32 	%rs10, %r82;
 	or.b16  	%rs11, %rs10, %rs9;
@@ -1142,22 +1142,22 @@ $L__BB6_22:
 
 $L__BB6_24:
 	add.s64 	%rd168, %rd211, 4;
-	
+
 	ld.global.nc.f32 %f17, [%rd168];
-	
+
 	add.s64 	%rd169, %rd212, 4;
-	
+
 	ld.global.nc.f32 %f18, [%rd169];
-	
+
 	max.ftz.f32 	%f21, %f17, %f18;
 	add.s64 	%rd170, %rd213, 4;
-	
+
 	ld.global.nc.f32 %f19, [%rd170];
-	
+
 	add.s64 	%rd171, %rd214, 4;
-	
+
 	ld.global.nc.f32 %f20, [%rd171];
-	
+
 	min.ftz.f32 	%f22, %f19, %f20;
 	st.global.f32 	[%rd208+4], %f21;
 	st.global.f32 	[%rd210+4], %f22;
@@ -1167,13 +1167,13 @@ $L__BB6_24:
 
 $L__BB6_25:
 	add.s64 	%rd172, %rd206, 2;
-	
+
 	ld.global.nc.u8 %r84, [%rd172];
-	
+
 	add.s64 	%rd173, %rd207, 2;
-	
+
 	ld.global.nc.u8 %r85, [%rd173];
-	
+
 	cvt.u16.u32 	%rs13, %r84;
 	cvt.u16.u32 	%rs14, %r85;
 	or.b16  	%rs15, %rs14, %rs13;
@@ -1184,22 +1184,22 @@ $L__BB6_25:
 
 $L__BB6_27:
 	add.s64 	%rd174, %rd211, 8;
-	
+
 	ld.global.nc.f32 %f25, [%rd174];
-	
+
 	add.s64 	%rd175, %rd212, 8;
-	
+
 	ld.global.nc.f32 %f26, [%rd175];
-	
+
 	max.ftz.f32 	%f29, %f25, %f26;
 	add.s64 	%rd176, %rd213, 8;
-	
+
 	ld.global.nc.f32 %f27, [%rd176];
-	
+
 	add.s64 	%rd177, %rd214, 8;
-	
+
 	ld.global.nc.f32 %f28, [%rd177];
-	
+
 	min.ftz.f32 	%f30, %f27, %f28;
 	st.global.f32 	[%rd208+8], %f29;
 	st.global.f32 	[%rd210+8], %f30;
@@ -1210,13 +1210,13 @@ $L__BB6_27:
 $L__BB6_28:
 	add.s32 	%r106, %r106, 4;
 	add.s64 	%rd178, %rd206, 3;
-	
+
 	ld.global.nc.u8 %r87, [%rd178];
-	
+
 	add.s64 	%rd179, %rd207, 3;
-	
+
 	ld.global.nc.u8 %r88, [%rd179];
-	
+
 	cvt.u16.u32 	%rs17, %r87;
 	cvt.u16.u32 	%rs18, %r88;
 	or.b16  	%rs19, %rs18, %rs17;
@@ -1227,22 +1227,22 @@ $L__BB6_28:
 
 $L__BB6_30:
 	add.s64 	%rd180, %rd211, 12;
-	
+
 	ld.global.nc.f32 %f33, [%rd180];
-	
+
 	add.s64 	%rd181, %rd212, 12;
-	
+
 	ld.global.nc.f32 %f34, [%rd181];
-	
+
 	max.ftz.f32 	%f37, %f33, %f34;
 	add.s64 	%rd182, %rd213, 12;
-	
+
 	ld.global.nc.f32 %f35, [%rd182];
-	
+
 	add.s64 	%rd183, %rd214, 12;
-	
+
 	ld.global.nc.f32 %f36, [%rd183];
-	
+
 	min.ftz.f32 	%f38, %f35, %f36;
 	st.global.f32 	[%rd208+12], %f37;
 	st.global.f32 	[%rd210+12], %f38;
@@ -1397,7 +1397,7 @@ $L__BB6_38:
 	bra.uni 	$L__BB6_38;
 
 }
-	
+
 .visible .entry donchian_many_series_one_param_f32(
 	.param .u64 donchian_many_series_one_param_f32_param_0,
 	.param .u64 donchian_many_series_one_param_f32_param_1,

@@ -43,17 +43,17 @@ extern "C" __global__ void alphatrend_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
-    const float* __restrict__ tr,                 
-    const float* __restrict__ momentum_table,     
-    const int*   __restrict__ mrow_for_combo,     
-    const float* __restrict__ coeffs,             
-    const int*   __restrict__ periods,            
+    const float* __restrict__ tr,
+    const float* __restrict__ momentum_table,
+    const int*   __restrict__ mrow_for_combo,
+    const float* __restrict__ coeffs,
+    const int*   __restrict__ periods,
     int len,
     int first_valid,
     int n_combos,
     int n_mrows,
-    float* __restrict__ k1_out,                   
-    float* __restrict__ k2_out)                   
+    float* __restrict__ k1_out,
+    float* __restrict__ k2_out)
 {
     const int tid0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
@@ -64,7 +64,7 @@ extern "C" __global__ void alphatrend_batch_f32(
         float* __restrict__ k1_row = k1_out + (size_t)row * len;
         float* __restrict__ k2_row = k2_out + (size_t)row * len;
 
-        
+
         if (period <= 0 || period > len) {
             for (int i = 0; i < len; ++i) { k1_row[i] = CUDART_NAN_F; k2_row[i] = CUDART_NAN_F; }
             continue;
@@ -73,7 +73,7 @@ extern "C" __global__ void alphatrend_batch_f32(
         const int warm = first_valid + period - 1;
         if (warm >= len) {
             for (int i = 0; i < len; ++i) { k1_row[i] = CUDART_NAN_F; k2_row[i] = CUDART_NAN_F; }
-            continue; 
+            continue;
         }
 
         const int mrow = mrow_for_combo[row];
@@ -83,10 +83,10 @@ extern "C" __global__ void alphatrend_batch_f32(
         }
         const float* __restrict__ mom = momentum_table + (size_t)mrow * len;
 
-        
+
         for (int i = 0; i < warm; ++i) { k1_row[i] = CUDART_NAN_F; k2_row[i] = CUDART_NAN_F; }
 
-        
+
         const float p_inv = 1.0f / (float)period;
 #if AT_USE_F64_SUM
         double s = 0.0;
@@ -96,32 +96,32 @@ extern "C" __global__ void alphatrend_batch_f32(
         for (int j = first_valid; j <= warm; ++j) kahan_add(s, c, tr[j]);
 #endif
 
-        
+
         float prev_alpha = CUDART_NAN_F;
         float prev1 = CUDART_NAN_F;
         float prev2 = CUDART_NAN_F;
 
         #pragma unroll 1
         for (int i = warm; i < len; ++i) {
-            
+
 #if AT_USE_F64_SUM
             const float a = (float)(s * (double)p_inv);
 #else
             const float a = s * p_inv;
 #endif
-            const float up = fmaf(-coeff, a, low[i]);   
-            const float dn = fmaf( coeff, a, high[i]);  
+            const float up = fmaf(-coeff, a, low[i]);
+            const float dn = fmaf( coeff, a, high[i]);
 
             const float m = mom[i];
             const bool m_ge_50 = is_finite(m) ? (m >= 50.0f) : false;
 
-            
+
             const float up_clamped = fmaxf(up, prev_alpha);
             const float dn_clamped = fminf(dn, prev_alpha);
             const float cur = m_ge_50 ? up_clamped : dn_clamped;
 
             k1_row[i] = cur;
-            k2_row[i] = prev2;     
+            k2_row[i] = prev2;
 
             prev2 = prev1;
             prev1 = cur;
@@ -147,15 +147,15 @@ extern "C" __global__ void alphatrend_many_series_one_param_f32(
     const float* __restrict__ low_tm,
     const float* __restrict__ tr_tm,
     const float* __restrict__ momentum_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     float coeff,
     int period,
-    float* __restrict__ k1_tm_out, 
-    float* __restrict__ k2_tm_out) 
+    float* __restrict__ k1_tm_out,
+    float* __restrict__ k2_tm_out)
 {
-    int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_series) return;
     const int fv = first_valids[s];
 
@@ -180,14 +180,14 @@ extern "C" __global__ void alphatrend_many_series_one_param_f32(
         return;
     }
 
-    
+
     for (int t = 0; t < warm; ++t) {
         const int idx = t * num_series + s;
         k1_tm_out[idx] = CUDART_NAN_F;
         k2_tm_out[idx] = CUDART_NAN_F;
     }
 
-    
+
 #if AT_USE_F64_SUM
     double ssum = 0.0;
     for (int t = fv; t <= warm; ++t) ssum += (double)tr_tm[t * num_series + s];
@@ -238,12 +238,12 @@ extern "C" __global__ void alphatrend_many_series_one_param_f32(
 
 
 extern "C" __global__ void atr_table_from_tr_f32(
-    const float* __restrict__ tr,          
+    const float* __restrict__ tr,
     int len,
     int first_valid,
     const int* __restrict__ periods_unique,
     int n_u,
-    float* __restrict__ atr_table          
+    float* __restrict__ atr_table
 ){
     const int u = blockIdx.x * blockDim.x + threadIdx.x;
     if (u >= n_u) return;
@@ -289,9 +289,9 @@ extern "C" __global__ void atr_table_from_tr_f32(
 }
 
 extern "C" __global__ void momentum_to_mask_bits(
-    const float* __restrict__ momentum_table, 
+    const float* __restrict__ momentum_table,
     int len, int n_mrows,
-    unsigned* __restrict__ mask_bits          
+    unsigned* __restrict__ mask_bits
 ){
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= n_mrows) return;
@@ -322,12 +322,12 @@ __device__ __forceinline__ bool mask_test(const unsigned* __restrict__ row, int 
 extern "C" __global__ void alphatrend_batch_from_precomputed_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
-    const float* __restrict__ atr_table,       
-    const unsigned* __restrict__ mask_bits,    
-    const int* __restrict__ period_row_for_combo, 
-    const int* __restrict__ mrow_for_combo,       
-    const float* __restrict__ coeffs,             
-    const int*   __restrict__ periods,            
+    const float* __restrict__ atr_table,
+    const unsigned* __restrict__ mask_bits,
+    const int* __restrict__ period_row_for_combo,
+    const int* __restrict__ mrow_for_combo,
+    const float* __restrict__ coeffs,
+    const int*   __restrict__ periods,
     int len,
     int first_valid,
     int n_combos,

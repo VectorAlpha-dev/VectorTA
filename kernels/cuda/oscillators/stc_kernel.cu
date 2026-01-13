@@ -24,7 +24,7 @@
 #endif
 
 #ifndef STC_SMALL_K
-#define STC_SMALL_K 16   
+#define STC_SMALL_K 16
 #endif
 
 
@@ -36,7 +36,7 @@
 
 
 static __device__ __forceinline__ float ema_update_f32(float prev, float a, float x) {
-    
+
     return __fmaf_rn(a, (x - prev), prev);
 }
 
@@ -62,26 +62,26 @@ struct KahanF32 {
 
 
 struct IndexDeque {
-    int*  buf;     
-    int   head;    
-    int   len;     
-    int   cap;     
-    float* ring;   
-    bool  is_min;  
+    int*  buf;
+    int   head;
+    int   len;
+    int   cap;
+    float* ring;
+    bool  is_min;
 
     __device__ __forceinline__ void init(int* storage, int capacity, float* ring_ptr, bool as_min) {
         buf = storage; cap = capacity; ring = ring_ptr; is_min = as_min; head = 0; len = 0;
     }
     __device__ __forceinline__ void reset() { head = 0; len = 0; }
     __device__ __forceinline__ void push(int idx, float v) {
-        
+
         while (len > 0) {
             int last = head + len - 1; if (last >= cap) last -= cap;
             float backv = ring[ buf[last] % cap ];
             if (is_min ? (backv >= v) : (backv <= v)) { len--; }
             else break;
         }
-        
+
         int tail_pos = head + len; if (tail_pos >= cap) tail_pos -= cap;
         buf[tail_pos] = idx;
         if (len < cap) len++;
@@ -111,7 +111,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
 {
     if (len <= 0 || first_valid >= len) return;
 
-    
+
     extern __shared__ unsigned char shmem[];
     float* macd_ring = reinterpret_cast<float*>(shmem);
     float* d_ring    = macd_ring + max_k;
@@ -120,18 +120,18 @@ static __device__ __forceinline__ void stc_compute_series_f32(
     int* d_min_idx    = macd_max_idx + max_k;
     int* d_max_idx    = d_min_idx + max_k;
 
-    
+
     const int warm = first_valid + max(max(fast, slow), max(k, d)) - 1;
-    
+
     for (int i = 0; i < min(warm, len); ++i) out[i] = NAN;
     if (warm >= len) return;
 
-    
+
     const float fast_a = div_rn_f32(2.0f, (float)(fast + 1));
     const float slow_a = div_rn_f32(2.0f, (float)(slow + 1));
     const float d_a    = div_rn_f32(2.0f, (float)(d + 1));
 
-    
+
     KahanF32 fast_acc; fast_acc.reset();
     KahanF32 slow_acc; slow_acc.reset();
     bool fast_seed_nan = false, slow_seed_nan = false;
@@ -142,28 +142,28 @@ static __device__ __forceinline__ void stc_compute_series_f32(
     float fast_ema = (f_end == fast && !fast_seed_nan) ? div_rn_f32(fast_acc.result(), (float)fast) : NAN;
     float slow_ema = (s_end == slow && !slow_seed_nan) ? div_rn_f32(slow_acc.result(), (float)slow) : NAN;
 
-    
+
     IndexDeque macd_min, macd_max, d_min, d_max;
     macd_min.init(macd_min_idx, k, macd_ring, true);
     macd_max.init(macd_max_idx, k, macd_ring, false);
     d_min.init(d_min_idx, k, d_ring, true);
     d_max.init(d_max_idx, k, d_ring, false);
 
-    
+
     int macd_run = 0, d_run = 0;
 
-    
+
     KahanF32 d_seed_acc; d_seed_acc.reset(); int d_seed_cnt = 0; float d_ema = NAN;
     KahanF32 final_seed_acc; final_seed_acc.reset(); int final_seed_cnt = 0; float final_ema = NAN;
 
     const int fast_thr = fast > 0 ? (fast - 1) : 0;
     const int slow_thr = slow > 0 ? (slow - 1) : 0;
 
-    
+
     for (int i = 0; i < len; ++i) {
         const float x = prices[i];
 
-        
+
         if (i >= first_valid) {
             const int rel = i - first_valid;
             if (rel >= fast_thr) {
@@ -174,19 +174,19 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             }
         }
 
-        
+
         float macd; unsigned char macd_is_valid;
         if (i >= first_valid + slow_thr && isfinite(fast_ema) && isfinite(slow_ema)) { macd = fast_ema - slow_ema; macd_is_valid = 1u; }
         else { macd = NAN; macd_is_valid = 0u; }
 
-        
+
         float stok = NAN;
         if (macd_is_valid) {
-            
+
             macd_ring[i % k] = macd;
             macd_run += 1;
             if (k <= STC_SMALL_K) {
-                
+
                 float mn = macd_ring[(i - (macd_run-1)) % k];
                 float mx = mn;
                 int start = i - min(macd_run, k) + 1;
@@ -196,7 +196,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
                     stok = (fabsf(range) > STC_RANGE_EPS) ? ((macd - mn) * div_rn_f32(100.0f, range)) : 50.0f;
                 } else { stok = 50.0f; }
             } else {
-                
+
                 macd_min.push(i, macd); macd_max.push(i, macd);
                 const int left = i - k + 1;
                 macd_min.pop_expired(left); macd_max.pop_expired(left);
@@ -211,7 +211,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             macd_run = 0; macd_min.reset(); macd_max.reset(); stok = NAN;
         }
 
-        
+
         float d_val = NAN;
         if (isfinite(stok)) {
             if (d_seed_cnt < d) {
@@ -230,7 +230,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             else d_val = d_ema;
         }
 
-        
+
         float kd = NAN;
         if (isfinite(d_val)) {
             d_ring[i % k] = d_val; d_run += 1;
@@ -250,7 +250,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             }
         } else { d_min.reset(); d_max.reset(); }
 
-        
+
         float out_i = NAN;
         if (isfinite(kd)) {
             if (final_seed_cnt < d) {
@@ -269,7 +269,7 @@ static __device__ __forceinline__ void stc_compute_series_f32(
             else out_i = final_ema;
         }
 
-        if (i >= warm) out[i] = out_i; 
+        if (i >= warm) out[i] = out_i;
     }
 }
 
@@ -297,7 +297,7 @@ void stc_batch_f32(const float* __restrict__ prices,
 
     const int base = row * series_len;
 
-    
+
     if (threadIdx.x != 0) return;
     stc_compute_series_f32(prices, series_len, first_valid, fast, slow, kk, dd, max_k, out + base);
 }
@@ -318,18 +318,18 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (s >= cols) return;
     const int first = first_valids[s];
 
-    
+
     int warm = first + max(max(fast, slow), max(k, d)) - 1;
     if (warm > rows) warm = rows;
     for (int t = 0; t < warm; ++t) out_tm[t * cols + s] = NAN;
     if (warm >= rows) return;
 
-    
+
     const float fast_a = div_rn_f32(2.0f, (float)(fast + 1));
     const float slow_a = div_rn_f32(2.0f, (float)(slow + 1));
     const float d_a    = div_rn_f32(2.0f, (float)(d + 1));
 
-    
+
     KahanF32 fast_acc; fast_acc.reset();
     KahanF32 slow_acc; slow_acc.reset();
     const int f_end = min(fast, rows - first);
@@ -339,14 +339,14 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     float fast_ema = (f_end == fast) ? div_rn_f32(fast_acc.result(), (float)fast) : NAN;
     float slow_ema = (s_end == slow) ? div_rn_f32(slow_acc.result(), (float)slow) : NAN;
 
-    
+
     const int KMAX = 2048;
     const int kk = (k <= KMAX) ? k : KMAX;
     float macd_ring[KMAX];
     float d_ring[KMAX];
     for (int i = 0; i < kk; ++i) { macd_ring[i] = NAN; d_ring[i] = NAN; }
 
-    
+
     KahanF32 d_seed_acc; d_seed_acc.reset(); int d_seed_cnt = 0; float d_ema = NAN;
     KahanF32 final_seed_acc; final_seed_acc.reset(); int final_seed_cnt = 0; float final_ema = NAN;
     const int fast_thr = fast > 0 ? (fast - 1) : 0;
@@ -356,7 +356,7 @@ void stc_many_series_one_param_f32(const float* __restrict__ prices_tm,
     for (int i = 0; i < rows; ++i) {
         const float x = prices_tm[i * cols + s];
 
-        
+
         if (i >= first) {
             const int rel = i - first;
             if (rel >= fast_thr) {

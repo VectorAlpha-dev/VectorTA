@@ -36,7 +36,7 @@ __device__ __forceinline__ float ad_mfv_f32(float h, float l, float c, float v)
     float hl  = h - l;
     if (hl == 0.0f) return 0.0f;
 
-    
+
     float num = fmaf(2.0f, c, -(h + l));
     float m   = AD_DIV(num, hl);
     return m * v;
@@ -94,8 +94,8 @@ extern "C" __global__ void ad_series_f32(
     const float* __restrict__ v = volume + offset;
     float* __restrict__ o       = out    + offset;
 
-    
-    
+
+
     double sum = 0.0;
     for (int i = 0; i < len; ++i) {
         double hl = (double)h[i] - (double)l[i];
@@ -113,13 +113,13 @@ extern "C" __global__ void ad_series_f32(
 
 
 extern "C" __global__ void ad_many_series_one_param_time_major_f32(
-    const float* __restrict__ high_tm,   
-    const float* __restrict__ low_tm,    
-    const float* __restrict__ close_tm,  
-    const float* __restrict__ volume_tm, 
+    const float* __restrict__ high_tm,
+    const float* __restrict__ low_tm,
+    const float* __restrict__ close_tm,
+    const float* __restrict__ volume_tm,
     int num_series,
     int series_len,
-    float* __restrict__ out_tm)          
+    float* __restrict__ out_tm)
 {
     int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series || series_len <= 0) return;

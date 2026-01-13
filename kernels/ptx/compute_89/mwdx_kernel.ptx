@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .global .align 1 .b8 _ZN45_INTERNAL_2a78529b_14_mwdx_kernel_cu_b8e8e5fc4cuda3std6ranges3__45__cpo4swapE[1];
 
 .visible .entry mwdx_batch_f32(
@@ -132,9 +132,9 @@ $L__BB0_9:
 	setp.ge.s32 	%p13, %r36, %r25;
 	@%p13 bra 	$L__BB0_11;
 
-	
+
 	prefetch.global.L2 [%rd53];
-	
+
 
 $L__BB0_11:
 	mul.ftz.f32 	%f13, %f2, %f23;
@@ -172,9 +172,9 @@ $L__BB0_15:
 
 	mul.wide.s32 	%rd42, %r19, 4;
 	add.s64 	%rd41, %rd22, %rd42;
-	
+
 	prefetch.global.L2 [%rd41];
-	
+
 
 $L__BB0_17:
 	ld.global.L2::cache_hint.f32 %f15, [%rd56], %rd3;
@@ -187,9 +187,9 @@ $L__BB0_17:
 
 	add.s64 	%rd44, %rd22, %rd56;
 	add.s64 	%rd43, %rd44, %rd16;
-	
+
 	prefetch.global.L2 [%rd43];
-	
+
 
 $L__BB0_19:
 	mul.ftz.f32 	%f17, %f2, %f8;
@@ -203,9 +203,9 @@ $L__BB0_19:
 	add.s64 	%rd46, %rd22, %rd56;
 	add.s64 	%rd47, %rd46, %rd16;
 	add.s64 	%rd45, %rd47, 4;
-	
+
 	prefetch.global.L2 [%rd45];
-	
+
 
 $L__BB0_21:
 	mul.ftz.f32 	%f19, %f2, %f9;
@@ -219,9 +219,9 @@ $L__BB0_21:
 	add.s64 	%rd49, %rd22, %rd56;
 	add.s64 	%rd50, %rd49, %rd16;
 	add.s64 	%rd48, %rd50, 8;
-	
+
 	prefetch.global.L2 [%rd48];
-	
+
 
 $L__BB0_23:
 	add.s64 	%rd20, %rd56, 16;
@@ -242,7 +242,7 @@ $L__BB0_27:
 	ret;
 
 }
-	
+
 .visible .entry mwdx_many_series_one_param_f32(
 	.param .u64 mwdx_many_series_one_param_f32_param_0,
 	.param .u64 mwdx_many_series_one_param_f32_param_1,
@@ -403,7 +403,7 @@ $L__BB1_16:
 	ret;
 
 }
-	
+
 .visible .entry mwdx_many_series_one_param_tiled2d_f32_tx128_ty2(
 	.param .u64 mwdx_many_series_one_param_tiled2d_f32_tx128_ty2_param_0,
 	.param .u64 mwdx_many_series_one_param_tiled2d_f32_tx128_ty2_param_1,
@@ -646,7 +646,7 @@ $L__BB2_24:
 	ret;
 
 }
-	
+
 .visible .entry mwdx_many_series_one_param_tiled2d_f32_tx128_ty4(
 	.param .u64 mwdx_many_series_one_param_tiled2d_f32_tx128_ty4_param_0,
 	.param .u64 mwdx_many_series_one_param_tiled2d_f32_tx128_ty4_param_1,

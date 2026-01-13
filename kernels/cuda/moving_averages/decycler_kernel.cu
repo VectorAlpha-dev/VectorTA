@@ -14,18 +14,18 @@
 #include <math_constants.h>
 
 extern "C" __global__
-void decycler_batch_f32(const float* __restrict__ prices,          
-                        const int*   __restrict__ periods,         
-                        const float* __restrict__ c_vals,          
-                        const float* __restrict__ two_1m_vals,     
-                        const float* __restrict__ neg_oma_sq_vals, 
-                        const float* __restrict__ diff,            
+void decycler_batch_f32(const float* __restrict__ prices,
+                        const int*   __restrict__ periods,
+                        const float* __restrict__ c_vals,
+                        const float* __restrict__ two_1m_vals,
+                        const float* __restrict__ neg_oma_sq_vals,
+                        const float* __restrict__ diff,
                         int series_len,
                         int n_combos,
                         int first_valid,
-                        float* __restrict__ out)                   
+                        float* __restrict__ out)
 {
-    (void)periods; 
+    (void)periods;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     for (int combo = tid; combo < n_combos; combo += blockDim.x * gridDim.x) {
@@ -33,7 +33,7 @@ void decycler_batch_f32(const float* __restrict__ prices,
 
         if (series_len <= 0) continue;
 
-        
+
         if (first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out_row[i] = CUDART_NAN_F;
             continue;
@@ -43,23 +43,23 @@ void decycler_batch_f32(const float* __restrict__ prices,
         const float two_1m     = two_1m_vals[combo];
         const float neg_oma_sq = neg_oma_sq_vals[combo];
 
-        
+
         const int warm = min(series_len, first_valid + 2);
         for (int i = 0; i < warm; ++i) out_row[i] = CUDART_NAN_F;
 
-        if (first_valid + 1 >= series_len) continue; 
+        if (first_valid + 1 >= series_len) continue;
 
-        
+
         float hp_im2 = prices[first_valid];
         float hp_im1 = prices[first_valid + 1];
 
         for (int t = first_valid + 2; t < series_len; ++t) {
-            
+
             const float s3 = __fmaf_rn(two_1m, hp_im1, c * diff[t]);
             const float hp = __fmaf_rn(neg_oma_sq, hp_im2, s3);
-            
+
             out_row[t] = prices[t] - hp;
-            
+
             hp_im2 = hp_im1;
             hp_im1 = hp;
         }
@@ -82,7 +82,7 @@ void decycler_batch_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
-                                 const int*   __restrict__ periods,         
+                                 const int*   __restrict__ periods,
                                  const float* __restrict__ c_vals,
                                  const float* __restrict__ two_1m_vals,
                                  const float* __restrict__ neg_oma_sq_vals,
@@ -116,17 +116,17 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
     const float a1     = two_1m_vals[combo];
     const float a2     = neg_oma_sq_vals[combo];
 
-    
+
     float s0_prev = 0.0f;
     float s1_prev = 0.0f;
     if (lane == 0) {
-        s1_prev = prices[first_valid];     
-        s0_prev = prices[first_valid + 1]; 
+        s1_prev = prices[first_valid];
+        s0_prev = prices[first_valid + 1];
     }
     s0_prev = __shfl_sync(mask, s0_prev, 0);
     s1_prev = __shfl_sync(mask, s1_prev, 0);
 
-    
+
     const float m00 = a1;
     const float m01 = a2;
     const float m10 = 1.0f;
@@ -144,8 +144,8 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
             u = c * diff[t];
         }
 
-        
-        
+
+
         float p00 = valid ? m00 : 1.0f;
         float p01 = valid ? m01 : 0.0f;
         float p10 = valid ? m10 : 0.0f;
@@ -153,7 +153,7 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
         float v0  = valid ? u   : 0.0f;
         float v1  = 0.0f;
 
-        
+
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float p00_prev = __shfl_up_sync(mask, p00, offset);
@@ -179,7 +179,7 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
             }
         }
 
-        
+
         const float hp0 = fmaf(p00, s0_prev, fmaf(p01, s1_prev, v0));
         const float hp1 = fmaf(p10, s0_prev, fmaf(p11, s1_prev, v1));
 
@@ -196,9 +196,9 @@ void decycler_batch_warp_scan_f32(const float* __restrict__ prices,
 
 
 extern "C" __global__
-void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm, 
-                                        const int*   __restrict__ first_valids, 
-                                        int period,    
+void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm,
+                                        const int*   __restrict__ first_valids,
+                                        int period,
                                         float c,
                                         float two_1m,
                                         float neg_oma_sq,
@@ -207,7 +207,7 @@ void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                         float* __restrict__ out_tm)
 {
     (void)period;
-    const int stride = num_series; 
+    const int stride = num_series;
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
 
     for (int s = tid; s < num_series; s += blockDim.x * gridDim.x) {
@@ -218,14 +218,14 @@ void decycler_many_series_one_param_f32(const float* __restrict__ prices_tm,
             continue;
         }
 
-        
+
         const int warm = min(series_len, fv + 2);
         for (int t = 0; t < warm; ++t) {
             out_tm[(size_t)t * (size_t)stride + s] = CUDART_NAN_F;
         }
         if (fv + 1 >= series_len) continue;
 
-        
+
         float hp_im2 = prices_tm[(size_t)fv * (size_t)stride + s];
         float hp_im1 = prices_tm[(size_t)(fv + 1) * (size_t)stride + s];
 

@@ -31,7 +31,7 @@ static __device__ __forceinline__ float smooth_sma_push(
     double* __restrict__ sum,
     double inv_m)
 {
-    if (!isfinite(x)) { 
+    if (!isfinite(x)) {
         *sum = 0.0;
         *count = 0;
         *head = 0;
@@ -68,7 +68,7 @@ static __device__ __forceinline__ float smooth_ema_push(
     double* __restrict__ prev)
 {
     if (!isfinite(x)) {
-        
+
         *started = false;
         *seed_sum = 0.0;
         *seed_cnt = 0;
@@ -135,9 +135,9 @@ static __device__ __forceinline__ void kahan_add_diff(float x_add_minus_y, float
 extern "C" __global__
 void rvi_segprefix_f32(const float* __restrict__ prices,
                        int len,
-                       float* __restrict__ pref,   
-                       float* __restrict__ pref2,  
-                       int*   __restrict__ runlen) 
+                       float* __restrict__ pref,
+                       float* __restrict__ pref2,
+                       int*   __restrict__ runlen)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     float s = 0.0f, q = 0.0f, cs = 0.0f, cq = 0.0f;
@@ -178,7 +178,7 @@ static __device__ __forceinline__ float smooth_sma_push_f32(
     float* __restrict__ comp,
     float inv_m)
 {
-    if (!isfinite(x)) { 
+    if (!isfinite(x)) {
         *sum = 0.0f; *comp = 0.0f; *count = 0; *head = 0; return NAN;
     }
     if (*count < ma_len) {
@@ -215,7 +215,7 @@ static __device__ __forceinline__ float smooth_ema_push_f32(
         kahan_add(x, *seed_sum, *seed_comp);
         (*seed_cnt)++;
         if (*seed_cnt == ma_len) {
-            *prev = (*seed_sum) * inv_m;   
+            *prev = (*seed_sum) * inv_m;
             *started = true;
             return *prev;
         }
@@ -229,9 +229,9 @@ static __device__ __forceinline__ float smooth_ema_push_f32(
 
 extern "C" __global__
 void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
-                                      const float* __restrict__ pref,    
-                                      const float* __restrict__ pref2,   
-                                      const int*   __restrict__ runlen,  
+                                      const float* __restrict__ pref,
+                                      const float* __restrict__ pref2,
+                                      const int*   __restrict__ runlen,
                                       const int* __restrict__ periods,
                                       const int* __restrict__ ma_lens,
                                       const int* __restrict__ matypes,
@@ -239,32 +239,32 @@ void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
                                       int first_valid,
                                       int n_combos,
                                       int max_ma_len,
-                                      const int* __restrict__ row_ids,   
+                                      const int* __restrict__ row_ids,
                                       float* __restrict__ out)
 {
-    const int row = blockIdx.x;              
+    const int row = blockIdx.x;
     if (row >= n_combos) return;
-    if (threadIdx.x != 0) return;            
+    if (threadIdx.x != 0) return;
 
     const int period = periods[row];
     const int ma_len = ma_lens[row];
     const int matype = matypes[row];
     if (period <= 0 || ma_len <= 0) return;
 
-    
+
     extern __shared__ unsigned char shraw[];
     float* up_ring = reinterpret_cast<float*>(shraw);
     float* dn_ring = up_ring + max_ma_len;
 
-    const int global_row = row_ids ? row_ids[row] : row; 
+    const int global_row = row_ids ? row_ids[row] : row;
     const int base = global_row * series_len;
     const int warm = first_valid + (period - 1) + (ma_len - 1);
 
-    
+
     for (int i = 0; i < ((warm < series_len) ? warm : series_len); ++i) out[base + i] = NAN;
     if (warm >= series_len) return;
 
-    
+
     const double inv_m_d = 1.0 / (double)ma_len;
     const double alpha_d  = 2.0 / ((double)ma_len + 1.0);
     const double one_m_alpha_d = 1.0 - alpha_d;
@@ -292,7 +292,7 @@ void rvi_batch_stddev_from_prefix_f32(const float* __restrict__ prices,
         } else if (runlen[i] < period) {
             dev = NAN;
         } else {
-            
+
             double s = (double)(pref[i]  - ((i == period - 1) ? 0.f : pref[i - period]));
             double q = (double)(pref2[i] - ((i == period - 1) ? 0.f : pref2[i - period]));
             const double invP = 1.0 / (double)period;
@@ -363,17 +363,17 @@ static __device__ __forceinline__ void rvi_compute_series(
     extern __shared__ unsigned char shraw[];
     float* up_ring = reinterpret_cast<float*>(shraw);
     float* dn_ring = up_ring + max_ma_len;
-    float* dev_ring = dn_ring + max_ma_len;        
-    unsigned char* vflag = reinterpret_cast<unsigned char*>(dev_ring + max_period); 
+    float* dev_ring = dn_ring + max_ma_len;
+    unsigned char* vflag = reinterpret_cast<unsigned char*>(dev_ring + max_period);
 
     const int warm = first_valid + (period - 1) + (ma_len - 1);
 
-    
-    double sum = 0.0, sumsq = 0.0; 
-    int head = 0, filled = 0;      
-    double ring_sum = 0.0;         
 
-    
+    double sum = 0.0, sumsq = 0.0;
+    int head = 0, filled = 0;
+    double ring_sum = 0.0;
+
+
     const double inv_m = 1.0 / (double)ma_len;
     const double alpha = 2.0 / ((double)ma_len + 1.0);
     const double one_m_alpha = 1.0 - alpha;
@@ -381,14 +381,14 @@ static __device__ __forceinline__ void rvi_compute_series(
     double up_seed_sum = 0.0, dn_seed_sum = 0.0;
     int up_seed_cnt = 0, dn_seed_cnt = 0;
     int up_h = 0, dn_h = 0, up_cnt = 0, dn_cnt = 0;
-    double up_sum = 0.0, dn_sum = 0.0; 
-    double up_prev = 0.0, dn_prev = 0.0; 
+    double up_sum = 0.0, dn_sum = 0.0;
+    double up_prev = 0.0, dn_prev = 0.0;
 
     float prev = prices[0];
 
-    
+
     if (devtype != 0) {
-        
+
         filled = 0;
         head = 0;
         ring_sum = 0.0;
@@ -404,7 +404,7 @@ static __device__ __forceinline__ void rvi_compute_series(
         if (i + 1 < period) {
             dev = NAN;
         } else if (devtype == 0) {
-            
+
             if (i == period - 1) {
                 sum = 0.0; sumsq = 0.0;
                 bool ok = true;
@@ -447,9 +447,9 @@ static __device__ __forceinline__ void rvi_compute_series(
                     dev = (float)sqrt(fmax(0.0, mean_sq - mean * mean));
                 }
             }
-        } else { 
+        } else {
             if (!isfinite(x)) {
-                
+
                 filled = 0;
                 head = 0;
                 ring_sum = 0.0;
@@ -459,9 +459,9 @@ static __device__ __forceinline__ void rvi_compute_series(
                 ring_sum += (double)x;
                 head = (head + 1 == period) ? 0 : head + 1;
                 filled += 1;
-                dev = (filled == period) ? 0.0f : NAN; 
+                dev = (filled == period) ? 0.0f : NAN;
                 if (filled == period) {
-                    
+
                     const double mean = ring_sum / (double)period;
                     double abs_sum = 0.0;
                     for (int k = 0; k < period; ++k) {
@@ -470,7 +470,7 @@ static __device__ __forceinline__ void rvi_compute_series(
                     dev = (float)(abs_sum / (double)period);
                 }
             } else {
-                
+
                 const float old = dev_ring[head];
                 dev_ring[head] = x;
                 head = (head + 1 == period) ? 0 : head + 1;
@@ -539,7 +539,7 @@ void rvi_batch_f32(const float* __restrict__ prices,
 
     const int base = row * series_len;
 
-    
+
     int warm = first_valid + (period - 1) + (ma_len - 1);
     if (warm > series_len) warm = series_len;
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
@@ -547,7 +547,7 @@ void rvi_batch_f32(const float* __restrict__ prices,
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
     rvi_compute_series(prices, series_len, first_valid, period, ma_len, matype, devtype, max_period, max_ma_len, out + base);
 }
 
@@ -567,7 +567,7 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     if (period <= 0 || ma_len <= 0) return;
     const int first = first_valids[s];
 
-    
+
     int warm = first + (period - 1) + (ma_len - 1);
     if (warm > rows) warm = rows;
     for (int t = 0; t < warm; ++t) {
@@ -575,22 +575,22 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     if (warm >= rows) return;
 
-    
-    
-    
-    
 
-    
-    
-    
 
-    
-    
-    
-    
+
+
+
+
+
+
+
+
+
+
+
 
     const bool use_sma = (matype == 0) && (ma_len <= 1024);
-    
+
     const double inv_m = 1.0 / (double)ma_len;
     const double alpha = 2.0 / ((double)ma_len + 1.0);
     const double one_m_alpha = 1.0 - alpha;
@@ -598,26 +598,26 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     double up_seed_sum = 0.0, dn_seed_sum = 0.0;
     int up_seed_cnt = 0, dn_seed_cnt = 0;
     int up_h = 0, dn_h = 0, up_cnt = 0, dn_cnt = 0;
-    double up_sum = 0.0, dn_sum = 0.0; 
-    double up_prev = 0.0, dn_prev = 0.0; 
+    double up_sum = 0.0, dn_sum = 0.0;
+    double up_prev = 0.0, dn_prev = 0.0;
 
-    
+
     double sum = 0.0, sumsq = 0.0;
     int valid = 0, head = 0, filled = 0;
     double ring_sum = 0.0;
 
     float prev = prices_tm[0 * cols + s];
 
-    
+
     float up_ring_local[ (1024) ];
     float dn_ring_local[ (1024) ];
     float* up_ring = up_ring_local;
     float* dn_ring = dn_ring_local;
-    
+
     const bool mad_local_ok = (period <= 2048);
     float dev_ring_local[ (2048) ];
 
-    
+
     if (devtype != 0) {
         filled = 0; head = 0; ring_sum = 0.0;
     }
@@ -632,7 +632,7 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (i + 1 < period) {
             dev = NAN;
         } else if (devtype == 0) {
-            
+
             if (i == period - 1) {
                 sum = 0.0; sumsq = 0.0; bool ok = true;
                 for (int k = 0; k < period; ++k) {
@@ -667,7 +667,7 @@ void rvi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     dev = (float)sqrt(fmax(0.0, mean_sq - mean * mean));
                 }
             }
-        } else { 
+        } else {
             if (!isfinite(x)) { filled = 0; head = 0; ring_sum = 0.0; dev = NAN; }
             else if (filled < period) {
                 if (mad_local_ok) dev_ring_local[head] = x;

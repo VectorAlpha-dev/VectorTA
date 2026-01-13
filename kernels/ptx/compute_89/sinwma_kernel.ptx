@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .func  (.param .align 8 .b8 func_retval0[16]) __internal_trig_reduction_slowpathd
 (
 	.param .b64 __internal_trig_reduction_slowpathd_param_0
@@ -150,19 +150,19 @@ $L__BB0_9:
 	setp.ltu.f64 	%p9, %fd3, 0d41E0000000000000;
 	@%p9 bra 	$L__BB0_12;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd2;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd95, [retval0+0];
 	ld.param.b32 	%r115, [retval0+8];
-	} 
+	}
 
 $L__BB0_12:
 	and.b32  	%r77, %r115, 1;
@@ -229,19 +229,19 @@ $L__BB0_18:
 	setp.ltu.f64 	%p14, %fd16, 0d41E0000000000000;
 	@%p14 bra 	$L__BB0_21;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd15;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd98, [retval0+0];
 	ld.param.b32 	%r116, [retval0+8];
-	} 
+	}
 
 $L__BB0_21:
 	and.b32  	%r82, %r116, 1;
@@ -443,7 +443,7 @@ $L__BB0_49:
 	ret;
 
 }
-	
+
 .visible .entry sinwma_many_series_one_param_time_major_f32(
 	.param .u64 sinwma_many_series_one_param_time_major_f32_param_0,
 	.param .u32 sinwma_many_series_one_param_time_major_f32_param_1,
@@ -575,19 +575,19 @@ $L__BB1_9:
 	setp.ltu.f64 	%p9, %fd3, 0d41E0000000000000;
 	@%p9 bra 	$L__BB1_12;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd2;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd95, [retval0+0];
 	ld.param.b32 	%r116, [retval0+8];
-	} 
+	}
 
 $L__BB1_12:
 	and.b32  	%r77, %r116, 1;
@@ -654,19 +654,19 @@ $L__BB1_18:
 	setp.ltu.f64 	%p14, %fd16, 0d41E0000000000000;
 	@%p14 bra 	$L__BB1_21;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd15;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd98, [retval0+0];
 	ld.param.b32 	%r117, [retval0+8];
-	} 
+	}
 
 $L__BB1_21:
 	and.b32  	%r82, %r117, 1;
@@ -885,7 +885,7 @@ $L__BB1_49:
 	ld.param.f64 	%fd4, [__internal_trig_reduction_slowpathd_param_0];
 	add.u64 	%rd1, %SPL, 0;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r1}, %fd4;
 	}
 	shr.u32 	%r12, %r1, 20;

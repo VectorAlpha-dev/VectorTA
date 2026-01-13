@@ -5,21 +5,18 @@ echo WASM Indicator Performance Benchmark
 echo =====================================
 echo.
 
-REM Check if Node.js is available
 where node >nul 2>nul
 if %errorlevel% neq 0 (
     echo Error: Node.js not found. Please install Node.js.
     exit /b 1
 )
 
-REM Check for rebuild flag
 set FORCE_REBUILD=0
 if "%1"=="--rebuild" (
     set FORCE_REBUILD=1
     shift
 )
 
-REM Build WASM package with optimizations
 if %FORCE_REBUILD%==1 (
     echo Force rebuilding WASM package with optimizations...
     goto :build
@@ -41,15 +38,12 @@ echo.
 
 :skipbuild
 
-REM Navigate to benchmarks directory
 cd benchmarks
 
-REM Check if help is requested
 if "%1"=="-h" goto :help
 if "%1"=="--help" goto :help
 if "%1"=="/?" goto :help
 
-REM Run benchmark with GC exposed for better measurements
 echo Running benchmark with GC control...
 echo.
 node --expose-gc wasm_indicator_benchmark.js %*
@@ -71,7 +65,6 @@ echo.
 echo Available indicators are listed in benchmarks/wasm_indicator_benchmark.js
 
 :end
-REM Return to original directory
 cd ..
 
 echo.

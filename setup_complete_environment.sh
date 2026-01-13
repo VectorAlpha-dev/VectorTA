@@ -1,5 +1,5 @@
 #!/bin/bash
-# Complete environment setup script for Python and WASM bindings
+
 
 set -e
 
@@ -7,19 +7,19 @@ YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo -e "${BLUE}🔧 Complete Environment Setup for Technical Indicators Library${NC}"
 echo "=============================================================="
 
-# Check for cargo
+
 if ! command -v cargo &> /dev/null; then
     echo -e "${RED}✗ Cargo not found. Please install Rust first:${NC}"
     echo "  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
     exit 1
 fi
 
-# 1. Install WASM target
+
 echo -e "\n${BLUE}Step 1: Installing WASM target${NC}"
 if rustup target list --installed | grep -q wasm32-unknown-unknown; then
     echo -e "${GREEN}✓ WASM target already installed${NC}"
@@ -29,7 +29,7 @@ else
     echo -e "${GREEN}✓ WASM target installed${NC}"
 fi
 
-# 2. Python virtual environment
+
 echo -e "\n${BLUE}Step 2: Python Virtual Environment${NC}"
 if [ -d ".venv" ]; then
     echo -e "${GREEN}✓ Virtual environment already exists${NC}"
@@ -43,17 +43,17 @@ echo -e "${YELLOW}To activate the virtual environment, run:${NC}"
 echo "  source .venv/bin/activate  # On Linux/Mac"
 echo "  .venv\\Scripts\\activate     # On Windows"
 
-# 3. Check if venv is activated
+
 if [ -n "$VIRTUAL_ENV" ]; then
     echo -e "${GREEN}✓ Virtual environment is active${NC}"
-    
-    # Install Python dependencies
+
+
     echo -e "\n${BLUE}Step 3: Installing Python dependencies${NC}"
     pip install --upgrade pip
     pip install maturin numpy pytest
     echo -e "${GREEN}✓ Python dependencies installed${NC}"
-    
-    # Build Python module
+
+
     echo -e "\n${BLUE}Step 4: Building Python module${NC}"
     maturin develop --features python
     echo -e "${GREEN}✓ Python module built and installed${NC}"
@@ -65,7 +65,7 @@ else
     echo "  maturin develop --features python"
 fi
 
-# 4. Install wasm-pack
+
 echo -e "\n${BLUE}Step 5: Installing wasm-pack${NC}"
 if command -v wasm-pack &> /dev/null; then
     echo -e "${GREEN}✓ wasm-pack already installed${NC}"
@@ -75,7 +75,7 @@ else
     echo -e "${GREEN}✓ wasm-pack installed${NC}"
 fi
 
-# 5. Create example test files if they don't exist
+
 echo -e "\n${BLUE}Step 6: Creating test files${NC}"
 
 if [ ! -f "tests/test_zscore_integration.py" ]; then
@@ -87,21 +87,21 @@ import ta_indicators
 
 def test_zscore_values():
     """Test that zscore produces expected values"""
-    # Simple test data with known pattern
+
     data = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10] * 2, dtype=np.float64)
-    
+
     result = ta_indicators.zscore(
         data=data,
         period=10,
         ma_type="sma",
         nbdev=1.0,
-        devtype=0  # standard deviation
+        devtype=0
     )
-    
+
     assert len(result) == len(data)
-    # First 9 values should be NaN
+
     assert all(np.isnan(result[i]) for i in range(9))
-    # Values from index 9 onwards should be calculated
+
     assert not np.isnan(result[9])
 
 def test_zscore_stream():
@@ -112,33 +112,33 @@ def test_zscore_stream():
         nbdev=2.0,
         devtype=0
     )
-    
-    # Feed values one by one
+
+
     values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]
     results = []
-    
+
     for val in values:
         result = stream.update(val)
         results.append(result)
-    
-    # First 4 should be None (period-1)
+
+
     assert all(r is None for r in results[:4])
-    # Fifth and beyond should have values
+
     assert all(r is not None for r in results[4:])
 
 def test_alma_values():
     """Test ALMA indicator"""
-    data = np.random.randn(100) * 100 + 1000  # Random data around 1000
-    
+    data = np.random.randn(100) * 100 + 1000
+
     result = ta_indicators.alma(
         data=data,
         period=9,
         offset=0.85,
         sigma=6.0
     )
-    
+
     assert len(result) == len(data)
-    # Check that we have some non-NaN values
+
     non_nan_count = np.sum(~np.isnan(result))
     assert non_nan_count > len(data) - 9
 
@@ -148,7 +148,7 @@ EOF
     echo -e "${GREEN}✓ Created tests/test_zscore_integration.py${NC}"
 fi
 
-# Summary
+
 echo -e "\n${BLUE}=============================================================="
 echo -e "Setup Summary:${NC}"
 echo "=============================================================="

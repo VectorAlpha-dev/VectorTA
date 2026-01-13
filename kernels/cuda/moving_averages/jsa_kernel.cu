@@ -34,22 +34,22 @@ void jsa_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     const int warm   = warm_indices[combo];
 
-    
+
     if (period <= 0 || warm < first_valid || warm > series_len) return;
 
-    
+
     const int start = max(warm, period);
     const int row_off = combo * series_len;
     float* __restrict__ out_row = out + row_off;
 
-    
+
     for (int t = threadIdx.x; t < min(start, series_len); t += blockDim.x) {
         out_row[t] = jsaf_qnan();
     }
 
     if (start >= series_len) return;
 
-    
+
     for (int t = start + threadIdx.x; t < series_len; t += blockDim.x) {
         const float c = prices[t];
         const float p = prices[t - period];
@@ -75,17 +75,17 @@ void jsa_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int warm        = warm_indices[series_idx];
     if (first_valid < 0 || first_valid >= series_len) return;
 
-    
+
     const int start = max(max(warm, period), first_valid);
 
-    
+
     for (int t = threadIdx.x; t < min(start, series_len); t += blockDim.x) {
         out_tm[t * stride + series_idx] = jsaf_qnan();
     }
 
     if (start >= series_len) return;
 
-    
+
     for (int t = start + threadIdx.x; t < series_len; t += blockDim.x) {
         const int curr = t * stride + series_idx;
         const int prev = (t - period) * stride + series_idx;
@@ -117,23 +117,23 @@ void jsa_many_series_one_param_f32_coalesced(const float* __restrict__ prices_tm
 
     const int stride = num_series;
 
-    
+
     const int s = blockIdx.y * blockDim.x + threadIdx.x;
     if (s >= num_series) return;
 
-    
+
     const int t0   = blockIdx.x * JSA_TIME_TILE;
     const int tEnd = min(t0 + JSA_TIME_TILE, series_len);
 
-    
+
     int fv   = first_valids[s];
     int warm = warm_indices[s];
     if (fv < 0 || fv >= series_len) return;
 
-    
+
     const int start = max(max(warm, period), fv);
 
-    
+
     for (int t = t0; t < tEnd; ++t) {
         const int offset = t * stride + s;
         if (t < start) {

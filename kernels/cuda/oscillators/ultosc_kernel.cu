@@ -33,9 +33,9 @@ __device__ __forceinline__ float2 ldg_float2(const float2* __restrict__ base, in
 
 __device__ __forceinline__ void d_to_ds(float& hi, float& lo, const double d)
 {
-    
+
     hi = (float)d;
-    
+
     lo = (float)(d - (double)hi);
 }
 
@@ -44,18 +44,18 @@ __device__ __forceinline__ float ds_diff_to_f(
     const float ah, const float al,
     const float bh, const float bl)
 {
-    
+
     float s  = ah - bh;
     float vb = s - ah;
     float e  = (ah - (s - vb)) - (bh + vb);
 
-    
+
     float t   = (al - bl);
     float s2  = s + t;
     float vb2 = s2 - s;
     e += (t - vb2);
 
-    
+
     float hi = s2 + e;
     float lo = (s2 - hi) + e;
     return hi + lo;
@@ -95,7 +95,7 @@ __global__ void ultosc_batch_f32(
     const int row = blockIdx.y;
     if (row >= nrows) return;
 
-    
+
     __shared__ int sp1, sp2, sp3, sstart;
     if (threadIdx.x == 0) {
         const int3 p = periods[row];
@@ -119,7 +119,7 @@ __global__ void ultosc_batch_f32(
         const int i2 = a - sp2;
         const int i3 = a - sp3;
 
-        
+
         const float2 c_now  = ldg_float2(pcmtl, a);
         const float2 c_p1   = ldg_float2(pcmtl, i1);
         const float2 c_p2   = ldg_float2(pcmtl, i2);
@@ -129,7 +129,7 @@ __global__ void ultosc_batch_f32(
         const float2 tr_p2  = ldg_float2(ptr, i2);
         const float2 tr_p3  = ldg_float2(ptr, i3);
 
-        
+
         const float s1a = ds_diff_to_f(c_now.x,  c_now.y,  c_p1.x,  c_p1.y);
         const float s1b = ds_diff_to_f(tr_now.x, tr_now.y, tr_p1.x, tr_p1.y);
         const float s2a = ds_diff_to_f(c_now.x,  c_now.y,  c_p2.x,  c_p2.y);
@@ -166,7 +166,7 @@ __global__ void ultosc_many_series_one_param_f32(
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm)
 {
-    
+
     const int s = blockIdx.y * blockDim.y + threadIdx.y;
     if (s >= cols) return;
 
@@ -209,5 +209,5 @@ __global__ void ultosc_many_series_one_param_f32(
     }
 }
 
-} 
+}
 

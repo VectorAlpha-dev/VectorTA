@@ -38,7 +38,7 @@ void minmax_batch_f32(const float* __restrict__ high,
     if (row >= n_combos) return;
 
     const int base = row * series_len;
-    
+
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < series_len; i += blockDim.x * gridDim.x) {
         out_is_min[base + i] = CUDART_NAN_F;
         out_is_max[base + i] = CUDART_NAN_F;
@@ -47,7 +47,7 @@ void minmax_batch_f32(const float* __restrict__ high,
     }
     __syncthreads();
 
-    
+
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
 
     int order = orders[row];
@@ -65,7 +65,7 @@ void minmax_batch_f32(const float* __restrict__ high,
         const float ch = high[i];
         const float cl = low[i];
         if (in_bounds && isfinite(ch) && isfinite(cl)) {
-            
+
             bool left_ok_low = true, right_ok_low = true;
             float lmin = CUDART_INF_F, rmin = CUDART_INF_F;
             for (int o = 1; o <= order; ++o) {
@@ -80,7 +80,7 @@ void minmax_batch_f32(const float* __restrict__ high,
                 min_here = cl;
             }
 
-            
+
             bool left_ok_high = true, right_ok_high = true;
             float lmax = -CUDART_INF_F, rmax = -CUDART_INF_F;
             for (int o = 1; o <= order; ++o) {
@@ -117,12 +117,12 @@ void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_
                                                  float* __restrict__ out_is_max_tm,
                                                  float* __restrict__ out_last_min_tm,
                                                  float* __restrict__ out_last_max_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= num_series || series_len <= 0 || order <= 0) return;
     const int stride = num_series;
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         const int idx = t * stride + s;
         out_is_min_tm[idx] = CUDART_NAN_F;
@@ -196,7 +196,7 @@ void minmax_many_series_one_param_time_major_f32(const float* __restrict__ high_
 
 
 static __device__ __forceinline__ int ilog2_floor_u32(unsigned int x) {
-    
+
     return 31 - __clz(x);
 }
 
@@ -256,7 +256,7 @@ void st_init_level0_minmax_valid_f32(const float* __restrict__ low,
     const bool fl = isfinite(cl);
     const bool fh = isfinite(ch);
 
-    
+
     low_min_st[i]  = fl ? cl : CUDART_INF_F;
     high_max_st[i] = fh ? ch : -CUDART_INF_F;
     valid_low_st[i]  = fl ? 1u : 0u;
@@ -266,7 +266,7 @@ void st_init_level0_minmax_valid_f32(const float* __restrict__ low,
 
 extern "C" __global__
 void st_build_level_k_minmax_valid_f32(int series_len,
-                                       int k, 
+                                       int k,
                                        float* __restrict__ low_min_st,
                                        float* __restrict__ high_max_st,
                                        uint8_t* __restrict__ valid_low_st,
@@ -274,7 +274,7 @@ void st_build_level_k_minmax_valid_f32(int series_len,
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int half = 1 << (k - 1);
     const int span = 1 << k;
-    if (i > series_len - span) return; 
+    if (i > series_len - span) return;
 
     const int prev = (k - 1) * series_len;
 
@@ -310,14 +310,14 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
                           float* __restrict__ out_is_min,
                           float* __restrict__ out_is_max) {
     if (series_len <= 0) return;
-    const int row = blockIdx.y; 
+    const int row = blockIdx.y;
     if (row >= n_combos) return;
 
     const int k = orders[row];
     const int base = row * series_len;
 
     if (k <= 0) {
-        
+
         for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
             out_is_min[base + t] = CUDART_NAN_F;
             out_is_max[base + t] = CUDART_NAN_F;
@@ -325,9 +325,9 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         return;
     }
 
-    
-    
-    
+
+
+
     const unsigned ku = (unsigned)k;
     const int klog = ilog2_floor_u32(ku);
     const int step = 1 << klog;
@@ -335,7 +335,7 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
 
     const int fv = (first_valid < 0 ? 0 : first_valid);
     for (int t = blockIdx.x * blockDim.x + threadIdx.x; t < series_len; t += blockDim.x * gridDim.x) {
-        
+
         out_is_min[base + t] = CUDART_NAN_F;
         out_is_max[base + t] = CUDART_NAN_F;
         if (t < fv) continue;
@@ -346,13 +346,13 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
         const float ch = high[t];
         if (!(isfinite(cl) && isfinite(ch))) continue;
 
-        
+
         const int l0 = t - k;
         const int r0 = t - 1;
-        const int r0b = t - step; 
+        const int r0b = t - step;
         const int l1 = t + 1;
         const int r1 = t + k;
-        const int r1b = t + k - step + 1; 
+        const int r1b = t + k - step + 1;
         uint8_t left_ok_low  = min_u8(valid_low_st[off + l0], valid_low_st[off + r0b]);
         uint8_t right_ok_low = min_u8(valid_low_st[off + l1], valid_low_st[off + r1b]);
         if (left_ok_low && right_ok_low) {
@@ -363,7 +363,7 @@ void minmax_batch_rmq_f32(const float* __restrict__ high,
             }
         }
 
-        
+
         uint8_t left_ok_high  = min_u8(valid_high_st[off + l0], valid_high_st[off + r0b]);
         uint8_t right_ok_high = min_u8(valid_high_st[off + l1], valid_high_st[off + r1b]);
         if (left_ok_high && right_ok_high) {
@@ -404,7 +404,7 @@ void forward_fill_two_streams_f32(const float* __restrict__ in_is_min,
 
     const int base = row * series_len;
     const unsigned full_mask = 0xffffffffu;
-    __shared__ float warp_totals_min[WARP_SIZE]; 
+    __shared__ float warp_totals_min[WARP_SIZE];
     __shared__ float warp_totals_max[WARP_SIZE];
 
     float carry_min = CUDART_NAN_F;

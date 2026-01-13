@@ -32,13 +32,13 @@ class Test{IndicatorTitle}:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_{indicator}_accuracy(self, test_data):
         """Test {INDICATOR_UPPER} matches expected values from Rust tests"""
         # TODO: Update expected values in test_utils.py EXPECTED_OUTPUTS
         # TODO: Implement test based on Rust check_{indicator}_accuracy
         pass
-    
+
     def test_{indicator}_errors(self):
         """Test error handling"""
         # TODO: Implement error tests based on Rust tests
@@ -56,14 +56,14 @@ WASM_TEST_TEMPLATE = '''/**
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
-const {{ 
-    loadTestData, 
-    assertArrayClose, 
+const {{
+    loadTestData,
+    assertArrayClose,
     assertClose,
     isNaN,
     assertAllNaN,
     assertNoNaN,
-    EXPECTED_OUTPUTS 
+    EXPECTED_OUTPUTS
 }} = require('./test_utils');
 
 let wasm;
@@ -79,7 +79,7 @@ test.before(async () => {{
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
     }}
-    
+
     testData = loadTestData();
 }});
 
@@ -102,8 +102,8 @@ def generate_tests(indicator_name):
     indicator_lower = indicator_name.lower()
     indicator_upper = indicator_name.upper()
     indicator_title = indicator_name.title()
-    
-    
+
+
     python_test_path = Path(f'tests/python/test_{indicator_lower}.py')
     if python_test_path.exists():
         print(f"Python test already exists: {python_test_path}")
@@ -115,8 +115,8 @@ def generate_tests(indicator_name):
         )
         python_test_path.write_text(python_content)
         print(f"Created: {python_test_path}")
-    
-    
+
+
     wasm_test_path = Path(f'tests/wasm/test_{indicator_lower}.js')
     if wasm_test_path.exists():
         print(f"WASM test already exists: {wasm_test_path}")
@@ -128,7 +128,7 @@ def generate_tests(indicator_name):
         )
         wasm_test_path.write_text(wasm_content)
         print(f"Created: {wasm_test_path}")
-    
+
     print(f"\nNext steps for {indicator_name}:")
     print("1. Update EXPECTED_OUTPUTS in test_utils.py/js with values from Rust tests")
     print("2. Implement test methods based on the Rust unit tests")
@@ -140,7 +140,7 @@ def main():
         print("Usage: python generate_binding_tests.py <indicator_name>")
         print("Example: python generate_binding_tests.py ema")
         sys.exit(1)
-    
+
     indicator_name = sys.argv[1]
     generate_tests(indicator_name)
 

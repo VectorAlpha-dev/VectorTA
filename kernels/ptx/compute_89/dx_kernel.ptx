@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry dx_batch_f32(
 	.param .u64 dx_batch_f32_param_0,
@@ -254,7 +254,7 @@ $L__BB0_28:
 	ret;
 
 }
-	
+
 .visible .entry dx_many_series_one_param_time_major_f32(
 	.param .u64 dx_many_series_one_param_time_major_f32_param_0,
 	.param .u64 dx_many_series_one_param_time_major_f32_param_1,
@@ -552,7 +552,7 @@ $L__BB1_33:
 	ret;
 
 }
-	
+
 .visible .entry dx_batch_f32_fast(
 	.param .u64 dx_batch_f32_fast_param_0,
 	.param .u64 dx_batch_f32_fast_param_1,
@@ -813,7 +813,7 @@ $L__BB2_23:
 	ret;
 
 }
-	
+
 .visible .entry dx_many_series_one_param_time_major_f32_fast(
 	.param .u64 dx_many_series_one_param_time_major_f32_fast_param_0,
 	.param .u64 dx_many_series_one_param_time_major_f32_fast_param_1,

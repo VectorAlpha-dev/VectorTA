@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# Minimal nvcc stub that writes a placeholder PTX at the path provided with -o.
-# This allows building and running CPU-only tests while CUDA device tests skip.
+
+
 
 set -euo pipefail
 
 out=""
 src=""
 arch="compute_80"
-while [[ $# -gt 0 ]]; do
+while [[ $
   case "$1" in
     -o)
       out="$2"; shift 2 ;;
     -arch)
       arch="$2"; shift 2 ;;
     *)
-      # record last non-flag as src candidate
+
       if [[ "$1" == *.cu ]]; then src="$1"; fi
       shift ;;
   esac

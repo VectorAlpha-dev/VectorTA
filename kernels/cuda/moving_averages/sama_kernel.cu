@@ -226,11 +226,11 @@ void pop_outdated_front(int*& q, int& front, int& size, const int cap, int start
 static __device__ __forceinline__
 void push_max_idx(const float* base, int*& q, int& back, int& size, const int cap, int k) {
     float vk = ldgf(base + k);
-    if (!isfinite(vk)) return; 
+    if (!isfinite(vk)) return;
     while (size > 0) {
         int back_pos = (back == 0 ? cap - 1 : back - 1);
         float vb = ldgf(base + q[back_pos]);
-        
+
         if (vb > vk) break;
         back = back_pos;
         --size;
@@ -245,11 +245,11 @@ void push_max_idx(const float* base, int*& q, int& back, int& size, const int ca
 static __device__ __forceinline__
 void push_min_idx(const float* base, int*& q, int& back, int& size, const int cap, int k) {
     float vk = ldgf(base + k);
-    if (!isfinite(vk)) return; 
+    if (!isfinite(vk)) return;
     while (size > 0) {
         int back_pos = (back == 0 ? cap - 1 : back - 1);
         float vb = ldgf(base + q[back_pos]);
-        
+
         if (vb < vk) break;
         back = back_pos;
         --size;
@@ -263,15 +263,15 @@ void push_min_idx(const float* base, int*& q, int& back, int& size, const int ca
 
 
 extern "C" __global__
-void sama_batch_f32_opt(const float* __restrict__ prices,     
-                        const int*   __restrict__ lengths,     
-                        const float* __restrict__ min_alphas,  
-                        const float* __restrict__ maj_alphas,  
+void sama_batch_f32_opt(const float* __restrict__ prices,
+                        const int*   __restrict__ lengths,
+                        const float* __restrict__ min_alphas,
+                        const float* __restrict__ maj_alphas,
                         const int*   __restrict__ first_valids,
                         int series_len,
                         int n_combos,
-                        int max_window,                        
-                        float* __restrict__ out)               
+                        int max_window,
+                        float* __restrict__ out)
 {
     const int combo = blockIdx.x;
     if (combo >= n_combos) return;
@@ -284,19 +284,19 @@ void sama_batch_f32_opt(const float* __restrict__ prices,
     if (length < 0 || first_valid >= series_len || series_len <= 0) return;
 
     const int row_offset = combo * series_len;
-    
+
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
         out[row_offset + idx] = NAN;
     }
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    
+
     const float dalpha = min_alpha - maj_alpha;
 
     float prev = NAN;
 
-    
+
     const bool use_deque = (max_window >= length);
     if (!use_deque) {
         for (int t = first_valid; t < series_len; ++t) {
@@ -334,20 +334,20 @@ void sama_batch_f32_opt(const float* __restrict__ prices,
         return;
     }
 
-    
-    extern __shared__ int shmem[];
-    const int cap = max_window + 1;  
-    int* dq_max = shmem;             
-    int* dq_min = shmem + cap;       
 
-    int fmax = 0, bmax = 0, szmax = 0;  
+    extern __shared__ int shmem[];
+    const int cap = max_window + 1;
+    int* dq_max = shmem;
+    int* dq_min = shmem + cap;
+
+    int fmax = 0, bmax = 0, szmax = 0;
     int fmin = 0, bmin = 0, szmin = 0;
 
     for (int t = first_valid; t < series_len; ++t) {
         const int start = clamp_start(t, length);
         const float price_t = ldgf(prices + t);
 
-        
+
         pop_outdated_front(dq_max, fmax, szmax, cap, start);
         pop_outdated_front(dq_min, fmin, szmin, cap, start);
 
@@ -356,11 +356,11 @@ void sama_batch_f32_opt(const float* __restrict__ prices,
             continue;
         }
 
-        
+
         while (szmax > 0) {
             int back_pos = (bmax == 0 ? cap - 1 : bmax - 1);
             float vb = ldgf(prices + dq_max[back_pos]);
-            if (vb > price_t) break; 
+            if (vb > price_t) break;
             bmax = back_pos; --szmax;
         }
         dq_max[bmax] = t; bmax = (bmax + 1 == cap ? 0 : bmax + 1); ++szmax;
@@ -368,12 +368,12 @@ void sama_batch_f32_opt(const float* __restrict__ prices,
         while (szmin > 0) {
             int back_pos = (bmin == 0 ? cap - 1 : bmin - 1);
             float vb = ldgf(prices + dq_min[back_pos]);
-            if (vb < price_t) break; 
+            if (vb < price_t) break;
             bmin = back_pos; --szmin;
         }
         dq_min[bmin] = t; bmin = (bmin + 1 == cap ? 0 : bmin + 1); ++szmin;
 
-        
+
         const float hh = ldgf(prices + dq_max[fmax]);
         const float ll = ldgf(prices + dq_min[fmin]);
         const float denom = hh - ll;
@@ -394,15 +394,15 @@ void sama_batch_f32_opt(const float* __restrict__ prices,
 
 
 extern "C" __global__
-void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm, 
-                                        const int*   __restrict__ first_valids, 
+void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
+                                        const int*   __restrict__ first_valids,
                                         int length,
                                         float min_alpha,
                                         float maj_alpha,
                                         int num_series,
                                         int series_len,
-                                        int max_window,                    
-                                        float* __restrict__ out_tm)        
+                                        int max_window,
+                                        float* __restrict__ out_tm)
 {
     const int series_idx = blockIdx.x;
     if (series_idx >= num_series) return;
@@ -411,7 +411,7 @@ void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
     const int stride = num_series;
     const int first_valid = first_valids[series_idx];
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series_idx] = NAN;
     }
@@ -422,7 +422,7 @@ void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
 
     float prev = NAN;
 
-    
+
     const bool use_deque = (max_window >= length);
     if (!use_deque) {
         for (int t = first_valid; t < series_len; ++t) {
@@ -460,11 +460,11 @@ void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
         return;
     }
 
-    
+
     extern __shared__ int shmem[];
     const int cap = max_window + 1;
-    int* dq_max = shmem;       
-    int* dq_min = shmem + cap; 
+    int* dq_max = shmem;
+    int* dq_min = shmem + cap;
 
     int fmax = 0, bmax = 0, szmax = 0;
     int fmin = 0, bmin = 0, szmin = 0;
@@ -478,7 +478,7 @@ void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
         const int off   = t * stride + series_idx;
         const float price_t = load_tm(t);
 
-        
+
         pop_outdated_front(dq_max, fmax, szmax, cap, start);
         pop_outdated_front(dq_min, fmin, szmin, cap, start);
 
@@ -487,11 +487,11 @@ void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
             continue;
         }
 
-        
+
         while (szmax > 0) {
             int back_pos = (bmax == 0 ? cap - 1 : bmax - 1);
             float vb = load_tm(dq_max[back_pos]);
-            if (vb > price_t) break; 
+            if (vb > price_t) break;
             bmax = back_pos; --szmax;
         }
         dq_max[bmax] = t; bmax = (bmax + 1 == cap ? 0 : bmax + 1); ++szmax;
@@ -499,7 +499,7 @@ void sama_many_series_one_param_f32_opt(const float* __restrict__ prices_tm,
         while (szmin > 0) {
             int back_pos = (bmin == 0 ? cap - 1 : bmin - 1);
             float vb = load_tm(dq_min[back_pos]);
-            if (vb < price_t) break; 
+            if (vb < price_t) break;
             bmin = back_pos; --szmin;
         }
         dq_min[bmin] = t; bmin = (bmin + 1 == cap ? 0 : bmin + 1); ++szmin;

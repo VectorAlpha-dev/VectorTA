@@ -13,7 +13,7 @@
 
 #include <cuda_runtime.h>
 #include <math.h>
-#include <math_constants.h>  
+#include <math_constants.h>
 
 
 
@@ -50,46 +50,46 @@ void maaq_batch_f32(const float* __restrict__ prices,
     const int warm = first + period - 1;
     if (warm >= series_len) return;
 
-    extern __shared__ float diffs[];  
+    extern __shared__ float diffs[];
 
     const int base_out = combo * series_len;
     const float nan_f = CUDART_NAN_F;
     const float anchor = prices[first];
     const float EPS = 1.0e-12f;
 
-    
+
     if (threadIdx.x == 0) {
-        
+
         for (int idx = 0; idx < first; ++idx) {
             out[base_out + idx] = nan_f;
         }
-        
+
         for (int idx = first; idx <= warm; ++idx) {
             out[base_out + idx] = prices[idx];
         }
         if (warm + 1 >= series_len) return;
 
-        
+
         float vol_sum = 0.0f;
         for (int j = 1; j < period; ++j) {
             const int cur = first + j;
             const float diff = fabsf(prices[cur] - prices[cur - 1]);
-            diffs[j] = diff;         
+            diffs[j] = diff;
             vol_sum += diff;
         }
 
-        
+
         const int i0 = warm + 1;
-        float prev = prices[warm];          
-        float prev_input = prices[warm];    
+        float prev = prices[warm];
+        float prev_input = prices[warm];
 
         const float newest = prices[i0];
         const float newest_diff = fabsf(newest - prev_input);
-        diffs[0] = newest_diff;             
+        diffs[0] = newest_diff;
         vol_sum += newest_diff;
         prev_input = newest;
 
-        
+
         const float a = fast_sc * fast_sc;
         const float b = 2.0f * fast_sc * slow_sc;
         const float c = slow_sc * slow_sc;
@@ -102,14 +102,14 @@ void maaq_batch_f32(const float* __restrict__ prices,
         prev = fmaf(sc, newest - prev, prev);
         out[base_out + i0] = prev;
 
-        
-        int head = 1;  
+
+        int head = 1;
         for (int t = i0 + 1; t < series_len; ++t) {
-            
+
             vol_sum -= diffs[head];
 
             const float cur_price = prices[t];
-            const float nd = fabsf(cur_price - prev_input);  
+            const float nd = fabsf(cur_price - prev_input);
             diffs[head] = nd;
             vol_sum += nd;
             prev_input = cur_price;
@@ -140,7 +140,7 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     if (series_idx >= num_series) return;
     if (period <= 0 || series_len <= 0) return;
 
-    extern __shared__ float diffs[];  
+    extern __shared__ float diffs[];
 
     int first = first_valids[series_idx];
     if (first < 0) first = 0;
@@ -154,17 +154,17 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
     const float EPS = 1.0e-12f;
 
     if (threadIdx.x == 0) {
-        
+
         for (int t = 0; t < warm; ++t) {
             out_tm[t * stride + series_idx] = nan_f;
         }
 
         const int warm_idx = warm * stride + series_idx;
-        out_tm[warm_idx] = prices_tm[warm_idx];  
+        out_tm[warm_idx] = prices_tm[warm_idx];
 
         if (warm + 1 >= series_len) return;
 
-        
+
         float vol_sum = 0.0f;
         for (int j = 1; j < period; ++j) {
             const int cur = first + j;
@@ -177,8 +177,8 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 
         const int i0 = warm + 1;
         const int prev_idx = warm * stride + series_idx;
-        float prev       = prices_tm[prev_idx];    
-        float prev_input = prices_tm[prev_idx];    
+        float prev       = prices_tm[prev_idx];
+        float prev_input = prices_tm[prev_idx];
 
         const int cur_idx = i0 * stride + series_idx;
         const float newest = prices_tm[cur_idx];
@@ -189,7 +189,7 @@ void maaq_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 
         const float anchor = prices_tm[first * stride + series_idx];
 
-        
+
         const float a = fast_sc * fast_sc;
         const float b = 2.0f * fast_sc * slow_sc;
         const float c = slow_sc * slow_sc;

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry damiani_volatmeter_batch_f32(
 	.param .u64 damiani_volatmeter_batch_f32_param_0,
@@ -144,9 +144,9 @@ $L__BB0_4:
 $L__BB0_5:
 	mov.f32 	%f12, %f305;
 	mov.f32 	%f11, %f306;
-	
+
 	ld.global.nc.f32 %f70, [%rd72];
-	
+
 	setp.lt.s32 	%p8, %r82, %r9;
 	@%p8 bra 	$L__BB0_8;
 	bra.uni 	$L__BB0_6;
@@ -529,7 +529,7 @@ $L__BB0_32:
 	ret;
 
 }
-	
+
 .visible .entry damiani_volatmeter_many_series_one_param_time_major_f32(
 	.param .u64 damiani_volatmeter_many_series_one_param_time_major_f32_param_0,
 	.param .u64 damiani_volatmeter_many_series_one_param_time_major_f32_param_1,
@@ -674,17 +674,17 @@ $L__BB1_5:
 	cvt.s64.s32 	%rd15, %r116;
 	mul.wide.s32 	%rd42, %r116, 4;
 	add.s64 	%rd39, %rd82, %rd42;
-	
+
 	ld.global.nc.f32 %f78, [%rd39];
-	
+
 	add.s64 	%rd40, %rd83, %rd42;
-	
+
 	ld.global.nc.f32 %f79, [%rd40];
-	
+
 	add.s64 	%rd41, %rd84, %rd42;
-	
+
 	ld.global.nc.f32 %f80, [%rd41];
-	
+
 	abs.ftz.f32 	%f22, %f80;
 	setp.geu.ftz.f32 	%p6, %f22, 0f7F800000;
 	and.b16  	%rs4, %rs5, 255;

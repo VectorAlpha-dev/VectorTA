@@ -65,7 +65,7 @@ def test_zscore_basic():
     """Test basic zscore calculation"""
     data = np.array([10.0, 20.0, 30.0, 40.0, 50.0] * 3, dtype=np.float64)
     result = ta_indicators.zscore(data, period=14, ma_type="sma", nbdev=1.0, devtype=0)
-    
+
     assert isinstance(result, np.ndarray)
     assert len(result) == len(data)
     assert np.isnan(result[:13]).all()  # First 13 should be NaN
@@ -74,12 +74,12 @@ def test_zscore_basic():
 def test_zscore_stream():
     """Test streaming zscore calculation"""
     stream = ta_indicators.ZscoreStream(period=10, ma_type="sma", nbdev=1.0, devtype=0)
-    
+
     values = []
     for i in range(20):
         val = stream.update(float(i))
         values.append(val)
-    
+
     # First 9 should be None
     assert all(v is None for v in values[:9])
     # 10th and beyond should have values
@@ -95,13 +95,13 @@ def test_zscore_batch():
         nbdev_range=(1.0, 2.0, 0.5),
         devtype_range=(0, 0, 1)
     )
-    
+
     assert isinstance(result, dict)
     assert 'values' in result
     assert 'periods' in result
     assert 'nbdevs' in result
     assert 'devtypes' in result
-    
+
     # Check that values is a 2D array
     assert result['values'].ndim == 2
 
@@ -110,7 +110,7 @@ def test_zscore_errors():
     # Empty data should raise
     with pytest.raises(ValueError):
         ta_indicators.zscore(np.array([]), period=14, ma_type="sma", nbdev=1.0, devtype=0)
-    
+
     # All NaN should raise
     with pytest.raises(ValueError):
         ta_indicators.zscore(np.full(10, np.nan), period=5, ma_type="sma", nbdev=1.0, devtype=0)
@@ -186,7 +186,7 @@ jobs:
         run: |
           maturin develop --features python
           pytest tests/test_*_python.py -v
-          
+
   test-wasm:
     runs-on: ubuntu-latest
     steps:

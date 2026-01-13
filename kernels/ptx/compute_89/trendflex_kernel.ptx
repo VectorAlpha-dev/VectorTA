@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .func  (.param .align 8 .b8 func_retval0[16]) __internal_trig_reduction_slowpathd
 (
 	.param .b64 __internal_trig_reduction_slowpathd_param_0
@@ -99,7 +99,7 @@
 	mov.f64 	%fd105, 0d3FF71547652B82FE;
 	fma.rn.f64 	%fd106, %fd103, %fd105, %fd104;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r6, %temp}, %fd106;
 	}
 	mov.f64 	%fd107, 0dC338000000000000;
@@ -130,18 +130,18 @@
 	fma.rn.f64 	%fd132, %fd131, %fd112, %fd102;
 	fma.rn.f64 	%fd133, %fd132, %fd112, %fd102;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r7, %temp}, %fd133;
 	}
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r8}, %fd133;
 	}
 	shl.b32 	%r59, %r6, 20;
 	add.s32 	%r60, %r8, %r59;
 	mov.b64 	%fd276, {%r7, %r60};
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r61}, %fd103;
 	}
 	mov.b32 	%f23, %r61;
@@ -161,7 +161,7 @@
 	mul.f64 	%fd273, %fd101, 0dC011C5831ADD62E4;
 	fma.rn.f64 	%fd272, %fd273, %fd274, %fd275;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r116, %temp}, %fd272;
 	}
 	shr.u32 	%r62, %r116, 31;
@@ -204,19 +204,19 @@ $L__BB0_10:
 	setp.ltu.f64 	%p19, %fd7, 0d41E0000000000000;
 	@%p19 bra 	$L__BB0_13;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd1;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd277, [retval0+0];
 	ld.param.b32 	%r134, [retval0+8];
-	} 
+	}
 
 $L__BB0_13:
 	add.s32 	%r12, %r134, 1;
@@ -694,7 +694,7 @@ $L__BB0_50:
 	ret;
 
 }
-	
+
 .visible .entry trendflex_many_series_one_param_f32(
 	.param .u64 trendflex_many_series_one_param_f32_param_0,
 	.param .u64 trendflex_many_series_one_param_f32_param_1,
@@ -769,7 +769,7 @@ $L__BB0_50:
 	mov.f64 	%fd23, 0d3FF71547652B82FE;
 	fma.rn.f64 	%fd24, %fd21, %fd23, %fd22;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r5, %temp}, %fd24;
 	}
 	mov.f64 	%fd25, 0dC338000000000000;
@@ -800,18 +800,18 @@ $L__BB0_50:
 	fma.rn.f64 	%fd50, %fd49, %fd30, %fd20;
 	fma.rn.f64 	%fd51, %fd50, %fd30, %fd20;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r6, %temp}, %fd51;
 	}
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r7}, %fd51;
 	}
 	shl.b32 	%r55, %r5, 20;
 	add.s32 	%r56, %r7, %r55;
 	mov.b64 	%fd92, {%r6, %r56};
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r57}, %fd21;
 	}
 	mov.b32 	%f92, %r57;
@@ -865,19 +865,19 @@ $L__BB1_9:
 	setp.ltu.f64 	%p16, %fd6, 0d41E0000000000000;
 	@%p16 bra 	$L__BB1_12;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd1;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd93, [retval0+0];
 	ld.param.b32 	%r102, [retval0+8];
-	} 
+	}
 
 $L__BB1_12:
 	add.s32 	%r11, %r102, 1;
@@ -1324,7 +1324,7 @@ $L__BB1_48:
 	ld.param.f64 	%fd4, [__internal_trig_reduction_slowpathd_param_0];
 	add.u64 	%rd1, %SPL, 0;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r1}, %fd4;
 	}
 	shr.u32 	%r12, %r1, 20;

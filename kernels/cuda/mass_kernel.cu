@@ -54,13 +54,13 @@ __device__ __forceinline__ float ds_diff_to_f32(const float2 A, const float2 B) 
 
 
 extern "C" __global__ void mass_batch_f32(
-    const float2* __restrict__ prefix_ratio_ds, 
-    const int*    __restrict__ prefix_nan,   
+    const float2* __restrict__ prefix_ratio_ds,
+    const int*    __restrict__ prefix_nan,
     int len,
     int first_valid,
-    const int*    __restrict__ periods,      
+    const int*    __restrict__ periods,
     int n_combos,
-    float*        __restrict__ out           
+    float*        __restrict__ out
 ) {
     const int row = blockIdx.y;
     if (row >= n_combos) return;
@@ -75,11 +75,11 @@ extern "C" __global__ void mass_batch_f32(
     const int stride = gridDim.x * blockDim.x;
 
     int t = t0;
-    int start = t + 1 - period; 
+    int start = t + 1 - period;
     while (t < len) {
         float out_val = mass_nan();
         if (t >= warm) {
-            const int p1 = t + 1; 
+            const int p1 = t + 1;
             const int bad = prefix_nan[p1] - prefix_nan[start];
             if (bad == 0) {
                 const float2 a = prefix_ratio_ds[p1];
@@ -101,10 +101,10 @@ extern "C" __global__ void mass_many_series_one_param_time_major_f32(
     const double* __restrict__ prefix_ratio_tm,
     const int*    __restrict__ prefix_nan_tm,
     int period,
-    int num_series,   
-    int series_len,   
-    const int*    __restrict__ first_valids,   
-    float*        __restrict__ out_tm          
+    int num_series,
+    int series_len,
+    const int*    __restrict__ first_valids,
+    float*        __restrict__ out_tm
 ) {
     const int series = blockIdx.y;
     if (series >= num_series) return;
@@ -118,7 +118,7 @@ extern "C" __global__ void mass_many_series_one_param_time_major_f32(
     int t   = t0;
 
     while (t < series_len) {
-        const int idx = t * num_series + series;               
+        const int idx = t * num_series + series;
         float out_val = mass_nan();
         if (t >= warm) {
             const int start = (t + 1 - period) * num_series + series;

@@ -63,7 +63,7 @@ extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
     const int period = periods[combo];
     const int base   = combo * series_len;
 
-    
+
     auto fill_all_nan = [&](int len){
         for (int i = threadIdx.x; i < len; i += blockDim.x) {
             out_fisher[base + i] = NAN;
@@ -83,46 +83,46 @@ extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
 
     const int warm = first_valid + period - 1;
 
-    
+
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out_fisher[base + i] = NAN;
         out_signal[base + i] = NAN;
     }
     __syncthreads();
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     extern __shared__ int s[];
-    int* dq_min = s;               
-    int* dq_max = s + period;      
+    int* dq_min = s;
+    int* dq_max = s + period;
 
-    int hmin = 0, tmin = 0; 
-    int hmax = 0, tmax = 0; 
-    int cmin = 0, cmax = 0; 
+    int hmin = 0, tmin = 0;
+    int hmax = 0, tmax = 0;
+    int cmin = 0, cmax = 0;
 
-    
+
     float prev_fish = 0.0f;
     float val1 = 0.0f;
 
-    
+
     for (int i = first_valid; i < series_len; ++i) {
         const float xi = hl[i];
 
-        
-        
+
+
         if (i >= warm) {
             const int window_start = i - period + 1;
             while (cmin > 0 && dq_min[hmin] < window_start) { hmin = rb_inc(hmin, period); --cmin; }
             while (cmax > 0 && dq_max[hmax] < window_start) { hmax = rb_inc(hmax, period); --cmax; }
         }
 
-        
+
         while (cmin > 0) {
             int last = rb_dec(tmin, period);
             if (xi <= hl[dq_min[last]]) {
-                tmin = last; 
+                tmin = last;
                 --cmin;
             } else {
                 break;
@@ -132,11 +132,11 @@ extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
         tmin = rb_inc(tmin, period);
         ++cmin;
 
-        
+
         while (cmax > 0) {
             int last = rb_dec(tmax, period);
             if (xi >= hl[dq_max[last]]) {
-                tmax = last; 
+                tmax = last;
                 --cmax;
             } else {
                 break;
@@ -146,19 +146,19 @@ extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
         tmax = rb_inc(tmax, period);
         ++cmax;
 
-        
+
         if (i >= warm) {
             const float minv  = hl[dq_min[hmin]];
             const float maxv  = hl[dq_max[hmax]];
-            const float range = fmaxf(maxv - minv, 1.0e-3f); 
+            const float range = fmaxf(maxv - minv, 1.0e-3f);
             const float norm  = (xi - minv) / range - 0.5f;
 
-            
+
             val1 = fmaf(0.67f, val1, 0.66f * norm);
             val1 = clampf(val1, -0.999f, 0.999f);
 
             out_signal[base + i] = prev_fish;
-            
+
             const float fish = atanhf(val1) + 0.5f * prev_fish;
             out_fisher[base + i] = fish;
             prev_fish = fish;
@@ -168,8 +168,8 @@ extern "C" __global__ void fisher_batch_f32(const float* __restrict__ hl,
 
 
 extern "C" __global__ void fisher_many_series_one_param_f32(
-    const float* __restrict__ hl_tm,        
-    const int*   __restrict__ first_valids, 
+    const float* __restrict__ hl_tm,
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
@@ -209,7 +209,7 @@ extern "C" __global__ void fisher_many_series_one_param_f32(
         const int start = r + 1 - period;
         float minv = CUDART_INF_F;
         float maxv = -CUDART_INF_F;
-        
+
         for (int k = 0; k < period; ++k) {
             const int idx = (start + k) * num_series + series;
             const float x = hl_tm[idx];

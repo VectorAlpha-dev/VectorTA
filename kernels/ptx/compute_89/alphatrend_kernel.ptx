@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry alphatrend_batch_f32(
 	.param .u64 alphatrend_batch_f32_param_0,
@@ -721,7 +721,7 @@ $L__BB0_72:
 	ret;
 
 }
-	
+
 .visible .entry alphatrend_many_series_one_param_f32(
 	.param .u64 alphatrend_many_series_one_param_f32_param_0,
 	.param .u64 alphatrend_many_series_one_param_f32_param_1,
@@ -1115,7 +1115,7 @@ $L__BB1_35:
 	ret;
 
 }
-	
+
 .visible .entry atr_table_from_tr_f32(
 	.param .u64 atr_table_from_tr_f32_param_0,
 	.param .u32 atr_table_from_tr_f32_param_1,
@@ -1372,7 +1372,7 @@ $L__BB2_28:
 	ret;
 
 }
-	
+
 .visible .entry momentum_to_mask_bits(
 	.param .u64 momentum_to_mask_bits_param_0,
 	.param .u32 momentum_to_mask_bits_param_1,
@@ -1813,7 +1813,7 @@ $L__BB3_37:
 	ret;
 
 }
-	
+
 .visible .entry alphatrend_batch_from_precomputed_f32(
 	.param .u64 alphatrend_batch_from_precomputed_f32_param_0,
 	.param .u64 alphatrend_batch_from_precomputed_f32_param_1,

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 smem_rb[];
 .extern .shared .align 16 .b8 smem_rb2[];
 
@@ -503,7 +503,7 @@ $L__BB0_63:
 	ret;
 
 }
-	
+
 .visible .entry vama_many_series_one_param_f32(
 	.param .u64 vama_many_series_one_param_f32_param_0,
 	.param .u64 vama_many_series_one_param_f32_param_1,

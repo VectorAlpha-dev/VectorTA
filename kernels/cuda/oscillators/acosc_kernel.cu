@@ -66,11 +66,11 @@ static __device__ __forceinline__ float acosc_ao_at(const float* __restrict__ hi
         if (rel >= 38 && k < 5) sum5 += med;
     }
     if (rel < 38) {
-        
-        
-        
-        
-        
+
+
+
+
+
         if (rel == 34) {
             sum5 = acosc_median(high, low, first_valid + 1) +
                    acosc_median(high, low, first_valid + 2) +
@@ -90,7 +90,7 @@ static __device__ __forceinline__ float acosc_ao_at(const float* __restrict__ hi
                    acosc_median(high, low, idx - 1) +
                    acosc_median(high, low, idx);
         } else {
-            
+
             sum5 = acosc_median(high, low, first_valid + 4) +
                    acosc_median(high, low, idx - 3) +
                    acosc_median(high, low, idx - 2) +
@@ -113,7 +113,7 @@ void acosc_batch_f32(const float* __restrict__ high,
     if (series_len <= 0) return;
 
     const int fv = first_valid < 0 ? 0 : first_valid;
-    const int warm = fv + 34 + 5 - 1; 
+    const int warm = fv + 34 + 5 - 1;
     const float nn = CUDART_NAN_F;
 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -125,7 +125,7 @@ void acosc_batch_f32(const float* __restrict__ high,
             continue;
         }
 
-        
+
         const float ao0 = acosc_ao_at(high, low, i, fv);
         const float ao1 = acosc_ao_at(high, low, i - 1, fv);
         const float ao2 = acosc_ao_at(high, low, i - 2, fv);
@@ -156,13 +156,13 @@ void acosc_many_series_one_param_f32(const float* __restrict__ high_tm,
                                      int series_len,
                                      float* __restrict__ out_osc_tm,
                                      float* __restrict__ out_change_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= num_series || series_len <= 0) return;
 
-    const int stride = num_series; 
+    const int stride = num_series;
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_osc_tm[t * stride + s] = CUDART_NAN_F;
         out_change_tm[t * stride + s] = CUDART_NAN_F;
@@ -171,7 +171,7 @@ void acosc_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     if (threadIdx.x != 0) return;
     if (fv >= series_len) return;
-    if ((series_len - fv) < 39) return; 
+    if ((series_len - fv) < 39) return;
 
     const int P5 = 5;
     const int P34 = 34;
@@ -242,7 +242,7 @@ void acosc_many_series_one_param_f32(const float* __restrict__ high_tm,
 
         const float sma5ao = sum5ao * INV5;
         const float res = ao - sma5ao;
-        const float mom = res - prev_res; 
+        const float mom = res - prev_res;
         prev_res = res;
         out_osc_tm[t * stride + s] = res;
         out_change_tm[t * stride + s] = mom;
@@ -264,15 +264,15 @@ void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
                                           float* __restrict__ out_osc_tm,
                                           float* __restrict__ out_change_tm) {
     const int lane = threadIdx.x & (WARP_SIZE - 1);
-    const int warp_idx = blockIdx.x;        
+    const int warp_idx = blockIdx.x;
     const int s = warp_idx * WARP_SIZE + lane;
     if (s >= num_series || series_len <= 0) return;
 
     const int stride = num_series;
     int fv = first_valids[s]; if (fv < 0) fv = 0;
 
-    
-    
+
+
     for (int t = 0; t < series_len; ++t) {
         out_osc_tm[t * stride + s] = CUDART_NAN_F;
         out_change_tm[t * stride + s] = CUDART_NAN_F;
@@ -287,9 +287,9 @@ void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
     const float INV34 = 1.0f / 34.0f;
 
     extern __shared__ float smem[];
-    float* q34  = smem;                    
-    float* q5   = q34  + P34 * WARP_SIZE;  
-    float* q5ao = q5   + P5  * WARP_SIZE;  
+    float* q34  = smem;
+    float* q5   = q34  + P34 * WARP_SIZE;
+    float* q5ao = q5   + P5  * WARP_SIZE;
 
     auto SM = [&](int k) { return k * WARP_SIZE + lane; };
 
@@ -298,7 +298,7 @@ void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
     float sum5ao= 0.0f, c5ao= 0.0f;
     int i34 = 0, i5 = 0, i5ao = 0;
 
-    
+
     #pragma unroll
     for (int k = 0; k < P34; ++k) {
         const int t = fv + k;
@@ -311,7 +311,7 @@ void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
         }
     }
 
-    
+
     for (int t = fv + P34; t < fv + P34 + P5 - 1; ++t) {
         const float med = (high_tm[t * stride + s] + low_tm[t * stride + s]) * 0.5f;
 
@@ -357,7 +357,7 @@ void acosc_many_series_one_param_f32_warp(const float* __restrict__ high_tm,
 
         const float sma5ao = sum5ao * INV5;
         const float res = ao - sma5ao;
-        const float mom = res - prev_res; 
+        const float mom = res - prev_res;
         prev_res = res;
         out_osc_tm[t * stride + s] = res;
         out_change_tm[t * stride + s] = mom;

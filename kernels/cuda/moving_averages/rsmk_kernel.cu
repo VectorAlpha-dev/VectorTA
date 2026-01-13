@@ -24,9 +24,9 @@ extern "C" __global__ void rsmk_momentum_f32(
     const float* __restrict__ main_in,
     const float* __restrict__ compare_in,
     int lookback,
-    int first_valid, 
+    int first_valid,
     int len,
-    float* __restrict__ mom_out 
+    float* __restrict__ mom_out
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     const float nanf = qnan32();
@@ -35,7 +35,7 @@ extern "C" __global__ void rsmk_momentum_f32(
     for (int i = 0; i < min(mom_fv, len); ++i) { mom_out[i] = nanf; }
     if (mom_fv >= len) return;
 
-    
+
     for (int i = mom_fv; i < len; ++i) {
         const float a_m = main_in[i];
         const float a_c = compare_in[i];
@@ -56,26 +56,26 @@ extern "C" __global__ void rsmk_momentum_f32(
 extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
     const float* __restrict__ mom,
     int len,
-    int first_valid_mom, 
+    int first_valid_mom,
     int period,
     int signal_period,
-    float* __restrict__ out_indicator, 
-    float* __restrict__ out_signal     
+    float* __restrict__ out_indicator,
+    float* __restrict__ out_signal
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     const float nanf = qnan32();
     if (len <= 0 || period <= 0 || signal_period <= 0) return;
 
-    
-    
-    
-    
+
+
+
+
     int first = first_valid_mom;
     if (first < 0) first = 0;
     if (first >= len) return;
     while (first < len && isnan(mom[first])) { first += 1; }
 
-    
+
     for (int i = 0; i < min(first, len); ++i) {
         out_indicator[i] = nanf;
         out_signal[i] = nanf;
@@ -87,7 +87,7 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
     const double alpha_sig = 2.0 / (double(signal_period) + 1.0);
     const double beta_sig = 1.0 - alpha_sig;
 
-    
+
     double ind_mean = (double)mom[first] * 100.0;
     double ind_val = ind_mean;
     out_indicator[first] = (float)ind_val;
@@ -95,7 +95,7 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
     int ind_warm_end = first + period;
     if (ind_warm_end > len) ind_warm_end = len;
 
-    
+
     double sig_mean = ind_val;
     double sig_val = sig_mean;
     out_signal[first] = (float)sig_val;
@@ -119,7 +119,7 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
         }
         out_indicator[i] = (float)ind_val;
 
-        
+
         if (i < sig_warm_end) {
             if (isfinite(ind_val)) {
                 sig_count += 1;
@@ -141,7 +141,7 @@ extern "C" __global__ void rsmk_apply_mom_single_row_ema_ema_f32(
 extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
     const float* __restrict__ main_tm,
     const float* __restrict__ compare_tm,
-    const int* __restrict__ first_valids, 
+    const int* __restrict__ first_valids,
     int cols,
     int rows,
     int lookback,
@@ -152,20 +152,20 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
 ) {
     const int s = blockIdx.y;
     if (s >= cols) return;
-    if (threadIdx.x != 0 || blockIdx.x != 0) return; 
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
     const int stride = cols;
     const int fv = first_valids[s];
     const float nanf = qnan32();
     if (rows <= 0 || lookback <= 0 || period <= 0 || signal_period <= 0) return;
 
-    
+
     const int mom_fv = fv + lookback;
     const int ind_warm = mom_fv + period - 1;
     const int sig_warm = ind_warm + signal_period - 1;
     const double alpha_ind = 2.0 / (double(period) + 1.0);
     const double alpha_sig = 2.0 / (double(signal_period) + 1.0);
 
-    
+
     for (int t = 0; t < min(ind_warm, rows); ++t) {
         out_indicator_tm[t * stride + s] = nanf;
     }
@@ -174,7 +174,7 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
     }
     if (ind_warm >= rows) return;
 
-    
+
     double sum = 0.0; int cnt = 0;
     const int init_end = min(rows, mom_fv + period);
     for (int t = mom_fv; t < init_end; ++t) {
@@ -202,7 +202,7 @@ extern "C" __global__ void rsmk_many_series_one_param_time_major_ema_ema_f32(
     double ema_ind = (sum / (double)cnt) * 100.0;
     out_indicator_tm[ind_warm * stride + s] = (float)ema_ind;
 
-    
+
     double ema_sig = 0.0; bool sig_seeded = false;
     double acc_sig = ema_ind; int cnt_sig = 1;
     if (sig_warm == ind_warm) {

@@ -66,14 +66,14 @@ void alligator_batch_f32(const float* __restrict__ prices,
   const int combo = blockIdx.x * blockDim.x + threadIdx.x;
   const float nan_f = __int_as_float(0x7fffffff);
 
-  
+
   int pj = 0, pt = 0, pl = 0;
   int oj = 0, ot = 0, ol = 0;
   int base = 0;
   bool valid = false;
-  float aj = 0.f, bj = 0.f; 
-  float at = 0.f, bt = 0.f; 
-  float al = 0.f, bl = 0.f; 
+  float aj = 0.f, bj = 0.f;
+  float at = 0.f, bt = 0.f;
+  float al = 0.f, bl = 0.f;
 
   if (combo < n_combos) {
     pj = jaw_periods[combo];
@@ -91,8 +91,8 @@ void alligator_batch_f32(const float* __restrict__ prices,
     }
   }
 
-  
-  
+
+
   if (combo < n_combos && valid) {
     const int warm_base_j = first_valid + pj - 1;
     const int warm_base_t = first_valid + pt - 1;
@@ -103,12 +103,12 @@ void alligator_batch_f32(const float* __restrict__ prices,
     for (int i = 0; i < warm_j; ++i) out_jaw[base + i] = nan_f;
     for (int i = 0; i < warm_t; ++i) out_teeth[base + i] = nan_f;
     for (int i = 0; i < warm_l; ++i) out_lips[base + i] = nan_f;
-    
-    
+
+
   }
 
-  
-  
+
+
   float prev_j = 0.f, prev_t = 0.f, prev_l = 0.f;
   if (combo < n_combos && valid) {
     const unsigned mask = __activemask();
@@ -116,10 +116,10 @@ void alligator_batch_f32(const float* __restrict__ prices,
     const int warm_base_t = first_valid + pt - 1;
     const int warm_base_l = first_valid + pl - 1;
     int maxP = warp_reduce_max(max(pj, max(pt, pl)), mask);
-    
-    
+
+
     maxP = __shfl_sync(mask, maxP, 0);
-    const int leader = 0; 
+    const int leader = 0;
     float sum_j = 0.f, sum_t = 0.f, sum_l = 0.f;
     for (int k = 0; k < maxP; ++k) {
       float v = 0.f;
@@ -135,7 +135,7 @@ void alligator_batch_f32(const float* __restrict__ prices,
     prev_t = sum_t * at;
     prev_l = sum_l * al;
 
-    
+
     const int tj = warm_base_j + oj;
     const int tt = warm_base_t + ot;
     const int tl = warm_base_l + ol;
@@ -143,12 +143,12 @@ void alligator_batch_f32(const float* __restrict__ prices,
     if (tt < series_len) out_teeth[base + tt] = prev_t;
     if (tl < series_len) out_lips[base + tl] = prev_l;
 
-    
-    
-    
-    
-    
-    
+
+
+
+
+
+
     const int min_base = min(min(warm_base_j, warm_base_t), warm_base_l);
     int start_i = warp_reduce_min(min_base, mask);
     start_i = __shfl_sync(mask, start_i, 0) + 1;
@@ -158,7 +158,7 @@ void alligator_batch_f32(const float* __restrict__ prices,
         v2 = prices[i];
       }
       const float px = __shfl_sync(mask, v2, leader);
-      
+
       if (i > warm_base_j) {
         prev_j = fmaf(prev_j, bj, px * aj);
       }
@@ -217,7 +217,7 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
   const size_t col    = size_t(series_idx);
   const float nan_f = __int_as_float(0x7fffffff);
 
-  
+
   for (int t = 0; t < min(series_len, warm_j); ++t)
     out_jaw_tm[size_t(t) * stride + col] = nan_f;
   for (int t = 0; t < min(series_len, warm_t); ++t)
@@ -227,7 +227,7 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
   if (warm_base_j >= series_len && warm_base_t >= series_len && warm_base_l >= series_len) return;
 
-  
+
   size_t idx = size_t(first) * stride + col;
   float sum_j = 0.f, sum_t = 0.f, sum_l = 0.f;
   for (int k = 0; k < max(max(jaw_period, teeth_period), lips_period); ++k) {
@@ -244,7 +244,7 @@ void alligator_many_series_one_param_f32(const float* __restrict__ prices_tm,
   if (warm_t < series_len) out_teeth_tm[size_t(warm_t) * stride + col] = prev_t;
   if (warm_l < series_len) out_lips_tm[size_t(warm_l) * stride + col] = prev_l;
 
-  
+
   int start_i = min(min(warm_base_j, warm_base_t), warm_base_l) + 1;
   size_t t_idx = size_t(start_i) * stride + col;
   for (int i = start_i; i < series_len; ++i, t_idx += stride) {

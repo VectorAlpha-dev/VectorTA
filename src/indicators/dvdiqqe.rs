@@ -3724,7 +3724,7 @@ mod tests {
             .fast_range(2.6, 2.6, 0.0)
             .slow_range(4.2, 4.2, 0.0)
             .apply_candles(&c)?;
-        let expected = 4/*periods*/ * 3/*smoothings*/;
+        let expected = 4 * 3;
         assert_eq!(out.rows, expected);
         assert_eq!(out.cols, c.close.len());
         Ok(())
@@ -3952,7 +3952,7 @@ mod tests {
             .slow_range(4.2, 4.2, 0.0)
             .apply_candles(&c)?;
 
-        let expected = 4/*periods*/ * 3/*smoothings*/;
+        let expected = 4 * 3;
         assert_eq!(out.rows, expected);
         assert_eq!(out.cols, c.close.len());
 

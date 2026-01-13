@@ -25,11 +25,11 @@ __device__ __forceinline__ float ftz_f32(float x) {
 
 
 struct Deque {
-    int*   idx;   
-    float* val;   
-    int    cap;   
-    int    head;  
-    int    tail;  
+    int*   idx;
+    float* val;
+    int    cap;
+    int    head;
+    int    tail;
 };
 
 __device__ __forceinline__ void dq_init(Deque* d, int* idx_buf, float* val_buf, int cap) {
@@ -95,14 +95,14 @@ struct Kahan {
 extern "C" __global__
 void srsi_fk_batch_f32(const float* __restrict__ rsi,
                        const int*   __restrict__ stoch_periods,
-                       const int*   __restrict__ k_periods, 
-                       const int*   __restrict__ d_periods, 
+                       const int*   __restrict__ k_periods,
+                       const int*   __restrict__ d_periods,
                        int series_len,
                        int first_valid,
                        int rsi_period,
                        int n_combos,
-                       float* __restrict__ out_k, 
-                       float* __restrict__ out_d) 
+                       float* __restrict__ out_k,
+                       float* __restrict__ out_d)
 {
     const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
@@ -147,16 +147,16 @@ void srsi_fk_batch_f32(const float* __restrict__ rsi,
 }
 
 extern "C" __global__
-void srsi_sma_k_batch_f32(const float* __restrict__ rsi, 
+void srsi_sma_k_batch_f32(const float* __restrict__ rsi,
                           const int*   __restrict__ stoch_periods,
                           const int*   __restrict__ k_periods,
-                          const int*   __restrict__ d_periods, 
+                          const int*   __restrict__ d_periods,
                           int series_len,
                           int first_valid,
                           int rsi_period,
                           int n_combos,
-                          float* __restrict__ out_k, 
-                          float* __restrict__ out_d) 
+                          float* __restrict__ out_k,
+                          float* __restrict__ out_d)
 {
     const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
@@ -198,7 +198,7 @@ void srsi_sma_k_batch_f32(const float* __restrict__ rsi,
 }
 
 extern "C" __global__
-void srsi_sma_d_batch_f32(const float* __restrict__ rsi, 
+void srsi_sma_d_batch_f32(const float* __restrict__ rsi,
                           const int*   __restrict__ stoch_periods,
                           const int*   __restrict__ k_periods,
                           const int*   __restrict__ d_periods,
@@ -206,8 +206,8 @@ void srsi_sma_d_batch_f32(const float* __restrict__ rsi,
                           int first_valid,
                           int rsi_period,
                           int n_combos,
-                          float* __restrict__ out_k, 
-                          float* __restrict__ out_d) 
+                          float* __restrict__ out_k,
+                          float* __restrict__ out_d)
 {
     const int combo = (int)blockIdx.y;
     if (combo >= n_combos) return;
@@ -263,7 +263,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     const int* __restrict__ first_valids,
                                     float* __restrict__ k_out_tm,
                                     float* __restrict__ d_out_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= cols) return;
     if (rsi_period <= 0 || stoch_period <= 0 || k_period <= 0 || d_period <= 0) return;
 
@@ -274,7 +274,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int k_warmup     = stoch_warmup + k_period - 1;
     const int d_warmup     = k_warmup + d_period - 1;
 
-    
+
     for (int t = threadIdx.x; t < rows; t += blockDim.x) {
         if (t < k_warmup) k_out_tm[t * stride + s] = NAN;
         if (t < d_warmup) d_out_tm[t * stride + s] = NAN;
@@ -282,7 +282,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    
+
     float avg_gain = 0.0f, avg_loss = 0.0f;
     float prev = LDG(&prices_tm[first * stride + s]);
     for (int i = first + 1; i <= first + rsi_period && i < rows; ++i) {
@@ -293,18 +293,18 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     avg_gain /= (float)rsi_period; avg_loss /= (float)rsi_period;
     const float alpha = 1.0f / (float)rsi_period;
 
-    
+
     extern __shared__ unsigned char smem2[];
-    int*   max_idx = (int*)smem2;                     
+    int*   max_idx = (int*)smem2;
     float* rsi_ring = (float*)(max_idx + stoch_period);
-    int*   min_idx = (int*)(rsi_ring + stoch_period); 
+    int*   min_idx = (int*)(rsi_ring + stoch_period);
     float* min_val = (float*)(min_idx + stoch_period);
     float* ring_k  = (float*)(min_val + stoch_period);
     float* ring_d  = (float*)(ring_k + k_period);
 
-    
-    
-    
+
+
+
     int rpos = 0; int rcnt = 0;
     float rsi = 50.0f;
     if (rsi_warmup < rows) {
@@ -346,7 +346,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         avg_loss = fmaf(loss - avg_loss, alpha, avg_loss);
         rsi = (avg_loss == 0.0f) ? 100.0f : (100.0f - 100.0f / (1.0f + avg_gain / avg_loss));
         rsi = ftz_f32(rsi);
-        
+
         rsi_ring[rpos] = rsi; rpos = (rpos + 1 == stoch_period ? 0 : rpos + 1); if (rcnt < stoch_period) ++rcnt;
         float hi = rsi, lo = rsi;
         int cnt = rcnt < stoch_period ? rcnt : stoch_period;
@@ -357,7 +357,7 @@ void srsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
 
         const float denom = hi - lo;
-        
+
         float fk = (isfinite(hi) && isfinite(lo) && denom >= FLT_MIN) ? ((rsi - lo) * 100.0f) / denom : 50.0f;
 
         if (cnt_k < k_period) { sum_k += fk; ring_k[head_k] = fk; ++cnt_k; if (++head_k == k_period) head_k = 0; }

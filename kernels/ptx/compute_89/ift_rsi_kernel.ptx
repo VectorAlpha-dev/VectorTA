@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 shmem[];
 .extern .shared .align 16 .b8 shbuf[];
 
@@ -191,9 +191,9 @@ $L__BB0_21:
 	@%p34 bra 	$L__BB0_21;
 
 $L__BB0_22:
-	
+
 	activemask.b32 %r72;
-	
+
 	mov.b32 	%r74, %f226;
 	mov.u32 	%r75, 2;
 	mov.u32 	%r76, 31;
@@ -220,9 +220,9 @@ $L__BB0_22:
 	shfl.sync.down.b32 	%r89|%p39, %r87, %r88, %r76, %r72;
 	mov.b32 	%f139, %r89;
 	add.ftz.f32 	%f228, %f138, %f139;
-	
+
 	activemask.b32 %r73;
-	
+
 	mov.b32 	%r90, %f227;
 	shfl.sync.down.b32 	%r91|%p40, %r90, %r77, %r76, %r73;
 	mov.b32 	%f140, %r91;
@@ -589,7 +589,7 @@ $L__BB0_60:
 	ret;
 
 }
-	
+
 .visible .entry ift_rsi_many_series_one_param_f32(
 	.param .u64 ift_rsi_many_series_one_param_f32_param_0,
 	.param .u64 ift_rsi_many_series_one_param_f32_param_1,

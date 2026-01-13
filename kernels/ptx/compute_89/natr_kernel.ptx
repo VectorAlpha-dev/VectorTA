@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .shared .align 4 .b8 _ZZN45_INTERNAL_ae0a5641_14_natr_kernel_cu_1a08b83d16block_reduce_sumEfE9warp_sums[128];
 
 
@@ -66,7 +66,7 @@ $L__BB0_4:
 	ret;
 
 }
-	
+
 .visible .entry natr_batch_f32(
 	.param .u64 natr_batch_f32_param_0,
 	.param .u64 natr_batch_f32_param_1,
@@ -703,7 +703,7 @@ $L__BB1_71:
 	ret;
 
 }
-	
+
 .visible .entry natr_batch_f32_with_inv(
 	.param .u64 natr_batch_f32_with_inv_param_0,
 	.param .u64 natr_batch_f32_with_inv_param_1,
@@ -1274,7 +1274,7 @@ $L__BB2_59:
 	ret;
 
 }
-	
+
 .visible .entry natr_batch_warp_io_f32(
 	.param .u64 natr_batch_warp_io_f32_param_0,
 	.param .u64 natr_batch_warp_io_f32_param_1,
@@ -1290,11 +1290,11 @@ $L__BB2_59:
 	.reg .b32 	%r<280>;
 	.reg .f64 	%fd<141>;
 	.reg .b64 	%rd<52>;
-	
+
 	.shared .align 4 .b8 _ZZ22natr_batch_warp_io_f32E5sh_tr[128];
-	
+
 	.shared .align 4 .b8 _ZZ22natr_batch_warp_io_f32E8sh_scale[128];
-	
+
 	.shared .align 8 .b8 _ZZ22natr_batch_warp_io_f32E6sh_atr[256];
 
 	ld.param.u64 	%rd21, [natr_batch_warp_io_f32_param_0];
@@ -2231,7 +2231,7 @@ $L__BB3_100:
 	ret;
 
 }
-	
+
 .visible .entry natr_batch_warp_io_f32_with_inv(
 	.param .u64 natr_batch_warp_io_f32_with_inv_param_0,
 	.param .u64 natr_batch_warp_io_f32_with_inv_param_1,
@@ -2247,11 +2247,11 @@ $L__BB3_100:
 	.reg .b32 	%r<280>;
 	.reg .f64 	%fd<141>;
 	.reg .b64 	%rd<52>;
-	
+
 	.shared .align 4 .b8 _ZZ31natr_batch_warp_io_f32_with_invE5sh_tr[128];
-	
+
 	.shared .align 4 .b8 _ZZ31natr_batch_warp_io_f32_with_invE8sh_scale[128];
-	
+
 	.shared .align 8 .b8 _ZZ31natr_batch_warp_io_f32_with_invE6sh_atr[256];
 
 	ld.param.u64 	%rd21, [natr_batch_warp_io_f32_with_inv_param_0];
@@ -3177,7 +3177,7 @@ $L__BB4_98:
 	ret;
 
 }
-	
+
 .visible .entry natr_many_series_one_param_f32(
 	.param .u64 natr_many_series_one_param_f32_param_0,
 	.param .u64 natr_many_series_one_param_f32_param_1,

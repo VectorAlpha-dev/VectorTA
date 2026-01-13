@@ -13,29 +13,29 @@
 #include <math_constants.h>
 
 #ifndef HP2_UNROLL2
-#define HP2_UNROLL2 1  
+#define HP2_UNROLL2 1
 #endif
 
 
 extern "C" __global__
-void highpass2_batch_f32(const float* __restrict__ prices,          
-                         const int*   __restrict__ periods,         
-                         const float* __restrict__ c_vals,          
-                         const float* __restrict__ cm2_vals,        
-                         const float* __restrict__ two_1m_vals,     
-                         const float* __restrict__ neg_oma_sq_vals, 
+void highpass2_batch_f32(const float* __restrict__ prices,
+                         const int*   __restrict__ periods,
+                         const float* __restrict__ c_vals,
+                         const float* __restrict__ cm2_vals,
+                         const float* __restrict__ two_1m_vals,
+                         const float* __restrict__ neg_oma_sq_vals,
                          int series_len,
                          int n_combos,
                          int first_valid,
-                         float* __restrict__ out)                   
+                         float* __restrict__ out)
 {
     const int tid   = blockIdx.x * blockDim.x + threadIdx.x;
 
-    
+
     for (int combo = tid; combo < n_combos; combo += blockDim.x * gridDim.x) {
 
-        
-        
+
+
         const int   period     = periods[combo];
         (void)period;
         const float c          = c_vals[combo];
@@ -46,20 +46,20 @@ void highpass2_batch_f32(const float* __restrict__ prices,
         float* __restrict__ out_row = out + (size_t)combo * (size_t)series_len;
 
         if (series_len <= 0) {
-            
+
             continue;
         }
 
-        
+
         if (first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out_row[i] = CUDART_NAN_F;
             continue;
         }
 
-        
+
         for (int i = 0; i < first_valid; ++i) out_row[i] = CUDART_NAN_F;
 
-        
+
         float x_im2 = prices[first_valid];
         out_row[first_valid] = x_im2;
         if (first_valid + 1 >= series_len) continue;
@@ -70,13 +70,13 @@ void highpass2_batch_f32(const float* __restrict__ prices,
         float y_im2 = x_im2;
         float y_im1 = x_im1;
 
-        
+
         int t = first_valid + 2;
 
 #if HP2_UNROLL2
-        
+
         for (; t + 1 < series_len; t += 2) {
-            
+
             const float x0   = prices[t];
             const float c_x0 = c * x0;
             const float t0   = __fmaf_rn(cm2, x_im1, c_x0);
@@ -84,13 +84,13 @@ void highpass2_batch_f32(const float* __restrict__ prices,
             const float y0   = __fmaf_rn(two_1m, y_im1, __fmaf_rn(neg_oma_sq, y_im2, t1));
             out_row[t] = y0;
 
-            
+
             x_im2 = x_im1;
             x_im1 = x0;
             y_im2 = y_im1;
             y_im1 = y0;
 
-            
+
             const float x1   = prices[t + 1];
             const float c_x1 = c * x1;
             const float u0   = __fmaf_rn(cm2, x_im1, c_x1);
@@ -98,14 +98,14 @@ void highpass2_batch_f32(const float* __restrict__ prices,
             const float y1   = __fmaf_rn(two_1m, y_im1, __fmaf_rn(neg_oma_sq, y_im2, u1));
             out_row[t + 1] = y1;
 
-            
+
             x_im2 = x_im1;
             x_im1 = x1;
             y_im2 = y_im1;
             y_im1 = y1;
         }
 #endif
-        
+
         for (; t < series_len; ++t) {
             const float x_i   = prices[t];
             const float c_xi  = c * x_i;
@@ -140,7 +140,7 @@ void highpass2_batch_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
-                                   const int*   __restrict__ periods,         
+                                   const int*   __restrict__ periods,
                                    const float* __restrict__ c_vals,
                                    const float* __restrict__ cm2_vals,
                                    const float* __restrict__ two_1m_vals,
@@ -165,10 +165,10 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     for (int t = lane; t < first_valid; t += 32) out_row[t] = CUDART_NAN_F;
 
-    
+
     if (lane == 0) {
         out_row[first_valid] = prices[first_valid];
         if (first_valid + 1 < series_len) {
@@ -182,17 +182,17 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
     const float a1     = two_1m_vals[combo];
     const float a2     = neg_oma_sq_vals[combo];
 
-    
+
     float s0_prev = 0.0f;
     float s1_prev = 0.0f;
     if (lane == 0) {
-        s1_prev = prices[first_valid];     
-        s0_prev = prices[first_valid + 1]; 
+        s1_prev = prices[first_valid];
+        s0_prev = prices[first_valid + 1];
     }
     s0_prev = __shfl_sync(mask, s0_prev, 0);
     s1_prev = __shfl_sync(mask, s1_prev, 0);
 
-    
+
     const float m00 = a1;
     const float m01 = a2;
     const float m10 = 1.0f;
@@ -205,18 +205,18 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
         const int t = tile + lane;
         const bool valid = (t < series_len);
 
-        
+
         float u = 0.0f;
         if (valid) {
             const float x0  = prices[t];
             const float x1  = prices[t - 1];
             const float x2  = prices[t - 2];
-            
+
             u = fmaf(c, x2, fmaf(cm2, x1, c * x0));
         }
 
-        
-        
+
+
         float p00 = valid ? m00 : 1.0f;
         float p01 = valid ? m01 : 0.0f;
         float p10 = valid ? m10 : 0.0f;
@@ -224,7 +224,7 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
         float v0  = valid ? u   : 0.0f;
         float v1  = 0.0f;
 
-        
+
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float p00_prev = __shfl_up_sync(mask, p00, offset);
@@ -250,7 +250,7 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
             }
         }
 
-        
+
         const float s0 = fmaf(p00, s0_prev, fmaf(p01, s1_prev, v0));
         const float s1 = fmaf(p10, s0_prev, fmaf(p11, s1_prev, v1));
 
@@ -267,29 +267,29 @@ void highpass2_batch_warp_scan_f32(const float* __restrict__ prices,
 
 
 extern "C" __global__
-void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,  
+void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                          const int*   __restrict__ first_valids,
-                                         int period,      
+                                         int period,
                                          float c,
                                          float cm2,
                                          float two_1m,
                                          float neg_oma_sq,
                                          int num_series,
                                          int series_len,
-                                         float* __restrict__ out_tm)           
+                                         float* __restrict__ out_tm)
 {
     (void)period;
-    const int stride = num_series; 
+    const int stride = num_series;
 
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    
+
     for (int series_idx = tid; series_idx < num_series; series_idx += blockDim.x * gridDim.x) {
 
         if (series_len <= 0) continue;
 
         const int fv = first_valids[series_idx];
 
-        
+
         if (fv < 0 || fv >= series_len) {
             for (int t = 0; t < series_len; ++t) {
                 out_tm[(size_t)t * (size_t)stride + series_idx] = CUDART_NAN_F;
@@ -297,12 +297,12 @@ void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,
             continue;
         }
 
-        
+
         for (int t = 0; t < fv; ++t) {
             out_tm[(size_t)t * (size_t)stride + series_idx] = CUDART_NAN_F;
         }
 
-        
+
         int idx0 = fv * stride + series_idx;
         float x_im2 = prices_tm[idx0];
         out_tm[idx0] = x_im2;
@@ -316,11 +316,11 @@ void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,
         float y_im2 = x_im2;
         float y_im1 = x_im1;
 
-        
+
         int t = fv + 2;
 
 #if HP2_UNROLL2
-        
+
         for (; t + 1 < series_len; t += 2) {
             int i0 = t * stride + series_idx;
             const float x0   = prices_tm[i0];
@@ -330,7 +330,7 @@ void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,
             const float y0   = __fmaf_rn(two_1m, y_im1, __fmaf_rn(neg_oma_sq, y_im2, t1));
             out_tm[i0] = y0;
 
-            
+
             x_im2 = x_im1;
             x_im1 = x0;
             y_im2 = y_im1;
@@ -344,7 +344,7 @@ void highpass2_many_series_one_param_f32(const float* __restrict__ prices_tm,
             const float y1   = __fmaf_rn(two_1m, y_im1, __fmaf_rn(neg_oma_sq, y_im2, u1));
             out_tm[i1] = y1;
 
-            
+
             x_im2 = x_im1;
             x_im1 = x1;
             y_im2 = y_im1;

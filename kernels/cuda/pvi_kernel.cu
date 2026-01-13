@@ -31,18 +31,18 @@ extern "C" __global__ void pvi_build_scale_f32(
     float* __restrict__ scale_out)
 {
     if (len <= 0) return;
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
     const int fv = first_valid < 0 ? 0 : first_valid;
     for (int i = 0; i < len; ++i) scale_out[i] = nanf("");
     if (fv >= len) return;
 
-    scale_out[fv] = 1.0f; 
+    scale_out[fv] = 1.0f;
 
-    
+
     double prev_close = (double)close[fv];
     double prev_vol = (double)volume[fv];
-    double accum = 1.0; 
+    double accum = 1.0;
 
     for (int i = fv + 1; i < len; ++i) {
         const float cf = close[i];
@@ -51,7 +51,7 @@ extern "C" __global__ void pvi_build_scale_f32(
             if ((double)vf > prev_vol) {
                 const double c = (double)cf;
                 const double r = (c - prev_close) / prev_close;
-                
+
                 accum += r * accum;
             }
             scale_out[i] = (float)accum;
@@ -90,14 +90,14 @@ extern "C" __global__ void pvi_build_scale_warp16_f32(
     const int fv = first_valid < 0 ? 0 : first_valid;
     const float nan_f = nanf("");
 
-    
+
     for (int i = lane; i < fv && i < len; i += 16) scale_out[i] = nan_f;
     if (fv >= len) return;
 
     if (lane == 0) scale_out[fv] = 1.0f;
     if (fv + 1 >= len) return;
 
-    double accum0 = 1.0; 
+    double accum0 = 1.0;
 
     for (int t0 = fv + 1; t0 < len; t0 += 16) {
         const int i = t0 + lane;
@@ -115,7 +115,7 @@ extern "C" __global__ void pvi_build_scale_warp16_f32(
             }
         }
 
-        
+
         double prefix = f;
         for (int offset = 1; offset < 16; offset <<= 1) {
             double other = __shfl_up_sync(mask, prefix, offset, 16);
@@ -136,12 +136,12 @@ extern "C" __global__ void pvi_apply_scale_batch_f32(
     const float* __restrict__ scale,
     int len,
     int first_valid,
-    const float* __restrict__ initial_values, 
+    const float* __restrict__ initial_values,
     int rows,
-    float* __restrict__ out)                 
+    float* __restrict__ out)
 {
-    const int t = blockIdx.x * blockDim.x + threadIdx.x; 
-    const int r = (int)blockIdx.y * (int)blockDim.y + (int)threadIdx.y; 
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int r = (int)blockIdx.y * (int)blockDim.y + (int)threadIdx.y;
     if (t >= len || r >= rows || rows <= 0) return;
 
     const float nan_f = nanf("");
@@ -170,13 +170,13 @@ extern "C" __global__ void pvi_apply_scale_batch_f32(
 
 
 extern "C" __global__ void pvi_apply_batch_direct_f32(
-    const float* __restrict__ close,   
-    const float* __restrict__ volume,  
+    const float* __restrict__ close,
+    const float* __restrict__ volume,
     int len,
     int first_valid,
-    const float* __restrict__ initial_values, 
+    const float* __restrict__ initial_values,
     int rows,
-    float* __restrict__ out) 
+    float* __restrict__ out)
 {
     if (rows <= 0 || len <= 0) return;
     const int fv = first_valid < 0 ? 0 : first_valid;
@@ -184,7 +184,7 @@ extern "C" __global__ void pvi_apply_batch_direct_f32(
 
     const int stride = blockDim.x * gridDim.x;
     for (int r = blockIdx.x * blockDim.x + threadIdx.x; r < rows; r += stride) {
-        
+
         for (int t = 0; t < min(fv, len); ++t) out[(size_t)r * len + t] = nan_f;
         if (fv >= len) continue;
 
@@ -200,7 +200,7 @@ extern "C" __global__ void pvi_apply_batch_direct_f32(
             if (isfinite(cf) && isfinite(vf) && isfinite(prev_close) && isfinite(prev_vol)) {
                 if ((double)vf > prev_vol) {
                     const double c = (double)cf;
-                    
+
                     pvi *= c / prev_close;
                 }
                 out[(size_t)r * len + t] = (float)pvi;
@@ -223,17 +223,17 @@ extern "C" __global__ void pvi_many_series_one_param_f32(
     const float* __restrict__ volume_tm,
     int cols,
     int rows,
-    const int* __restrict__ first_valids, 
+    const int* __restrict__ first_valids,
     float initial_value,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols || rows <= 0) return;
 
     const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
     const float nan_f = nanf("");
 
-    
+
     for (int t = 0; t < fv && t < rows; ++t) {
         out_tm[t * cols + s] = nan_f;
     }
@@ -253,7 +253,7 @@ extern "C" __global__ void pvi_many_series_one_param_f32(
             if ((double)vf > prev_vol) {
                 const double c = (double)cf;
                 const double r = (c - prev_close) / prev_close;
-                pvi += r * pvi; 
+                pvi += r * pvi;
             }
             out_tm[t * cols + s] = (float)pvi;
             prev_close = (double)cf;

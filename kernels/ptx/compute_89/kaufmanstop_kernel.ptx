@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 s_base[];
 
 .visible .entry kaufmanstop_axpy_row_f32(
@@ -79,7 +79,7 @@ $L__BB0_5:
 	ret;
 
 }
-	
+
 .visible .entry kaufmanstop_many_series_one_param_time_major_f32(
 	.param .u64 kaufmanstop_many_series_one_param_time_major_f32_param_0,
 	.param .u64 kaufmanstop_many_series_one_param_time_major_f32_param_1,
@@ -305,7 +305,7 @@ $L__BB1_24:
 	ret;
 
 }
-	
+
 .visible .entry kaufmanstop_one_series_many_params_time_major_f32(
 	.param .u64 kaufmanstop_one_series_many_params_time_major_f32_param_0,
 	.param .u64 kaufmanstop_one_series_many_params_time_major_f32_param_1,

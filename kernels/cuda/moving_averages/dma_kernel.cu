@@ -17,7 +17,7 @@ static __device__ __forceinline__ float sum_read(float s, float c) { return s + 
 
 static __device__ __forceinline__ float wsum_norm_i32(int p) {
     long long t = (long long)p * (p + 1);
-    
+
     return __int2float_rn((int)(t >> 1));
 }
 
@@ -38,8 +38,8 @@ float dma_quantized_best_gain(float x,
                               float ec_prev,
                               float alpha_e,
                               int   ema_gain_limit) {
-    
-    
+
+
     const float one_minus_alpha_e = 1.0f - alpha_e;
     const float base  = fmaf(alpha_e, e0_prev, one_minus_alpha_e * ec_prev);
     const float t     = alpha_e * (x - ec_prev);
@@ -49,8 +49,8 @@ float dma_quantized_best_gain(float x,
     if (fabsf(t) <= EPS) return 0.0f;
 
     const float step = 0.1f;
-    const int   limit = ema_gain_limit; 
-    float target = (r / t) / step;      
+    const int   limit = ema_gain_limit;
+    float target = (r / t) / step;
 
     int i0 = (int)floorf(target);
     if (i0 < 0) i0 = 0; else if (i0 > limit) i0 = limit;
@@ -80,7 +80,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                    const int* __restrict__ hull_lengths,
                    const int* __restrict__ ema_lengths,
                    const int* __restrict__ ema_gain_limits,
-                   const int* __restrict__ hull_types,  
+                   const int* __restrict__ hull_types,
                    int series_len,
                    int n_combos,
                    int first_valid,
@@ -90,7 +90,7 @@ void dma_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     if (threadIdx.x != 0) {
         return;
     }
@@ -121,7 +121,7 @@ void dma_batch_f32(const float* __restrict__ prices,
         out[base_out + i] = NAN;
     }
 
-    
+
     extern __shared__ __align__(16) float shared[];
     float* diff_ring = shared;
 
@@ -217,7 +217,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                     const float a_prev = sum_read(a_half, a_half_c);
                     const float old = prices[i - half];
                     kahan_add(x - old, a_half, a_half_c);
-                    
+
                     s_half += fmaf(static_cast<float>(half), x, -a_prev);
                 }
             }
@@ -244,7 +244,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                     const float a_prev = sum_read(a_full, a_full_c);
                     const float old = prices[i - hull_length];
                     kahan_add(x - old, a_full, a_full_c);
-                    
+
                     s_full += fmaf(static_cast<float>(hull_length), x, -a_prev);
                 }
             }
@@ -325,7 +325,7 @@ void dma_batch_f32(const float* __restrict__ prices,
                 if (is_wma) {
                     const float a_prev = sum_read(a_diff, a_diff_c);
                     kahan_add(diff_now - old, a_diff, a_diff_c);
-                    
+
                     kahan_add(fmaf(static_cast<float>(sqrt_len), diff_now, -a_prev), s_diff, s_diff_c);
                     hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {
@@ -620,7 +620,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int hull_length,
                                    int ema_length,
                                    int ema_gain_limit,
-                                   int hull_type,  
+                                   int hull_type,
                                    int series_len,
                                    int num_series,
                                    const int* __restrict__ first_valids,
@@ -657,8 +657,8 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int half = hull_length / 2;
     const int sqrt_len_clamped = (sqrt_len > 0) ? sqrt_len : 1;
 
-    
-    
+
+
     const float denom_half_f = (half        > 0 ? wsum_norm_i32(half)        : 1.0f);
     const float denom_full_f = (hull_length > 0 ? wsum_norm_i32(hull_length) : 1.0f);
     const float denom_sqrt_f = (sqrt_len_clamped > 0 ? wsum_norm_i32(sqrt_len_clamped) : 1.0f);
@@ -767,7 +767,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     const float a_prev = a_half;
                     const float old = prices_tm[(i - half) * stride + series_idx];
                     kahan_add(x - old, a_half, a_half_c);
-                    
+
                     kahan_add(fmaf(static_cast<float>(half), x, -a_prev), s_half, s_half_c);
                 }
             }
@@ -797,7 +797,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     const float a_prev = a_full;
                     const float old = prices_tm[(i - hull_length) * stride + series_idx];
                     kahan_add(x - old, a_full, a_full_c);
-                    
+
                     kahan_add(fmaf(static_cast<float>(hull_length), x, -a_prev), s_full, s_full_c);
                 }
             }
@@ -884,7 +884,7 @@ void dma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                     }
                     const float a_prev = a_diff;
                     kahan_add(diff_now - old, a_diff, a_diff_c);
-                    
+
                     kahan_add(fmaf(static_cast<float>(sqrt_len_clamped), diff_now, -a_prev), s_diff, s_diff_c);
                     hull_val = sum_read(s_diff, s_diff_c) * inv_w_sqrt;
                 } else {

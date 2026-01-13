@@ -11,7 +11,7 @@
 #endif
 
 #include <cuda_runtime.h>
-#include <math.h>  
+#include <math.h>
 
 
 static __device__ __forceinline__ float qnan_f() { return __int_as_float(0x7fffffff); }
@@ -49,7 +49,7 @@ void hwma_batch_f32(const float* __restrict__ prices,
     for (int t = 0; t < first; ++t) { out[base + t] = nan_f; }
     if (first >= series_len) { return; }
 
-    
+
     float f = prices[first];
     float v = 0.0f;
     float a = 0.0f;
@@ -90,7 +90,7 @@ void hwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
 
         int first = clamp_int(first_valids[series_idx], 0, series_len);
 
-        
+
         const float nan_f = qnan_f();
         int idx = series_idx;
         for (int t = 0; t < first; ++t, idx += stride) {
@@ -98,22 +98,22 @@ void hwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
         }
         if (first >= series_len) continue;
 
-        
+
         const double dna = (double)na;
         const double dnb = (double)nb;
         const double dnc = (double)nc;
         const double dh  = 0.5;
 
-        
+
         int first_idx = first * stride + series_idx;
         double f = (double)prices_tm[first_idx];
         double v = 0.0;
         double a = 0.0;
 
-        
+
         idx = first_idx;
 
-        
+
         for (int t = first; t < series_len; ++t, idx += stride) {
             const double price = (double)prices_tm[idx];
 

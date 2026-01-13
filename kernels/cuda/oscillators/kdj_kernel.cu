@@ -36,7 +36,7 @@
 
 
 __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
-    
+
     float y = x - c;
     float t = sum + y;
     c = (t - sum) - y;
@@ -52,7 +52,7 @@ __device__ __forceinline__ float stoch_from_tables_fk(
     const int*   __restrict__ nan_psum
 ){
     const int start = t - fk + 1;
-    
+
     if (nan_psum[t + 1] - nan_psum[start]) return KDJ_QNAN;
 
     const int idx_a = level_base + start;
@@ -61,13 +61,13 @@ __device__ __forceinline__ float stoch_from_tables_fk(
     const float l = fminf(st_min[idx_a], st_min[idx_b]);
     const float c = close[t];
     const float den = h - l;
-    
+
     if (!(h==h) || !(l==l) || !(c==c) || den <= 0.0f) return KDJ_QNAN;
     return (c - l) * (100.0f / den);
 }
 
 extern "C" __global__ void kdj_batch_f32(
-    
+
     const float* __restrict__ high,
     const float* __restrict__ low,
     const float* __restrict__ close,
@@ -85,7 +85,7 @@ extern "C" __global__ void kdj_batch_f32(
     int first_valid,
     int level_count,
     int n_combos,
-    
+
     float* __restrict__ out_k,
     float* __restrict__ out_d,
     float* __restrict__ out_j
@@ -95,8 +95,8 @@ extern "C" __global__ void kdj_batch_f32(
 
     const int base = combo * series_len;
 
-    
-    
+
+
     if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
             out_k[base + i] = KDJ_QNAN;
@@ -131,7 +131,7 @@ extern "C" __global__ void kdj_batch_f32(
     const int k_ma = k_ma_types[combo];
     const int d_ma = d_ma_types[combo];
 
-    
+
     const int k_log2 = log2_tbl[fk];
     if (UNLIKELY(k_log2 < 0 || k_log2 >= level_count)) {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
@@ -144,11 +144,11 @@ extern "C" __global__ void kdj_batch_f32(
     const int offset     = 1 << k_log2;
     const int level_base = level_offsets[k_log2];
 
-    
-    
+
+
     const int lane = threadIdx.x & 31;
     if ((threadIdx.x >> 5) == 0) {
-        
+
         for (int t = lane; t < stoch_warm; t += 32) {
             out_j[base + t] = KDJ_QNAN;
         }
@@ -163,7 +163,7 @@ extern "C" __global__ void kdj_batch_f32(
     const int k_warm = stoch_warm + sk - 1;
     const int d_warm = k_warm     + sd - 1;
 
-    
+
     if (k_ma == 0 && d_ma == 0) {
         if (UNLIKELY(k_warm >= series_len)) {
             for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
@@ -174,11 +174,11 @@ extern "C" __global__ void kdj_batch_f32(
             return;
         }
 
-        
+
         for (int i = threadIdx.x; i < k_warm; i += blockDim.x) out_k[base + i] = KDJ_QNAN;
         for (int i = threadIdx.x; i < d_warm && i < series_len; i += blockDim.x) out_d[base + i] = KDJ_QNAN;
 
-        
+
         for (int t = k_warm + threadIdx.x; t < series_len; t += blockDim.x) {
             float sum = 0.0f;
             int cnt = 0;
@@ -191,10 +191,10 @@ extern "C" __global__ void kdj_batch_f32(
         }
         __syncthreads();
 
-        
+
         for (int i = threadIdx.x; i < d_warm && i < series_len; i += blockDim.x) out_j[base + i] = KDJ_QNAN;
 
-        
+
         if (d_warm < series_len) {
             for (int t = d_warm + threadIdx.x; t < series_len; t += blockDim.x) {
                 float sum = 0.0f;
@@ -214,10 +214,10 @@ extern "C" __global__ void kdj_batch_f32(
         return;
     }
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     if (k_ma == 1 && d_ma == 1) {
         if (k_warm >= series_len) return;
 
@@ -226,7 +226,7 @@ extern "C" __global__ void kdj_batch_f32(
         const float alpha_d = 2.0f / (float(sd) + 1.0f);
         const float one_md  = 1.0f - alpha_d;
 
-        
+
         float sum0 = 0.0f, c0 = 0.0f; int cnt0 = 0;
         {
             const int start = k_warm - sk + 1;
@@ -238,23 +238,23 @@ extern "C" __global__ void kdj_batch_f32(
         float ema_k = (cnt0 > 0) ? (sum0 / (float)cnt0) : KDJ_QNAN;
         out_k[base + k_warm] = ema_k;
 
-        
+
         float sum_d = (ema_k == ema_k) ? ema_k : 0.0f;
         int   cnt_d = (ema_k == ema_k) ? 1 : 0;
 
-        
+
         for (int t = k_warm + 1; t <= d_warm && t < series_len; ++t) {
             const float s = out_j[base + t];
             if (s == s && ema_k == ema_k) {
                 ema_k = fmaf(alpha_k, s, one_mk * ema_k);
             } else if (s == s && !(ema_k == ema_k)) {
-                ema_k = s; 
+                ema_k = s;
             }
             out_k[base + t] = ema_k;
             if (ema_k == ema_k) { sum_d += ema_k; ++cnt_d; }
         }
 
-        
+
         float ema_d = (d_warm < series_len && cnt_d > 0) ? (sum_d / (float)cnt_d) : KDJ_QNAN;
         if (d_warm < series_len) {
             out_d[base + d_warm] = ema_d;
@@ -262,7 +262,7 @@ extern "C" __global__ void kdj_batch_f32(
             out_j[base + d_warm] = (kv == kv && ema_d == ema_d) ? (3.0f * kv - 2.0f * ema_d) : KDJ_QNAN;
         }
 
-        
+
         for (int t = d_warm + 1; t < series_len; ++t) {
             const float s = out_j[base + t];
             if (s == s && ema_k == ema_k) {
@@ -283,7 +283,7 @@ extern "C" __global__ void kdj_batch_f32(
         return;
     }
 
-    
+
 }
 
 
@@ -292,7 +292,7 @@ extern "C" __global__ void kdj_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int fast_k,
@@ -308,7 +308,7 @@ extern "C" __global__ void kdj_many_series_one_param_f32(
     if (series >= num_series) return;
 
     const int fv = first_valids[series];
-    
+
     for (int t = 0; t < series_len; ++t) {
         *(k_out_tm + (size_t)t * num_series + series) = KDJ_QNAN;
         *(d_out_tm + (size_t)t * num_series + series) = KDJ_QNAN;
@@ -329,7 +329,7 @@ extern "C" __global__ void kdj_many_series_one_param_f32(
     const int start = t - fast_k + 1;
     float h = -INFINITY, l = INFINITY;
 
-        
+
         size_t idx = (size_t)start * (size_t)num_series + (size_t)series;
         const float* __restrict__ ph = high_tm;
         const float* __restrict__ pl = low_tm;

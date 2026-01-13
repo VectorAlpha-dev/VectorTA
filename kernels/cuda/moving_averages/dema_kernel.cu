@@ -67,17 +67,17 @@ void dema_batch_f32(const float* __restrict__ prices,
     const int   warm  = first_valid + period - 1;
 
 #if DEMA_INIT_NANS_IN_KERNEL
-    
+
     const int nan_end = (warm < series_len ? warm : series_len);
     for (int i = threadIdx.x; i < nan_end; i += blockDim.x) {
         out[base + i] = NAN;
     }
 #endif
 
-    
+
     if (threadIdx.x != 0)  return;
 
-    
+
     int t = first_valid;
     float ema  = prices[t];
     float ema2 = ema;
@@ -89,7 +89,7 @@ void dema_batch_f32(const float* __restrict__ prices,
         out[base + t] = 2.0f * ema - ema2;
     }
 
-    
+
     for (++t; t < series_len; ++t) {
         const float x = prices[t];
 #if USE_DEMA_COMPENSATION
@@ -120,33 +120,33 @@ void dema_batch_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void dema_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm,   
+    const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
     int period,
     int num_series,
     int series_len,
-    float* __restrict__ out_tm)            
+    float* __restrict__ out_tm)
 {
     if (period <= 0 || series_len <= 0) return;
 
-    const int lane      = threadIdx.x & 31;          
-    const int warps_pb  = blockDim.x >> 5;           
-    const int warp_id   = threadIdx.x >> 5;          
+    const int lane      = threadIdx.x & 31;
+    const int warps_pb  = blockDim.x >> 5;
+    const int warp_id   = threadIdx.x >> 5;
     const int warp_gbl  = blockIdx.x * warps_pb + warp_id;
     const int series0   = warp_gbl * 32;
     const int series_idx= series0 + lane;
     if (series_idx >= num_series) return;
 
-    const int   stride  = num_series; 
+    const int   stride  = num_series;
     const int   fv      = first_valids[series_idx];
     const float alpha   = 2.0f / (static_cast<float>(period) + 1.0f);
     const int   warm    = fv + period - 1;
 
 #if DEMA_INIT_NANS_IN_KERNEL
-    
+
     const int nan_end = (warm < series_len ? warm : series_len);
-    
-    
+
+
     for (int t = 0; t < nan_end; ++t) {
         out_tm[(size_t)t * stride + series_idx] = NAN;
     }
@@ -156,15 +156,15 @@ void dema_many_series_one_param_time_major_f32(
         return;
     }
 
-    
-    
+
+
     bool  started = false;
     float ema = 0.0f, ema2 = 0.0f;
 #if USE_DEMA_COMPENSATION
     float c1 = 0.0f, c2 = 0.0f;
 #endif
 
-    
+
     const float* x_ptr = prices_tm + series_idx;
     float*       y_ptr = out_tm    + series_idx;
 

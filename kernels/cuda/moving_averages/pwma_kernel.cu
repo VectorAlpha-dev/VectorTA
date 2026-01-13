@@ -79,9 +79,9 @@ extern "C" __global__
 void pwma_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const float* __restrict__ weights,
                                      int period,
-                                     
-                                     
-                                     float /*inv_norm*/,
+
+
+                                     float ,
                                      int num_series,
                                      int series_len,
                                      const int* __restrict__ first_valids,
@@ -143,9 +143,9 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     if (period <= 0 || period > max_period) return;
 
-    const int TILE = PWMA_TILE_TX;             
-    const int wlen = period;                   
-    const int total = TILE + wlen - 1;         
+    const int TILE = PWMA_TILE_TX;
+    const int wlen = period;
+    const int total = TILE + wlen - 1;
 
     const int warm = warm_indices[combo];
     const int base_out = combo * series_len;
@@ -153,11 +153,11 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
 
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
-    float* w = reinterpret_cast<float*>(shraw + off);           
+    float* w = reinterpret_cast<float*>(shraw + off);
     off = pwma_align_up_sz(off + size_t(max_period) * sizeof(float), 16);
-    float* tile = reinterpret_cast<float*>(shraw + off);         
+    float* tile = reinterpret_cast<float*>(shraw + off);
 
-    
+
     const float* wsrc = weights_flat + combo * max_period;
     for (int i = threadIdx.x; i < wlen; i += blockDim.x) {
         w[i] = wsrc[i];
@@ -175,7 +175,7 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
     int t_base = blockIdx.x * TILE;
     int stage  = 0;
 
-    
+
     for (int s = 0; s < STAGES; ++s) {
         pipe.producer_acquire();
         const int t0 = t_base + s * grid_tile_stride;
@@ -191,19 +191,19 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
         pipe.producer_commit();
     }
 
-    
+
     while (t_base < series_len) {
         pipe.consumer_wait();
         __syncthreads();
 
-        
+
         const float* tbuf = &tile[stage * total];
         const int t = t_base + lane;
         if (t < series_len) {
             if (t < warm) {
                 out[base_out + t] = nan_f;
             } else {
-                int start = lane; 
+                int start = lane;
                 const float* xptr = &tbuf[start];
                 float acc = 0.0f;
 #pragma unroll 8
@@ -217,11 +217,11 @@ void pwma_batch_tiled_async_f32(const float* __restrict__ prices,
         __syncthreads();
         pipe.consumer_release();
 
-        
+
         pipe.producer_acquire();
         const int next_t0 = t_base + STAGES * grid_tile_stride;
         const int next_p0 = next_t0 - (wlen - 1);
-        const int next_stage = stage; 
+        const int next_stage = stage;
 
         for (int dt = lane; dt < total; dt += blockDim.x) {
             const int tcur = next_p0 + dt;
@@ -250,7 +250,7 @@ __device__ __forceinline__
 void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
                           const float* __restrict__ weights,
                           int period,
-                          float /*inv_norm_unused*/, 
+                          float ,
                           int num_series,
                           int series_len,
                           const int* __restrict__ first_valids,
@@ -259,19 +259,19 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     const int s0 = blockIdx.y * TY;
     if (t0 >= series_len || s0 >= num_series) return;
 
-    
+
     const int total = TX + period - 1;
     extern __shared__ __align__(16) unsigned char shraw[];
     size_t off = 0;
     float* w = reinterpret_cast<float*>(shraw + off);
     off = pwma_align_up(off + size_t(period) * sizeof(float), 16);
-    const int LD = TY + 1; 
+    const int LD = TY + 1;
     float* tile = reinterpret_cast<float*>(shraw + off);
 
-    
+
     uintptr_t waddr = reinterpret_cast<uintptr_t>(weights);
     if ((waddr & 0xF) == 0) {
-        int ve = period >> 2; 
+        int ve = period >> 2;
         for (int vi = threadIdx.y * blockDim.x + threadIdx.x; vi < ve; vi += blockDim.x * blockDim.y) {
             reinterpret_cast<float4*>(w)[vi] = reinterpret_cast<const float4*>(weights)[vi];
         }
@@ -286,7 +286,7 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    
+
     const bool vec_ok = (TY == 4) && ((num_series & 3) == 0) && ((s0 & 3) == 0);
     const int p0 = t0 - (period - 1);
     for (int dt = threadIdx.x; dt < total; dt += blockDim.x) {
@@ -312,7 +312,7 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
     }
     __syncthreads();
 
-    
+
     int s = s0 + threadIdx.y;
     int t = t0 + threadIdx.x;
     if (s >= num_series || t >= series_len) return;
@@ -324,14 +324,14 @@ void pwma_ms1p_tiled_core(const float* __restrict__ prices_tm,
         return;
     }
 
-    int start = threadIdx.x; 
+    int start = threadIdx.x;
     const float* xptr = &tile[start * LD + threadIdx.y];
     float acc = 0.f;
 #pragma unroll 8
     for (int i = 0; i < period; ++i) {
         acc = fmaf(xptr[i * LD], w[i], acc);
     }
-    
+
     out_tm[out_idx] = acc;
 }
 

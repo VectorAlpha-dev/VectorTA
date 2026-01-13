@@ -24,15 +24,15 @@ if ([string]::IsNullOrWhiteSpace($TargetDir)) {
     $TargetDir = Join-Path $env:TEMP "my_project_target_cuda"
 }
 
-# Keep builds reliable on Windows: sccache wrapper has been flaky/timing out.
+
 Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
 $env:SCCACHE_DISABLE = "1"
 
 $env:CARGO_TARGET_DIR = $TargetDir
 $env:CUDA_BENCH_VRAM_HEADROOM_MB = $VramHeadroomMB.ToString()
 
-# Disable in-process "scenario timeout" (preflight skip) and rely on the OS-level
-# per-benchmark process timeout instead.
+
+
 Remove-Item Env:CUDA_BENCH_SCENARIO_TIMEOUT_SECS -ErrorAction SilentlyContinue
 Remove-Item Env:CUDA_BENCH_SCENARIO_TIMEOUT_MS -ErrorAction SilentlyContinue
 
@@ -114,8 +114,8 @@ for ($i = 0; $i -lt $ids.Count; $i++) {
         continue
     }
 
-    # In some environments, $p.ExitCode can transiently be $null immediately after
-    # a timed WaitForExit(). Ensure the process has fully terminated and refresh.
+
+
     $p.WaitForExit()
     $p.Refresh()
     $exitCode = $p.ExitCode

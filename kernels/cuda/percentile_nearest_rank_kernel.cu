@@ -56,13 +56,13 @@ static __device__ __forceinline__ void cx_nan_last(float &a, float &b, bool up) 
     const bool b_nan = is_nan(bb);
 
     float lo, hi;
-    if (a_nan & b_nan) {           
+    if (a_nan & b_nan) {
         lo = aa; hi = bb;
-    } else if (a_nan) {            
+    } else if (a_nan) {
         lo = bb; hi = aa;
-    } else if (b_nan) {            
+    } else if (b_nan) {
         lo = aa; hi = bb;
-    } else {                       
+    } else {
         if (aa <= bb) { lo = aa; hi = bb; }
         else           { lo = bb; hi = aa; }
     }
@@ -76,14 +76,14 @@ static __device__ void bitonic_sort_shared_nan_last(float* buf, int size) {
     const int tid      = threadIdx.x;
     const int nthreads = blockDim.x;
 
-    
+
     for (int k = 2; k <= size; k <<= 1) {
-        
+
         for (int j = k >> 1; j > 0; j >>= 1) {
             for (int idx = tid; idx < size; idx += nthreads) {
                 int ixj = idx ^ j;
                 if (ixj > idx) {
-                    bool up = ((idx & k) == 0);  
+                    bool up = ((idx & k) == 0);
                     float a = buf[idx];
                     float b = buf[ixj];
                     cx_nan_last(a, b, up);
@@ -98,18 +98,18 @@ static __device__ void bitonic_sort_shared_nan_last(float* buf, int size) {
 
 
 static __device__ __forceinline__ int insert_sorted(float* sorted, int wl, float v) {
-    
+
     int lo = 0, hi = wl;
     while (lo < hi) {
         int mid = (lo + hi) >> 1;
         float mv = sorted[mid];
-        if (!(v < mv)) { 
+        if (!(v < mv)) {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    
+
     for (int i = wl; i > lo; --i) sorted[i] = sorted[i - 1];
     sorted[lo] = v;
     return wl + 1;
@@ -117,7 +117,7 @@ static __device__ __forceinline__ int insert_sorted(float* sorted, int wl, float
 
 
 static __device__ __forceinline__ int erase_sorted(float* sorted, int wl, float v) {
-    
+
     int lo = 0, hi = wl;
     while (lo < hi) {
         int mid = (lo + hi) >> 1;
@@ -127,16 +127,16 @@ static __device__ __forceinline__ int erase_sorted(float* sorted, int wl, float 
         } else if (v < mv) {
             hi = mid;
         } else {
-            
+
             for (int i = mid; i + 1 < wl; ++i) sorted[i] = sorted[i + 1];
             return wl - 1;
         }
     }
-    return wl; 
+    return wl;
 }
 
 static __device__ __forceinline__ int nearest_rank_index(float p_wl, int wl) {
-    
+
     float raw_f = floorf(p_wl + 0.5f) - 1.0f;
     int   raw   = (int)raw_f;
     if (raw <= 0) return 0;
@@ -145,7 +145,7 @@ static __device__ __forceinline__ int nearest_rank_index(float p_wl, int wl) {
 }
 
 static __device__ __forceinline__ int nearest_rank_index_from_frac(float p_frac, int wl) {
-    
+
     float raw_f = floorf(fmaf(p_frac, (float)wl, 0.5f)) - 1.0f;
     int   raw   = (int)raw_f;
     if (raw <= 0)     return 0;
@@ -157,12 +157,12 @@ extern "C" __global__
 void percentile_nearest_rank_batch_f32(
     const float* __restrict__ prices,
     const int*   __restrict__ lengths,
-    const float* __restrict__ percentages,  
+    const float* __restrict__ percentages,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out,                
-    float* __restrict__ scratch,            
+    float* __restrict__ out,
+    float* __restrict__ scratch,
     int max_length
 ) {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
@@ -179,14 +179,14 @@ void percentile_nearest_rank_batch_f32(
     }
 
     const int warm = first_valid + length - 1;
-    
+
     for (int i = 0; i < warm && i < series_len; ++i) out_row[i] = qnan32();
     if (warm >= series_len) return;
 
     const float p_frac = perc * 0.01f;
     const int window_start0 = warm + 1 - length;
 
-    
+
     int wl = 0;
     for (int idx = window_start0; idx <= warm; ++idx) {
         float v = prices[idx];
@@ -204,7 +204,7 @@ void percentile_nearest_rank_batch_f32(
         }
 
         if (i + 1 >= series_len) break;
-        
+
         int out_idx = i + 1 - length;
         float v_out = prices[out_idx];
         if (!isnan(v_out)) wl = erase_sorted(sorted, wl, v_out);
@@ -217,14 +217,14 @@ void percentile_nearest_rank_batch_f32(
 
 extern "C" __global__
 void percentile_nearest_rank_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm, 
+    const float* __restrict__ prices_tm,
     int cols,
     int rows,
     int length,
     float percentage,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm,           
-    float* __restrict__ scratch_cols,     
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm,
+    float* __restrict__ scratch_cols,
     int max_length
 ) {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
@@ -247,7 +247,7 @@ void percentile_nearest_rank_many_series_one_param_time_major_f32(
     auto load_tm = [&](int t) -> float { return prices_tm[(size_t)t * cols + series]; };
     auto store_tm = [&](int t, float v) { out_tm[(size_t)t * cols + series] = v; };
 
-    
+
     const int w0 = warm + 1 - length;
     for (int idx = w0; idx <= warm; ++idx) {
         float v = load_tm(idx);
@@ -278,17 +278,17 @@ void percentile_nearest_rank_many_series_one_param_time_major_f32(
 
 extern "C" __global__
 void percentile_nearest_rank_one_series_many_params_same_len_f32(
-    const float* __restrict__ prices,      
+    const float* __restrict__ prices,
     int series_len,
-    int length,                            
-    const float* __restrict__ percentages, 
+    int length,
+    const float* __restrict__ percentages,
     int n_combos,
     int first_valid,
-    float* __restrict__ out                
+    float* __restrict__ out
 ) {
-    
+
     if (UNLIKELY(length <= 0 || first_valid < 0 || first_valid >= series_len)) {
-        
+
         if (blockIdx.x == 0) {
             for (int c = threadIdx.x; c < n_combos; c += blockDim.x) {
                 float* row = out + (size_t)c * series_len;
@@ -300,7 +300,7 @@ void percentile_nearest_rank_one_series_many_params_same_len_f32(
 
     const int warm = first_valid + length - 1;
     if (blockIdx.x == 0) {
-        
+
         for (int c = threadIdx.x; c < n_combos; c += blockDim.x) {
             float* row = out + (size_t)c * series_len;
             for (int t = 0; t < warm && t < series_len; ++t) row[t] = qnan32();
@@ -309,16 +309,16 @@ void percentile_nearest_rank_one_series_many_params_same_len_f32(
     __syncthreads();
     if (warm >= series_len) return;
 
-    
+
     extern __shared__ float s_win[];
     const int S = next_pow2(length);
 
-    
+
     for (int t = warm + blockIdx.x; t < series_len; t += gridDim.x) {
-        
+
         const int start = t + 1 - length;
 
-        
+
         int local_valid = 0;
         for (int i = threadIdx.x; i < length; i += blockDim.x) {
             float v = prices[start + i];
@@ -326,16 +326,16 @@ void percentile_nearest_rank_one_series_many_params_same_len_f32(
             if (!is_nan(v)) local_valid += 1;
         }
         for (int i = threadIdx.x + length; i < S; i += blockDim.x) {
-            s_win[i] = qnan32(); 
+            s_win[i] = qnan32();
         }
 
-        
+
         __shared__ int wl_shared;
         if (threadIdx.x == 0) wl_shared = 0;
         __syncthreads();
 
         int sum = local_valid;
-        
+
         for (int offset = 16; offset > 0; offset >>= 1)
             sum += __shfl_down_sync(0xffffffff, sum, offset);
         if ((threadIdx.x & 31) == 0) atomicAdd(&wl_shared, sum);
@@ -343,7 +343,7 @@ void percentile_nearest_rank_one_series_many_params_same_len_f32(
 
         const int wl = wl_shared;
 
-        
+
         if (wl == 0) {
             for (int c = threadIdx.x; c < n_combos; c += blockDim.x) {
                 out[(size_t)c * series_len + t] = qnan32();
@@ -352,10 +352,10 @@ void percentile_nearest_rank_one_series_many_params_same_len_f32(
             continue;
         }
 
-        
+
         bitonic_sort_shared_nan_last(s_win, S);
 
-        
+
         for (int c = threadIdx.x; c < n_combos; c += blockDim.x) {
             float p = percentages[c] * 0.01f;
             int   k = (wl == length)

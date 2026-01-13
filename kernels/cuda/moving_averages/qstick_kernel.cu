@@ -26,12 +26,12 @@
 #endif
 
 extern "C" __global__ void qstick_batch_prefix_f32(
-    const float* __restrict__ prefix_diff, 
+    const float* __restrict__ prefix_diff,
     int len,
     int first_valid,
-    const int* __restrict__ periods,       
+    const int* __restrict__ periods,
     int n_combos,
-    float* __restrict__ out                
+    float* __restrict__ out
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -50,7 +50,7 @@ extern "C" __global__ void qstick_batch_prefix_f32(
             out[row_off + t] = QS_NAN;
         } else {
             const int t1 = t + 1;
-            int start = t1 - period; if (start < 0) start = 0; 
+            int start = t1 - period; if (start < 0) start = 0;
             const float sum = prefix_diff[t1] - prefix_diff[start];
             out[row_off + t] = sum * inv_p;
         }
@@ -113,12 +113,12 @@ extern "C" __global__ void qstick_batch_prefix_tiled_f32_tile256(
 
 
 extern "C" __global__ void qstick_many_series_one_param_f32(
-    const float* __restrict__ prefix_tm, 
+    const float* __restrict__ prefix_tm,
     int period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm             
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm
 ) {
     const int series = blockIdx.y;
     if (series >= num_series) return;

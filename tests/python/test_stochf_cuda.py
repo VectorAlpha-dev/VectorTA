@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -24,7 +24,7 @@ def _cuda_available() -> bool:
     if not hasattr(ti, 'stochf_cuda_batch_dev'):
         return False
     try:
-        
+
         x = np.array([np.nan, 1.0, 2.0, 3.0, 4.0], dtype=np.float64)
         k_h, d_h = ti.stochf_cuda_batch_dev(
             x.astype(np.float32), x.astype(np.float32), x.astype(np.float32),
@@ -49,10 +49,10 @@ class TestStochfCuda:
         high = test_data['high']; low = test_data['low']; close = test_data['close']
         fk, fd = 5, 3
 
-        
+
         k_cpu, d_cpu = ti.stochf(high, low, close, fk, fd, 0)
 
-        
+
         k_h, d_h = ti.stochf_cuda_batch_dev(
             high.astype(np.float32), low.astype(np.float32), close.astype(np.float32),
             fastk_range=(fk, fk, 0), fastd_range=(fd, fd, 0)
@@ -78,7 +78,7 @@ class TestStochfCuda:
             close_tm[:, j] = base_c * s
 
         fk, fd = 9, 3
-        
+
         k_cpu_tm = np.zeros_like(close_tm)
         d_cpu_tm = np.zeros_like(close_tm)
         for j in range(N):

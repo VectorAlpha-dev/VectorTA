@@ -4,12 +4,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  
+except ImportError:
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -40,7 +40,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(handle)
         assert int(meta["fast_lengths"][0]) == 3
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg:
             return False
@@ -78,9 +78,9 @@ class TestMaczCuda:
         gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
 
         assert_close(gpu_vals, cpu_vals, rtol=5e-4, atol=7e-4, msg="CUDA MAC-Z histogram mismatch")
-        
-        assert np.array_equal(meta["fast_lengths"], cpu["fast_lengths"])  
-        assert np.array_equal(meta["slow_lengths"], cpu["slow_lengths"])  
+
+        assert np.array_equal(meta["fast_lengths"], cpu["fast_lengths"])
+        assert np.array_equal(meta["slow_lengths"], cpu["slow_lengths"])
 
     def test_macz_cuda_many_series_one_param_matches_cpu(self, test_data):
         cols, rows = 5, 1024
@@ -104,7 +104,7 @@ class TestMaczCuda:
             gamma=0.02,
         )
 
-        
+
         cpu_tm = np.full_like(tm, np.nan)
         for s in range(cols):
             out = ti.macz(tm[:, s], vol[:, s], **params)

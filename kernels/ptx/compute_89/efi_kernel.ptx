@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry efi_precompute_diffs_f32(
 	.param .u64 efi_precompute_diffs_f32_param_0,
@@ -61,13 +61,13 @@ $L__BB0_4:
 
 	mul.wide.s32 	%rd11, %r7, 4;
 	add.s64 	%rd9, %rd5, %rd11;
-	
+
 	prefetch.global.L2 [%rd9];
-	
+
 	add.s64 	%rd10, %rd6, %rd11;
-	
+
 	prefetch.global.L2 [%rd10];
-	
+
 
 $L__BB0_6:
 	add.s32 	%r17, %r25, -1;
@@ -121,7 +121,7 @@ $L__BB0_13:
 	ret;
 
 }
-	
+
 .visible .entry efi_batch_f32(
 	.param .u64 efi_batch_f32_param_0,
 	.param .u64 efi_batch_f32_param_1,
@@ -229,9 +229,9 @@ $L__BB1_9:
 	setp.ge.s32 	%p12, %r32, %r22;
 	@%p12 bra 	$L__BB1_11;
 
-	
+
 	prefetch.global.L2 [%rd67];
-	
+
 	ld.global.f32 	%f72, [%rd68];
 
 $L__BB1_11:
@@ -294,9 +294,9 @@ $L__BB1_19:
 
 	mul.wide.s32 	%rd54, %r19, 4;
 	add.s64 	%rd53, %rd29, %rd54;
-	
+
 	prefetch.global.L2 [%rd53];
-	
+
 
 $L__BB1_21:
 	ld.global.f32 	%f77, [%rd72];
@@ -329,9 +329,9 @@ $L__BB1_25:
 
 	add.s64 	%rd58, %rd29, %rd72;
 	add.s64 	%rd57, %rd58, %rd20;
-	
+
 	prefetch.global.L2 [%rd57];
-	
+
 	add.s64 	%rd59, %rd4, %rd57;
 	add.s64 	%rd60, %rd59, %rd21;
 	ld.global.f32 	%f77, [%rd60];
@@ -365,9 +365,9 @@ $L__BB1_31:
 	add.s64 	%rd62, %rd72, 4;
 	add.s64 	%rd63, %rd29, %rd62;
 	add.s64 	%rd61, %rd63, %rd20;
-	
+
 	prefetch.global.L2 [%rd61];
-	
+
 	ld.global.f32 	%f79, [%rd72+4];
 
 $L__BB1_33:
@@ -399,9 +399,9 @@ $L__BB1_37:
 	add.s64 	%rd65, %rd72, 8;
 	add.s64 	%rd66, %rd29, %rd65;
 	add.s64 	%rd64, %rd66, %rd20;
-	
+
 	prefetch.global.L2 [%rd64];
-	
+
 	ld.global.f32 	%f81, [%rd72+8];
 
 $L__BB1_39:
@@ -438,7 +438,7 @@ $L__BB1_44:
 	ret;
 
 }
-	
+
 .visible .entry efi_batch_from_diff_f32(
 	.param .u64 efi_batch_from_diff_f32_param_0,
 	.param .u64 efi_batch_from_diff_f32_param_1,
@@ -584,9 +584,9 @@ $L__BB2_15:
 	or.pred  	%p22, %p21, %p20;
 	@%p22 bra 	$L__BB2_17;
 
-	
+
 	prefetch.global.L2 [%rd66];
-	
+
 
 $L__BB2_17:
 	mov.u32 	%r96, 0;
@@ -653,9 +653,9 @@ $L__BB2_25:
 
 	mul.wide.s32 	%rd60, %r31, 4;
 	add.s64 	%rd59, %rd34, %rd60;
-	
+
 	prefetch.global.L2 [%rd59];
-	
+
 
 $L__BB2_27:
 	mov.u32 	%r101, 0;
@@ -687,9 +687,9 @@ $L__BB2_31:
 	or.pred  	%p36, %p29, %p34;
 	@%p36 bra 	$L__BB2_33;
 
-	
+
 	prefetch.global.L2 [%rd70];
-	
+
 
 $L__BB2_33:
 	mov.u32 	%r102, 0;
@@ -721,9 +721,9 @@ $L__BB2_37:
 	or.pred  	%p42, %p29, %p40;
 	@%p42 bra 	$L__BB2_39;
 
-	
+
 	prefetch.global.L2 [%rd71];
-	
+
 
 $L__BB2_39:
 	mov.u32 	%r103, 0;
@@ -755,9 +755,9 @@ $L__BB2_43:
 	or.pred  	%p48, %p29, %p46;
 	@%p48 bra 	$L__BB2_45;
 
-	
+
 	prefetch.global.L2 [%rd72];
-	
+
 
 $L__BB2_45:
 	mov.u32 	%r104, 0;
@@ -800,7 +800,7 @@ $L__BB2_50:
 	ret;
 
 }
-	
+
 .visible .entry efi_many_series_one_param_f32(
 	.param .u64 efi_many_series_one_param_f32_param_0,
 	.param .u64 efi_many_series_one_param_f32_param_1,
@@ -988,13 +988,13 @@ $L__BB3_11:
 
 	mul.wide.s32 	%rd64, %r123, 4;
 	add.s64 	%rd62, %rd44, %rd64;
-	
+
 	prefetch.global.L2 [%rd62];
-	
+
 	add.s64 	%rd63, %rd45, %rd64;
-	
+
 	prefetch.global.L2 [%rd63];
-	
+
 
 $L__BB3_13:
 	cvt.s64.s32 	%rd17, %r125;
@@ -1075,13 +1075,13 @@ $L__BB3_21:
 	mad.lo.s32 	%r83, %r81, %r51, %r1;
 	mul.wide.s32 	%rd76, %r83, 4;
 	add.s64 	%rd74, %rd44, %rd76;
-	
+
 	prefetch.global.L2 [%rd74];
-	
+
 	add.s64 	%rd75, %rd45, %rd76;
-	
+
 	prefetch.global.L2 [%rd75];
-	
+
 
 $L__BB3_23:
 	add.s64 	%rd23, %rd6, %rd22;
@@ -1128,14 +1128,14 @@ $L__BB3_27:
 
 	add.s64 	%rd82, %rd44, %rd23;
 	add.s64 	%rd80, %rd82, %rd19;
-	
+
 	prefetch.global.L2 [%rd80];
-	
+
 	add.s64 	%rd83, %rd45, %rd24;
 	add.s64 	%rd81, %rd83, %rd21;
-	
+
 	prefetch.global.L2 [%rd81];
-	
+
 	add.s64 	%rd84, %rd6, %rd80;
 	add.s64 	%rd85, %rd84, %rd20;
 	ld.global.f32 	%f99, [%rd85];
@@ -1181,14 +1181,14 @@ $L__BB3_33:
 
 	add.s64 	%rd88, %rd44, %rd28;
 	add.s64 	%rd86, %rd88, %rd19;
-	
+
 	prefetch.global.L2 [%rd86];
-	
+
 	add.s64 	%rd89, %rd45, %rd29;
 	add.s64 	%rd87, %rd89, %rd21;
-	
+
 	prefetch.global.L2 [%rd87];
-	
+
 	ld.global.f32 	%f102, [%rd28];
 
 $L__BB3_35:
@@ -1232,14 +1232,14 @@ $L__BB3_39:
 
 	add.s64 	%rd92, %rd44, %rd33;
 	add.s64 	%rd90, %rd92, %rd19;
-	
+
 	prefetch.global.L2 [%rd90];
-	
+
 	add.s64 	%rd93, %rd45, %rd34;
 	add.s64 	%rd91, %rd93, %rd21;
-	
+
 	prefetch.global.L2 [%rd91];
-	
+
 	ld.global.f32 	%f105, [%rd33];
 
 $L__BB3_41:
@@ -1288,7 +1288,7 @@ $L__BB3_52:
 	ret;
 
 }
-	
+
 .visible .entry efi_one_series_many_params_from_diff_tm_f32(
 	.param .u64 efi_one_series_many_params_from_diff_tm_f32_param_0,
 	.param .u64 efi_one_series_many_params_from_diff_tm_f32_param_1,
@@ -1431,9 +1431,9 @@ $L__BB4_14:
 	or.pred  	%p19, %p18, %p17;
 	@%p19 bra 	$L__BB4_16;
 
-	
+
 	prefetch.global.L2 [%rd71];
-	
+
 
 $L__BB4_16:
 	mov.u32 	%r101, 0;
@@ -1502,9 +1502,9 @@ $L__BB4_24:
 
 	mul.wide.s32 	%rd63, %r36, 4;
 	add.s64 	%rd62, %rd34, %rd63;
-	
+
 	prefetch.global.L2 [%rd62];
-	
+
 
 $L__BB4_26:
 	mov.u32 	%r107, 0;
@@ -1538,9 +1538,9 @@ $L__BB4_30:
 	or.pred  	%p33, %p26, %p31;
 	@%p33 bra 	$L__BB4_32;
 
-	
+
 	prefetch.global.L2 [%rd74];
-	
+
 
 $L__BB4_32:
 	mov.u32 	%r108, 0;
@@ -1573,9 +1573,9 @@ $L__BB4_36:
 	or.pred  	%p39, %p26, %p37;
 	@%p39 bra 	$L__BB4_38;
 
-	
+
 	prefetch.global.L2 [%rd75];
-	
+
 
 $L__BB4_38:
 	mov.u32 	%r109, 0;
@@ -1608,9 +1608,9 @@ $L__BB4_42:
 	or.pred  	%p45, %p26, %p43;
 	@%p45 bra 	$L__BB4_44;
 
-	
+
 	prefetch.global.L2 [%rd76];
-	
+
 
 $L__BB4_44:
 	mov.u32 	%r110, 0;
@@ -1653,7 +1653,7 @@ $L__BB4_49:
 	ret;
 
 }
-	
+
 .visible .entry efi_one_series_many_params_from_diff_rm_f32(
 	.param .u64 efi_one_series_many_params_from_diff_rm_f32_param_0,
 	.param .u64 efi_one_series_many_params_from_diff_rm_f32_param_1,
@@ -1795,9 +1795,9 @@ $L__BB5_15:
 	or.pred  	%p18, %p17, %p16;
 	@%p18 bra 	$L__BB5_17;
 
-	
+
 	prefetch.global.L2 [%rd66];
-	
+
 
 $L__BB5_17:
 	mov.u32 	%r96, 0;
@@ -1864,9 +1864,9 @@ $L__BB5_25:
 
 	mul.wide.s32 	%rd60, %r31, 4;
 	add.s64 	%rd59, %rd34, %rd60;
-	
+
 	prefetch.global.L2 [%rd59];
-	
+
 
 $L__BB5_27:
 	mov.u32 	%r101, 0;
@@ -1898,9 +1898,9 @@ $L__BB5_31:
 	or.pred  	%p32, %p25, %p30;
 	@%p32 bra 	$L__BB5_33;
 
-	
+
 	prefetch.global.L2 [%rd70];
-	
+
 
 $L__BB5_33:
 	mov.u32 	%r102, 0;
@@ -1932,9 +1932,9 @@ $L__BB5_37:
 	or.pred  	%p38, %p25, %p36;
 	@%p38 bra 	$L__BB5_39;
 
-	
+
 	prefetch.global.L2 [%rd71];
-	
+
 
 $L__BB5_39:
 	mov.u32 	%r103, 0;
@@ -1966,9 +1966,9 @@ $L__BB5_43:
 	or.pred  	%p44, %p25, %p42;
 	@%p44 bra 	$L__BB5_45;
 
-	
+
 	prefetch.global.L2 [%rd72];
-	
+
 
 $L__BB5_45:
 	mov.u32 	%r104, 0;

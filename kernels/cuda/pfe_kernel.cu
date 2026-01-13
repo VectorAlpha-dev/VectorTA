@@ -67,7 +67,7 @@ void pfe_batch_f32(const float* __restrict__ data,
     const int row_off = combo * len;
     const int start = first_valid + period;
 
-    
+
     for (int t = 0; t < ((start < len) ? start : len); ++t) out[row_off + t] = CUDART_NAN_F;
     if (start >= len) return;
 
@@ -75,7 +75,7 @@ void pfe_batch_f32(const float* __restrict__ data,
     const float alpha = 2.0f / (float(smoothing) + 1.0f);
     const float one_minus_alpha = 1.0f - alpha;
 
-    
+
     float denom = 0.0f;
     const bool use_ring = period <= 256;
     float ring[256];
@@ -164,7 +164,7 @@ void pfe_batch_prefix_f32(const float* __restrict__ data,
         const float diff = cur - past;
         const float long_leg = sqrtf(fmaf(diff, diff, p2));
 
-        
+
         const double denom_d = prefix[t] - prefix[t - period];
         const float denom = (float)denom_d;
 
@@ -191,7 +191,7 @@ void pfe_many_series_one_param_time_major_f32(const float* __restrict__ data_tm,
                                               int period,
                                               int smoothing,
                                               float* __restrict__ out_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols || period <= 0 || smoothing <= 0) return;
 
     const int fv = first_valids[s];

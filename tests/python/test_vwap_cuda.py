@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -30,7 +30,7 @@ def _cuda_available() -> bool:
         handle = ti.vwap_cuda_batch_dev(ts, vols, prices, ("1m", "1m", 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "nvcc" in msg:
             return False
@@ -42,7 +42,7 @@ class TestVwapCuda:
     @pytest.fixture(scope="class")
     def test_data(self):
         data = load_test_data()
-        limit = 2048  
+        limit = 2048
         return {
             "timestamp": data["timestamp"][:limit].astype(np.int64),
             "volume": data["volume"][:limit].astype(np.float64),
@@ -70,7 +70,7 @@ class TestVwapCuda:
         rows = ts.shape[0]
         cols = 8
 
-        
+
         prices_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         volumes_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
@@ -81,13 +81,13 @@ class TestVwapCuda:
 
         anchor = "1m"
 
-        
+
         cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
             vals = ti.vwap(ts, volumes_tm[:, s], prices_tm[:, s], anchor)
             cpu_tm[:, s] = np.asarray(vals, dtype=np.float64)
 
-        
+
         handle = ti.vwap_cuda_many_series_one_param_dev(ts, prices_tm, volumes_tm, anchor)
         gpu_tm = cp.asnumpy(cp.asarray(handle)).astype(np.float64)
 

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .func  (.param .align 8 .b8 func_retval0[16]) __internal_trig_reduction_slowpathd
 (
 	.param .b64 __internal_trig_reduction_slowpathd_param_0
@@ -556,7 +556,7 @@ $L__BB0_45:
 	ret;
 
 }
-	
+
 .visible .entry lpc_batch_f32(
 	.param .u64 lpc_batch_f32_param_0,
 	.param .u64 lpc_batch_f32_param_1,
@@ -783,19 +783,19 @@ $L__BB1_16:
 	setp.ltu.f64 	%p16, %fd5, 0d41E0000000000000;
 	@%p16 bra 	$L__BB1_19;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd4;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd234, [retval0+0];
 	ld.param.b32 	%r85, [retval0+8];
-	} 
+	}
 
 $L__BB1_19:
 	and.b32  	%r54, %r85, 1;
@@ -858,19 +858,19 @@ $L__BB1_24:
 	setp.ltu.f64 	%p20, %fd230, 0d41E0000000000000;
 	@%p20 bra 	$L__BB1_27;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd4;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd237, [retval0+0];
 	ld.param.b32 	%r86, [retval0+8];
-	} 
+	}
 
 $L__BB1_27:
 	mov.u64 	%rd87, __cudart_sin_cos_coeffs;
@@ -985,19 +985,19 @@ $L__BB1_39:
 	setp.ltu.f64 	%p32, %fd228, 0d41E0000000000000;
 	@%p32 bra 	$L__BB1_42;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd35;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd244, [retval0+0];
 	ld.param.b32 	%r90, [retval0+8];
-	} 
+	}
 
 $L__BB1_42:
 	and.b32  	%r65, %r90, 1;
@@ -1060,19 +1060,19 @@ $L__BB1_47:
 	setp.ltu.f64 	%p36, %fd227, 0d41E0000000000000;
 	@%p36 bra 	$L__BB1_50;
 
-	{ 
+	{
 	.reg .b32 temp_param_reg;
 	.param .b64 param0;
 	st.param.f64 	[param0+0], %fd35;
 	.param .align 8 .b8 retval0[16];
-	call.uni (retval0), 
-	__internal_trig_reduction_slowpathd, 
+	call.uni (retval0),
+	__internal_trig_reduction_slowpathd,
 	(
 	param0
 	);
 	ld.param.f64 	%fd247, [retval0+0];
 	ld.param.b32 	%r91, [retval0+8];
-	} 
+	}
 
 $L__BB1_50:
 	mov.u64 	%rd84, __cudart_sin_cos_coeffs;
@@ -1194,7 +1194,7 @@ $L__BB1_60:
 	ret;
 
 }
-	
+
 .visible .entry lpc_many_series_one_param_time_major_f32(
 	.param .u64 lpc_many_series_one_param_time_major_f32_param_0,
 	.param .u64 lpc_many_series_one_param_time_major_f32_param_1,
@@ -1444,7 +1444,7 @@ $L__BB2_12:
 	ld.param.f64 	%fd4, [__internal_trig_reduction_slowpathd_param_0];
 	add.u64 	%rd1, %SPL, 0;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r1}, %fd4;
 	}
 	shr.u32 	%r12, %r1, 20;

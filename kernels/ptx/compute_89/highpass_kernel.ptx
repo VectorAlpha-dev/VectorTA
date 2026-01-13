@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry highpass_batch_warp_scan_f32(
 	.param .u64 highpass_batch_warp_scan_f32_param_0,
@@ -598,7 +598,7 @@ $L__BB0_69:
 	ret;
 
 }
-	
+
 .visible .entry highpass_batch_f32(
 	.param .u64 highpass_batch_f32_param_0,
 	.param .u32 highpass_batch_f32_param_1,
@@ -666,7 +666,7 @@ $L__BB1_3:
 	mov.f64 	%fd43, 0d4000000000000000;
 	div.rn.f64 	%fd105, %fd43, %fd42;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r110}, %fd105;
 	}
 	shl.b32 	%r58, %r110, 1;
@@ -676,14 +676,14 @@ $L__BB1_3:
 	mov.f64 	%fd44, 0d0000000000000000;
 	mul.rn.f64 	%fd105, %fd105, %fd44;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r110}, %fd105;
 	}
 
 $L__BB1_6:
 	add.s32 	%r59, %r110, 1048576;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r60, %temp}, %fd105;
 	}
 	mov.b64 	%fd45, {%r60, %r59};
@@ -734,12 +734,12 @@ $L__BB1_6:
 	@%p12 bra 	$L__BB1_8;
 
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r61}, %fd108;
 	}
 	xor.b32  	%r62, %r61, -2147483648;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r63, %temp}, %fd108;
 	}
 	mov.b64 	%fd8, {%r63, %r62};
@@ -752,22 +752,22 @@ $L__BB1_8:
 	@%p13 bra 	$L__BB1_10;
 
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r65}, %fd108;
 	}
 	xor.b32  	%r66, %r65, -2147483648;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r67, %temp}, %fd108;
 	}
 	mov.b64 	%fd108, {%r67, %r66};
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r68}, %fd109;
 	}
 	xor.b32  	%r69, %r68, -2147483648;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r70, %temp}, %fd109;
 	}
 	mov.b64 	%fd109, {%r70, %r69};
@@ -848,9 +848,9 @@ $L__BB1_23:
 	setp.ge.s32 	%p26, %r5, %r52;
 	@%p26 bra 	$L__BB1_48;
 
-	
+
 	activemask.b32 %r79;
-	
+
 	brev.b32 	%r81, %r79;
 	bfind.shiftamt.u32 	%r30, %r81;
 	setp.ne.s32 	%p27, %r7, %r30;
@@ -1018,7 +1018,7 @@ $L__BB1_49:
 	ret;
 
 }
-	
+
 .visible .entry highpass_many_series_one_param_time_major_f32(
 	.param .u64 highpass_many_series_one_param_time_major_f32_param_0,
 	.param .u64 highpass_many_series_one_param_time_major_f32_param_1,
@@ -1054,7 +1054,7 @@ $L__BB1_49:
 	mov.f64 	%fd45, 0d4000000000000000;
 	div.rn.f64 	%fd131, %fd45, %fd44;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r90}, %fd131;
 	}
 	shl.b32 	%r53, %r90, 1;
@@ -1064,14 +1064,14 @@ $L__BB1_49:
 	mov.f64 	%fd46, 0d0000000000000000;
 	mul.rn.f64 	%fd131, %fd131, %fd46;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r90}, %fd131;
 	}
 
 $L__BB2_3:
 	add.s32 	%r54, %r90, 1048576;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r55, %temp}, %fd131;
 	}
 	mov.b64 	%fd47, {%r55, %r54};
@@ -1122,12 +1122,12 @@ $L__BB2_3:
 	@%p10 bra 	$L__BB2_5;
 
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r56}, %fd134;
 	}
 	xor.b32  	%r57, %r56, -2147483648;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r58, %temp}, %fd134;
 	}
 	mov.b64 	%fd6, {%r58, %r57};
@@ -1140,22 +1140,22 @@ $L__BB2_5:
 	@%p11 bra 	$L__BB2_7;
 
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r60}, %fd134;
 	}
 	xor.b32  	%r61, %r60, -2147483648;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r62, %temp}, %fd134;
 	}
 	mov.b64 	%fd134, {%r62, %r61};
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%temp, %r63}, %fd135;
 	}
 	xor.b32  	%r64, %r63, -2147483648;
 	{
-	.reg .b32 %temp; 
+	.reg .b32 %temp;
 	mov.b64 	{%r65, %temp}, %fd135;
 	}
 	mov.b64 	%fd135, {%r65, %r64};

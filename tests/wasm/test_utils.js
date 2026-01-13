@@ -1,6 +1,4 @@
-/**
- * Common utilities for WASM binding tests (no external deps)
- */
+
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -21,14 +19,14 @@ function loadTestData() {
     };
 
     const lines = content.split(/\r?\n/);
-    
+
     for (let li = 1; li < lines.length; li++) {
         const line = lines[li].trim();
         if (!line) continue;
         const cols = line.split(',');
         if (cols.length < 6) continue;
 
-        
+
         const t = Number(cols[0]);
         const o = Number(cols[1]);
         const c = Number(cols[2]);
@@ -36,7 +34,7 @@ function loadTestData() {
         const l = Number(cols[4]);
         const v = Number(cols[5]);
 
-        
+
         if ([t, o, c, h, l, v].some(x => Number.isNaN(x))) continue;
 
         candles.timestamp.push(t);
@@ -47,7 +45,7 @@ function loadTestData() {
         candles.volume.push(v);
     }
 
-    
+
     candles.hl2 = candles.high.map((h, i) => (h + candles.low[i]) / 2.0);
 
     return candles;
@@ -62,7 +60,7 @@ function assertClose(actual, expected, tolerance = 1e-8, msg = "") {
 }
 
 function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
-    
+
     let atol, rtol;
     if (typeof tolerance === 'number') {
         atol = tolerance;
@@ -74,15 +72,15 @@ function assertArrayClose(actual, expected, tolerance = 1e-8, msg = "") {
         atol = 1e-8;
         rtol = 0;
     }
-    
+
     const actualLen = actual ? actual.length : 0;
     const expectedLen = expected ? expected.length : 0;
-    
+
     if (actualLen !== expectedLen) {
         throw new Error(`${msg}: Length mismatch: ${actualLen} vs ${expectedLen}`);
     }
     for (let i = 0; i < actualLen; i++) {
-        
+
         if (isNaN(actual[i]) && isNaN(expected[i])) {
             continue;
         }
@@ -129,12 +127,12 @@ const EXPECTED_OUTPUTS = {
             59200.32,
             59117.04
         ],
-        warmupPeriod: 16 
+        warmupPeriod: 16
     },
     zscore: {
-        
+
         defaultParams: { period: 14, maType: 'sma', nbdev: 1.0, devtype: 0 },
-        
+
         last5Values: [
             -0.3040683926967643,
             -0.41042159719064014,
@@ -169,7 +167,7 @@ const EXPECTED_OUTPUTS = {
     },
     wto: {
         defaultParams: { channelLength: 10, averageLength: 21 },
-        
+
         last5Values: {
             wavetrend1: [
                 -34.81423091,
@@ -193,7 +191,7 @@ const EXPECTED_OUTPUTS = {
                 -5.02955265,
             ]
         },
-        warmupPeriod: 20,  
+        warmupPeriod: 20,
         hasThreeOutputs: true
     },
     mass: {
@@ -205,7 +203,7 @@ const EXPECTED_OUTPUTS = {
             3.6450956734739375,
             3.6748009093527125
         ],
-        warmupPeriod: 20  
+        warmupPeriod: 20
     },
     aso: {
         defaultParams: { period: 10, mode: 0 },
@@ -233,7 +231,7 @@ const EXPECTED_OUTPUTS = {
             59155.93381742,
             59026.92526112
         ],
-        
+
         reinputLast5: [
             59140.73195170,
             59211.58090986,
@@ -300,9 +298,9 @@ const EXPECTED_OUTPUTS = {
             58575.33291206,
             58376.00589983
         ],
-        
+
         reinputLast5: [
-            59083.04826441,  
+            59083.04826441,
             58900.06593477,
             58722.13172976,
             58575.33291206,
@@ -318,13 +316,13 @@ const EXPECTED_OUTPUTS = {
             -261.87532144673423,
             -698.9026088956363
         ],
-        
+
         hasWarmup: false,
         warmupLength: 0
     },
     percentileNearestRank: {
         defaultParams: { length: 15, percentage: 50.0 },
-        
+
         last5Values: [
             59419.0,
             59419.0,
@@ -332,23 +330,23 @@ const EXPECTED_OUTPUTS = {
             59285.0,
             59273.0
         ],
-        
+
         basicTest: {
             data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             length: 5,
             percentage: 50.0,
-            expectedAt4: 3.0,  
-            expectedAt5: 4.0,  
+            expectedAt4: 3.0,
+            expectedAt5: 4.0,
         },
         percentileTests: {
             data: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
             length: 5,
-            p25At4: 1.0,  
-            p75At4: 4.0,  
-            p100At4: 5.0,  
+            p25At4: 1.0,
+            p75At4: 4.0,
+            p100At4: 5.0,
         },
-        
-        warmupPeriod: 14,  
+
+        warmupPeriod: 14,
     },
     alphatrend: {
         defaultParams: { coeff: 1.0, period: 14, noVolume: false },
@@ -366,7 +364,7 @@ const EXPECTED_OUTPUTS = {
             60243.00,
             60138.92857143
         ],
-        warmupPeriod: 13  
+        warmupPeriod: 13
     },
     kama: {
         defaultParams: { period: 30 },
@@ -397,8 +395,8 @@ const EXPECTED_OUTPUTS = {
             59048.71111114628,
             58803.44444447962
         ],
-        
-        
+
+
         warmupPeriod: 5
     },
     pwma: {
@@ -410,20 +408,20 @@ const EXPECTED_OUTPUTS = {
             59175.625,
             59094.875
         ],
-        warmupPeriod: 244,  
-        
+        warmupPeriod: 244,
+
         reinputPeriods: { first: 5, second: 3 },
-        reinputWarmup: 246,  
-        
+        reinputWarmup: 246,
+
         constantValue: 50.0,
-        
+
         formulaTest: {
             data: [1.0, 2.0, 3.0, 4.0, 5.0],
             period: 3,
-            
+
             expected: [NaN, NaN, 2.0, 3.0, 4.0]
         },
-        
+
         batchPeriods: [3, 5, 7, 9],
         batchRange: { start: 3, end: 10, step: 2 }
     },
@@ -463,7 +461,7 @@ const EXPECTED_OUTPUTS = {
             centerType: 'dynamic',
             tickSize: 0.0001
         },
-        
+
         pinescriptDvdi: [-304.41010224, -279.48152664, -287.58723437, -252.40349484, -343.00922595],
         pinescriptSlowTl: [356.29040696, -955.69385266, -951.82562405, -903.39071943, -903.39071943],
         pinescriptFastTl: [-728.26380454, -697.40500858, -697.40500858, -654.73695895, -654.73695895],
@@ -478,7 +476,7 @@ const EXPECTED_OUTPUTS = {
             0.3155080213903743,
             0.7308584686774942
         ],
-        
+
         valuesAt100_104: [
             0.2715789473684199,
             0.35274356103023446,
@@ -486,25 +484,25 @@ const EXPECTED_OUTPUTS = {
             0.7715877437325899,
             0.6793743890518072
         ],
-        
-        trendingDataValues: Array(6).fill(1.0),  
-        
-        choppyDataValues: Array(6).fill(0.14285714285714285),  
-        
-        warmupPeriod: 4  
+
+        trendingDataValues: Array(6).fill(1.0),
+
+        choppyDataValues: Array(6).fill(0.14285714285714285),
+
+        warmupPeriod: 4
     },
     cvi: {
         defaultParams: { period: 10 },
         accuracyParams: { period: 5 },
-        last5Values: [  
+        last5Values: [
             -52.96320026271643,
             -64.39616778235792,
             -59.4830094380472,
             -52.4690724045071,
             -11.858704179539174
         ],
-        warmupPeriod: 19,  
-        accuracyWarmup: 9  
+        warmupPeriod: 19,
+        accuracyWarmup: 9
     },
     tema: {
         defaultParams: { period: 9 },
@@ -515,12 +513,12 @@ const EXPECTED_OUTPUTS = {
             59175.218345941066,
             58934.24395798363
         ],
-        warmupPeriod: 24  
+        warmupPeriod: 24
     },
     lrsi: {
         defaultParams: { alpha: 0.2 },
-        
-        
+
+
     },
     iftRsi: {
         defaultParams: { rsiPeriod: 5, wmaPeriod: 9 },
@@ -531,7 +529,7 @@ const EXPECTED_OUTPUTS = {
             -0.26631220621545837,
             0.28324385010826775
         ],
-        warmupPeriod: 13,  
+        warmupPeriod: 13,
         parameterCombinations: [
             { rsiPeriod: 2, wmaPeriod: 2 },
             { rsiPeriod: 3, wmaPeriod: 5 },
@@ -543,7 +541,7 @@ const EXPECTED_OUTPUTS = {
     },
     ehlersEcema: {
         defaultParams: { length: 20, gainLimit: 50 },
-        
+
         last5Values: [
             59368.42792078,
             59311.07435861,
@@ -551,7 +549,7 @@ const EXPECTED_OUTPUTS = {
             59221.59111692,
             58978.72640292
         ],
-        
+
         pineModeLast5: [
             59368.42792078,
             59311.07435861,
@@ -559,7 +557,7 @@ const EXPECTED_OUTPUTS = {
             59221.59111692,
             58978.72640292
         ],
-        
+
         reinputParams: { length: 10, gainLimit: 30 },
         reinputLast5: [
             59324.20351585,
@@ -568,14 +566,14 @@ const EXPECTED_OUTPUTS = {
             59194.22630265,
             59025.67038012
         ],
-        warmupPeriod: 19,  
-        pineWarmupPeriod: 0,  
-        
+        warmupPeriod: 19,
+        pineWarmupPeriod: 0,
+
         batchParams: {
-            lengthRange: [15, 25, 5],  
-            gainLimitRange: [40, 60, 10]  
+            lengthRange: [15, 25, 5],
+            gainLimitRange: [40, 60, 10]
         },
-        batchCombinations: 9  
+        batchCombinations: 9
     },
     tilson: {
         defaultParams: { period: 5, volume_factor: 0.0 },
@@ -586,7 +584,7 @@ const EXPECTED_OUTPUTS = {
             59240.25895948583,
             59203.544843167765
         ],
-        
+
         reinputLast5: [
             59328.94228019944,
             59292.16983061365,
@@ -677,11 +675,11 @@ const EXPECTED_OUTPUTS = {
         last5Upper: [61290.0, 61290.0, 61290.0, 61290.0, 61290.0],
         last5Middle: [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
         last5Lower: [57876.0, 57876.0, 57876.0, 57876.0, 57876.0],
-        
+
         reinputLast5Upper: [61700.0, 61700.0, 61700.0, 61642.5, 61642.5],
         reinputLast5Middle: [60641.5, 60641.5, 60641.5, 60612.75, 60612.75],
         reinputLast5Lower: [59583.0, 59583.0, 59583.0, 59583.0, 59583.0],
-        warmupPeriod: 19  
+        warmupPeriod: 19
     },
     trima: {
         defaultParams: { period: 30 },
@@ -692,7 +690,7 @@ const EXPECTED_OUTPUTS = {
             59665.2125,
             59581.612499999996
         ],
-        
+
         reinputLast5: [
             60750.01069444444,
             60552.44180555555,
@@ -700,7 +698,7 @@ const EXPECTED_OUTPUTS = {
             60210.39555555556,
             60066.62458333334
         ],
-        warmupPeriod: 29  
+        warmupPeriod: 29
     },
     msw: {
         defaultParams: { period: 5 },
@@ -718,12 +716,12 @@ const EXPECTED_OUTPUTS = {
             0.36030983330963545,
             -0.28983704937461496
         ],
-        warmupPeriod: 4  
+        warmupPeriod: 4
     },
     jsa: {
         defaultParams: { period: 30 },
         last5Values: [61640.0, 61418.0, 61240.0, 61060.5, 60889.5],
-        warmupPeriod: 30  
+        warmupPeriod: 30
     },
     cg: {
         defaultParams: { period: 10 },
@@ -744,7 +742,7 @@ const EXPECTED_OUTPUTS = {
             63966.35530620797,
             64039.04719192334
         ],
-        
+
         batchDefaultRow: [
             64320.486018271724,
             64227.95719984426,
@@ -762,11 +760,11 @@ const EXPECTED_OUTPUTS = {
             59100.6,
             58987.94285714286
         ],
-        warmupPeriod: 13,  
-        
+        warmupPeriod: 13,
+
         reinputPeriods: { first: 14, second: 10 },
-        reinputWarmup: 23,  
-        
+        reinputWarmup: 23,
+
         batchPeriods: [10, 20, 30, 40],
         batchRange: [10, 40, 10]
     },
@@ -779,7 +777,7 @@ const EXPECTED_OUTPUTS = {
             58724.56154031242,
             58713.39965211639
         ],
-        warmupPeriod: 21  
+        warmupPeriod: 21
     },
     cfo: {
         defaultParams: { period: 14, scalar: 100.0 },
@@ -810,7 +808,7 @@ const EXPECTED_OUTPUTS = {
             59167.01279027576,
             59039.413552249636
         ],
-        
+
         warmupPeriod: 13
     },
     decycler: {
@@ -881,9 +879,9 @@ const EXPECTED_OUTPUTS = {
             59391.23,
             59372.19
         ],
-        
+
         reinputLast5: [
-            59638.12,  
+            59638.12,
             59497.26,
             59431.08,
             59391.23,
@@ -934,7 +932,7 @@ const EXPECTED_OUTPUTS = {
             57137.18181818182,
             56516.09090909091
         ],
-        warmupPeriod: 21,  
+        warmupPeriod: 21,
         batchDefaultRow: [
             56711.545454545456,
             57132.72727272727,
@@ -982,10 +980,10 @@ const EXPECTED_OUTPUTS = {
             59171.22758152845,
             59127.859841077094
         ],
-        
-        
-        reinputLast5: null,  
-        warmupPeriod: 13  
+
+
+        reinputLast5: null,
+        warmupPeriod: 13
     },
     trix: {
         defaultParams: { period: 18 },
@@ -1038,7 +1036,7 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     acosc: {
-        defaultParams: {},  
+        defaultParams: {},
         last5Osc: [
             273.30,
             383.72,
@@ -1156,7 +1154,7 @@ const EXPECTED_OUTPUTS = {
             59720.60576365108,
             59673.9954445178
         ],
-        warmupPeriod: 10,  
+        warmupPeriod: 10,
         batchDefaultRow: [
             59747.657115949725,
             59740.803138018055,
@@ -1192,7 +1190,7 @@ const EXPECTED_OUTPUTS = {
     },
     bollinger_bands_width: {
         defaultParams: { period: 20, devup: 2.0, devdn: 2.0, matype: 'sma', devtype: 0 },
-        
+
         last_5_values: [
             0.03715911020016619,
             0.036072736452195386,
@@ -1247,7 +1245,7 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     bop: {
-        defaultParams: {},  
+        defaultParams: {},
         last5Values: [
             0.045454545454545456,
             -0.32398753894080995,
@@ -1277,7 +1275,7 @@ const EXPECTED_OUTPUTS = {
         ]
     },
     roc: {
-        
+
         defaultParams: { period: 10 },
         last5Values: [
             -0.22551709049294377,
@@ -1295,7 +1293,7 @@ const EXPECTED_OUTPUTS = {
             sed_std: 100,
             threshold: 1.4
         },
-        
+
         volLast5Values: [
             0.8539059,
             0.75935611,
@@ -1310,7 +1308,7 @@ const EXPECTED_OUTPUTS = {
             1.13929192,
             1.12982407
         ],
-        
+
         rustVolLast5Values: [
             0.9009485470514558,
             0.8333604467044887,
@@ -1325,7 +1323,7 @@ const EXPECTED_OUTPUTS = {
             1.1403866079746106,
             1.1392919184055932
         ],
-        warmupPeriod: 101  
+        warmupPeriod: 101
     },
     di: {
         defaultParams: { period: 14 },
@@ -1366,7 +1364,7 @@ const EXPECTED_OUTPUTS = {
                 -47.01112630514571
             ]
         },
-        warmupPeriod: 44  
+        warmupPeriod: 44
     },
     efi: {
         defaultParams: { period: 13 },
@@ -1454,8 +1452,8 @@ const EXPECTED_OUTPUTS = {
             -0.664976238854087,
             0.7454354957832976
         ],
-        
-        reinputLast5: [0, 0, 0, 0, 0]  
+
+        reinputLast5: [0, 0, 0, 0, 0]
     },
     rvi: {
         defaultParams: { period: 10, ma_len: 14, matype: 1, devtype: 0 },
@@ -1484,7 +1482,7 @@ const EXPECTED_OUTPUTS = {
             -39811.02321812391,
             -36599.9671820205,
             -29903.28014503471,
-            -55406.382981  
+            -55406.382981
         ]
     },
     coppock: {
@@ -1520,7 +1518,7 @@ const EXPECTED_OUTPUTS = {
     sma: {
         defaultParams: { period: 9 },
         last_5_values: [59180.8, 59175.0, 59129.4, 59085.4, 59133.7],
-        reinputLast5: null  
+        reinputLast5: null
     },
     mwdx: {
         defaultParams: { factor: 0.2 },
@@ -1541,17 +1539,17 @@ const EXPECTED_OUTPUTS = {
             59171.14999178,
             59053.74201623
         ],
-        warmupPeriod: 22,  
-        
-        noSmoothingDiffers: true,  
-        differentRMultiDiffers: true,  
-        
+        warmupPeriod: 22,
+
+        noSmoothingDiffers: true,
+        differentRMultiDiffers: true,
+
         batchPeriods: [15, 20, 25],
         batchRMultis: [1.5, 2.0, 2.5],
         batchRange: {
             periodRange: [15, 25, 5],
             rMultiRange: [1.5, 2.5, 0.5],
-            smooth: false  
+            smooth: false
         }
     },
     dma: {
@@ -1568,18 +1566,18 @@ const EXPECTED_OUTPUTS = {
             59153.22811529,
             58933.88503421
         ],
-        
+
         warmupPeriod: 19,
-        
+
         constantValue: 100.0,
-        
+
         batchHullLengths: [5, 7, 9, 11],
-        batchHullRange: [5, 11, 2],  
-        batchEmaRange: [20, 20, 0],  
-        batchGainRange: [50, 50, 0], 
-        
+        batchHullRange: [5, 11, 2],
+        batchEmaRange: [20, 20, 0],
+        batchGainRange: [50, 50, 0],
+
         hullMaTypes: ['WMA', 'EMA'],
-        
+
         batchDefaultRow: [
             59404.62489256,
             59326.48766951,
@@ -1591,26 +1589,26 @@ const EXPECTED_OUTPUTS = {
     ehma: {
         defaultParams: { period: 14 },
         testData: [
-            59500.0, 59450.0, 59420.0, 59380.0, 59350.0, 
+            59500.0, 59450.0, 59420.0, 59380.0, 59350.0,
             59320.0, 59310.0, 59300.0, 59280.0, 59260.0,
             59250.0, 59240.0, 59230.0, 59220.0, 59210.0,
             59200.0, 59190.0, 59180.0
         ],
-        expectedValueAt13: 59309.748,  
-        warmupPeriod: 13,  
-        
-        period10Warmup: 9,  
-        
+        expectedValueAt13: 59309.748,
+        warmupPeriod: 13,
+
+        period10Warmup: 9,
+
         batchPeriods: [10, 14, 20, 28],
-        batchRange: [10, 30, 10],  
-        
+        batchRange: [10, 30, 10],
+
         streamingMatchesBatch: true,
-        
+
         consistencyTest: true
     },
     ott: {
         defaultParams: { period: 2, percent: 1.4, ma_type: 'VAR' },
-        accuracyParams: { period: 2, percent: 1.4, ma_type: 'VAR' },  
+        accuracyParams: { period: 2, percent: 1.4, ma_type: 'VAR' },
         last5Values: [
             59719.89457348,
             59719.89457348,
@@ -1618,8 +1616,8 @@ const EXPECTED_OUTPUTS = {
             59719.89457348,
             59649.80599569
         ],
-        warmupPeriod: 1,  
-        
+        warmupPeriod: 1,
+
         reinputLast5: [
             60132.08843846,
             60132.08843846,
@@ -1647,7 +1645,7 @@ const EXPECTED_OUTPUTS = {
             0.1320298011553359,
             -0.7969910390628968
         ],
-        warmupPeriod: 32  
+        warmupPeriod: 32
     },
     lpc: {
         default_params: {
@@ -1657,7 +1655,7 @@ const EXPECTED_OUTPUTS = {
             cycle_mult: 1.0,
             tr_mult: 1.0
         },
-        
+
         last_5_filter: [
             59346.30519969,
             59327.59393858,
@@ -1679,7 +1677,7 @@ const EXPECTED_OUTPUTS = {
             58534.26453184,
             58488.71820303
         ],
-        warmupPeriod: 1  
+        warmupPeriod: 1
     },
     qqe: {
         defaultParams: { rsiPeriod: 14, smoothingFactor: 5, fastFactor: 4.236 },
@@ -1697,8 +1695,8 @@ const EXPECTED_OUTPUTS = {
             36.64790896,
             36.64790896
         ],
-        warmupPeriod: 17,  
-        
+        warmupPeriod: 17,
+
         batchDefaultRowFast: [
             42.68548144,
             42.68200826,
@@ -1716,7 +1714,7 @@ const EXPECTED_OUTPUTS = {
     },
     vama: {
         defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        fastValues: [  
+        fastValues: [
             58881.58124494,
             58866.67951208,
             58873.34641238,
@@ -1724,19 +1722,19 @@ const EXPECTED_OUTPUTS = {
             58696.37821343
         ],
         slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        slowValues: [  
+        slowValues: [
             60338.30226444,
             60327.06967012,
             60318.07491767,
             60324.78454609,
             60305.94922998
         ],
-        warmupPeriod: 12  
+        warmupPeriod: 12
     },
-    volume_adjusted_ma: {  
+    volume_adjusted_ma: {
         defaultParams: { length: 13, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        
-        fastValues: [  
+
+        fastValues: [
             60249.34558277224,
             60283.79398716032,
             60173.3929697517,
@@ -1744,14 +1742,14 @@ const EXPECTED_OUTPUTS = {
             60226.095375540506
         ],
         slowParams: { length: 55, viFactor: 0.67, strict: true, samplePeriod: 0 },
-        slowValues: [  
+        slowValues: [
             60943.90131552854,
             60929.79497887764,
             60912.66617792769,
             60900.71462347596,
             60844.41271673433
         ],
-        warmupPeriod: 12  
+        warmupPeriod: 12
     },
     ehlersKama: {
         defaultParams: { period: 20 },
@@ -1768,7 +1766,7 @@ const EXPECTED_OUTPUTS = {
         testIndices: [15570, 15571, 15574, 15575, 15576],
         expectedHalftrend: [59763.0, 59763.0, 59763.0, 59310.0, 59310.0],
         expectedTrend: [0.0, 0.0, 1.0, 1.0, 1.0],
-        warmupPeriod: 99,  
+        warmupPeriod: 99,
         hasWarmup: true
     }
 };
@@ -1777,10 +1775,10 @@ const EXPECTED_OUTPUTS = {
 const EXPECTED_SUPERSMOOTHER_3_POLE = EXPECTED_OUTPUTS.supersmoother_3_pole.last5Values;
 const EXPECTED_SUPERSMOOTHER = EXPECTED_OUTPUTS.supersmoother.last5Values;
 
-export { 
-    loadTestData, 
-    assertClose, 
-    assertArrayClose, 
+export {
+    loadTestData,
+    assertClose,
+    assertArrayClose,
     isNaN,
     assertAllNaN,
     assertNoNaN,

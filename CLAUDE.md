@@ -224,7 +224,7 @@ test_bindings.bat indicator_name
 The codebase automatically selects the best SIMD instruction set at runtime:
 - `Kernel::Avx512` - Latest Intel/AMD processors (requires `--features nightly-avx`)
 - `Kernel::Avx2` - Modern processors (requires `--features nightly-avx`)
-- `Kernel::Sse2` - Older x86 processors  
+- `Kernel::Sse2` - Older x86 processors
 - `Kernel::Scalar` - Fallback for compatibility
 
 Use `detect_best_kernel()` or `detect_best_batch_kernel()` helpers.
@@ -308,10 +308,10 @@ Tests skip gracefully if no CUDA device is present (tests call `cuda_available()
    ```bash
    # Test a specific indicator after changes
    cargo test --features nightly-avx --lib indicators::indicator_name -- --nocapture
-   
+
    # Check if your changes compile
    cargo check --features nightly-avx
-   
+
    # Run clippy to catch potential issues
    cargo clippy --features nightly-avx
    ```

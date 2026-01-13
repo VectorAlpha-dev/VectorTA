@@ -24,7 +24,7 @@
 
 
 __device__ __forceinline__ void kahan_add(float x, float &sum, float &c) {
-    
+
     float y = x - c;
     float t = sum + y;
     c = (t - sum) - y;
@@ -89,7 +89,7 @@ void macd_batch_f32(const float* __restrict__ prices,
     const int macd_warmup   = fv + slow - 1;
     const int signal_warmup = fv + slow + signal - 2;
 
-    
+
     const float nanv = NAN;
     const int macd_nan_end   = imin(macd_warmup, series_len);
     const int signal_nan_end = imin(signal_warmup, series_len);
@@ -104,7 +104,7 @@ void macd_batch_f32(const float* __restrict__ prices,
 
     if (macd_warmup >= series_len) return;
 
-    
+
     float fast_prev = 0.0f;
     float slow_prev = 0.0f;
     float se_prev   = 0.0f;
@@ -118,7 +118,7 @@ void macd_batch_f32(const float* __restrict__ prices,
     const float bsig  = 1.0f - asig;
 
     if (lane == 0) {
-        
+
         float fsum = 0.0f, fc = 0.0f;
         const int fcap = imin(fast, series_len - fv);
         for (int i = 0; i < fcap; ++i) {
@@ -133,21 +133,21 @@ void macd_batch_f32(const float* __restrict__ prices,
         }
         float slow_ema = ssum / static_cast<float>(slow);
 
-        
+
         const int mwu = imin(macd_warmup, series_len - 1);
         for (int t = fv + fast; t <= mwu; ++t) {
             const float x = prices[t];
             if (isfinite(x)) {
-                
+
                 fast_ema = fmaf(x - fast_ema, af, fast_ema);
             }
         }
 
-        
+
         float m0 = fast_ema - slow_ema;
         macd_out[row_base + static_cast<size_t>(macd_warmup)] = m0;
 
-        
+
         if (signal_warmup < series_len) {
             if (signal == 1) {
                 se_prev = m0;
@@ -158,7 +158,7 @@ void macd_batch_f32(const float* __restrict__ prices,
                 float sig_acc = m0;
                 float sig_c = 0.0f;
 
-                
+
                 for (int k = macd_warmup + 1; k <= signal_warmup; ++k) {
                     const float x = prices[k];
                     if (isfinite(x)) {
@@ -184,7 +184,7 @@ void macd_batch_f32(const float* __restrict__ prices,
         slow_prev = slow_ema;
     }
 
-    
+
     fast_prev = __shfl_sync(mask, fast_prev, 0);
     slow_prev = __shfl_sync(mask, slow_prev, 0);
     se_prev   = __shfl_sync(mask, se_prev,   0);
@@ -192,14 +192,14 @@ void macd_batch_f32(const float* __restrict__ prices,
 
     int t0 = have_seed ? (signal_warmup + 1) : (macd_warmup + 1);
 
-    
+
     for (; t0 < series_len; t0 += 32) {
         const int t = t0 + lane;
 
-        
+
         float Af = 1.0f;
         float Bf = 0.0f;
-        
+
         float As = 1.0f;
         float Bs = 0.0f;
 
@@ -271,7 +271,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                     float* __restrict__ hist_tm) {
     if (rows <= 0 || cols <= 0 || fast <= 0 || slow <= 0 || signal <= 0) return;
 
-    const int stride = cols; 
+    const int stride = cols;
 
     for (int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
          series_idx < cols;
@@ -284,7 +284,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
         const int macd_warmup   = fv + slow - 1;
         const int signal_warmup = fv + slow + signal - 2;
 
-        
+
         const int macd_nan_end   = imin(macd_warmup, rows);
         const int signal_nan_end = imin(signal_warmup, rows);
         for (int t = 0; t < macd_nan_end; ++t) {
@@ -297,7 +297,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
         if (macd_warmup >= rows) continue;
 
-        
+
         float fsum = 0.f, fc = 0.f;
         const int fcap = imin(fast, rows - fv);
         for (int i = 0; i < fcap; ++i) {
@@ -316,7 +316,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
         const float aslow = 2.0f / (slow   + 1.0f);
         const float asig  = 2.0f / (signal + 1.0f);
 
-        
+
         const int mwu = imin(macd_warmup, rows - 1);
         for (int t = fv + fast; t <= mwu; ++t) {
             const float x = prices_tm[t * stride + series_idx];
@@ -325,10 +325,10 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
             }
         }
 
-        
+
         macd_tm[macd_warmup * stride + series_idx] = fast_ema - slow_ema;
 
-        
+
         bool  have_seed = false;
         float se        = 0.0f;
 
@@ -342,7 +342,7 @@ void macd_many_series_one_param_f32(const float* __restrict__ prices_tm,
             hist_tm  [signal_warmup * stride + series_idx] = macd_tm[signal_warmup * stride + series_idx] - se;
         }
 
-        
+
         for (int t = macd_warmup + 1; t < rows; ++t) {
             const float x = prices_tm[t * stride + series_idx];
             if (isfinite(x)) {

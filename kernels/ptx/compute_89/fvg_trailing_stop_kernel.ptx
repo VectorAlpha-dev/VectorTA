@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -41,7 +41,7 @@
 	.reg .f32 	%f<896>;
 	.reg .b32 	%r<285>;
 	.reg .b64 	%rd<158>;
-	
+
 	.shared .align 4 .u32 _ZZ27fvg_trailing_stop_batch_f32E14first_valid_sh;
 
 	mov.u64 	%SPL, __local_depot0;
@@ -4024,7 +4024,7 @@ $L__BB0_696:
 	ret;
 
 }
-	
+
 .visible .entry fvg_trailing_stop_batch_shmem_f32(
 	.param .u64 fvg_trailing_stop_batch_shmem_f32_param_0,
 	.param .u64 fvg_trailing_stop_batch_shmem_f32_param_1,
@@ -4050,7 +4050,7 @@ $L__BB0_696:
 	.reg .f32 	%f<904>;
 	.reg .b32 	%r<269>;
 	.reg .b64 	%rd<118>;
-	
+
 	.shared .align 4 .u32 _ZZ33fvg_trailing_stop_batch_shmem_f32E14first_valid_sh;
 
 	mov.u64 	%SPL, __local_depot1;
@@ -7952,7 +7952,7 @@ $L__BB1_690:
 	ret;
 
 }
-	
+
 .visible .entry fvg_trailing_stop_batch_small_shmem_f32(
 	.param .u64 fvg_trailing_stop_batch_small_shmem_f32_param_0,
 	.param .u64 fvg_trailing_stop_batch_small_shmem_f32_param_1,
@@ -7978,7 +7978,7 @@ $L__BB1_690:
 	.reg .f32 	%f<456>;
 	.reg .b32 	%r<269>;
 	.reg .b64 	%rd<118>;
-	
+
 	.shared .align 4 .u32 _ZZ39fvg_trailing_stop_batch_small_shmem_f32E14first_valid_sh;
 
 	mov.u64 	%SPL, __local_depot2;
@@ -9640,7 +9640,7 @@ $L__BB2_242:
 	ret;
 
 }
-	
+
 .visible .entry fvg_trailing_stop_many_series_one_param_f32(
 	.param .u64 fvg_trailing_stop_many_series_one_param_f32_param_0,
 	.param .u64 fvg_trailing_stop_many_series_one_param_f32_param_1,

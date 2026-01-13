@@ -4,12 +4,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  
+except ImportError:
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -24,7 +24,7 @@ def _cuda_available() -> bool:
     if not hasattr(ti, "ad_cuda_dev"):
         return False
     try:
-        
+
         n = 64
         base = np.linspace(100.0, 101.0, n, dtype=np.float32)
         high = base + 0.5
@@ -32,7 +32,7 @@ def _cuda_available() -> bool:
         vol = np.linspace(800.0, 1200.0, n, dtype=np.float32)
         _ = ti.ad_cuda_dev(high, low, base, vol)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         message = str(exc).lower()
         if "cuda not available" in message or "ptx" in message:
             return False
@@ -63,7 +63,7 @@ class TestAdCuda:
         gpu = cp.asnumpy(cp.asarray(handle))
         assert gpu.shape == (1, cpu.shape[0])
 
-        
+
         assert_close(
             gpu[0],
             cpu.astype(np.float32),

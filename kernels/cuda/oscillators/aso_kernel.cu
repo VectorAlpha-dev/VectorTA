@@ -32,8 +32,8 @@ __device__ __forceinline__ float inv_or_one(const float x) {
 }
 
 __device__ __forceinline__ void mode_weights(const int mode, float& w_intra, float& w_group) {
-    
-    
+
+
     if (mode == 0) { w_intra = 0.5f; w_group = 0.5f; }
     else if (mode == 2) { w_intra = 0.0f; w_group = 1.0f; }
     else { w_intra = 1.0f; w_group = 0.0f; }
@@ -51,7 +51,7 @@ __device__ __forceinline__ void kahan_add(float y, float& sum, float& c) {
 struct ModHelper {
     const int period;
     const bool is_pow2;
-    const int mask; 
+    const int mask;
     __device__ __forceinline__ ModHelper(int p)
         : period(p), is_pow2((p & (p - 1)) == 0), mask(p - 1) {}
     __device__ __forceinline__ int inc_wrap(int x) const {
@@ -96,7 +96,7 @@ extern "C" __global__ void aso_batch_f32(
 
     const int base = combo * series_len;
 
-    
+
     auto fill_all_nan = [&]() {
         for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
             out_bulls[base + i] = NAN;
@@ -115,68 +115,68 @@ extern "C" __global__ void aso_batch_f32(
         return;
     }
 
-    
+
     const int k = log2_tbl[period];
     if (UNLIKELY(k < 0 || k >= level_count)) {
         fill_all_nan();
         return;
     }
 
-    
+
     const int  mode = modes[combo];
     float w_intra, w_group;
     mode_weights(mode, w_intra, w_group);
 
-    
+
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out_bulls[base + i] = NAN;
         out_bears[base + i] = NAN;
     }
     __syncthreads();
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     const int offset   = 1 << k;
     const int lvl_base = level_offsets[k];
     const float* __restrict__ st_max_lvl = st_max + lvl_base;
     const float* __restrict__ st_min_lvl = st_min + lvl_base;
 
-    
+
     extern __shared__ float smem[];
     float* ring_b = smem;
     float* ring_e = smem + period;
 
-    
+
     for (int i = 0; i < period; ++i) { ring_b[i] = 0.0f; ring_e[i] = 0.0f; }
 
     ModHelper mh(period);
     int   head   = 0;
     int   filled = 0;
-    float sum_b  = 0.0f, cb = 0.0f; 
+    float sum_b  = 0.0f, cb = 0.0f;
     float sum_e  = 0.0f, ce = 0.0f;
 
-    
+
     int start     = warm - period + 1;
     int idx_a     = start;
     int idx_b     = warm + 1 - offset;
     int gopen_idx = start;
 
-    
+
     for (int t = warm; t < series_len; ++t, ++start, ++idx_a, ++idx_b, ++gopen_idx) {
         const float o = open[t];
         const float h = high[t];
         const float l = low[t];
         const float c = close[t];
 
-        
+
         const float intrarange    = h - l;
         const float scale1        = 50.0f * inv_or_one(intrarange);
         const float intrabarbulls = fmaf((c - l) + (h - o), scale1, 0.0f);
         const float intrabarbears = fmaf((h - c) + (o - l), scale1, 0.0f);
 
-        
+
         const float gh    = fmaxf(st_max_lvl[idx_a], st_max_lvl[idx_b]);
         const float gl    = fminf(st_min_lvl[idx_a], st_min_lvl[idx_b]);
         const float gopen = open[gopen_idx];
@@ -185,14 +185,14 @@ extern "C" __global__ void aso_batch_f32(
         const float groupbulls    = fmaf((c - gl) + (gh - gopen), scale2, 0.0f);
         const float groupbears    = fmaf((gh - c) + (gopen - gl), scale2, 0.0f);
 
-        
+
         const float b = fmaf(w_intra, intrabarbulls, w_group * groupbulls);
         const float e = fmaf(w_intra, intrabarbears, w_group * groupbears);
 
         const float old_b = (filled == period) ? ring_b[head] : 0.0f;
         const float old_e = (filled == period) ? ring_e[head] : 0.0f;
 
-        
+
         kahan_add(b - old_b, sum_b, cb);
         kahan_add(e - old_e, sum_e, ce);
 
@@ -216,15 +216,15 @@ extern "C" __global__ void aso_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
-    const int*   __restrict__ first_valids, 
-    int cols,    
-    int rows,    
+    const int*   __restrict__ first_valids,
+    int cols,
+    int rows,
     int period,
     int mode,
     float* __restrict__ out_bulls_tm,
     float* __restrict__ out_bears_tm)
 {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= cols) return;
 
     auto fill_all_nan = [&]() {
@@ -251,7 +251,7 @@ extern "C" __global__ void aso_many_series_one_param_f32(
         return;
     }
 
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         const int idx = t * cols + s;
         out_bulls_tm[idx] = NAN;
@@ -259,7 +259,7 @@ extern "C" __global__ void aso_many_series_one_param_f32(
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
 
     float w_intra, w_group;
     mode_weights(mode, w_intra, w_group);
@@ -280,13 +280,13 @@ extern "C" __global__ void aso_many_series_one_param_f32(
     float sum_b = 0.0f, cb = 0.0f;
     float sum_e = 0.0f, ce = 0.0f;
 
-    
+
     int min_head = 0, min_tail = 0, min_len = 0;
     int max_head = 0, max_tail = 0, max_len = 0;
 
-    
-    int idx       = fv * cols + s;                         
-    int start_idx = idx - (period - 1) * cols;             
+
+    int idx       = fv * cols + s;
+    int start_idx = idx - (period - 1) * cols;
 
     for (int t = fv; t < rows; ++t, idx += cols, start_idx += cols) {
         const float o = open_tm[idx];
@@ -294,7 +294,7 @@ extern "C" __global__ void aso_many_series_one_param_f32(
         const float l = low_tm[idx];
         const float c = close_tm[idx];
 
-        
+
         while (min_len > 0) {
             int back = mh.dec_wrap(min_tail);
             int j    = dq_min_idx[back];
@@ -304,7 +304,7 @@ extern "C" __global__ void aso_many_series_one_param_f32(
         if (min_len == period) { min_head = mh.inc_wrap(min_head); --min_len; }
         dq_min_idx[min_tail] = t; min_tail = mh.inc_wrap(min_tail); ++min_len;
 
-        
+
         while (max_len > 0) {
             int back = mh.dec_wrap(max_tail);
             int j    = dq_max_idx[back];
@@ -323,13 +323,13 @@ extern "C" __global__ void aso_many_series_one_param_f32(
             const float gh    = high_tm[dq_max_idx[max_head] * cols + s];
             const float gopen = open_tm[start_idx];
 
-            
+
             const float intrarange    = h - l;
             const float scale1        = 50.0f * inv_or_one(intrarange);
             const float intrabarbulls = fmaf((c - l) + (h - o), scale1, 0.0f);
             const float intrabarbears = fmaf((h - c) + (o - l), scale1, 0.0f);
 
-            
+
             const float gr            = gh - gl;
             const float scale2        = 50.0f * inv_or_one(gr);
             const float groupbulls    = fmaf((c - gl) + (gh - gopen), scale2, 0.0f);

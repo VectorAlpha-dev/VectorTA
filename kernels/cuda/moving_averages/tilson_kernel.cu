@@ -53,7 +53,7 @@ void tilson_batch_f32(const float* __restrict__ prices,
 
 #if !PREFILL_NAN_ON_HOST
     const float nanv = qnan_f32();
-    
+
     const int nan_end = (warm_index < series_len ? warm_index : series_len);
     for (int i = 0; i < nan_end; ++i) out[base + i] = nanv;
 #endif
@@ -66,12 +66,12 @@ void tilson_batch_f32(const float* __restrict__ prices,
     int   today = 0;
     float sum   = 0.0f;
 
-    
+
     for (int i = 0; i < period; ++i) sum += P[i];
     float e1 = sum * invP;
     today += period;
 
-    
+
     sum = e1;
     for (int i = 1; i < period; ++i) {
         const float price = P[today++];
@@ -80,7 +80,7 @@ void tilson_batch_f32(const float* __restrict__ prices,
     }
     float e2 = sum * invP;
 
-    
+
     sum = e2;
     for (int i = 1; i < period; ++i) {
         const float price = P[today++];
@@ -90,7 +90,7 @@ void tilson_batch_f32(const float* __restrict__ prices,
     }
     float e3 = sum * invP;
 
-    
+
     sum = e3;
     for (int i = 1; i < period; ++i) {
         const float price = P[today++];
@@ -101,7 +101,7 @@ void tilson_batch_f32(const float* __restrict__ prices,
     }
     float e4 = sum * invP;
 
-    
+
     sum = e4;
     for (int i = 1; i < period; ++i) {
         const float price = P[today++];
@@ -113,7 +113,7 @@ void tilson_batch_f32(const float* __restrict__ prices,
     }
     float e5 = sum * invP;
 
-    
+
     sum = e5;
     for (int i = 1; i < period; ++i) {
         const float price = P[today++];
@@ -126,10 +126,10 @@ void tilson_batch_f32(const float* __restrict__ prices,
     }
     float e6 = sum * invP;
 
-    
+
     out[base + warm_index] = fmaf(c1, e6, fmaf(c2, e5, fmaf(c3, e4, c4 * e3)));
 
-    
+
     int out_idx = warm_index + 1;
     const int N = series_len - first_valid;
     while (today <= (N - 1)) {
@@ -182,7 +182,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
 
     const unsigned mask = 0xffffffffu;
 
-    
+
     int period = 0;
     int lookback = 0;
     float k = 0.0f, c1 = 0.0f, c2 = 0.0f, c3 = 0.0f, c4 = 0.0f;
@@ -213,14 +213,14 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
     const int need_last = first_valid + (6 * period - 6);
     if (need_last >= series_len) return;
 
-    
+
     const float nanv = qnan_f32();
     for (int t = lane; t < warm_index && t < series_len; t += 32) {
         out[base + (size_t)t] = nanv;
     }
     if (warm_index >= series_len) return;
 
-    
+
     float e1_prev = 0.0f, e2_prev = 0.0f, e3_prev = 0.0f, e4_prev = 0.0f, e5_prev = 0.0f, e6_prev = 0.0f;
     if (lane == 0) {
         const float invP = 1.0f / (float)period;
@@ -229,12 +229,12 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         int today = 0;
         float sum = 0.0f;
 
-        
+
         for (int i = 0; i < period; ++i) sum += P[i];
         float e1 = sum * invP;
         today += period;
 
-        
+
         sum = e1;
         for (int i = 1; i < period; ++i) {
             const float price = P[today++];
@@ -243,7 +243,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         float e2 = sum * invP;
 
-        
+
         sum = e2;
         for (int i = 1; i < period; ++i) {
             const float price = P[today++];
@@ -253,7 +253,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         float e3 = sum * invP;
 
-        
+
         sum = e3;
         for (int i = 1; i < period; ++i) {
             const float price = P[today++];
@@ -264,7 +264,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         float e4 = sum * invP;
 
-        
+
         sum = e4;
         for (int i = 1; i < period; ++i) {
             const float price = P[today++];
@@ -276,7 +276,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         float e5 = sum * invP;
 
-        
+
         sum = e5;
         for (int i = 1; i < period; ++i) {
             const float price = P[today++];
@@ -289,13 +289,13 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         float e6 = sum * invP;
 
-        
+
         out[base + (size_t)warm_index] = fmaf(c1, e6, fmaf(c2, e5, fmaf(c3, e4, c4 * e3)));
 
         e1_prev = e1; e2_prev = e2; e3_prev = e3; e4_prev = e4; e5_prev = e5; e6_prev = e6;
     }
 
-    
+
     e1_prev = __shfl_sync(mask, e1_prev, 0);
     e2_prev = __shfl_sync(mask, e2_prev, 0);
     e3_prev = __shfl_sync(mask, e3_prev, 0);
@@ -310,7 +310,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         const int t = tile + lane;
         const bool valid = (t < series_len);
 
-        
+
         float A = valid ? one_m_k : 1.0f;
         float B = valid ? (k * prices[t]) : 0.0f;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -325,7 +325,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         const float e1 = fmaf(A, e1_prev, B);
 
-        
+
         A = valid ? one_m_k : 1.0f;
         B = valid ? (k * e1) : 0.0f;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -340,7 +340,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         const float e2 = fmaf(A, e2_prev, B);
 
-        
+
         A = valid ? one_m_k : 1.0f;
         B = valid ? (k * e2) : 0.0f;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -355,7 +355,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         const float e3 = fmaf(A, e3_prev, B);
 
-        
+
         A = valid ? one_m_k : 1.0f;
         B = valid ? (k * e3) : 0.0f;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -370,7 +370,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         const float e4 = fmaf(A, e4_prev, B);
 
-        
+
         A = valid ? one_m_k : 1.0f;
         B = valid ? (k * e4) : 0.0f;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -385,7 +385,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
         }
         const float e5 = fmaf(A, e5_prev, B);
 
-        
+
         A = valid ? one_m_k : 1.0f;
         B = valid ? (k * e5) : 0.0f;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -418,7 +418,7 @@ void tilson_batch_warp_scan_f32(const float* __restrict__ prices,
 
 
 extern "C" __global__
-void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm, 
+void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                       const int*   __restrict__ first_valids,
                                       int   period,
                                       float k,
@@ -450,7 +450,7 @@ void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
 #if !PREFILL_NAN_ON_HOST
     const float nanv = qnan_f32();
-    
+
     const int nan_end = (warm_index < series_len ? warm_index : series_len);
     for (int t = 0; t < nan_end; ++t) out_tm[t * stride + series] = nanv;
 #endif
@@ -465,12 +465,12 @@ void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
     int   today = 0;
     float sum   = 0.0f;
 
-    
+
     for (int i = 0; i < period; ++i) sum += P(fv + i);
     float e1 = sum * invP;
     today += period;
 
-    
+
     sum = e1;
     for (int i = 1; i < period; ++i) {
         const float price = P(fv + today++);
@@ -479,7 +479,7 @@ void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     float e2 = sum * invP;
 
-    
+
     sum = e2;
     for (int i = 1; i < period; ++i) {
         const float price = P(fv + today++);
@@ -489,7 +489,7 @@ void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     float e3 = sum * invP;
 
-    
+
     sum = e3;
     for (int i = 1; i < period; ++i) {
         const float price = P(fv + today++);
@@ -500,7 +500,7 @@ void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     float e4 = sum * invP;
 
-    
+
     sum = e4;
     for (int i = 1; i < period; ++i) {
         const float price = P(fv + today++);
@@ -512,7 +512,7 @@ void tilson_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     float e5 = sum * invP;
 
-    
+
     sum = e5;
     for (int i = 1; i < period; ++i) {
         const float price = P(fv + today++);

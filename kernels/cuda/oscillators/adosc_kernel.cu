@@ -25,7 +25,7 @@ struct KahanF32 {
 };
 
 __device__ __forceinline__ void kahan_add(KahanF32& s, float x) {
-    
+
     float y = x - s.c;
     float t = s.sum + y;
     s.c = (t - s.sum) - y;
@@ -52,15 +52,15 @@ extern "C" __global__ void adosc_adl_f32(const float* __restrict__ high,
                                          int series_len,
                                          float* __restrict__ adl_out)
 {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;   
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
     if (series_len <= 0) return;
 
-    
+
     const float mfm0 = mfm_from_hlc(high[0], low[0], close[0]);
     KahanF32 acc { mfm0 * volume[0], 0.0f };
     adl_out[0] = acc.sum;
 
-    
+
     for (int i = 1; i < series_len; ++i) {
         const float mfv = mfm_from_hlc(high[i], low[i], close[i]) * volume[i];
         kahan_add(acc, mfv);
@@ -83,7 +83,7 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
 {
     if (series_len <= 0) return;
 
-    
+
     const unsigned lane = threadIdx.x & 31u;
     const unsigned warp = threadIdx.x >> 5;
     const unsigned warps_per_block = blockDim.x >> 5;
@@ -93,7 +93,7 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
     const int sp = short_periods[combo];
     const int lp = long_periods[combo];
     if (sp <= 0 || lp <= 0 || sp >= lp) {
-        
+
         return;
     }
 
@@ -104,18 +104,18 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
 
     float* out_row = out + (size_t)combo * (size_t)series_len;
 
-    
+
     if (lane == 0) out_row[0] = 0.0f;
     float s_ema = adl[0];
     float l_ema = adl[0];
 
     const unsigned mask = 0xffffffffu;
 
-    
+
     for (int t0 = 1; t0 < series_len; t0 += 32) {
         const int t = t0 + (int)lane;
 
-        
+
         float As = 1.0f;
         float Bs = 0.0f;
         float Al = 1.0f;
@@ -128,8 +128,8 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
             Bl = a_l * x;
         }
 
-        
-        
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float As_prev = __shfl_up_sync(mask, As, offset);
             const float Bs_prev = __shfl_up_sync(mask, Bs, offset);
@@ -154,7 +154,7 @@ extern "C" __global__ void adosc_batch_from_adl_f32(const float* __restrict__ ad
             out_row[t] = ys - yl;
         }
 
-        
+
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         s_ema = __shfl_sync(mask, ys, last_lane);
@@ -172,8 +172,8 @@ extern "C" __global__ void adosc_many_series_one_param_f32(
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
     const float* __restrict__ volume_tm,
-    int cols,    
-    int rows,    
+    int cols,
+    int rows,
     int short_p,
     int long_p,
     float* __restrict__ out_tm)
@@ -189,15 +189,15 @@ extern "C" __global__ void adosc_many_series_one_param_f32(
     const int tid          = blockIdx.x * blockDim.x + threadIdx.x;
     const int totalThreads = gridDim.x * blockDim.x;
 
-    
+
     for (int s = tid; s < cols; s += totalThreads) {
-        int idx0 = /* t=0 */ 0 * cols + s;
+        int idx0 =  0 * cols + s;
         const float mfm0 = mfm_from_hlc(high_tm[idx0], low_tm[idx0], close_tm[idx0]);
         KahanF32 acc { mfm0 * volume_tm[idx0], 0.0f };
 
         float s_ema = acc.sum;
         float l_ema = acc.sum;
-        out_tm[idx0] = 0.0f;  
+        out_tm[idx0] = 0.0f;
 
         for (int t = 1; t < rows; ++t) {
             const int idx = t * cols + s;

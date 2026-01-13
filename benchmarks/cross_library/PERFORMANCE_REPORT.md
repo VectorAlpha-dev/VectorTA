@@ -7,11 +7,11 @@ This report analyzes the performance comparison between the Rust-Backtester libr
 
 ### ✅ Optimization Status
 - **SIMD Enabled**: AVX512 instructions are now active
-- **Compiler Optimizations**: 
+- **Compiler Optimizations**:
   - LTO (Link-Time Optimization): Enabled
   - Codegen Units: Set to 1 (maximum optimization)
   - Optimization Level: 3 (maximum performance)
-  
+
 ### 📊 Performance Results
 
 #### With Optimizations Enabled:

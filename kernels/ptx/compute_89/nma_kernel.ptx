@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .const .align 4 .b8 c_sqrt_diffs[16384];
 
 
@@ -45,7 +45,7 @@ $L__BB0_2:
 	ret;
 
 }
-	
+
 .visible .entry nma_batch_f32(
 	.param .u64 nma_batch_f32_param_0,
 	.param .u64 nma_batch_f32_param_1,
@@ -62,9 +62,9 @@ $L__BB0_2:
 	.reg .f32 	%f<113>;
 	.reg .b32 	%r<120>;
 	.reg .b64 	%rd<44>;
-	
+
 	.shared .align 4 .b8 _ZZ13nma_batch_f32E4tile[18432];
-	
+
 	.shared .align 4 .b8 _ZZ13nma_batch_f32E4wbuf[16384];
 
 	ld.param.u64 	%rd14, [nma_batch_f32_param_0];
@@ -228,20 +228,20 @@ $L__BB1_19:
 	shl.b32 	%r78, %r77, 2;
 	mov.u32 	%r79, _ZZ13nma_batch_f32E4tile;
 	add.s32 	%r76, %r79, %r78;
-	
+
 	cp.async.ca.shared.global [%r76], [%rd28], 4, 4;
-	
+
 	add.s64 	%rd43, %rd43, %rd8;
 	setp.lt.u64 	%p20, %rd43, %rd9;
 	@%p20 bra 	$L__BB1_19;
 
 $L__BB1_20:
-	
+
 	cp.async.commit_group;
-	
-	
+
+
 	cp.async.wait_group 0;
-	
+
 	barrier.sync 	0;
 	barrier.sync 	0;
 	setp.ge.s32 	%p21, %r5, %r26;
@@ -431,7 +431,7 @@ $L__BB1_41:
 	ret;
 
 }
-	
+
 .visible .entry nma_many_series_one_param_f32(
 	.param .u64 nma_many_series_one_param_f32_param_0,
 	.param .u64 nma_many_series_one_param_f32_param_1,
@@ -448,7 +448,7 @@ $L__BB1_41:
 	.reg .f32 	%f<126>;
 	.reg .b32 	%r<138>;
 	.reg .b64 	%rd<82>;
-	
+
 	.shared .align 4 .b8 _ZZ29nma_many_series_one_param_f32E4wbuf[16384];
 
 	ld.param.u64 	%rd14, [nma_many_series_one_param_f32_param_0];

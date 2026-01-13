@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 s_deques[];
 
 .visible .entry aroon_batch_f32(
@@ -346,7 +346,7 @@ $L__BB0_45:
 	ret;
 
 }
-	
+
 .visible .entry aroon_many_series_one_param_f32(
 	.param .u64 aroon_many_series_one_param_f32_param_0,
 	.param .u64 aroon_many_series_one_param_f32_param_1,

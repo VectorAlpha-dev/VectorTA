@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -24,7 +24,7 @@ def _cuda_available() -> bool:
     if not hasattr(ti, 'fvg_trailing_stop_cuda_batch_dev'):
         return False
     try:
-        
+
         x = np.array([np.nan, 1.0, 2.0, 3.0], dtype=np.float32)
         h = x + 0.1
         l = x - 0.1
@@ -52,7 +52,7 @@ class TestFvgTrailingStopCuda:
     def test_ohlc(self):
         data = load_test_data()
         close = data['close']
-        
+
         high = close + 0.15
         low  = close - 0.14
         return high, low, close
@@ -60,9 +60,9 @@ class TestFvgTrailingStopCuda:
     def test_batch_dev_matches_cpu(self, test_ohlc):
         high, low, close = test_ohlc
         params = dict(unmitigated_fvg_lookback=5, smoothing_length=9, reset_on_cross=False)
-        
+
         cpu_u, cpu_l, cpu_ut, cpu_lt = ti.fvg_trailing_stop(close, **params, kernel=None)
-        
+
         u, l, ut, lt = ti.fvg_trailing_stop_cuda_batch_dev(
             high.astype(np.float32), low.astype(np.float32), close.astype(np.float32),
             lookback_range=(params['unmitigated_fvg_lookback'], params['unmitigated_fvg_lookback'], 0),
@@ -73,7 +73,7 @@ class TestFvgTrailingStopCuda:
         gl = cp.asnumpy(cp.asarray(l))[0]
         gut= cp.asnumpy(cp.asarray(ut))[0]
         glt= cp.asnumpy(cp.asarray(lt))[0]
-        
+
         assert_close(gu, cpu_u, rtol=1e-3, atol=1e-3, msg="upper mismatch")
         assert_close(gl, cpu_l, rtol=1e-3, atol=1e-3, msg="lower mismatch")
         assert_close(gut, cpu_ut, rtol=1e-3, atol=1e-3, msg="upper_ts mismatch")
@@ -83,7 +83,7 @@ class TestFvgTrailingStopCuda:
         high, low, close = test_ohlc
         T = 2048
         N = 4
-        
+
         h_tm = np.zeros((T, N), dtype=np.float64)
         l_tm = np.zeros_like(h_tm)
         c_tm = np.zeros_like(h_tm)
@@ -93,7 +93,7 @@ class TestFvgTrailingStopCuda:
             c_tm[:, j] = close[:T] * (1.0 + 0.0*j)
 
         params = dict(unmitigated_fvg_lookback=5, smoothing_length=9, reset_on_cross=False)
-        
+
         cpu_u = np.zeros_like(c_tm)
         cpu_l = np.zeros_like(c_tm)
         cpu_ut= np.zeros_like(c_tm)

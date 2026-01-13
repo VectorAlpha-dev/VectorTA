@@ -28,7 +28,7 @@ __device__ __forceinline__ SupersmootherCoefs make_coefs(int period) {
     const double b = 2.0 * a * cos(1.738 * CUDART_PI * inv_period);
     const double c = a * a;
     SupersmootherCoefs coefs;
-    
+
     coefs.coef_source = 1.0 - c * c - b + b * c;
     coefs.coef_prev1 = b + c;
     coefs.coef_prev2 = -c - b * c;
@@ -49,13 +49,13 @@ __device__ __forceinline__ void supersmoother_3_pole_row_with_coefs(
 
     const int start = (first_valid < 0) ? 0 : first_valid;
 
-    
+
     for (int t = 0; t < start && t < series_len; ++t) {
         out[t] = CUDART_NAN_F;
     }
     if (start >= series_len) return;
 
-    
+
     int t = start;
 
     double y0 = static_cast<double>(prices[t]);
@@ -70,11 +70,11 @@ __device__ __forceinline__ void supersmoother_3_pole_row_with_coefs(
     out[t] = static_cast<float>(y2);
     ++t;
 
-    
+
     #pragma unroll 4
     for (; t < series_len; ++t) {
         const double x = static_cast<double>(prices[t]);
-        
+
         const double y_next =
             fma(coefs.coef_prev3, y0,
             fma(coefs.coef_prev2, y1,
@@ -109,7 +109,7 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided_with_coefs(
 
     const int start = (first_valid < 0) ? 0 : first_valid;
 
-    
+
     float* o = out;
     for (int t = 0; t < start && t < series_len; ++t) {
         *o = CUDART_NAN_F;
@@ -117,12 +117,12 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided_with_coefs(
     }
     if (start >= series_len) return;
 
-    
+
     const float* p = prices + static_cast<size_t>(start) * static_cast<size_t>(stride);
     o = out + static_cast<size_t>(start) * static_cast<size_t>(stride);
     int t = start;
 
-    
+
     double y0 = static_cast<double>(*p); *o = static_cast<float>(y0);
     p += stride; o += stride; ++t; if (t >= series_len) return;
 
@@ -132,7 +132,7 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided_with_coefs(
     double y2 = static_cast<double>(*p); *o = static_cast<float>(y2);
     p += stride; o += stride; ++t;
 
-    
+
     #pragma unroll 4
     for (; t < series_len; ++t) {
         const double x = static_cast<double>(*p);
@@ -161,7 +161,7 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided(
     supersmoother_3_pole_row_strided_with_coefs(prices, series_len, stride, first_valid, coefs, out);
 }
 
-}  
+}
 
 
 
@@ -170,12 +170,12 @@ __device__ __forceinline__ void supersmoother_3_pole_row_strided(
 
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_batch_f32(
-    const float* __restrict__ prices,   
-    const int*   __restrict__ periods,  
+    const float* __restrict__ prices,
+    const int*   __restrict__ periods,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out)            
+    float* __restrict__ out)
 {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -190,8 +190,8 @@ void supersmoother_3_pole_batch_f32(
 
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_batch_f32_precomp(
-    const float* __restrict__ prices,                 
-    const SupersmootherCoefs* __restrict__ coefs_arr, 
+    const float* __restrict__ prices,
+    const SupersmootherCoefs* __restrict__ coefs_arr,
     int series_len,
     int n_combos,
     int first_valid,
@@ -248,10 +248,10 @@ void supersmoother_3_pole_batch_warp_scan_f32(
         return;
     }
 
-    
+
     for (int t = lane; t < first_valid; t += 32) out_row[t] = CUDART_NAN_F;
 
-    
+
     if (lane == 0) {
         out_row[first_valid] = prices[first_valid];
         if (first_valid + 1 < series_len) out_row[first_valid + 1] = prices[first_valid + 1];
@@ -261,20 +261,20 @@ void supersmoother_3_pole_batch_warp_scan_f32(
 
     const SupersmootherCoefs coefs = make_coefs(period);
 
-    
+
     double s0_prev = 0.0;
     double s1_prev = 0.0;
     double s2_prev = 0.0;
     if (lane == 0) {
-        s2_prev = static_cast<double>(prices[first_valid]);     
-        s1_prev = static_cast<double>(prices[first_valid + 1]); 
-        s0_prev = static_cast<double>(prices[first_valid + 2]); 
+        s2_prev = static_cast<double>(prices[first_valid]);
+        s1_prev = static_cast<double>(prices[first_valid + 1]);
+        s0_prev = static_cast<double>(prices[first_valid + 2]);
     }
     s0_prev = __shfl_sync(mask, s0_prev, 0);
     s1_prev = __shfl_sync(mask, s1_prev, 0);
     s2_prev = __shfl_sync(mask, s2_prev, 0);
 
-    
+
     const double m00 = coefs.coef_prev1;
     const double m01 = coefs.coef_prev2;
     const double m02 = coefs.coef_prev3;
@@ -326,15 +326,15 @@ void supersmoother_3_pole_batch_warp_scan_f32(
 
         Mat3 P = valid ? M : I;
 
-        
+
         double v0 = valid ? (coefs.coef_source * static_cast<double>(prices[t])) : 0.0;
         double v1 = 0.0;
         double v2 = 0.0;
 
-        
-        
-        
-        
+
+
+
+
         #pragma unroll
         for (int offset = 1; offset < 32; offset <<= 1) {
             const double p00_prev = __shfl_up_sync(mask, P.m00, offset);
@@ -362,7 +362,7 @@ void supersmoother_3_pole_batch_warp_scan_f32(
             }
         }
 
-        
+
         double h0, h1, h2;
         mat_apply(P, s0_prev, s1_prev, s2_prev, h0, h1, h2);
 
@@ -386,17 +386,17 @@ void supersmoother_3_pole_batch_warp_scan_f32(
 
 extern "C" __global__ __launch_bounds__(256)
 void supersmoother_3_pole_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm,  
+    const float* __restrict__ prices_tm,
     int period,
     int num_series,
     int series_len,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm)           
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm)
 {
     const int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (series_idx >= num_series) return;
 
-    const int stride = num_series; 
+    const int stride = num_series;
     const int first_valid = first_valids[series_idx];
 
     const float* series_prices = prices_tm + series_idx;

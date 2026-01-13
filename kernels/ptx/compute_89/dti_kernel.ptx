@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry dti_batch_f32(
 	.param .u64 dti_batch_f32_param_0,
@@ -636,7 +636,7 @@ $L__BB0_51:
 	bra.uni 	$L__BB0_52;
 
 }
-	
+
 .visible .entry dti_many_series_one_param_f32(
 	.param .u64 dti_many_series_one_param_f32_param_0,
 	.param .u64 dti_many_series_one_param_f32_param_1,

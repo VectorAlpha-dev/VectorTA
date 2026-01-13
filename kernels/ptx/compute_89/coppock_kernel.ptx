@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry coppock_batch_f32(
 	.param .u64 coppock_batch_f32_param_0,
@@ -816,7 +816,7 @@ $L__BB0_46:
 	ret;
 
 }
-	
+
 .visible .entry coppock_batch_time_parallel_f32(
 	.param .u64 coppock_batch_time_parallel_f32_param_0,
 	.param .u64 coppock_batch_time_parallel_f32_param_1,
@@ -963,7 +963,7 @@ $L__BB1_10:
 	ret;
 
 }
-	
+
 .visible .entry coppock_many_series_one_param_f32(
 	.param .u64 coppock_many_series_one_param_f32_param_0,
 	.param .u64 coppock_many_series_one_param_f32_param_1,

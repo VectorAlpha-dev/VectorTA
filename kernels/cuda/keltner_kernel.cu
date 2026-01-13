@@ -22,21 +22,21 @@ static __device__ __forceinline__ float fast_nan() { return nanf(""); }
 
 extern "C" __global__ __launch_bounds__(256, 2)
 void keltner_batch_f32(
-    const float* __restrict__ ma_rows,           
-    const float* __restrict__ atr_rows,          
-    const int*   __restrict__ row_period_idx,    
-    const float* __restrict__ row_multipliers,   
-    const int*   __restrict__ row_warms,         
+    const float* __restrict__ ma_rows,
+    const float* __restrict__ atr_rows,
+    const int*   __restrict__ row_period_idx,
+    const float* __restrict__ row_multipliers,
+    const int*   __restrict__ row_warms,
     int len,
-    int rows,                                    
-    float* __restrict__ out_upper,               
-    float* __restrict__ out_middle,              
-    float* __restrict__ out_lower                
+    int rows,
+    float* __restrict__ out_upper,
+    float* __restrict__ out_middle,
+    float* __restrict__ out_lower
 ) {
     const int r = blockIdx.y;
     if (r >= rows) return;
 
-    
+
     __shared__ int   s_pidx;
     __shared__ int   s_warm;
     __shared__ float s_mult;
@@ -50,7 +50,7 @@ void keltner_batch_f32(
     const float neg_mult = -s_mult;
     const float nanv     = fast_nan();
 
-    
+
     const size_t base_p = static_cast<size_t>(s_pidx) * static_cast<size_t>(len);
     const size_t base_r = static_cast<size_t>(r)      * static_cast<size_t>(len);
 
@@ -63,12 +63,12 @@ void keltner_batch_f32(
     const int t0 = blockIdx.x * blockDim.x + threadIdx.x;
     const int stride = blockDim.x * gridDim.x;
 
-    
+
     if ((len & 3) == 0) {
         const int len4 = len >> 2;
         for (int i4 = t0; i4 < len4; i4 += stride) {
-            const int t = (i4 << 2);          
-            
+            const int t = (i4 << 2);
+
             if (t + 3 < s_warm) {
                 const float4 n4 = make_float4(nanv, nanv, nanv, nanv);
                 reinterpret_cast<float4*>(outM)[i4] = n4;
@@ -107,7 +107,7 @@ void keltner_batch_f32(
         return;
     }
 
-    
+
     for (int t = t0; t < len; t += stride) {
         if (t < s_warm) {
             outM[t] = nanv; outU[t] = nanv; outL[t] = nanv;
@@ -131,22 +131,22 @@ void keltner_batch_f32(
 
 extern "C" __global__ __launch_bounds__(256, 2)
 void keltner_many_series_one_param_f32(
-    const float* __restrict__ ma_tm,        
-    const float* __restrict__ atr_tm,       
-    const int*   __restrict__ first_valids, 
+    const float* __restrict__ ma_tm,
+    const float* __restrict__ atr_tm,
+    const int*   __restrict__ first_valids,
     int period,
     int cols,
     int rows,
-    int elems,                               
+    int elems,
     float multiplier,
-    float* __restrict__ out_upper_tm,       
-    float* __restrict__ out_middle_tm,      
-    float* __restrict__ out_lower_tm        
+    float* __restrict__ out_upper_tm,
+    float* __restrict__ out_middle_tm,
+    float* __restrict__ out_lower_tm
 ) {
     const float nanv      = fast_nan();
     const float neg_mult  = -multiplier;
 
-    
+
     if (gridDim.y > 1) {
         const int t = blockIdx.y;
         if (t >= rows) return;
@@ -166,7 +166,7 @@ void keltner_many_series_one_param_f32(
             for (int i4 = s0; i4 < cols4; i4 += stride) {
                 const int s = (i4 << 2);
 
-                
+
                 const int4 fv4 = reinterpret_cast<const int4*>(first_valids)[i4];
                 const int w0 = fv4.x + period - 1;
                 const int w1 = fv4.y + period - 1;
@@ -178,7 +178,7 @@ void keltner_many_series_one_param_f32(
                 const bool v2 = t >= w2;
                 const bool v3 = t >= w3;
 
-                
+
                 if (!(v0 | v1 | v2 | v3)) {
                     const float4 n4 = make_float4(nanv, nanv, nanv, nanv);
                     reinterpret_cast<float4*>(outM_row)[i4] = n4;
@@ -212,7 +212,7 @@ void keltner_many_series_one_param_f32(
             return;
         }
 
-        
+
         for (int s = s0; s < cols; s += stride) {
             const int warm = first_valids[s] + period - 1;
             if (t < warm) {
@@ -228,7 +228,7 @@ void keltner_many_series_one_param_f32(
         return;
     }
 
-    
+
     {
         const int i0 = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = blockDim.x * gridDim.x;
@@ -246,7 +246,7 @@ void keltner_many_series_one_param_f32(
             const float a   = atr_tm[idx];
             out_middle_tm[idx] = mid;
             out_upper_tm [idx] = fmaf(multiplier, a, mid);
-            out_lower_tm [idx] = fmaf(-multiplier, a, mid); 
+            out_lower_tm [idx] = fmaf(-multiplier, a, mid);
         }
     }
 }

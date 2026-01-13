@@ -27,7 +27,7 @@ class TestEpma:
         out = ti.epma(close, exp['default_params']['period'], exp['default_params']['offset'])
         assert len(out) == len(close)
 
-        
+
         assert_close(
             out[-5:],
             exp['last_5_values'],
@@ -36,7 +36,7 @@ class TestEpma:
             msg="EPMA last 5 values mismatch",
         )
 
-        
+
         compare_with_rust('epma', out, 'close', exp['default_params'])
 
     def test_epma_invalid_params(self):
@@ -69,7 +69,7 @@ class TestEpma:
             stream_vals.append(np.nan if x is None else x)
 
         assert len(batch) == len(stream_vals)
-        
+
         for i in range(len(batch)):
             if not (np.isnan(batch[i]) or np.isnan(stream_vals[i])):
                 assert abs(batch[i] - stream_vals[i]) < 1e-9, \
@@ -80,14 +80,14 @@ class TestEpma:
         exp = EXPECTED_OUTPUTS['epma']
         p, o = exp['default_params']['period'], exp['default_params']['offset']
 
-        
+
         batch = ti.epma_batch(close, (p, p, 1), (o, o, 1))
         assert 'values' in batch and 'periods' in batch and 'offsets' in batch
         assert batch['values'].shape == (1, len(close))
         assert list(batch['periods']) == [p]
         assert list(batch['offsets']) == [o]
 
-        
+
         assert_close(
             batch['values'][0, -5:],
             exp['last_5_values'],
@@ -96,13 +96,13 @@ class TestEpma:
             msg='EPMA batch default row mismatch',
         )
 
-        
-        
-        batch2 = ti.epma_batch(close[:200], (5, 11, 3), (1, 3, 2))  
+
+
+        batch2 = ti.epma_batch(close[:200], (5, 11, 3), (1, 3, 2))
         rows = len(batch2['periods'])
         assert batch2['values'].shape[0] == rows
         assert rows == len(batch2['offsets'])
-        
+
         for i in range(rows):
             pi = int(batch2['periods'][i])
             oi = int(batch2['offsets'][i])

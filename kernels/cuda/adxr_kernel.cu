@@ -50,19 +50,19 @@ void adxr_batch_f32(const float* __restrict__ high,
 
     const int base = combo * series_len;
 
-    
+
     for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
         out[base + i] = NAN;
     }
     __syncthreads();
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     int i = first_valid + 1;
     const int stop = min(first_valid + period, series_len - 1);
-    
+
     float pdm_sum = 0.f;
     float mdm_sum = 0.f;
     while (i <= stop) {
@@ -77,7 +77,7 @@ void adxr_batch_f32(const float* __restrict__ high,
         ++i;
     }
 
-    
+
     const float denom0 = pdm_sum + mdm_sum;
     const float initial_dx = (denom0 > 0.f) ? (100.f * fabsf(pdm_sum - mdm_sum) / denom0) : 0.f;
 
@@ -87,7 +87,7 @@ void adxr_batch_f32(const float* __restrict__ high,
     const float pm1 = p - 1.0f;
     const int warmup_start = first_valid + 2 * period;
 
-    
+
     float pdm_s = pdm_sum;
     float mdm_s = mdm_sum;
 
@@ -96,7 +96,7 @@ void adxr_batch_f32(const float* __restrict__ high,
     float adx_last = NAN;
     bool have_adx = false;
 
-    
+
     float ring_local[256];
     const bool use_local = (period <= 256);
     if (use_local) {
@@ -115,7 +115,7 @@ void adxr_batch_f32(const float* __restrict__ high,
         const float plus_dm = (up > down && up > 0.0f) ? up : 0.0f;
         const float minus_dm = (down > up && down > 0.0f) ? down : 0.0f;
 
-        
+
         pdm_s = fmaf(pdm_s, one_minus, plus_dm);
         mdm_s = fmaf(mdm_s, one_minus, minus_dm);
 
@@ -128,7 +128,7 @@ void adxr_batch_f32(const float* __restrict__ high,
             if (dx_count == period) {
                 adx_last = dx_sum.sum * inv_p;
                 have_adx = true;
-                
+
                 float prev = use_local ? ring_local[head] : NAN;
                 if (use_local) ring_local[head] = adx_last;
                 head += 1; if (head == period) head = 0;
@@ -169,7 +169,7 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     const int stride = num_series;
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = NAN;
     }
@@ -177,7 +177,7 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     if (threadIdx.x != 0) return;
 
-    
+
     int i = first_valid + 1;
     const int stop = min(first_valid + period, series_len - 1);
     float pdm_sum = 0.f;
@@ -212,7 +212,7 @@ void adxr_many_series_one_param_f32(const float* __restrict__ high_tm,
     bool have_adx = false;
 
     int head = 0;
-    
+
     const bool use_local = (period <= 256);
     float ring_local[256];
     if (use_local) {
@@ -276,10 +276,10 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
                                          int series_len,
                                          int first_valid,
                                          int n_periods,
-                                         
+
                                          float* __restrict__ adx_ring,
                                          int ring_pitch,
-                                         
+
                                          float* __restrict__ out)
 {
     if (first_valid < 0 || first_valid >= series_len || n_periods <= 0) return;
@@ -293,7 +293,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     }
     const bool valid = active && (period > 0);
 
-    
+
     const int row_base  = valid ? (tid * series_len) : 0;
     const int ring_base = valid ? (tid * ring_pitch) : 0;
 
@@ -309,7 +309,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         warmup_start = first_valid + 2 * period;
     }
 
-    
+
     if (valid) {
         const int warm_end = min(warmup_start, series_len);
         for (int t = 0; t < warm_end; ++t) {
@@ -317,7 +317,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         }
     }
 
-    
+
     const int init_i0 = first_valid + 1;
     const int init_i1 = min(first_valid + period, series_len - 1);
     float pdm_s = 0.f;
@@ -344,10 +344,10 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
     float adx_last = NAN;
     bool  have_adx = false;
 
-    int head = 0; 
+    int head = 0;
     int ring_filled = 0;
 
-    
+
     extern __shared__ float smem[];
     const int TILE = 256;
     float* pdm_tile = smem;
@@ -359,7 +359,7 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
         const int tile_end   = min(tile_start + TILE, series_len);
         const int count      = tile_end - tile_start;
 
-        
+
         for (int j = threadIdx.x; j < count; j += blockDim.x) {
             const int i = tile_start + j;
             const float ch = high[i];
@@ -377,9 +377,9 @@ void adxr_one_series_many_params_f32_opt(const float* __restrict__ high,
             const int i = tile_start + j;
 
             if (!valid || i <= first_valid + period) {
-                
+
             } else {
-                
+
                 pdm_s = fmaf(pdm_s, one_minus, pdm_tile[j]);
                 mdm_s = fmaf(mdm_s, one_minus, mdm_tile[j]);
 
@@ -431,7 +431,7 @@ void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ hig
                                                    int period,
                                                    int num_series,
                                                    int series_len,
-                                                   
+
                                                    float* __restrict__ adx_ring,
                                                    int ring_pitch,
                                                    float* __restrict__ out_tm) {
@@ -443,14 +443,14 @@ void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ hig
 
     const int stride = num_series;
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = NAN;
     }
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    
+
     int i = first_valid + 1;
     const int stop = min(first_valid + period, series_len - 1);
     float pdm_sum = 0.f;
@@ -489,7 +489,7 @@ void adxr_many_series_one_param_time_major_f32_opt(const float* __restrict__ hig
     if (use_local) {
         for (int k = 0; k < period; ++k) ring_local[k] = NAN;
     } else {
-        
+
         const int ring_base = series * ring_pitch;
         for (int k = 0; k < period; ++k) adx_ring[ring_base + k] = NAN;
     }

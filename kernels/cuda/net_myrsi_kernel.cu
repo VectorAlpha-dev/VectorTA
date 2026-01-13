@@ -50,13 +50,13 @@ static __device__ __forceinline__ int warp_reduce_sum_i32(int v) {
 }
 
 extern "C" __global__
-void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,   
-                                 const int*   __restrict__ periods,  
+void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
+                                 const int*   __restrict__ periods,
                                  int series_len,
                                  int n_combos,
                                  int first_valid,
-                                 int max_period,                     
-                                 float* __restrict__ out)            
+                                 int max_period,
+                                 float* __restrict__ out)
 {
     const int lane = threadIdx.x & 31;
     const int warp = threadIdx.x >> 5;
@@ -69,7 +69,7 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
 
     float* out_row = out + (size_t)combo * series_len;
 
-    
+
     if (UNLIKELY(period <= 0 || period > max_period || max_period <= 0 ||
                  max_period > NET_MYRSI_MAX_PERIOD ||
                  first_valid < 0 || first_valid >= series_len)) {
@@ -86,8 +86,8 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
     for (int i = lane; i < warm; i += 32) out_row[i] = qnan32();
     if (lane == 0) out_row[warm] = (period > 1) ? 0.0f : qnan32();
 
-    
-    
+
+
     extern __shared__ double smem_dbl[];
     double* diffs = smem_dbl + (size_t)warp * (size_t)max_period;
     double* myr = smem_dbl + (size_t)warps_per_block * (size_t)max_period +
@@ -101,7 +101,7 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
     double cu = 0.0, cd = 0.0;
     int d_head = 0, d_count = 0;
     int m_head = 0, m_count = 0;
-    int num = 0; 
+    int num = 0;
     const float denom = 0.5f * (float)period * (float)(period - 1);
 
     for (int i = first_valid + 1; i < series_len; ++i) {
@@ -145,7 +145,7 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
                 }
                 __syncwarp();
 
-                
+
                 m_head++; if (m_head == period) m_head = 0;
                 m_count++;
             } else {
@@ -176,7 +176,7 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
                 }
                 __syncwarp();
 
-                
+
                 m_head++; if (m_head == period) m_head = 0;
             }
 
@@ -191,13 +191,13 @@ void net_myrsi_batch_f32_warp_dbl(const float* __restrict__ prices,
 
 
 extern "C" __global__
-void net_myrsi_batch_f32_shared_fast(const float* __restrict__ prices,   
-                                     const int*   __restrict__ periods,  
+void net_myrsi_batch_f32_shared_fast(const float* __restrict__ prices,
+                                     const int*   __restrict__ periods,
                                      int series_len,
                                      int n_combos,
                                      int first_valid,
-                                     int max_period,                     
-                                     float* __restrict__ out)            
+                                     int max_period,
+                                     float* __restrict__ out)
 {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -205,7 +205,7 @@ void net_myrsi_batch_f32_shared_fast(const float* __restrict__ prices,
     const int period = periods[combo];
     float* out_row = out + (size_t)combo * series_len;
 
-    
+
     if (UNLIKELY(period <= 0 || period > max_period || max_period <= 0 ||
                  max_period > NET_MYRSI_MAX_PERIOD ||
                  first_valid < 0 || first_valid >= series_len)) {
@@ -222,13 +222,13 @@ void net_myrsi_batch_f32_shared_fast(const float* __restrict__ prices,
     for (int i = 0; i < warm; ++i) out_row[i] = qnan32();
     out_row[warm] = (period > 1) ? 0.0f : qnan32();
 
-    
+
     extern __shared__ float smem[];
     const int pitch = (int)blockDim.x;
     float* diffs = smem;
     double* myr  = (double*)(diffs + (size_t)max_period * pitch);
 
-    
+
     for (int j = 0; j < period; ++j) {
         myr[(size_t)j * pitch + threadIdx.x] = 0.0;
     }
@@ -304,13 +304,13 @@ void net_myrsi_batch_f32_shared_fast(const float* __restrict__ prices,
 }
 
 extern "C" __global__
-void net_myrsi_batch_f32_shared_dbl(const float* __restrict__ prices,   
-                                    const int*   __restrict__ periods,  
+void net_myrsi_batch_f32_shared_dbl(const float* __restrict__ prices,
+                                    const int*   __restrict__ periods,
                                     int series_len,
                                     int n_combos,
                                     int first_valid,
-                                    int max_period,                     
-                                    float* __restrict__ out)            
+                                    int max_period,
+                                    float* __restrict__ out)
 {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -318,7 +318,7 @@ void net_myrsi_batch_f32_shared_dbl(const float* __restrict__ prices,
     const int period = periods[combo];
     float* out_row = out + (size_t)combo * series_len;
 
-    
+
     if (UNLIKELY(period <= 0 || period > max_period || max_period <= 0 ||
                  max_period > NET_MYRSI_MAX_PERIOD ||
                  first_valid < 0 || first_valid >= series_len)) {
@@ -335,13 +335,13 @@ void net_myrsi_batch_f32_shared_dbl(const float* __restrict__ prices,
     for (int i = 0; i < warm; ++i) out_row[i] = qnan32();
     out_row[warm] = (period > 1) ? 0.0f : qnan32();
 
-    
+
     extern __shared__ double smem_dbl[];
     const int pitch = (int)blockDim.x;
     double* diffs = smem_dbl;
     double* myr   = diffs + (size_t)max_period * pitch;
 
-    
+
     for (int j = 0; j < period; ++j) {
         myr[(size_t)j * pitch + threadIdx.x] = 0.0;
     }
@@ -420,12 +420,12 @@ void net_myrsi_batch_f32_shared_dbl(const float* __restrict__ prices,
 }
 
 extern "C" __global__
-void net_myrsi_batch_f32(const float* __restrict__ prices,   
-                         const int*   __restrict__ periods,  
+void net_myrsi_batch_f32(const float* __restrict__ prices,
+                         const int*   __restrict__ periods,
                          int series_len,
                          int n_combos,
                          int first_valid,
-                         float* __restrict__ out)            
+                         float* __restrict__ out)
 {
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     if (combo >= n_combos) return;
@@ -433,7 +433,7 @@ void net_myrsi_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     float* out_row = out + (size_t)combo * series_len;
 
-    
+
     if (UNLIKELY(period <= 0 || period > NET_MYRSI_MAX_PERIOD ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_row[i] = qnan32();
@@ -449,7 +449,7 @@ void net_myrsi_batch_f32(const float* __restrict__ prices,
     for (int i = 0; i < warm; ++i) out_row[i] = qnan32();
     out_row[warm] = (period > 1) ? 0.0f : qnan32();
 
-    
+
     double cu = 0.0, cd = 0.0;
     double diffs[NET_MYRSI_MAX_PERIOD];
     int d_head = 0, d_count = 0;
@@ -514,10 +514,10 @@ void net_myrsi_batch_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void net_myrsi_many_series_one_param_time_major_f32(
-    const float* __restrict__ prices_tm, 
+    const float* __restrict__ prices_tm,
     int cols, int rows, int period,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm            
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm
 ){
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= cols) return;
@@ -539,7 +539,7 @@ void net_myrsi_many_series_one_param_time_major_f32(
     col_out[warm * cols] = (period > 1) ? 0.0f : qnan32();
 
 
-    
+
     double cu = 0.0, cd = 0.0;
     double diffs[NET_MYRSI_MAX_PERIOD];
     int d_head = 0, d_count = 0;
@@ -571,7 +571,7 @@ void net_myrsi_many_series_one_param_time_major_f32(
             double sum = cu + cd;
             double r = (sum != 0.0) ? ((cu - cd) / sum) : 0.0;
 
-            
+
             if (m_count < period) {
                 myr[m_head] = r;
                 m_head++; if (m_head == period) m_head = 0;
@@ -581,9 +581,9 @@ void net_myrsi_many_series_one_param_time_major_f32(
                 m_head++; if (m_head == period) m_head = 0;
             }
 
-            
+
             int cur_len = m_count;
-            int latest = (m_head - 1 + period) % period; 
+            int latest = (m_head - 1 + period) % period;
             double rw[NET_MYRSI_MAX_PERIOD];
             for (int kk = 0; kk < cur_len; ++kk) {
                 int pos = (latest - kk + period) % period;

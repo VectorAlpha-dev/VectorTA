@@ -58,7 +58,7 @@ void trix_batch_f32(const float* __restrict__ logs,
 
     float* __restrict__ out_row = out + combo * series_len;
 
-    const int warmup_end = first_valid + 3 * (period - 1) + 1; 
+    const int warmup_end = first_valid + 3 * (period - 1) + 1;
     const int nan_to = warmup_end < series_len ? warmup_end : series_len;
     const float qn = trix_qnan();
     for (int i = 0; i < nan_to; ++i) out_row[i] = qn;
@@ -70,14 +70,14 @@ void trix_batch_f32(const float* __restrict__ logs,
     const double a_d = (double)a;
     const double inv_n_d = (double)inv_n;
 
-    
+
     float sum1 = 0.0f;
     for (int i = first_valid; i < first_valid + period; ++i) {
         sum1 += logs[i];
     }
-    float ema1 = sum1 * inv_n; 
+    float ema1 = sum1 * inv_n;
 
-    
+
     float sum_ema1 = ema1;
     int end2 = first_valid + 2 * period - 1;
     for (int i = first_valid + period; i < end2; ++i) {
@@ -85,10 +85,10 @@ void trix_batch_f32(const float* __restrict__ logs,
         sum_ema1 += ema1;
     }
 
-    
-    float ema2 = sum_ema1 * inv_n; 
 
-    
+    float ema2 = sum_ema1 * inv_n;
+
+
     double sum_ema2 = (double)ema2;
     int end3 = first_valid + 3 * period - 2;
     for (int i = end2; i < end3; ++i) {
@@ -97,10 +97,10 @@ void trix_batch_f32(const float* __restrict__ logs,
         sum_ema2 += (double)ema2;
     }
 
-    
-    double ema3_prev = sum_ema2 * inv_n_d; 
 
-    
+    double ema3_prev = sum_ema2 * inv_n_d;
+
+
     int t = warmup_end;
     double ema3 = ema3_prev;
     {
@@ -113,7 +113,7 @@ void trix_batch_f32(const float* __restrict__ logs,
         ++t;
     }
 
-    
+
     for (; t < series_len; ++t) {
         const float lv = logs[t];
         ema1 = ema_step(ema1, lv, a);
@@ -160,7 +160,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
     int fv = first_valid;
     if (fv < 0) fv = 0;
 
-    const int warmup_end = fv + 3 * (period - 1) + 1; 
+    const int warmup_end = fv + 3 * (period - 1) + 1;
     const int nan_to = warmup_end < series_len ? warmup_end : series_len;
     for (int i = lane; i < nan_to; i += 32) out_row[i] = qn;
     if (warmup_end >= series_len) return;
@@ -176,7 +176,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
     if (lane == 0) {
         float sum1 = 0.0f;
         for (int i = fv; i < fv + period; ++i) sum1 += logs[i];
-        ema1 = sum1 * inv_n; 
+        ema1 = sum1 * inv_n;
 
         float sum_ema1 = ema1;
         const int end2 = fv + 2 * period - 1;
@@ -184,7 +184,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
             ema1 = ema_step(ema1, logs[i], a);
             sum_ema1 += ema1;
         }
-        ema2 = sum_ema1 * inv_n; 
+        ema2 = sum_ema1 * inv_n;
 
         float sum_ema2 = ema2;
         const int end3 = fv + 3 * period - 2;
@@ -193,7 +193,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
             ema2 = ema_step(ema2, ema1, a);
             sum_ema2 += ema2;
         }
-        ema3_prev = sum_ema2 * inv_n; 
+        ema3_prev = sum_ema2 * inv_n;
     }
 
     ema1 = __shfl_sync(mask, ema1, 0);
@@ -204,7 +204,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
         const int t = t0 + lane;
         const float lv = (t < series_len) ? logs[t] : 0.0f;
 
-        
+
         float A1 = one_minus_a;
         float B1 = a * lv;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -219,7 +219,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
         }
         const float ema1_lane = __fmaf_rn(A1, ema1, B1);
 
-        
+
         float A2 = one_minus_a;
         float B2 = a * ema1_lane;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -234,7 +234,7 @@ void trix_batch_warp_scan_f32(const float* __restrict__ logs,
         }
         const float ema2_lane = __fmaf_rn(A2, ema2, B2);
 
-        
+
         float A3 = one_minus_a;
         float B3 = a * ema2_lane;
         for (int offset = 1; offset < 32; offset <<= 1) {
@@ -292,7 +292,7 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float inv_n = 1.0f / float(period);
     const float SCALE = 10000.0f;
 
-    
+
     float sum1 = 0.0f;
     for (int i = fv; i < fv + period; ++i) {
         const float px = prices_tm[i * num_series + sidx];
@@ -300,7 +300,7 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     float ema1 = sum1 * inv_n;
 
-    
+
     float sum_ema1 = ema1;
     int end2 = fv + 2 * period - 1;
     for (int i = fv + period; i < end2; ++i) {
@@ -309,10 +309,10 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
         sum_ema1 += ema1;
     }
 
-    
+
     float ema2 = sum_ema1 * inv_n;
 
-    
+
     float sum_ema2 = ema2;
     int end3 = fv + 3 * period - 2;
     for (int i = end2; i < end3; ++i) {
@@ -322,10 +322,10 @@ void trix_many_series_one_param_f32(const float* __restrict__ prices_tm,
         sum_ema2 += ema2;
     }
 
-    
+
     float ema3_prev = sum_ema2 * inv_n;
 
-    
+
     int t = warmup_end;
     float ema3 = ema3_prev;
     {

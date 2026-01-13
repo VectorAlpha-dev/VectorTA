@@ -55,25 +55,25 @@ static __device__ __forceinline__ double hilbert_nfma(double x0, double x2, doub
 }
 
 static __device__ __forceinline__ double atan_fast_f64(double z) {
-    
+
     const double C0 = 0.2447;
     const double C1 = 0.0663;
-    const double PIO4 = PI_D * 0.25; 
-    const double PIO2 = PI_D * 0.5;  
+    const double PIO4 = PI_D * 0.25;
+    const double PIO2 = PI_D * 0.5;
 
     double a = fabs(z);
     if (a <= 1.0) {
-        
-        double t = fma(C1, a, C0);                 
-        double inner = fma(z, (a - 1.0), t);       
-        return fma(PIO4, z, inner);                
+
+        double t = fma(C1, a, C0);
+        double inner = fma(z, (a - 1.0), t);
+        return fma(PIO4, z, inner);
     } else {
-        
+
         double inv = 1.0 / z;
         double ai = fabs(inv);
-        double t = fma(C1, ai, C0);                
-        double inner = fma(inv, (ai - 1.0), t);    
-        double base = fma(PIO4, inv, inner);       
+        double t = fma(C1, ai, C0);
+        double inner = fma(inv, (ai - 1.0), t);
+        double base = fma(PIO4, inv, inner);
         return (z > 0.0) ? (PIO2 - base) : (-PIO2 - base);
     }
 }
@@ -84,7 +84,7 @@ static __device__ __forceinline__ double clamp_double(double x, double lo, doubl
     return x;
 }
 
-} 
+}
 
 
 
@@ -98,7 +98,7 @@ void mama_inv_dp_f32(const float* __restrict__ prices,
                      float* __restrict__ out_inv_dp)
 {
     if (series_len <= 0) return;
-    if (blockIdx.x != 0 || threadIdx.x != 0) return; 
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
 
     const float nanf32 = nanf("");
     int fv = first_valid;
@@ -235,13 +235,13 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
     const int nan_end = (warm < series_len ? warm : series_len);
     const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    
+
     for (int i = threadIdx.x; i < nan_end; i += blockDim.x) {
         out_mama[base + static_cast<size_t>(i)] = nanf32;
         out_fama[base + static_cast<size_t>(i)] = nanf32;
     }
 
-    
+
     if (blockDim.x < 32) {
         if (threadIdx.x != 0) return;
         float prev_m = prices[fv];
@@ -268,7 +268,7 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
 
     if (threadIdx.x >= 32) return;
 
-    const unsigned lane = static_cast<unsigned>(threadIdx.x); 
+    const unsigned lane = static_cast<unsigned>(threadIdx.x);
     const unsigned mask = 0xffffffffu;
 
     float prev_m = prices[fv];
@@ -291,9 +291,9 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
             B_m = alpha * x;
         }
 
-        
-        
-        
+
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A_m, offset);
             const float B_prev = __shfl_up_sync(mask, B_m, offset);
@@ -307,7 +307,7 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
 
         const float mama = __fmaf_rn(A_m, prev_m, B_m);
 
-        
+
         float A_f = 1.0f;
         float B_f = 0.0f;
         if (t < series_len) {
@@ -332,7 +332,7 @@ void mama_batch_from_inv_dp_f32(const float* __restrict__ prices,
             out_fama[base + static_cast<size_t>(t)] = fama;
         }
 
-        
+
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         prev_m = __shfl_sync(mask, mama, last_lane);
@@ -355,10 +355,10 @@ void mama_batch_f32(const float* __restrict__ prices,
     const int stride = blockDim.x * gridDim.x;
     const float nanf32 = nanf("");
 
-    
-    
+
+
     if (n_combos == 1) {
-        if (tid != 0) return; 
+        if (tid != 0) return;
         const int combo = 0;
 
         float* out_m_row = out_mama + combo * series_len;
@@ -375,7 +375,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         double fast = static_cast<double>(fast_limits[combo]);
         double slow = static_cast<double>(slow_limits[combo]);
         const float nn = nanf("");
-        
+
         for (int i = 0; i < series_len; ++i) { out_m_row[i] = nn; out_f_row[i] = nn; }
         if (!(fast > 0.0) || !(slow > 0.0)) {
             return;
@@ -383,7 +383,7 @@ void mama_batch_f32(const float* __restrict__ prices,
 
         const int warm = fv + 10;
 
-        
+
         constexpr int RING = 8;
         constexpr int MASK = RING - 1;
         double smooth_buf[RING];
@@ -504,7 +504,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         int fv = first_valid;
         if (fv < 0) fv = 0;
         if (fv >= series_len) {
-            
+
             for (int i = 0; i < series_len; ++i) { out_m_row[i] = nanf32; out_f_row[i] = nanf32; }
             continue;
         }
@@ -519,7 +519,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         const int warm = fv + 10;
 
         double seed_price = static_cast<double>(prices[fv]);
-        double p1 = seed_price, p2 = seed_price, p3 = seed_price; 
+        double p1 = seed_price, p2 = seed_price, p3 = seed_price;
 
         Shift8d smooth, detrender, i1r, q1r;
         smooth.seed(seed_price);
@@ -536,7 +536,7 @@ void mama_batch_f32(const float* __restrict__ prices,
         double prev_im = 0.0;
         double prev_phase = 0.0;
 
-        
+
         const int nan_end = (warm < series_len ? warm : series_len);
         for (int i = 0; i < nan_end; ++i) { out_m_row[i] = nanf32; out_f_row[i] = nanf32; }
 
@@ -682,7 +682,7 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
         double prev_im = 0.0;
         double prev_phase = 0.0;
 
-        
+
         const int nan_end = (warm < series_len ? warm : series_len);
         for (int t = 0; t < nan_end; ++t) {
             int idx = t * num_series + series_idx;
@@ -707,7 +707,7 @@ void mama_many_series_one_param_f32(const float* __restrict__ prices_tm,
             double x0, x2, x4, x6; smooth.taps(x0, x2, x4, x6);
 
             double mesa_mult = 0.075 * prev_mesa_period + 0.54;
-            
+
             double dt_val = hilbert_fma(x0, x2, x4, x6) * mesa_mult;
             detrender.push(dt_val);
 

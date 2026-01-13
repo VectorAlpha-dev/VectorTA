@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    
+
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -24,150 +24,150 @@ class TestWilders:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_wilders_partial_params(self, test_data):
         """Test Wilders with partial parameters (None values) - mirrors check_wilders_partial_params"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.wilders(close, 5)
         assert len(result) == len(close)
-    
+
     def test_wilders_accuracy(self, test_data):
         """Test Wilders matches expected values from Rust tests - mirrors check_wilders_accuracy"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['wilders']
-        
+
         result = ta_indicators.wilders(
             close,
             period=expected['default_params']['period']
         )
-        
+
         assert len(result) == len(close)
-        
-        
-        
+
+
+
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected['last_5_values'],
             rtol=0,
             atol=1e-8,
             msg="Wilders last 5 values mismatch"
         )
-        
-        
+
+
         compare_with_rust('wilders', result, 'close', expected['default_params'])
-    
+
     def test_wilders_default_candles(self, test_data):
         """Test Wilders with default parameters - mirrors check_wilders_default_candles"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.wilders(close, 5)
         assert len(result) == len(close)
-    
+
     def test_wilders_zero_period(self):
         """Test Wilders fails with zero period - mirrors check_wilders_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.wilders(input_data, period=0)
-    
+
     def test_wilders_period_exceeds_length(self):
         """Test Wilders fails when period exceeds data length - mirrors check_wilders_period_exceeds_length"""
         data_small = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.wilders(data_small, period=10)
-    
+
     def test_wilders_very_small_dataset(self):
         """Test Wilders with very small dataset - mirrors check_wilders_very_small_dataset"""
         single_point = np.array([42.0])
-        
-        
+
+
         result = ta_indicators.wilders(single_point, period=1)
         assert len(result) == 1
-    
+
     def test_wilders_empty_input(self):
         """Test Wilders fails with empty input - mirrors check_wilders_empty_input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Input data slice is empty|All values are NaN"):
             ta_indicators.wilders(empty, period=5)
-    
+
     def test_wilders_nan_handling(self, test_data):
         """Test Wilders handles NaN values correctly - mirrors check_wilders_nan_handling"""
         close = test_data['close']
         period = 5
-        
+
         result = ta_indicators.wilders(close, period=period)
         assert len(result) == len(close)
-        
-        
+
+
         first_valid = np.argmax(~np.isnan(close))
         warmup_end = first_valid + period - 1
-        
-        
+
+
         assert np.all(np.isnan(result[:warmup_end])), f"Expected NaN in warmup period [0:{warmup_end})"
-        
-        
+
+
         assert not np.isnan(result[warmup_end]), f"Expected valid value at index {warmup_end} (first output)"
-        
-        
+
+
         if len(result) > warmup_end:
             assert not np.any(np.isnan(result[warmup_end:])), f"Found unexpected NaN after index {warmup_end}"
-    
+
     def test_wilders_streaming(self, test_data):
         """Test Wilders streaming matches batch calculation - mirrors check_wilders_streaming"""
         close = test_data['close']
         period = 5
-        
-        
+
+
         batch_result = ta_indicators.wilders(close, period=period)
-        
-        
+
+
         stream = ta_indicators.WildersStream(period=period)
         stream_values = []
-        
+
         for price in close:
             result = stream.update(price)
             stream_values.append(result if result is not None else np.nan)
-        
+
         stream_values = np.array(stream_values)
-        
-        
+
+
         assert len(batch_result) == len(stream_values)
-        
-        
+
+
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            
-            assert_close(b, s, rtol=0, atol=1e-8, 
+
+            assert_close(b, s, rtol=0, atol=1e-8,
                         msg=f"Wilders streaming mismatch at index {i}")
-    
+
     def test_wilders_batch(self, test_data):
         """Test Wilders batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
-        
+
         result = ta_indicators.wilders_batch(
             close,
-            period_range=(5, 5, 0),  
+            period_range=(5, 5, 0),
         )
-        
+
         assert 'values' in result
         assert 'periods' in result
-        
-        
+
+
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
-        
-        
+
+
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['wilders']['last_5_values']
-        
-        
-        
+
+
+
         assert_close(
             default_row[-5:],
             expected,
@@ -175,26 +175,26 @@ class TestWilders:
             atol=1e-8,
             msg="Wilders batch default row mismatch"
         )
-    
+
     def test_wilders_all_nan_input(self):
         """Test Wilders with all NaN values"""
         all_nan = np.full(100, np.nan)
-        
+
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.wilders(all_nan, period=5)
-    
+
     def test_wilders_kernel_selection(self, test_data):
         """Test Wilders with different kernel selections"""
         close = test_data['close']
         period = 5
-        
-        
+
+
         for kernel in ['auto', 'scalar', 'avx2', 'avx512']:
             try:
                 result = ta_indicators.wilders(close, period=period, kernel=kernel)
                 assert len(result) == len(close)
             except ValueError as e:
-                
+
                 msg = str(e).lower()
                 allowed = (
                     'unknown kernel' in msg or
@@ -204,65 +204,65 @@ class TestWilders:
                 )
                 if not allowed:
                     raise
-    
+
     def test_wilders_batch_multiple_periods(self, test_data):
         """Test Wilders batch with multiple periods"""
-        close = test_data['close'][:100]  
-        
+        close = test_data['close'][:100]
+
         result = ta_indicators.wilders_batch(
             close,
-            period_range=(5, 10, 1),  
+            period_range=(5, 10, 1),
         )
-        
-        
+
+
         assert result['values'].shape[0] == 6
         assert result['values'].shape[1] == len(close)
-        
-        
+
+
         assert np.array_equal(result['periods'], [5, 6, 7, 8, 9, 10])
-        
-        
+
+
         for i, period in enumerate([5, 6, 7, 8, 9, 10]):
             row = result['values'][i]
             warmup_end = period - 1
-            
-            
+
+
             assert np.all(np.isnan(row[:warmup_end])), f"Expected NaN in warmup [0:{warmup_end}) for period {period}"
-            
-            
+
+
             assert not np.isnan(row[warmup_end]), f"Expected valid value at index {warmup_end} for period {period}"
-            
-            
+
+
             assert not np.any(np.isnan(row[warmup_end:])), f"Unexpected NaN after warmup for period {period}"
-    
+
     def test_wilders_batch_edge_cases(self, test_data):
         """Test Wilders batch processing edge cases"""
         close = test_data['close'][:20]
-        
-        
+
+
         result = ta_indicators.wilders_batch(
             close,
-            period_range=(5, 7, 10),  
+            period_range=(5, 7, 10),
         )
-        
-        
+
+
         assert result['values'].shape[0] == 1
         assert result['periods'][0] == 5
-        
-        
+
+
         result = ta_indicators.wilders_batch(
             close,
             period_range=(5, 5, 0),
         )
-        
+
         assert result['values'].shape[0] == 1
         assert result['periods'][0] == 5
-    
+
     def test_wilders_nan_in_initial_window(self):
         """Test Wilders handles NaN in initial window correctly"""
-        
+
         data = np.array([1.0, 2.0, np.nan, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0])
-        
+
         with pytest.raises(ValueError, match="Not enough valid data"):
             ta_indicators.wilders(data, period=5)
 

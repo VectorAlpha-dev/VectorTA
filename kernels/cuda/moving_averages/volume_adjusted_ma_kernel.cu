@@ -100,8 +100,8 @@ void volume_adjusted_ma_batch_f32(
                 const float vv = volumes[t];
                 avg_volume_d = isfinite(vv) ? (double)vv : 0.0;
             } else {
-                
-                
+
+
                 double window_sum = 0.0;
                 for (int k = start; k <= t; ++k) {
                     const float vv = volumes[k];
@@ -119,7 +119,7 @@ void volume_adjusted_ma_batch_f32(
         int nmb = 0;
 
         if (!strict) {
-            
+
             int cap = length;
             if (cap > t + 1) cap = t + 1;
 
@@ -212,7 +212,7 @@ void volume_adjusted_ma_multi_series_one_param_time_major_f32(
     const bool strict = (strict_flag != 0);
     const float inv_period = 1.0f / float(period);
 
-    
+
     for (int t = blockIdx.x; t < series_len; t += gridDim.x) {
         for (int s = threadIdx.x; s < num_series; s += blockDim.x) {
             const int warm = first_valids[s] + period - 1;
@@ -223,7 +223,7 @@ void volume_adjusted_ma_multi_series_one_param_time_major_f32(
                 continue;
             }
 
-            
+
             float avg_volume;
             if (sample_period == 0) {
                 const float pref = prefix_volumes_tm[t * num_series + s];

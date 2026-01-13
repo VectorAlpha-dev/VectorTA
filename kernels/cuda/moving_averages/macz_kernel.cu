@@ -37,28 +37,28 @@ static __device__ inline double window_sum(const double* __restrict__ pref, int 
 
 
 extern "C" __global__ void macz_batch_macz_tmp_f32(
-    
+
     const float* __restrict__ close,
-    const float* __restrict__ volume, 
+    const float* __restrict__ volume,
     const double* __restrict__ pref_close_sum,
     const double* __restrict__ pref_close_sumsq,
     const int* __restrict__ pref_close_nan,
-    const double* __restrict__ pref_vol_sum,   
-    const double* __restrict__ pref_pv_sum,    
-    const int* __restrict__ pref_vol_nan,      
-    
+    const double* __restrict__ pref_vol_sum,
+    const double* __restrict__ pref_pv_sum,
+    const int* __restrict__ pref_vol_nan,
+
     const int* __restrict__ fasts,
     const int* __restrict__ slows,
     const int* __restrict__ lzs,
     const int* __restrict__ lsds,
     const float* __restrict__ a_s,
     const float* __restrict__ b_s,
-    
+
     int len,
     int first_valid,
     int n_rows,
-    int use_sma_for_vwap, 
-    
+    int use_sma_for_vwap,
+
     float* __restrict__ macz_tmp
 ) {
     const int t = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -79,13 +79,13 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         return;
     }
 
-    
+
     double mean_vwap = NAN;
     {
         const int t1 = t + 1;
         const int t0 = t + 1 - lz;
         if (!use_sma_for_vwap && volume != nullptr) {
-            
+
             if (!window_has_nan(pref_close_nan, t1, t0) && !window_has_nan(pref_vol_nan, t1, t0)) {
                 const double vol_sum = window_sum(pref_vol_sum, t1, t0);
                 if (vol_sum > 0.0) {
@@ -94,7 +94,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
                 }
             }
         } else {
-            
+
             if (!window_has_nan(pref_close_nan, t1, t0)) {
                 const double ssum = window_sum(pref_close_sum, t1, t0);
                 mean_vwap = ssum / (double)lz;
@@ -102,7 +102,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         }
     }
 
-    
+
     double z = NAN;
     if (!isnan(mean_vwap)) {
         const int t1 = t + 1;
@@ -123,7 +123,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         }
     }
 
-    
+
     double macd = NAN;
     {
         const int t1s = t + 1;
@@ -137,7 +137,7 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
         }
     }
 
-    
+
     double sd = NAN;
     {
         const int t1d = t + 1;
@@ -161,18 +161,18 @@ extern "C" __global__ void macz_batch_macz_tmp_f32(
 
 
 extern "C" __global__ void macz_batch_hist_from_macz_f32(
-    
+
     const float* __restrict__ macz_tmp,
-    
+
     const int* __restrict__ slows,
     const int* __restrict__ sigs,
     const int* __restrict__ lzs,
     const int* __restrict__ lsds,
-    
+
     int len,
     int first_valid,
     int n_rows,
-    
+
     float* __restrict__ out_hist
 ) {
     const int t = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -192,7 +192,7 @@ extern "C" __global__ void macz_batch_hist_from_macz_f32(
         return;
     }
 
-    
+
     double sum = 0.0;
     bool any_nan = false;
     const int start = t + 1 - g;
@@ -212,16 +212,16 @@ extern "C" __global__ void macz_batch_hist_from_macz_f32(
 
 
 extern "C" __global__ void macz_batch_f32(
-    
+
     const float* __restrict__ close,
-    const float* __restrict__ volume, 
+    const float* __restrict__ volume,
     const double* __restrict__ pref_close_sum,
     const double* __restrict__ pref_close_sumsq,
     const int* __restrict__ pref_close_nan,
-    const double* __restrict__ pref_vol_sum,   
-    const double* __restrict__ pref_pv_sum,    
-    const int* __restrict__ pref_vol_nan,      
-    
+    const double* __restrict__ pref_vol_sum,
+    const double* __restrict__ pref_pv_sum,
+    const int* __restrict__ pref_vol_nan,
+
     const int* __restrict__ fasts,
     const int* __restrict__ slows,
     const int* __restrict__ sigs,
@@ -229,15 +229,15 @@ extern "C" __global__ void macz_batch_f32(
     const int* __restrict__ lsds,
     const float* __restrict__ a_s,
     const float* __restrict__ b_s,
-    const int* __restrict__ use_lag_s, 
+    const int* __restrict__ use_lag_s,
     const float* __restrict__ gammas,
-    
+
     int len,
     int first_valid,
     int n_rows,
-    int use_sma_for_vwap, 
-    
-    float* __restrict__ macz_tmp, 
+    int use_sma_for_vwap,
+
+    float* __restrict__ macz_tmp,
     float* __restrict__ out_hist
 ) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
@@ -257,23 +257,23 @@ extern "C" __global__ void macz_batch_f32(
     const int warm_hist = warm_m + g - 1;
     const int row_off = row * len;
 
-    
+
     for (int i = 0; i < len; ++i) {
         macz_tmp[row_off + i] = f32_nan();
         out_hist[row_off + i] = f32_nan();
     }
 
-    
+
     double l0 = 0.0, l1 = 0.0, l2 = 0.0, l3 = 0.0;
 
     for (int t = warm_m; t < len; ++t) {
-        
+
         double mean_vwap = NAN;
         if (t >= first_valid + lz - 1) {
             const int t1 = t + 1;
             const int t0 = t + 1 - lz;
             if (!use_sma_for_vwap && volume != nullptr) {
-                
+
                 if (!window_has_nan(pref_close_nan, t1, t0) && !window_has_nan(pref_vol_nan, t1, t0)) {
                     const double vol_sum = window_sum(pref_vol_sum, t1, t0);
                     if (vol_sum > 0.0) {
@@ -282,7 +282,7 @@ extern "C" __global__ void macz_batch_f32(
                     }
                 }
             } else {
-                
+
                 if (!window_has_nan(pref_close_nan, t1, t0)) {
                     const double ssum = window_sum(pref_close_sum, t1, t0);
                     mean_vwap = ssum / (double)lz;
@@ -290,7 +290,7 @@ extern "C" __global__ void macz_batch_f32(
             }
         }
 
-        
+
         double z = NAN;
         if (!isnan(mean_vwap)) {
             const int t1 = t + 1;
@@ -311,7 +311,7 @@ extern "C" __global__ void macz_batch_f32(
             }
         }
 
-        
+
         double macd = NAN;
         if (t >= first_valid + s - 1) {
             const int t1s = t + 1;
@@ -325,7 +325,7 @@ extern "C" __global__ void macz_batch_f32(
             }
         }
 
-        
+
         double sd = NAN;
         if (t >= first_valid + lsd - 1) {
             const int t1d = t + 1;
@@ -363,10 +363,10 @@ extern "C" __global__ void macz_batch_f32(
 
         macz_tmp[row_off + t] = macz_val;
 
-        
-        
+
+
         if (t >= warm_hist) {
-            
+
             double sum = 0.0;
             bool any_nan = false;
             const int start = t + 1 - g;
@@ -385,18 +385,18 @@ extern "C" __global__ void macz_batch_f32(
 }
 
 extern "C" __global__ void macz_many_series_one_param_time_major_f32(
-    
+
     const float* __restrict__ close_tm,
-    const float* __restrict__ volume_tm, 
-    const double* __restrict__ pref_close_sum_tm,   
-    const double* __restrict__ pref_close_sumsq_tm, 
-    const int* __restrict__ pref_close_nan_tm,      
-    const double* __restrict__ pref_vol_sum_tm,     
-    const double* __restrict__ pref_pv_sum_tm,      
-    const int* __restrict__ pref_vol_nan_tm,        
+    const float* __restrict__ volume_tm,
+    const double* __restrict__ pref_close_sum_tm,
+    const double* __restrict__ pref_close_sumsq_tm,
+    const int* __restrict__ pref_close_nan_tm,
+    const double* __restrict__ pref_vol_sum_tm,
+    const double* __restrict__ pref_pv_sum_tm,
+    const int* __restrict__ pref_vol_nan_tm,
     int cols,
     int rows,
-    
+
     int fast,
     int slow,
     int sig,
@@ -408,11 +408,11 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
     float gamma_f,
     const int* __restrict__ first_valids,
     int use_sma_for_vwap,
-    
+
     float* __restrict__ macz_tm,
     float* __restrict__ hist_tm
 ) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
     const int off_pref = s * (rows + 1);
 
@@ -435,7 +435,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
     const double gamma = (double)gamma_f;
 
     for (int t = warm_m; t < rows; ++t) {
-        
+
         double mean_vwap = NAN;
         if (t >= fv + lz - 1) {
             const int t1 = t + 1;
@@ -455,7 +455,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             }
         }
 
-        
+
         double z = NAN;
         if (!isnan(mean_vwap)) {
             const int t1 = t + 1, t0 = t + 1 - lz;
@@ -473,7 +473,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             }
         }
 
-        
+
         double macd = NAN;
         if (t >= fv + slow - 1) {
             const int t1s = t + 1, t0s = t + 1 - slow;
@@ -485,7 +485,7 @@ extern "C" __global__ void macz_many_series_one_param_time_major_f32(
             }
         }
 
-        
+
         double sd = NAN;
         if (t >= fv + lsd - 1) {
             const int t1d = t + 1, t0d = t + 1 - lsd;

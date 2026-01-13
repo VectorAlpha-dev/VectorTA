@@ -1,19 +1,16 @@
-/**
- * WASM binding tests for Percentile Nearest Rank indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { 
-    loadTestData, 
-    assertArrayClose, 
+import {
+    loadTestData,
+    assertArrayClose,
     assertClose,
     isNaN,
     assertAllNaN,
     assertNoNaN,
-    EXPECTED_OUTPUTS 
+    EXPECTED_OUTPUTS
 } from './test_utils.js';
 import { compareWithRust } from './rust-comparison.js';
 
@@ -24,54 +21,54 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    
+
     try {
         const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        
+
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
     }
-    
+
     testData = loadTestData();
 });
 
 test('PNR partial params', () => {
-    
+
     const data = new Float64Array(EXPECTED_OUTPUTS.percentileNearestRank.basicTest.data);
-    
-    
-    
+
+
+
     const result = wasm.percentile_nearest_rank_js(data, 5, 50.0);
     assert.strictEqual(result.length, data.length);
     assert.strictEqual(result[4], EXPECTED_OUTPUTS.percentileNearestRank.basicTest.expectedAt4);
 });
 
 test('PNR accuracy', async () => {
-    
+
     const close = new Float64Array(testData.close);
     const expected = EXPECTED_OUTPUTS.percentileNearestRank;
-    
+
     const result = wasm.percentile_nearest_rank_js(
         close,
         expected.defaultParams.length,
         expected.defaultParams.percentage
     );
-    
+
     assert.strictEqual(result.length, close.length);
-    
-    
+
+
     const warmup = expected.warmupPeriod;
     assertAllNaN(result.slice(0, warmup), `Expected NaN in first ${warmup} values`);
-    
-    
+
+
     assert(!isNaN(result[warmup]), `Expected valid value at index ${warmup}`);
-    
-    
+
+
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
@@ -79,177 +76,177 @@ test('PNR accuracy', async () => {
         1e-8,
         "PNR last 5 values mismatch"
     );
-    
-    
-    
-    
+
+
+
+
 });
 
 test('PNR default candles', () => {
-    
+
     const close = new Float64Array(testData.close);
-    
-    
-    
+
+
+
     const result = wasm.percentile_nearest_rank_js(close, 15, 50.0);
     assert.strictEqual(result.length, close.length);
-    
-    
+
+
     assertAllNaN(result.slice(0, 14), "Expected NaN in warmup period");
     assert(!isNaN(result[14]), "Expected valid value after warmup");
 });
 
 test('PNR zero period', () => {
-    
+
     const data = new Float64Array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
-    
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_js(data, 0, 50.0);
     }, /Invalid period/);
 });
 
 test('PNR period exceeds length', () => {
-    
+
     const data = new Float64Array([1.0, 1.0, 1.0, 1.0, 1.0]);
-    
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_js(data, 10, 50.0);
     }, /Invalid period/);
 });
 
 test('PNR very small dataset', () => {
-    
+
     const data = new Float64Array([5.0]);
-    
+
     const result = wasm.percentile_nearest_rank_js(data, 1, 50.0);
     assert.strictEqual(result.length, 1);
     assert.strictEqual(result[0], 5.0);
 });
 
 test('PNR empty input', () => {
-    
+
     const empty = new Float64Array([]);
-    
+
     assert.throws(() => {
-        
+
         wasm.percentile_nearest_rank_js(empty, 15, 50.0);
     }, /Input data is empty/);
 });
 
 test('PNR invalid percentage', () => {
-    
+
     const data = new Float64Array(Array(20).fill(1.0));
-    
-    
+
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_js(data, 5, 150.0);
     }, /Percentage must be between/);
-    
-    
+
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_js(data, 5, -10.0);
     }, /Percentage must be between/);
 });
 
 test('PNR NaN handling', () => {
-    
+
     const data = new Float64Array([
         1.0, 2.0, NaN, 4.0, 5.0,
         NaN, 7.0, 8.0, 9.0, 10.0,
         11.0, 12.0, 13.0, NaN, 15.0
     ]);
-    
+
     const result = wasm.percentile_nearest_rank_js(data, 5, 50.0);
     assert.strictEqual(result.length, data.length);
-    
-    
+
+
     assert(!isNaN(result[6]), "Should handle NaN values in window");
 });
 
 test('PNR basic functionality', () => {
-    
+
     const data = new Float64Array(EXPECTED_OUTPUTS.percentileNearestRank.basicTest.data);
     const expectedTest = EXPECTED_OUTPUTS.percentileNearestRank.basicTest;
-    
+
     const result = wasm.percentile_nearest_rank_js(
         data,
         expectedTest.length,
         expectedTest.percentage
     );
-    
+
     assert.strictEqual(result.length, data.length);
-    
-    
+
+
     assertAllNaN(result.slice(0, 4), "Expected NaN in warmup period");
-    
-    
+
+
     assert.strictEqual(result[4], expectedTest.expectedAt4);
     assert.strictEqual(result[5], expectedTest.expectedAt5);
 });
 
 test('PNR different percentiles', () => {
-    
+
     const data = new Float64Array(EXPECTED_OUTPUTS.percentileNearestRank.percentileTests.data);
     const expectedTest = EXPECTED_OUTPUTS.percentileNearestRank.percentileTests;
     const length = expectedTest.length;
-    
-    
+
+
     const result25 = wasm.percentile_nearest_rank_js(data, length, 25.0);
     assert.strictEqual(result25[4], expectedTest.p25At4);
-    
-    
+
+
     const result75 = wasm.percentile_nearest_rank_js(data, length, 75.0);
     assert.strictEqual(result75[4], expectedTest.p75At4);
-    
-    
+
+
     const result100 = wasm.percentile_nearest_rank_js(data, length, 100.0);
     assert.strictEqual(result100[4], expectedTest.p100At4);
 });
 
 test('PNR all NaN input', () => {
-    
+
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
-    
+
     assert.throws(() => {
-        
+
         wasm.percentile_nearest_rank_js(allNaN, 15, 50.0);
     }, /All values are NaN/);
 });
 
 test('PNR batch single parameter set', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 100));
-    
-    
+
+
     const batchResult = wasm.percentile_nearest_rank_batch(close, {
         length_range: [15, 15, 0],
         percentage_range: [50.0, 50.0, 0]
     });
-    
-    
+
+
     const singleResult = wasm.percentile_nearest_rank_js(close, 15, 50.0);
-    
+
     assert.strictEqual(batchResult.values.length, singleResult.length);
     assertArrayClose(batchResult.values, singleResult, 1e-10, "Batch vs single mismatch");
 });
 
 test('PNR batch multiple parameters', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 50));
-    
-    
+
+
     const batchResult = wasm.percentile_nearest_rank_batch(close, {
-        length_range: [10, 20, 10],      
-        percentage_range: [25.0, 75.0, 25.0] 
+        length_range: [10, 20, 10],
+        percentage_range: [25.0, 75.0, 25.0]
     });
-    
-    
+
+
     assert.strictEqual(batchResult.values.length, 6 * 50);
     assert.strictEqual(batchResult.rows, 6);
     assert.strictEqual(batchResult.cols, 50);
-    
-    
+
+
     const params = [
         {length: 10, percentage: 25.0},
         {length: 10, percentage: 50.0},
@@ -258,77 +255,77 @@ test('PNR batch multiple parameters', () => {
         {length: 20, percentage: 50.0},
         {length: 20, percentage: 75.0}
     ];
-    
+
     for (let i = 0; i < params.length; i++) {
         const rowStart = i * 50;
         const rowEnd = rowStart + 50;
         const rowData = batchResult.values.slice(rowStart, rowEnd);
-        
+
         const singleResult = wasm.percentile_nearest_rank_js(
-            close, 
-            params[i].length, 
+            close,
+            params[i].length,
             params[i].percentage
         );
         assertArrayClose(
-            rowData, 
-            singleResult, 
-            1e-10, 
+            rowData,
+            singleResult,
+            1e-10,
             `Row ${i} (length=${params[i].length}, percentage=${params[i].percentage}) mismatch`
         );
     }
 });
 
 test('PNR batch metadata from result', () => {
-    
+
     const close = new Float64Array(30);
     close.fill(100);
-    
+
     const result = wasm.percentile_nearest_rank_batch(close, {
-        length_range: [5, 10, 5],      
-        percentage_range: [50.0, 100.0, 50.0]   
+        length_range: [5, 10, 5],
+        percentage_range: [50.0, 100.0, 50.0]
     });
-    
-    
+
+
     assert.strictEqual(result.combos.length, 4);
-    
-    
+
+
     assert.strictEqual(result.combos[0].length, 5);
     assert.strictEqual(result.combos[0].percentage, 50.0);
-    
-    
+
+
     assert.strictEqual(result.combos[3].length, 10);
     assertClose(result.combos[3].percentage, 100.0, 1e-10, "percentage mismatch");
 });
 
 test('PNR batch full parameter sweep', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 30));
-    
+
     const batchResult = wasm.percentile_nearest_rank_batch(close, {
-        length_range: [5, 10, 5],      
-        percentage_range: [25.0, 50.0, 25.0]  
+        length_range: [5, 10, 5],
+        percentage_range: [25.0, 50.0, 25.0]
     });
-    
-    
+
+
     assert.strictEqual(batchResult.combos.length, 4);
     assert.strictEqual(batchResult.rows, 4);
     assert.strictEqual(batchResult.cols, 30);
     assert.strictEqual(batchResult.values.length, 4 * 30);
-    
-    
+
+
     for (let combo = 0; combo < batchResult.combos.length; combo++) {
         const length = batchResult.combos[combo].length;
         const percentage = batchResult.combos[combo].percentage;
-        
+
         const rowStart = combo * 30;
         const rowData = batchResult.values.slice(rowStart, rowStart + 30);
-        
-        
+
+
         for (let i = 0; i < length - 1; i++) {
             assert(isNaN(rowData[i]), `Expected NaN at warmup index ${i} for length ${length}`);
         }
-        
-        
+
+
         for (let i = length - 1; i < 30; i++) {
             assert(!isNaN(rowData[i]), `Unexpected NaN at index ${i} for length ${length}`);
         }
@@ -336,29 +333,29 @@ test('PNR batch full parameter sweep', () => {
 });
 
 test('PNR batch edge cases', () => {
-    
+
     const close = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-    
-    
+
+
     const singleBatch = wasm.percentile_nearest_rank_batch(close, {
         length_range: [5, 5, 1],
         percentage_range: [50.0, 50.0, 0.1]
     });
-    
+
     assert.strictEqual(singleBatch.values.length, 10);
     assert.strictEqual(singleBatch.combos.length, 1);
-    
-    
+
+
     const largeBatch = wasm.percentile_nearest_rank_batch(close, {
-        length_range: [5, 7, 10], 
+        length_range: [5, 7, 10],
         percentage_range: [50.0, 50.0, 0]
     });
-    
-    
+
+
     assert.strictEqual(largeBatch.values.length, 10);
     assert.strictEqual(largeBatch.combos.length, 1);
-    
-    
+
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_batch(new Float64Array([]), {
             length_range: [15, 15, 0],
@@ -368,36 +365,36 @@ test('PNR batch edge cases', () => {
 });
 
 test('PNR batch - new ergonomic API with single parameter', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 100));
-    
+
     const result = wasm.percentile_nearest_rank_batch(close, {
         length_range: [15, 15, 0],
         percentage_range: [50.0, 50.0, 0]
     });
-    
-    
+
+
     assert(result.values, 'Should have values array');
     assert(result.combos, 'Should have combos array');
     assert(typeof result.rows === 'number', 'Should have rows count');
     assert(typeof result.cols === 'number', 'Should have cols count');
-    
-    
+
+
     assert.strictEqual(result.rows, 1);
     assert.strictEqual(result.cols, close.length);
     assert.strictEqual(result.combos.length, 1);
     assert.strictEqual(result.values.length, close.length);
-    
-    
+
+
     const combo = result.combos[0];
     assert.strictEqual(combo.length, 15);
     assert.strictEqual(combo.percentage, 50.0);
-    
-    
+
+
     const oldResult = wasm.percentile_nearest_rank_js(close, 15, 50.0);
     for (let i = 0; i < oldResult.length; i++) {
         if (isNaN(oldResult[i]) && isNaN(result.values[i])) {
-            continue; 
+            continue;
         }
         assert(Math.abs(oldResult[i] - result.values[i]) < 1e-10,
                `Value mismatch at index ${i}`);
@@ -405,43 +402,43 @@ test('PNR batch - new ergonomic API with single parameter', () => {
 });
 
 test('PNR batch - new API with multiple parameters', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 50));
-    
+
     const result = wasm.percentile_nearest_rank_batch(close, {
-        length_range: [10, 15, 5],      
-        percentage_range: [25.0, 50.0, 25.0] 
+        length_range: [10, 15, 5],
+        percentage_range: [25.0, 50.0, 25.0]
     });
-    
-    
+
+
     assert.strictEqual(result.rows, 4);
     assert.strictEqual(result.cols, 50);
     assert.strictEqual(result.combos.length, 4);
     assert.strictEqual(result.values.length, 200);
-    
-    
+
+
     const expectedCombos = [
         { length: 10, percentage: 25.0 },
         { length: 10, percentage: 50.0 },
         { length: 15, percentage: 25.0 },
         { length: 15, percentage: 50.0 }
     ];
-    
+
     for (let i = 0; i < expectedCombos.length; i++) {
         assert.strictEqual(result.combos[i].length, expectedCombos[i].length);
         assert.strictEqual(result.combos[i].percentage, expectedCombos[i].percentage);
     }
-    
-    
+
+
     const secondRow = result.values.slice(result.cols, 2 * result.cols);
     assert.strictEqual(secondRow.length, 50);
-    
-    
+
+
     const oldResult = wasm.percentile_nearest_rank_js(close, 10, 25.0);
     const firstRow = result.values.slice(0, result.cols);
     for (let i = 0; i < oldResult.length; i++) {
         if (isNaN(oldResult[i]) && isNaN(firstRow[i])) {
-            continue; 
+            continue;
         }
         assert(Math.abs(oldResult[i] - firstRow[i]) < 1e-10,
                `Value mismatch at index ${i}`);
@@ -450,24 +447,24 @@ test('PNR batch - new API with multiple parameters', () => {
 
 test('PNR batch - new API error handling', () => {
     const close = new Float64Array(testData.close.slice(0, 10));
-    
-    
+
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_batch(close, {
-            length_range: [15, 15], 
+            length_range: [15, 15],
             percentage_range: [50.0, 50.0, 0]
         });
     }, /Invalid config/);
-    
-    
+
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_batch(close, {
             length_range: [15, 15, 0]
-            
+
         });
     }, /Invalid config/);
-    
-    
+
+
     assert.throws(() => {
         wasm.percentile_nearest_rank_batch(close, {
             length_range: "invalid",
@@ -481,75 +478,75 @@ test('PNR zero-copy API', () => {
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const length = 5;
     const percentage = 50.0;
-    
-    
+
+
     if (!wasm.percentile_nearest_rank_alloc) {
         console.log('Zero-copy API not available for PNR');
         return;
     }
-    
-    
+
+
     const ptr = wasm.percentile_nearest_rank_alloc(data.length);
     assert(ptr !== 0, 'Failed to allocate memory');
-    
-    
+
+
     const memory = wasm.__wasm.memory;
     const memView = new Float64Array(
         memory.buffer,
         ptr,
         data.length
     );
-    
-    
+
+
     memView.set(data);
-    
-    
+
+
     try {
         wasm.percentile_nearest_rank_into(ptr, ptr, data.length, length, percentage);
-        
-        
+
+
         const regularResult = wasm.percentile_nearest_rank_js(data, length, percentage);
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularResult[i]) && isNaN(memView[i])) {
-                continue; 
+                continue;
             }
             assert(Math.abs(regularResult[i] - memView[i]) < 1e-10,
                    `Zero-copy mismatch at index ${i}: regular=${regularResult[i]}, zerocopy=${memView[i]}`);
         }
     } finally {
-        
+
         wasm.percentile_nearest_rank_free(ptr, data.length);
     }
 });
 
 
 test('PNR SIMD128 consistency', () => {
-    
-    
+
+
     const testCases = [
         { size: 10, length: 5 },
         { size: 100, length: 15 },
         { size: 1000, length: 20 },
         { size: 10000, length: 50 }
     ];
-    
+
     for (const testCase of testCases) {
         const data = new Float64Array(testCase.size);
         for (let i = 0; i < testCase.size; i++) {
             data[i] = Math.sin(i * 0.1) + Math.cos(i * 0.05);
         }
-        
+
         const result = wasm.percentile_nearest_rank_js(data, testCase.length, 50.0);
-        
-        
+
+
         assert.strictEqual(result.length, data.length);
-        
-        
+
+
         for (let i = 0; i < testCase.length - 1; i++) {
             assert(isNaN(result[i]), `Expected NaN at warmup index ${i} for size=${testCase.size}`);
         }
-        
-        
+
+
         let sumAfterWarmup = 0;
         let countAfterWarmup = 0;
         for (let i = testCase.length - 1; i < result.length; i++) {
@@ -557,8 +554,8 @@ test('PNR SIMD128 consistency', () => {
             sumAfterWarmup += result[i];
             countAfterWarmup++;
         }
-        
-        
+
+
         const avgAfterWarmup = sumAfterWarmup / countAfterWarmup;
         assert(Math.abs(avgAfterWarmup) < 10, `Average value ${avgAfterWarmup} seems unreasonable`);
     }

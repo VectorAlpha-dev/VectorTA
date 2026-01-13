@@ -56,7 +56,7 @@ __device__ __forceinline__ ds_t ds_add(ds_t x, ds_t y) {
     float s3, e3; two_sum(s1, s2, s3, e3);
     float e = e1 + e2 + e3; float hi, lo; quick_two_sum(s3, e, hi, lo); ds_t r{hi, lo}; return r;
 }
-__device__ __forceinline__ ds_t ds_sub(ds_t x, ds_t y) { ds_t r{ x.hi - y.hi, x.lo - y.lo }; 
+__device__ __forceinline__ ds_t ds_sub(ds_t x, ds_t y) { ds_t r{ x.hi - y.hi, x.lo - y.lo };
     float s, e; two_sum(x.hi, -y.hi, s, e); float t, f; two_sum(x.lo, -y.lo, t, f); float u, g; two_sum(s, t, u, g);
     float hi, lo; quick_two_sum(u, e + f + g, hi, lo); return ds_t{hi, lo}; }
 __device__ __forceinline__ ds_t ds_scale(ds_t x, float b) {
@@ -76,17 +76,17 @@ __device__ __forceinline__ ds_t ds_mul(ds_t x, ds_t y) {
 extern "C" __global__ void devstop_batch_grouped_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
-    const float2* __restrict__ p1,   
-    const float2* __restrict__ p2,   
-    const int* __restrict__ pc,      
+    const float2* __restrict__ p1,
+    const float2* __restrict__ p2,
+    const int* __restrict__ pc,
     int len,
     int first_valid,
     int period,
     const float* __restrict__ mults,
     int n_combos,
-    int is_long,            
-    int out_row_base,       
-    float* __restrict__ out 
+    int is_long,
+    int out_row_base,
+    float* __restrict__ out
 ) {
     const int combo = blockIdx.x;
     if (combo >= n_combos || period <= 0) return;
@@ -95,12 +95,12 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     const int row = out_row_base + combo;
     const int row_off = row * len;
 
-    
+
     const int warm_clamp = (warm < len) ? warm : len;
     for (int t = threadIdx.x; t < warm_clamp; t += blockDim.x) { out[row_off + t] = qnan32(); }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
     if (warm >= len) return;
 
     extern __shared__ unsigned char smem[];
@@ -111,7 +111,7 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     int dq_head = 0, dq_len = 0;
     const int cap = period;
 
-    
+
     auto dq_back_at = [&](int len_) { int pos = dq_head + len_ - 1; if (pos >= cap) pos -= cap; return dq_idx[pos]; };
     auto dq_push_back = [&](int value) { int pos = dq_head + dq_len; if (pos >= cap) pos -= cap; dq_idx[pos] = value; dq_len += 1; };
     auto dq_pop_back = [&]() { dq_len -= 1; };
@@ -119,18 +119,18 @@ extern "C" __global__ void devstop_batch_grouped_f32(
     auto dq_front = [&]() { return dq_idx[dq_head]; };
 
     const float mult = mults[combo];
-    const int start_base = first_valid + period;           
-    const int start_final = start_base + period - 1;       
+    const int start_base = first_valid + period;
+    const int start_final = start_base + period - 1;
 
-    int slot = start_base % period; 
+    int slot = start_base % period;
     for (int i = start_base; i < len; ++i) {
-        
+
         const int t1 = i + 1;
-        int a = t1 - period; if (a < 0) a = 0; 
+        int a = t1 - period; if (a < 0) a = 0;
         const int cnt = pc[t1] - pc[a];
         float base = qnan32();
         if (cnt > 0) {
-            
+
             ds_t S1 = ds_sub(ds_from2(p1[t1]), ds_from2(p1[a]));
             ds_t S2 = ds_sub(ds_from2(p2[t1]), ds_from2(p2[a]));
             const float inv = 1.0f / (float)cnt;
@@ -139,7 +139,7 @@ extern "C" __global__ void devstop_batch_grouped_f32(
             ds_t var_ds  = ds_sub(m2_ds, ds_mul(mean_ds, mean_ds));
             const float mean = ds_to_f(mean_ds);
             float var = ds_to_f(var_ds);
-            if (var < 0.0f) var = 0.0f;                  
+            if (var < 0.0f) var = 0.0f;
             const float sigma = sqrtf(var);
             const float h = high[i];
             const float l = low[i];
@@ -154,24 +154,24 @@ extern "C" __global__ void devstop_batch_grouped_f32(
             }
         }
 
-        
-        
+
+
         if (isnan(base)) { base = is_long ? -INFINITY : INFINITY; }
         base_ring[slot] = base;
         {
-            
+
             const int cut = i + 1 - period;
             while (dq_len > 0 && dq_front() < cut) dq_pop_front();
 
             if (is_long) {
-                
+
                 while (dq_len > 0) {
                     int j = dq_back_at(dq_len);
                     float bj = base_ring[j % period];
                     if (isnan(bj) || bj <= base) dq_pop_back(); else break;
                 }
             } else {
-                
+
                 while (dq_len > 0) {
                     int j = dq_back_at(dq_len);
                     float bj = base_ring[j % period];
@@ -181,7 +181,7 @@ extern "C" __global__ void devstop_batch_grouped_f32(
             dq_push_back(i);
         }
 
-        
+
         const int cut = i + 1 - period;
         while (dq_len > 0 && dq_front() < cut) { dq_pop_front(); }
 
@@ -205,27 +205,27 @@ extern "C" __global__ void devstop_batch_grouped_f32(
 extern "C" __global__ void devstop_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
-    const int* __restrict__ first_valids, 
+    const int* __restrict__ first_valids,
     int cols,
     int rows,
     int period,
     float mult,
     int is_long,
     float* __restrict__ out_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= cols || period <= 0) return;
 
-    
+
     const int fv = first_valids[s];
     const int start_base  = fv + period;
     const int start_final = start_base + period - 1;
 
-    
+
     const int warm_clamp = (start_final < rows) ? start_final : rows;
     for (int t = threadIdx.x; t < warm_clamp; t += blockDim.x) { out_tm[t * cols + s] = qnan32(); }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
     if (start_base >= rows) return;
 
     extern __shared__ unsigned char smem_uc[];
@@ -239,7 +239,7 @@ extern "C" __global__ void devstop_many_series_one_param_f32(
     float prev_h = high_tm[fv * cols + s];
     float prev_l = low_tm [fv * cols + s];
 
-    
+
     for (int k = fv + 1; k < min(start_base, rows); ++k) {
         const float h = high_tm[k * cols + s];
         const float l = low_tm [k * cols + s];
@@ -298,7 +298,7 @@ extern "C" __global__ void devstop_many_series_one_param_f32(
         if (isnan(base)) { base = is_long ? -INFINITY : INFINITY; }
         base_ring[slot] = base;
         {
-            
+
             const int cut = i + 1 - period;
             while (dq_len > 0 && dq_front() < cut) dq_pop_front();
 

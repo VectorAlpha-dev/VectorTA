@@ -16,9 +16,9 @@
  #include <cuda_runtime.h>
  #include <math.h>
 
- 
- 
- 
+
+
+
  #ifndef GAUSS_BLOCK_DIM
  #define GAUSS_BLOCK_DIM 256
  #endif
@@ -27,17 +27,17 @@
  #define GAUSS_USE_STREAMING_STORES 0
  #endif
 
- 
- 
- 
+
+
+
  static __device__ __forceinline__ float qnan_f() {
-     return __int_as_float(0x7fffffff); 
+     return __int_as_float(0x7fffffff);
  }
 
  static __device__ __forceinline__ void store_out(float* __restrict__ p, float v) {
  #if GAUSS_USE_STREAMING_STORES
-     
-     
+
+
      asm volatile("st.global.cs.f32 [%0], %1;" :: "l"(p), "f"(v));
  #else
      *p = v;
@@ -48,11 +48,11 @@
      return (x < lo) ? lo : (x > hi ? hi : x);
  }
 
- 
- 
- 
- 
- 
+
+
+
+
+
  static __device__ __forceinline__ void gaussian_run_poles1(
      const float* __restrict__ prices,
      float* __restrict__ out,
@@ -67,13 +67,13 @@
      int idx = 0;
      int t = 0;
 
-     
+
      for (; t < valid && t < series_len; ++t, idx += stride) {
          const double x = static_cast<double>(prices[idx]);
          y_prev = c1 * y_prev + c0 * x;
          store_out(out + idx, nan_f);
      }
-     
+
      for (; t < series_len; ++t, idx += stride) {
          const double x = static_cast<double>(prices[idx]);
          y_prev = c1 * y_prev + c0 * x;
@@ -92,8 +92,8 @@
      double c1,
      double c2)
  {
-     double p1 = 0.0; 
-     double p0 = 0.0; 
+     double p1 = 0.0;
+     double p0 = 0.0;
      int idx = 0;
      int t = 0;
 
@@ -123,9 +123,9 @@
      double c2,
      double c3)
  {
-     double p2 = 0.0; 
-     double p1 = 0.0; 
-     double p0 = 0.0; 
+     double p2 = 0.0;
+     double p1 = 0.0;
+     double p0 = 0.0;
      int idx = 0;
      int t = 0;
 
@@ -156,10 +156,10 @@
      double c3,
      double c4)
  {
-     double p3 = 0.0; 
-     double p2 = 0.0; 
-     double p1 = 0.0; 
-     double p0 = 0.0; 
+     double p3 = 0.0;
+     double p2 = 0.0;
+     double p1 = 0.0;
+     double p0 = 0.0;
      int idx = 0;
      int t = 0;
 
@@ -177,10 +177,10 @@
      }
  }
 
- 
- 
- 
- 
+
+
+
+
  extern "C" __global__ void gaussian_batch_f32(
      const float* __restrict__ prices,
      const int* __restrict__ periods,
@@ -194,7 +194,7 @@
  {
      const float nan_f = qnan_f();
 
-     
+
      for (int combo = blockIdx.x * blockDim.x + threadIdx.x;
           combo < n_combos;
           combo += gridDim.x * blockDim.x)
@@ -202,11 +202,11 @@
          const int period = periods[combo];
          const int pole   = poles[combo];
 
-         
+
          if (period < 2 || pole < 1 || pole > 4 || series_len <= 0) {
-             
-             
-             
+
+
+
              continue;
          }
 
@@ -214,11 +214,11 @@
 
          int start = first_valid;
          start = clampi(start, 0, series_len);
-         
+
          int warm = first_valid + period;
          warm = clampi(warm, 0, series_len);
 
-         
+
          int valid = warm > start ? warm : start;
          valid = clampi(valid, 0, series_len);
 
@@ -247,10 +247,10 @@
      }
  }
 
- 
- 
- 
- 
+
+
+
+
  extern "C" __global__ void gaussian_many_series_one_param_f32(
      const float* __restrict__ prices_tm,
      const float* __restrict__ coeffs,
@@ -270,7 +270,7 @@
      const double c4 = static_cast<double>(coeffs[4]);
      const float nan_f = qnan_f();
 
-     
+
      for (int s = blockIdx.x * blockDim.x + threadIdx.x;
           s < num_series;
           s += gridDim.x * blockDim.x)
@@ -278,7 +278,7 @@
          int start = first_valids[s];
          start = clampi(start, 0, series_len);
 
-         
+
          int warm = first_valids[s] + period;
          warm = clampi(warm, 0, series_len);
 

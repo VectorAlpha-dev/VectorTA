@@ -1,14 +1,11 @@
-/**
- * WASM binding tests for PRB (Polynomial Regression Bands) indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { 
+import {
     loadTestData,
-    assertArrayClose, 
+    assertArrayClose,
     assertClose,
     isNaN,
     assertAllNaN,
@@ -24,10 +21,10 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    
+
     try {
         const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
@@ -35,7 +32,7 @@ test.before(async () => {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
     }
-    
+
     testData = loadTestData();
 });
 
@@ -46,15 +43,15 @@ test('PRB CSV accuracy matches Rust', () => {
 
     const result = wasm.prb(
         close,
-        false, 
-        10,    
-        100,   
-        2,     
-        0,     
-        2.0    
+        false,
+        10,
+        100,
+        2,
+        0,
+        2.0
     );
 
-    
+
     const mainValues = result.values.slice(0, close.length);
     const nonNan = Array.from(mainValues).filter(v => !isNaN(v));
     assert(nonNan.length >= 5, 'Should have at least 5 non-NaN values');
@@ -65,7 +62,7 @@ test('PRB CSV accuracy matches Rust', () => {
         const actual = last5[i];
         const exp = expectedLast5[i];
         const diff = Math.abs(actual - exp);
-        const tolerance = Math.abs(exp) * 0.01; 
+        const tolerance = Math.abs(exp) * 0.01;
         assert(
             diff < tolerance,
             `CSV parity mismatch at ${i}: expected ${exp}, got ${actual} (diff ${diff} > tol ${tolerance})`
@@ -74,7 +71,7 @@ test('PRB CSV accuracy matches Rust', () => {
 });
 
 test('PRB accuracy', () => {
-    
+
     const data = new Float64Array([
         66982.0, 66984.0, 66981.0, 66975.0, 66970.0,
         66968.0, 66960.0, 66955.0, 66950.0, 66945.0,
@@ -98,30 +95,30 @@ test('PRB accuracy', () => {
         66515.0, 66510.0, 66505.0, 66500.0, 66495.0,
         66490.0, 66485.0, 66480.0, 66475.0, 66470.0,
     ]);
-    
-    
+
+
     const result = wasm.prb(
         data,
-        true,   
-        10,     
-        100,    
-        2,      
-        0,      
-        2.0     
+        true,
+        10,
+        100,
+        2,
+        0,
+        2.0
     );
-    
-    
+
+
     assert(result, 'Result should exist');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows (main, upper, lower)');
     assert.strictEqual(result.cols, data.length, 'Cols should match input length');
     assert.strictEqual(result.values.length, 3 * data.length, 'Values should contain all three bands');
-    
-    
+
+
     const mainValues = result.values.slice(0, data.length);
     const upperBand = result.values.slice(data.length, 2 * data.length);
     const lowerBand = result.values.slice(2 * data.length, 3 * data.length);
-    
-    
+
+
     const expected = [
         66983.7659580663791616,
         66972.7911881188048896,
@@ -129,26 +126,26 @@ test('PRB accuracy', () => {
         66611.4138439137820672,
         66368.7769190448496640,
     ];
-    
-    
+
+
     const nonNanValues = Array.from(mainValues).filter(v => !isNaN(v));
     assert(nonNanValues.length >= 5, 'Should have at least 5 non-NaN values');
-    
-    
+
+
     const last5 = nonNanValues.slice(-5);
     for (let i = 0; i < 5; i++) {
         const actual = last5[i];
         const expectedVal = expected[i];
         const diff = Math.abs(actual - expectedVal);
-        const tolerance = Math.abs(expectedVal) * 0.01; 
-        
+        const tolerance = Math.abs(expectedVal) * 0.01;
+
         assert(
             diff < tolerance,
             `Main band value ${i} differs: expected ${expectedVal}, got ${actual}, diff ${diff}`
         );
     }
-    
-    
+
+
     for (let i = 0; i < data.length; i++) {
         if (!isNaN(mainValues[i])) {
             assert(!isNaN(upperBand[i]), `Upper band should not be NaN when main is not NaN at index ${i}`);
@@ -160,143 +157,143 @@ test('PRB accuracy', () => {
 });
 
 test('PRB default params', () => {
-    
+
     const data = new Float64Array(200);
     for (let i = 0; i < 200; i++) {
         data[i] = Math.random() * 100 + 5000;
     }
-    
-    
+
+
     const result = wasm.prb(
         data,
-        true,  
-        10,    
-        100,   
-        2,     
-        0,     
-        2.0    
+        true,
+        10,
+        100,
+        2,
+        0,
+        2.0
     );
-    
+
     assert(result, 'Result should exist');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows');
     assert.strictEqual(result.cols, data.length, 'Cols should match input');
     assert.strictEqual(result.values.length, 3 * data.length, 'Values should contain all three bands');
-    
-    
+
+
     const mainValues = result.values.slice(0, data.length);
-    
-    
+
+
     const nonNanCount = mainValues.filter(v => !isNaN(v)).length;
     assert(nonNanCount > 0, 'Should have some non-NaN values');
 });
 
 test('PRB no smoothing', () => {
-    
+
     const data = new Float64Array(150);
     for (let i = 0; i < 150; i++) {
         data[i] = Math.random() * 50 + 1000;
     }
-    
+
     const result = wasm.prb(
         data,
-        false, 
-        10,    
-        50,    
-        2,     
-        0,     
-        2.0    
+        false,
+        10,
+        50,
+        2,
+        0,
+        2.0
     );
-    
+
     assert(result, 'Result should exist');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows');
     assert.strictEqual(result.cols, data.length, 'Cols should match input');
-    
+
     const mainValues = result.values.slice(0, data.length);
     const nonNanCount = mainValues.filter(v => !isNaN(v)).length;
     assert(nonNanCount > 0, 'Should have non-NaN values');
 });
 
 test('PRB linear regression', () => {
-    
+
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
-        data[i] = i * 10 + 1000; 
+        data[i] = i * 10 + 1000;
     }
-    
+
     const result = wasm.prb(
         data,
-        false, 
+        false,
         10,
-        20,    
-        1,     
+        20,
+        1,
         0,
-        2.0    
+        2.0
     );
-    
+
     assert(result, 'Result should exist');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows');
     assert.strictEqual(result.cols, data.length, 'Cols should match input');
-    
+
     const mainValues = result.values.slice(0, data.length);
     const nonNanValues = Array.from(mainValues).filter(v => !isNaN(v));
     assert(nonNanValues.length > 0, 'Should have non-NaN values');
 });
 
 test('PRB cubic regression', () => {
-    
+
     const data = new Float64Array(200);
     for (let i = 0; i < 200; i++) {
         data[i] = Math.random() * 100 + 5000;
     }
-    
+
     const result = wasm.prb(
         data,
-        true,  
-        10,    
-        50,    
-        3,     
-        0,     
-        2.0    
+        true,
+        10,
+        50,
+        3,
+        0,
+        2.0
     );
-    
+
     assert(result, 'Result should exist');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows');
     assert.strictEqual(result.cols, data.length, 'Cols should match input');
-    
+
     const mainValues = result.values.slice(0, data.length);
     const nonNanCount = mainValues.filter(v => !isNaN(v)).length;
     assert(nonNanCount > 0, 'Should have non-NaN values');
 });
 
 test('PRB with offset', () => {
-    
+
     const data = new Float64Array(150);
     for (let i = 0; i < 150; i++) {
         data[i] = Math.random() * 50 + 1000;
     }
-    
-    
+
+
     const resultPos = wasm.prb(
         data,
         true,
         10,
-        50,    
+        50,
         2,
-        5,     
-        2.0    
+        5,
+        2.0
     );
-    
-    
+
+
     const resultNeg = wasm.prb(
         data,
         true,
         10,
-        50,    
+        50,
         2,
-        -5,    
-        2.0    
+        -5,
+        2.0
     );
-    
+
     assert(resultPos, 'Positive offset result should exist');
     assert(resultNeg, 'Negative offset result should exist');
     assert.strictEqual(resultPos.rows, 3, 'Positive offset should have 3 rows');
@@ -306,9 +303,9 @@ test('PRB with offset', () => {
 });
 
 test('PRB empty input', () => {
-    
+
     const data = new Float64Array([]);
-    
+
     assert.throws(
         () => wasm.prb(data, true, 10, 100, 2, 0, 2.0),
         /Input data slice is empty/,
@@ -317,12 +314,12 @@ test('PRB empty input', () => {
 });
 
 test('PRB all NaN', () => {
-    
+
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = NaN;
     }
-    
+
     assert.throws(
         () => wasm.prb(data, true, 10, 100, 2, 0, 2.0),
         /All values are NaN/,
@@ -331,20 +328,20 @@ test('PRB all NaN', () => {
 });
 
 test('PRB invalid period', () => {
-    
+
     const data = new Float64Array(50);
     for (let i = 0; i < 50; i++) {
         data[i] = Math.random() * 100;
     }
-    
-    
+
+
     assert.throws(
         () => wasm.prb(data, true, 10, 100, 2, 0, 2.0),
         /Invalid period/,
         'Should throw error when period exceeds data length'
     );
-    
-    
+
+
     assert.throws(
         () => wasm.prb(data, true, 10, 0, 2, 0, 2.0),
         /Invalid period/,
@@ -353,12 +350,12 @@ test('PRB invalid period', () => {
 });
 
 test('PRB invalid order', () => {
-    
+
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = Math.random() * 100;
     }
-    
+
     assert.throws(
         () => wasm.prb(data, true, 10, 50, 0, 0, 2.0),
         /Invalid polynomial order/,
@@ -367,12 +364,12 @@ test('PRB invalid order', () => {
 });
 
 test('PRB invalid smooth period', () => {
-    
+
     const data = new Float64Array(100);
     for (let i = 0; i < 100; i++) {
         data[i] = Math.random() * 100;
     }
-    
+
     assert.throws(
         () => wasm.prb(data, true, 1, 50, 2, 0, 2.0),
         /Invalid smooth period/,
@@ -381,12 +378,12 @@ test('PRB invalid smooth period', () => {
 });
 
 test('PRB insufficient data', () => {
-    
+
     const data = new Float64Array([1.0, 2.0, 3.0, 4.0, 5.0]);
-    
+
     assert.throws(
         () => wasm.prb(data, true, 2, 10, 2, 0, 2.0),
-        /Invalid period/,  
+        /Invalid period/,
         'Should throw error for insufficient data'
     );
 });
@@ -394,41 +391,41 @@ test('PRB insufficient data', () => {
 
 
 test('PRB reinput', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 200));
-    
-    
+
+
     const firstResult = wasm.prb(close, false, 10, 50, 2, 0, 2.0);
     assert(firstResult, 'First result should exist');
     assert.strictEqual(firstResult.rows, 3, 'Should have 3 rows');
-    
+
     const firstValues = firstResult.values.slice(0, close.length);
-    
-    
+
+
     const secondResult = wasm.prb(firstValues, false, 10, 50, 2, 0, 2.0);
     assert(secondResult, 'Second result should exist');
     assert.strictEqual(secondResult.rows, 3, 'Should have 3 rows');
-    
+
     const secondValues = secondResult.values.slice(0, close.length);
-    
-    
+
+
     const nonNanFirst = Array.from(firstValues).filter(v => !isNaN(v));
     const nonNanSecond = Array.from(secondValues).filter(v => !isNaN(v));
     assert(nonNanSecond.length > 0, 'Should have non-NaN values after reinput');
 });
 
 test('PRB NaN handling with test data', () => {
-    
+
     const close = new Float64Array(testData.close);
-    
+
     const result = wasm.prb(close, false, 10, 50, 2, 0, 2.0);
     assert(result, 'Result should exist');
-    
+
     const mainValues = result.values.slice(0, close.length);
     const upperBand = result.values.slice(close.length, 2 * close.length);
     const lowerBand = result.values.slice(2 * close.length, 3 * close.length);
-    
-    
+
+
     if (mainValues.length > 240) {
         for (let i = 240; i < mainValues.length; i++) {
             assert(!isNaN(mainValues[i]), `Found unexpected NaN in main at index ${i}`);
@@ -436,8 +433,8 @@ test('PRB NaN handling with test data', () => {
             assert(!isNaN(lowerBand[i]), `Found unexpected NaN in lower at index ${i}`);
         }
     }
-    
-    
+
+
     const warmup = 50 - 1;
     for (let i = 0; i < warmup && i < mainValues.length; i++) {
         assert(isNaN(mainValues[i]), `Expected NaN in warmup at index ${i}`);
@@ -445,91 +442,91 @@ test('PRB NaN handling with test data', () => {
 });
 
 test('PRB batch processing', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 100));
-    
+
     const result = wasm.prb_batch(
         close,
-        false,  
-        10, 10, 0,     
-        50, 60, 10,    
-        2, 2, 0,       
-        0, 0, 0        
+        false,
+        10, 10, 0,
+        50, 60, 10,
+        2, 2, 0,
+        0, 0, 0
     );
-    
+
     assert(result, 'Batch result should exist');
-    
-    
+
+
     const expectedCombos = 2;
-    const expectedSize = expectedCombos * 3 * close.length; 
-    
-    
+    const expectedSize = expectedCombos * 3 * close.length;
+
+
     assert(result.values, 'Should have values array');
     assert(result.rows, 'Should have rows');
     assert(result.cols, 'Should have cols');
     assert(result.combos, 'Should have combos');
-    
+
     assert.strictEqual(result.combos.length, expectedCombos, 'Should have correct number of combos');
-    
-    
+
+
     assert.strictEqual(result.combos[0].regression_period, 50);
     assert.strictEqual(result.combos[1].regression_period, 60);
 });
 
 test('PRB zero-copy API', () => {
-    
+
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     const len = data.length;
-    
-    
+
+
     const mainPtr = wasm.prb_alloc(len);
     const upperPtr = wasm.prb_alloc(len);
     const lowerPtr = wasm.prb_alloc(len);
     const inPtr = wasm.prb_alloc(len);
-    
+
     assert(mainPtr !== 0, 'Failed to allocate main buffer');
     assert(upperPtr !== 0, 'Failed to allocate upper buffer');
     assert(lowerPtr !== 0, 'Failed to allocate lower buffer');
     assert(inPtr !== 0, 'Failed to allocate input buffer');
-    
+
     try {
-        
+
         const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, len);
-        
-        
+
+
         inView.set(data);
-        
-        
+
+
         wasm.prb_into(
             inPtr,
             mainPtr,
             upperPtr,
             lowerPtr,
             len,
-            false,  
-            10,     
-            5,      
-            2,      
-            0,      
-            2.0     
+            false,
+            10,
+            5,
+            2,
+            0,
+            2.0
         );
-        
-        
+
+
         const memory2 = wasm.__wasm.memory;
         const mainView = new Float64Array(memory2.buffer, mainPtr, len);
         const upperView = new Float64Array(memory2.buffer, upperPtr, len);
         const lowerView = new Float64Array(memory2.buffer, lowerPtr, len);
-        
-        
+
+
         const regularResult = wasm.prb(data, false, 10, 5, 2, 0, 2.0);
         const regularMain = regularResult.values.slice(0, len);
         const regularUpper = regularResult.values.slice(len, 2 * len);
         const regularLower = regularResult.values.slice(2 * len, 3 * len);
-        
+
         for (let i = 0; i < len; i++) {
             if (isNaN(regularMain[i]) && isNaN(mainView[i])) {
-                continue; 
+                continue;
             }
             assert(Math.abs(regularMain[i] - mainView[i]) < 1e-10,
                    `Zero-copy main mismatch at index ${i}: regular=${regularMain[i]}, zerocopy=${mainView[i]}`);
@@ -538,8 +535,8 @@ test('PRB zero-copy API', () => {
             assert(Math.abs(regularLower[i] - lowerView[i]) < 1e-10,
                    `Zero-copy lower mismatch at index ${i}`);
         }
-        
-        
+
+
         for (let i = 0; i < len; i++) {
             if (!isNaN(mainView[i])) {
                 assert(upperView[i] > mainView[i], `Upper should be > main at index ${i}`);
@@ -547,7 +544,7 @@ test('PRB zero-copy API', () => {
             }
         }
     } finally {
-        
+
         wasm.prb_free(mainPtr, len);
         wasm.prb_free(upperPtr, len);
         wasm.prb_free(lowerPtr, len);
@@ -561,39 +558,39 @@ test('PRB zero-copy with large dataset', () => {
     for (let i = 0; i < size; i++) {
         data[i] = Math.sin(i * 0.01) + Math.random() * 0.1;
     }
-    
+
     const mainPtr = wasm.prb_alloc(size);
     const upperPtr = wasm.prb_alloc(size);
     const lowerPtr = wasm.prb_alloc(size);
     const inPtr = wasm.prb_alloc(size);
-    
+
     assert(mainPtr !== 0, 'Failed to allocate large main buffer');
     assert(upperPtr !== 0, 'Failed to allocate large upper buffer');
     assert(lowerPtr !== 0, 'Failed to allocate large lower buffer');
     assert(inPtr !== 0, 'Failed to allocate large input buffer');
-    
+
     try {
         const memory = wasm.__wasm.memory;
         const inView = new Float64Array(memory.buffer, inPtr, size);
         inView.set(data);
-        
+
         wasm.prb_into(
             inPtr, mainPtr, upperPtr, lowerPtr, size,
             false, 10, 50, 2, 0, 2.0
         );
-        
-        
+
+
         const memory2 = wasm.__wasm.memory;
         const mainView = new Float64Array(memory2.buffer, mainPtr, size);
         const upperView = new Float64Array(memory2.buffer, upperPtr, size);
         const lowerView = new Float64Array(memory2.buffer, lowerPtr, size);
-        
-        
-        for (let i = 0; i < 49; i++) { 
+
+
+        for (let i = 0; i < 49; i++) {
             assert(isNaN(mainView[i]), `Expected NaN at warmup index ${i}`);
         }
-        
-        
+
+
         for (let i = 49; i < Math.min(100, size); i++) {
             assert(!isNaN(mainView[i]), `Unexpected NaN at index ${i}`);
             assert(upperView[i] > mainView[i], `Upper should be > main at ${i}`);
@@ -608,20 +605,20 @@ test('PRB zero-copy with large dataset', () => {
 });
 
 test('PRB zero-copy error handling', () => {
-    
+
     assert.throws(() => {
         wasm.prb_into(0, 0, 0, 0, 10, false, 10, 5, 2, 0, 2.0);
     }, /null pointer/i);
-    
-    
+
+
     const ptr = wasm.prb_alloc(10);
     try {
-        
+
         assert.throws(() => {
             wasm.prb_into(ptr, ptr, ptr, ptr, 10, false, 10, 0, 2, 0, 2.0);
         }, /Invalid period/);
-        
-        
+
+
         assert.throws(() => {
             wasm.prb_into(ptr, ptr, ptr, ptr, 10, false, 10, 5, 0, 0, 2.0);
         }, /Invalid polynomial order/);
@@ -631,41 +628,41 @@ test('PRB zero-copy error handling', () => {
 });
 
 test('PRB partial params with test data', () => {
-    
+
     const close = new Float64Array(testData.close);
-    
+
     const result = wasm.prb(
         close,
-        true,   
-        10,     
-        100,    
-        2,      
-        0,      
-        2.0     
+        true,
+        10,
+        100,
+        2,
+        0,
+        2.0
     );
-    
+
     assert(result, 'Result should exist');
     assert.strictEqual(result.rows, 3, 'Should have 3 rows');
     assert.strictEqual(result.cols, close.length, 'Cols should match input');
 });
 
 test('PRB batch parameter sweep', () => {
-    
+
     const close = new Float64Array(testData.close.slice(0, 50));
-    
+
     const result = wasm.prb_batch(
         close,
-        false,  
-        8, 12, 2,     
-        20, 30, 5,    
-        1, 2, 1,      
-        -1, 1, 1      
+        false,
+        8, 12, 2,
+        20, 30, 5,
+        1, 2, 1,
+        -1, 1, 1
     );
-    
-    
+
+
     assert.strictEqual(result.combos.length, 54, 'Should have 54 parameter combinations');
-    
-    
+
+
     assert(result.values, 'Should have values');
     assert.strictEqual(result.rows, 54 * 3, 'Should have 54*3 rows (3 bands per combo)');
     assert.strictEqual(result.cols, close.length, 'Should match input length');

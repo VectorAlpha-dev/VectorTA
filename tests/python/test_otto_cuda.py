@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -27,7 +27,7 @@ def _cuda_available() -> bool:
         return False
     if not (_has("otto_cuda_batch_dev") and _has("otto_cuda_many_series_one_param_dev")):
         return False
-    
+
     try:
         data = np.linspace(1.0, 2.0, 260, dtype=np.float32)
         hott, lott = ti.otto_cuda_batch_dev(
@@ -36,7 +36,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(hott)
         _ = cp.asarray(lott)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False

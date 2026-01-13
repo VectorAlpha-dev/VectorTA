@@ -29,7 +29,7 @@ extern "C" __global__ void bbw_sma_prefix_f32(
     if (combo >= n_combos) return;
 
     const int period = periods[combo];
-    const float k = uplusd[combo]; 
+    const float k = uplusd[combo];
     if (period <= 0) return;
 
     const int warm = first_valid + period - 1;
@@ -41,7 +41,7 @@ extern "C" __global__ void bbw_sma_prefix_f32(
     while (t < len) {
         float out_val = nan_f32();
         if (t >= warm) {
-            const int start = t + 1 - period; 
+            const int start = t + 1 - period;
             const int nan_count = prefix_nan[t + 1] - prefix_nan[start];
             if (nan_count == 0) {
                 const double sum  = prefix_sum[t + 1]    - prefix_sum[start];
@@ -51,7 +51,7 @@ extern "C" __global__ void bbw_sma_prefix_f32(
                 double var = sum2 / den - mean * mean;
                 if (var < 0.0) var = 0.0;
                 const double std = (var > 0.0) ? sqrt(var) : 0.0;
-                
+
                 out_val = __double2float_rn((static_cast<double>(k) * std) / mean);
             }
         }
@@ -212,7 +212,7 @@ CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff(
     float var    = clamp_nonneg(var2.x + var2.y);
     float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
     float m      = mean.x + mean.y;
-    return stdv / m; 
+    return stdv / m;
 }
 
 
@@ -235,7 +235,7 @@ CUDA_FORCEINLINE __device__ float bbw_base_from_prefix_ff_no_nan(
     float var    = clamp_nonneg(var2.x + var2.y);
     float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
     float m      = mean.x + mean.y;
-    return stdv / m; 
+    return stdv / m;
 }
 
 
@@ -268,7 +268,7 @@ extern "C" __global__ void bbw_sma_prefix_ff_f32(
         float base = any_nan_since_first
             ? bbw_base_from_prefix_ff(prefix_sum, prefix_sum_sq, prefix_nan, t, period, warm)
             : bbw_base_from_prefix_ff_no_nan(prefix_sum, prefix_sum_sq, t, period, warm);
-        out[row_off + t] = k * base; 
+        out[row_off + t] = k * base;
         t += stride;
     }
 }
@@ -280,10 +280,10 @@ extern "C" __global__ void bbw_sma_prefix_grouped_ff_f32(
     const int*    __restrict__ prefix_nan,
     int len,
     int first_valid,
-    const int*   __restrict__ unique_periods,  
-    const int*   __restrict__ offsets,         
-    const float* __restrict__ uplusd_sorted,   
-    const int*   __restrict__ combo_index,     
+    const int*   __restrict__ unique_periods,
+    const int*   __restrict__ offsets,
+    const float* __restrict__ uplusd_sorted,
+    const int*   __restrict__ combo_index,
     int num_unique,
     float*       __restrict__ out)
 {
@@ -351,7 +351,7 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_ff_f32(
                 float var    = clamp_nonneg(var2.x + var2.y);
                 float stdv   = (var > 0.f) ? sqrtf(var) : 0.f;
                 float m      = mean.x + mean.y;
-                out_val = (u_plus_d * stdv) / m; 
+                out_val = (u_plus_d * stdv) / m;
             }
         }
         out_tm[idx] = out_val;
@@ -365,7 +365,7 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_ff_f32(
 
 
 extern "C" __global__ void bbw_sma_streaming_f64(
-    const float* __restrict__ data, 
+    const float* __restrict__ data,
     int len,
     int first_valid,
     const int* __restrict__ periods,
@@ -383,14 +383,14 @@ extern "C" __global__ void bbw_sma_streaming_f64(
     const int warm = first_valid + period - 1;
     const int row_off = combo * len;
 
-    
+
     for (int t = threadIdx.x; t < min(len, warm); t += blockDim.x) {
         out[row_off + t] = nan_f32();
     }
 
     if (threadIdx.x == 0) {
         if (warm < len) {
-            
+
             int start = warm + 1 - period;
             double sum = 0.0;
             double sum2 = 0.0;
@@ -405,7 +405,7 @@ extern "C" __global__ void bbw_sma_streaming_f64(
             double stdv = sqrt(var);
             out[row_off + warm] = (float)(k * stdv / mean);
 
-            
+
             for (int t = warm + 1; t < len; ++t) {
                 double vin = (double)data[t];
                 double vout = (double)data[t - period];
@@ -422,7 +422,7 @@ extern "C" __global__ void bbw_sma_streaming_f64(
 }
 
 extern "C" __global__ void bbw_multi_series_one_param_tm_streaming_f64(
-    const float* __restrict__ data_tm, 
+    const float* __restrict__ data_tm,
     int period,
     int num_series,
     int series_len,
@@ -437,14 +437,14 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_streaming_f64(
     const int warm = first_valids[s] + period - 1;
     const double k = (double)u_plus_d;
 
-    
+
     for (int t = threadIdx.x; t < min(series_len, warm); t += blockDim.x) {
         out_tm[t * num_series + s] = nan_f32();
     }
 
     if (threadIdx.x == 0) {
         if (warm < series_len) {
-            
+
             int start = warm + 1 - period;
             double sum = 0.0;
             double sum2 = 0.0;
@@ -459,7 +459,7 @@ extern "C" __global__ void bbw_multi_series_one_param_tm_streaming_f64(
             double stdv = sqrt(var);
             out_tm[warm * num_series + s] = (float)(k * stdv / mean);
 
-            
+
             for (int t = warm + 1; t < series_len; ++t) {
                 double vin = (double)data_tm[t * num_series + s];
                 double vout = (double)data_tm[(t - period) * num_series + s];

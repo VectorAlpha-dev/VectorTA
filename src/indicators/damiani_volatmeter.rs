@@ -1970,8 +1970,7 @@ impl DamianiVolatmeterFeedStream {
             return None;
         }
 
-        if self.vol_hist.iter().any(|x| x.is_nan()) { /* compute vol below, return Some once we have 3 */
-        }
+        if self.vol_hist.iter().any(|x| x.is_nan()) {}
 
         let lag_s = 0.5;
         let p1 = if self.vol_hist[0].is_nan() {

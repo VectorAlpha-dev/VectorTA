@@ -31,12 +31,12 @@ void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
                             int rows, int cols,
                             float* __restrict__ out_rm)
 {
-    __shared__ float tile[32][33]; 
+    __shared__ float tile[32][33];
 
-    int x = blockIdx.x * 32 + threadIdx.x; 
-    int y = blockIdx.y * 32 + threadIdx.y; 
+    int x = blockIdx.x * 32 + threadIdx.x;
+    int y = blockIdx.y * 32 + threadIdx.y;
 
-    
+
     #pragma unroll
     for (int j = 0; j < 32; j += 8) {
         int yy = y + j;
@@ -46,14 +46,14 @@ void transpose_tm_to_rm_f32(const float* __restrict__ in_tm,
     }
     __syncthreads();
 
-    
-    x = blockIdx.y * 32 + threadIdx.x; 
-    y = blockIdx.x * 32 + threadIdx.y; 
 
-    
+    x = blockIdx.y * 32 + threadIdx.x;
+    y = blockIdx.x * 32 + threadIdx.y;
+
+
     #pragma unroll
     for (int j = 0; j < 32; j += 8) {
-        int yy = y + j; 
+        int yy = y + j;
         if (x < rows && yy < cols) {
             out_rm[yy * rows + x] = tile[threadIdx.x][threadIdx.y + j];
         }
@@ -83,9 +83,9 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + period - 1;
 
-    
+
     float f0  = 0.0f;
-    float f8  = 0.0f;   
+    float f8  = 0.0f;
     bool  have_init = false;
     const float alpha = 3.0f / (float(period) + 2.0f);
     const float beta  = 1.0f - alpha;
@@ -98,10 +98,10 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
     const float f88 = (period >= 6) ? float(period - 1) : 5.0f;
     float f90 = 1.0f;
 
-    
+
     #pragma unroll 1
     for (int t = 0; t < series_len; ++t) {
-        
+
         unsigned mask = __activemask();
         float p = 0.0f;
         if ((threadIdx.x & 31) == 0) {
@@ -110,20 +110,20 @@ void rsx_batch_tm_f32(const float* __restrict__ prices,
         p = __shfl_sync(mask, p, 0);
         const float p100 = 100.0f * p;
 
-        
+
         if (t <= warm) {
             out_tm[(size_t)t * (size_t)n_combos + combo] = NAN;
             if (t == warm) { f8 = p100; have_init = true; }
             continue;
         }
 
-        
+
         f90 = (f88 <= f90) ? (f88 + 1.0f) : (f90 + 1.0f);
         const float prev = f8;
         f8 = p100;
         const float v8 = f8 - prev;
 
-        
+
         f28 = beta * f28 + alpha * v8;
         f30 = alpha * f28 + beta * f30;
         const float v_c = 1.5f * f28 - 0.5f * f30;
@@ -184,9 +184,9 @@ void rsx_batch_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + period - 1;
 
-    
+
     float f0  = 0.0f;
-    float f8  = 0.0f;   
+    float f8  = 0.0f;
     bool  have_init = false;
     const float alpha = 3.0f / (float(period) + 2.0f);
     const float beta  = 1.0f - alpha;
@@ -199,10 +199,10 @@ void rsx_batch_f32(const float* __restrict__ prices,
     const float f88 = (period >= 6) ? float(period - 1) : 5.0f;
     float f90 = 1.0f;
 
-    
+
     #pragma unroll 1
     for (int t = 0; t < series_len; ++t) {
-        
+
         unsigned mask = __activemask();
         float p = 0.0f;
         if ((threadIdx.x & 31) == 0) {
@@ -211,20 +211,20 @@ void rsx_batch_f32(const float* __restrict__ prices,
         p = __shfl_sync(mask, p, 0);
         const float p100 = 100.0f * p;
 
-        
+
         if (t <= warm) {
             out[base + t] = NAN;
             if (t == warm) { f8 = p100; have_init = true; }
             continue;
         }
 
-        
+
         f90 = (f88 <= f90) ? (f88 + 1.0f) : (f90 + 1.0f);
         const float prev = f8;
         f8 = p100;
         const float v8 = f8 - prev;
 
-        
+
         f28 = beta * f28 + alpha * v8;
         f30 = alpha * f28 + beta * f30;
         const float v_c = 1.5f * f28 - 0.5f * f30;
@@ -270,7 +270,7 @@ void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int rows,
                                    int period,
                                    float* __restrict__ out_tm) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
     if (period <= 0) return;
 
@@ -281,13 +281,13 @@ void rsx_many_series_one_param_f32(const float* __restrict__ prices_tm,
     }
     const int warm = fv + period - 1;
 
-    
+
     for (int t = 0; t <= warm && t < rows; ++t) {
         out_tm[t * cols + s] = NAN;
     }
     if (warm >= rows) return;
 
-    
+
     float f0 = 0.0f;
     float f8 = 100.0f * prices_tm[warm * cols + s];
     const float alpha = 3.0f / (float(period) + 2.0f);

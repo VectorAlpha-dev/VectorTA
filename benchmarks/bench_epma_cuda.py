@@ -11,7 +11,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError as exc:  
+except ImportError as exc:
     raise SystemExit(
         "CuPy is required for CUDA benchmarks. Install with `pip install cupy-cuda12x`."
     ) from exc
@@ -19,18 +19,18 @@ except ImportError as exc:
 
 def _import_module():
     try:
-        import ta_indicators as mod  
+        import ta_indicators as mod
     except Exception:
         try:
-            import my_project as mod  
-        except Exception as exc:  
+            import my_project as mod
+        except Exception as exc:
             raise SystemExit(
                 "Module not built. Run: maturin develop --features \"python,cuda\" --release"
             ) from exc
     if not hasattr(mod, 'epma_cuda_batch_dev'):
         for name in ('my_project', 'ta_indicators'):
             try:
-                imported = __import__(name)  
+                imported = __import__(name)
                 if hasattr(imported, 'epma_cuda_batch_dev'):
                     return imported
             except Exception:

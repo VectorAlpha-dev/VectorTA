@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    
+
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -24,218 +24,218 @@ class TestEhlersKama:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_ehlers_kama_partial_params(self, test_data):
         """Test Ehlers KAMA with partial parameters (None values) - mirrors test_ehlers_kama_partial_params"""
         close = test_data['close']
-        
-        
-        result = ta_indicators.ehlers_kama(close, 20)  
+
+
+        result = ta_indicators.ehlers_kama(close, 20)
         assert len(result) == len(close)
-    
+
     def test_ehlers_kama_accuracy(self, test_data):
         """Test Ehlers KAMA matches expected values from Rust tests - mirrors test_ehlers_kama_accuracy"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['ehlers_kama']
-        
+
         result = ta_indicators.ehlers_kama(
             close,
             period=expected['default_params']['period']
         )
-        
+
         assert len(result) == len(close)
-        
-        
+
+
         assert_close(
-            result[-6:-1], 
+            result[-6:-1],
             expected['last_5_values'],
             rtol=1e-8,
             msg="Ehlers KAMA last 5 values mismatch"
         )
-        
-        
-        
-    
+
+
+
+
     def test_ehlers_kama_default(self, test_data):
         """Test Ehlers KAMA with default parameters - mirrors test_ehlers_kama_default_candles"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.ehlers_kama(close, 20)
         assert len(result) == len(close)
-    
+
     def test_ehlers_kama_zero_period(self):
         """Test Ehlers KAMA fails with zero period - mirrors test_ehlers_kama_invalid_period"""
         input_data = np.array([10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.ehlers_kama(input_data, period=0)
-    
+
     def test_ehlers_kama_period_exceeds_length(self):
         """Test Ehlers KAMA fails when period exceeds data length - mirrors test_ehlers_kama_invalid_period"""
         data_small = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.ehlers_kama(data_small, period=10)
-    
+
     def test_ehlers_kama_very_small_dataset(self):
         """Test Ehlers KAMA fails with insufficient data - mirrors test_ehlers_kama_invalid_period"""
         single_point = np.array([42.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.ehlers_kama(single_point, period=20)
-    
+
     def test_ehlers_kama_empty_input(self):
         """Test Ehlers KAMA fails with empty input - mirrors test_ehlers_kama_empty_input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.ehlers_kama(empty, period=20)
-    
+
     def test_ehlers_kama_all_nan(self):
         """Test Ehlers KAMA fails with all NaN values - mirrors test_ehlers_kama_all_nan"""
         data = np.array([np.nan] * 10)
-        
+
         with pytest.raises(ValueError, match="All input data is NaN|All values are NaN"):
             ta_indicators.ehlers_kama(data, period=5)
-    
+
     def test_ehlers_kama_nan_handling(self, test_data):
         """Test Ehlers KAMA handles NaN values correctly - mirrors check_ehlers_kama_nan_handling"""
         close = test_data['close']
-        
+
         result = ta_indicators.ehlers_kama(close, period=20)
         assert len(result) == len(close)
-        
-        
+
+
         assert np.all(np.isnan(result[:19])), "Expected NaN in warmup period"
-        
-        
+
+
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
-    
+
     def test_ehlers_kama_not_enough_valid_data(self):
         """Test Ehlers KAMA fails with insufficient valid data"""
-        
+
         data = np.array([np.nan, np.nan, np.nan, np.nan, 1.0, 2.0, 3.0])
-        
+
         with pytest.raises(ValueError, match="Not enough valid data|Invalid period"):
             ta_indicators.ehlers_kama(data, period=5)
-    
+
     def test_ehlers_kama_nan_prefix_handling(self):
         """Test Ehlers KAMA handles NaN prefix correctly"""
-        
+
         data = np.array([np.nan, np.nan] + list(range(1, 21)))
-        
+
         result = ta_indicators.ehlers_kama(data, period=5)
         assert len(result) == len(data)
-        
-        
+
+
         assert np.isnan(result[0])
         assert np.isnan(result[1])
-        
-        
-        
+
+
+
         for i in range(6):
             assert np.isnan(result[i]), f"Expected NaN at index {i}"
-        
-        
+
+
         assert not np.isnan(result[7]), "Expected valid value after warmup"
-    
+
     def test_ehlers_kama_warmup_period_validation(self, test_data):
         """Test that warmup period is exactly period-1 NaN values"""
         close = test_data['close']
         period = 20
-        
+
         result = ta_indicators.ehlers_kama(close, period=period)
-        
-        
+
+
         nan_count = 0
         for val in result:
             if np.isnan(val):
                 nan_count += 1
             else:
                 break
-        
-        
+
+
         assert nan_count == period - 1, f"Expected {period-1} NaN values for warmup, got {nan_count}"
-        
-        
+
+
         assert not np.isnan(result[period-1]), f"Expected valid value at index {period-1}"
-    
+
     def test_ehlers_kama_streaming(self, test_data):
         """Test Ehlers KAMA streaming functionality - mirrors check_ehlers_kama_streaming"""
-        close = test_data['close'][:50]  
-        
-        
+        close = test_data['close'][:50]
+
+
         batch_result = ta_indicators.ehlers_kama(close, period=20)
-        
-        
+
+
         stream = ta_indicators.EhlersKamaStream(period=20)
         stream_result = []
-        
+
         for val in close:
             result = stream.update(val)
             stream_result.append(result if result is not None else np.nan)
-        
+
         stream_result = np.array(stream_result)
-        
-        
+
+
         for i in range(len(close)):
             if np.isnan(batch_result[i]) and np.isnan(stream_result[i]):
                 continue
             assert_close(
-                batch_result[i], 
+                batch_result[i],
                 stream_result[i],
                 rtol=1e-9,
                 atol=1e-9,
                 msg=f"Stream vs batch mismatch at index {i}"
             )
-    
+
     def test_ehlers_kama_batch(self, test_data):
         """Test Ehlers KAMA batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.ehlers_kama_batch(
             close,
-            period_range=(20, 20, 0)  
+            period_range=(20, 20, 0)
         )
-        
+
         assert 'values' in result
         assert 'periods' in result
-        
-        
+
+
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
-        
-        
+
+
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['ehlers_kama']['last_5_values']
-        
-        
+
+
         assert_close(
             default_row[-6:-1],
             expected,
             rtol=1e-8,
             msg="Ehlers KAMA batch default row mismatch"
         )
-    
+
     def test_ehlers_kama_batch_multiple_periods(self, test_data):
         """Test Ehlers KAMA batch with multiple periods"""
-        close = test_data['close'][:100]  
-        
-        
+        close = test_data['close'][:100]
+
+
         result = ta_indicators.ehlers_kama_batch(
             close,
-            period_range=(10, 20, 5)  
+            period_range=(10, 20, 5)
         )
-        
-        
+
+
         assert result['values'].shape[0] == 3
         assert result['values'].shape[1] == 100
         assert len(result['periods']) == 3
-        
-        
+
+
         periods = [10, 15, 20]
         for i, period in enumerate(periods):
             row_data = result['values'][i]
@@ -246,34 +246,34 @@ class TestEhlersKama:
                 rtol=1e-10,
                 msg=f"Period {period} mismatch"
             )
-    
+
     def test_ehlers_kama_batch_nan_handling(self, test_data):
         """Test batch processing with NaN values"""
-        
+
         data = np.array([np.nan, np.nan] + list(test_data['close'][2:52]))
-        
+
         result = ta_indicators.ehlers_kama_batch(
             data,
-            period_range=(10, 20, 10)  
+            period_range=(10, 20, 10)
         )
-        
-        
+
+
         for row_idx in range(2):
             row = result['values'][row_idx]
-            
+
             assert np.isnan(row[0])
             assert np.isnan(row[1])
-    
+
     def test_ehlers_kama_batch_metadata(self, test_data):
         """Test that batch result includes correct parameter combinations"""
         close = test_data['close'][:50]
-        
+
         result = ta_indicators.ehlers_kama_batch(
             close,
-            period_range=(10, 30, 10)  
+            period_range=(10, 30, 10)
         )
-        
-        
+
+
         assert len(result['periods']) == 3
         assert result['periods'][0] == 10
         assert result['periods'][1] == 20

@@ -44,19 +44,19 @@
 
 
 extern "C" __global__
-void vpwma_batch_f32(const float* __restrict__ prices,   
-                     const int*   __restrict__ periods,  
-                     const int*   __restrict__ win_lengths, 
-                     const float* __restrict__ weights,  
+void vpwma_batch_f32(const float* __restrict__ prices,
+                     const int*   __restrict__ periods,
+                     const int*   __restrict__ win_lengths,
+                     const float* __restrict__ weights,
                      const float* __restrict__ inv_norms,
                      int series_len,
                      int stride,
                      int first_valid,
                      int n_combos,
-                     float* __restrict__ out) {          
+                     float* __restrict__ out) {
 
-    
-    
+
+
     const bool cta_per_combo = (gridDim.x == (unsigned)n_combos);
 
     if (cta_per_combo) {
@@ -74,34 +74,34 @@ void vpwma_batch_f32(const float* __restrict__ prices,
         const int warm = first_valid + win_len;
         const int warm_clamped = warm < series_len ? warm : series_len;
 
-        
-        extern __shared__ float smem[];
-        float* __restrict__ s_w = smem;                     
-        float* __restrict__ s_x = smem + win_len;           
 
-        
+        extern __shared__ float smem[];
+        float* __restrict__ s_w = smem;
+        float* __restrict__ s_x = smem + win_len;
+
+
         for (int k = threadIdx.x; k < win_len; k += blockDim.x) {
             s_w[k] = weights[weight_offset + k];
         }
         __syncthreads();
 
-        
+
         for (int i = threadIdx.x; i < warm_clamped; i += blockDim.x) {
             out[row_offset + i] = VPWMA_NAN;
         }
         __syncthreads();
         if (warm >= series_len) return;
 
-        
+
         for (int t0 = warm; t0 < series_len; t0 += VPWMA_TILE_T) {
             const int tile_w   = min(VPWMA_TILE_T, series_len - t0);
             const int g_start  = t0 - (win_len - 1);
             const int load_len = tile_w + win_len - 1;
 
-            
+
             #if VPWMA_USE_ASYNC
-                
-                
+
+
             #endif
                 for (int o = threadIdx.x; o < load_len; o += blockDim.x) {
                     s_x[o] = prices[g_start + o];
@@ -109,12 +109,12 @@ void vpwma_batch_f32(const float* __restrict__ prices,
                 __syncthreads();
 
 
-            
-            
+
+
             for (int out_i = threadIdx.x; out_i < tile_w; out_i += blockDim.x) {
                 float acc = 0.0f;
                 const int x_base = out_i + (win_len - 1);
-                
+
                 #pragma unroll 4
                 for (int k = 0; k < win_len; ++k) {
                     acc = fmaf(s_w[k], s_x[x_base - k], acc);
@@ -126,7 +126,7 @@ void vpwma_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     {
         const int combo = blockIdx.x * blockDim.x + threadIdx.x;
         if (combo >= n_combos) return;
@@ -165,14 +165,14 @@ void vpwma_batch_f32(const float* __restrict__ prices,
 
 
 extern "C" __global__
-void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,  
-                                     const int*   __restrict__ first_valids, 
+void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
+                                     const int*   __restrict__ first_valids,
                                      int num_series,
                                      int series_len,
                                      int period,
-                                     const float* __restrict__ weights,    
+                                     const float* __restrict__ weights,
                                      float inv_norm,
-                                     float* __restrict__ out_tm) {         
+                                     float* __restrict__ out_tm) {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (series < num_series);
 
@@ -183,14 +183,14 @@ void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int first_valid = active ? first_valids[series] : 0;
     const int warm        = active ? (first_valid + win_len) : 0;
 
-    
+
     extern __shared__ float s_w[];
     for (int k = threadIdx.x; k < win_len; k += blockDim.x) {
         s_w[k] = weights[k];
     }
     __syncthreads();
 
-    
+
     if (active) {
         const int until = warm < series_len ? warm : series_len;
         for (int t = 0; t < until; ++t) {
@@ -198,10 +198,10 @@ void vpwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
     }
     if (!active || warm >= series_len) {
-        
+
     }
 
-    
+
     if (active) {
         for (int t = warm; t < series_len; ++t) {
             float acc = 0.0f;

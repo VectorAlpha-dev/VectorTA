@@ -20,47 +20,47 @@ class TestEmv:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_emv_basic_calculation(self):
         """Test basic EMV calculation - mirrors check_emv_basic_calculation"""
-        
+
         high = np.array([10.0, 12.0, 13.0, 15.0, 14.0, 16.0])
         low = np.array([5.0, 7.0, 8.0, 10.0, 11.0, 12.0])
         close = np.array([7.5, 9.0, 10.5, 12.5, 12.5, 14.0])
         volume = np.array([10000.0, 20000.0, 25000.0, 30000.0, 15000.0, 35000.0])
-        
+
         result = ta_indicators.emv(high, low, close, volume)
-        
-        
+
+
         assert len(result) == len(high)
-        
-        
+
+
         assert np.isnan(result[0])
-        
-        
+
+
         assert not np.isnan(result[1])
-        
-        
-        
-        
-        
-        
-        
+
+
+
+
+
+
+
         assert_close(result[1], 5.0, rtol=0.01)
-    
+
     def test_emv_accuracy(self, test_data):
         """Test EMV matches expected values from Rust tests - mirrors check_emv_accuracy"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         volume = test_data['volume']
-        
+
         result = ta_indicators.emv(high, low, close, volume)
-        
-        
+
+
         assert len(result) == len(high)
-        
-        
+
+
         expected_last_five = [
             -6488905.579799851,
             2371436.7401001123,
@@ -68,78 +68,78 @@ class TestEmv:
             1051939.877943717,
             -8519287.22257077,
         ]
-        
+
         assert_close(
             result[-5:],
             expected_last_five,
             rtol=0.0001,
             msg="EMV last 5 values mismatch"
         )
-        
-        
+
+
         compare_with_rust('emv', result, 'ohlcv')
-    
+
     def test_emv_warmup_period(self, test_data):
         """Test EMV warmup period behavior - mirrors check_emv_nan_handling"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         volume = test_data['volume']
-        
+
         result = ta_indicators.emv(high, low, close, volume)
-        
-        
+
+
         assert np.isnan(result[0]), "First EMV value should be NaN (warmup)"
-        
-        
+
+
         first_valid = None
         for i in range(len(high)):
             if not any(np.isnan([high[i], low[i], volume[i]])):
                 first_valid = i
                 break
-        
+
         if first_valid is not None:
-            
+
             if first_valid + 1 < len(result):
                 assert not np.isnan(result[first_valid + 1]), \
                     f"Expected valid EMV at index {first_valid + 1} after first valid data"
-    
+
     def test_emv_empty_data(self):
         """Test EMV with empty data - mirrors check_emv_empty_data"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="(?i)empty"):
             ta_indicators.emv(empty, empty, empty, empty)
-    
+
     def test_emv_all_nan(self):
         """Test EMV with all NaN values - mirrors check_emv_all_nan"""
         all_nan = np.full(10, np.nan)
-        
+
         with pytest.raises(ValueError, match="All values are NaN|AllValuesNaN"):
             ta_indicators.emv(all_nan, all_nan, all_nan, all_nan)
-    
+
     def test_emv_not_enough_data(self):
         """Test EMV with insufficient data - mirrors check_emv_not_enough_data"""
-        
+
         high = np.array([10.0, np.nan])
         low = np.array([9.0, np.nan])
         close = np.array([9.5, np.nan])
         volume = np.array([1000.0, np.nan])
-        
+
         with pytest.raises(ValueError, match="(?i)not enough"):
             ta_indicators.emv(high, low, close, volume)
-    
+
     def test_emv_with_kernels(self, test_data):
         """Test EMV with different kernel options"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         kernels = [None, "scalar", "avx2", "avx512"]
         results = []
-        
+
         for kernel in kernels:
             try:
                 if kernel:
@@ -148,8 +148,8 @@ class TestEmv:
                     result = ta_indicators.emv(high, low, close, volume)
                 results.append(result)
             except Exception as e:
-                
-                
+
+
                 emsg = str(e).lower()
                 if (
                     "not supported" in emsg
@@ -158,94 +158,94 @@ class TestEmv:
                 ):
                     continue
                 raise
-        
-        
+
+
         for i in range(1, len(results)):
             np.testing.assert_allclose(results[0], results[i], rtol=1e-10, equal_nan=True)
-    
+
     def test_emv_partial_nan_handling(self):
         """Test EMV with partial NaN values"""
         high = np.array([np.nan, 12.0, 15.0, np.nan, 13.0, 16.0])
         low = np.array([np.nan, 9.0, 11.0, np.nan, 10.0, 12.0])
         close = np.array([np.nan, 10.0, 13.0, np.nan, 11.5, 14.0])
         volume = np.array([np.nan, 10000.0, 20000.0, np.nan, 15000.0, 25000.0])
-        
+
         result = ta_indicators.emv(high, low, close, volume)
-        
-        
+
+
         assert len(result) == len(high)
-        
-        
+
+
         assert np.isnan(result[0])
-        assert np.isnan(result[1])  
-        
-        
+        assert np.isnan(result[1])
+
+
         assert not np.isnan(result[2])
-    
+
     def test_emv_zero_range(self):
         """Test EMV when high equals low (zero range)"""
         high = np.array([10.0, 10.0, 12.0, 13.0])
-        low = np.array([9.0, 10.0, 11.0, 12.0])  
+        low = np.array([9.0, 10.0, 11.0, 12.0])
         close = np.array([9.5, 10.0, 11.5, 12.5])
         volume = np.array([1000.0, 2000.0, 3000.0, 4000.0])
-        
+
         result = ta_indicators.emv(high, low, close, volume)
-        
-        
+
+
         assert np.isnan(result[1])
-        
-        
+
+
         assert not np.isnan(result[2])
-    
+
     def test_emv_streaming(self, test_data):
         """Test EMV streaming functionality - mirrors check_emv_streaming"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         batch_result = ta_indicators.emv(high, low, close, volume)
-        
-        
+
+
         stream = ta_indicators.EmvStream()
         stream_result = []
-        
+
         for i in range(len(high)):
             value = stream.update(high[i], low[i], close[i], volume[i])
             stream_result.append(value if value is not None else np.nan)
-        
+
         stream_result = np.array(stream_result)
-        
-        
+
+
         assert len(batch_result) == len(stream_result)
-        
-        
+
+
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if np.isnan(b) and np.isnan(s):
                 continue
             assert_close(b, s, rtol=1e-9, atol=1e-9,
                         msg=f"EMV streaming mismatch at index {i}")
-    
+
     def test_emv_batch(self, test_data):
         """Test EMV batch operations - mirrors check_batch_row"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         result = ta_indicators.emv_batch(high, low, close, volume)
-        
-        
+
+
         assert 'values' in result
         assert result['values'].shape == (1, len(high))
-        
-        
+
+
         single_result = ta_indicators.emv(high, low, close, volume)
         np.testing.assert_allclose(result['values'][0], single_result, rtol=1e-10, equal_nan=True)
-        
-        
+
+
         expected_last_five = [
             -6488905.579799851,
             2371436.7401001123,
@@ -253,35 +253,35 @@ class TestEmv:
             1051939.877943717,
             -8519287.22257077,
         ]
-        
+
         assert_close(
             result['values'][0, -5:],
             expected_last_five,
             rtol=0.0001,
             msg="EMV batch last 5 values mismatch"
         )
-    
+
     def test_emv_batch_with_kernel(self, test_data):
         """Test EMV batch with kernel parameter"""
         high = test_data['high']
         low = test_data['low']
         close = test_data['close']
         volume = test_data['volume']
-        
-        
+
+
         result = ta_indicators.emv_batch(high, low, close, volume, kernel="scalar")
-        
+
         assert 'values' in result
         assert result['values'].shape == (1, len(high))
-    
+
     def test_emv_mismatched_lengths(self):
         """Test EMV with mismatched input lengths"""
         high = np.array([10.0, 12.0, 13.0])
-        low = np.array([9.0, 11.0])  
+        low = np.array([9.0, 11.0])
         close = np.array([9.5, 11.5, 12.0])
         volume = np.array([1000.0, 2000.0, 3000.0])
-        
-        
+
+
         result = ta_indicators.emv(high, low, close, volume)
         assert len(result) == min(len(high), len(low), len(close), len(volume))
 

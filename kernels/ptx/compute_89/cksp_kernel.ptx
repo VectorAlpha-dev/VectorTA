@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 shraw[];
 .extern .shared .align 16 .b8 shraw$1[];
 
@@ -95,7 +95,7 @@ $L__BB0_7:
 	ret;
 
 }
-	
+
 .visible .entry cksp_batch_f32(
 	.param .u64 cksp_batch_f32_param_0,
 	.param .u64 cksp_batch_f32_param_1,
@@ -855,7 +855,7 @@ $L__BB1_45:
 	bra.uni 	$L__BB1_83;
 
 }
-	
+
 .visible .entry cksp_batch_f32_pretr(
 	.param .u64 cksp_batch_f32_pretr_param_0,
 	.param .u64 cksp_batch_f32_pretr_param_1,
@@ -1567,7 +1567,7 @@ $L__BB2_45:
 	bra.uni 	$L__BB2_83;
 
 }
-	
+
 .visible .entry cksp_many_series_one_param_f32(
 	.param .u64 cksp_many_series_one_param_f32_param_0,
 	.param .u64 cksp_many_series_one_param_f32_param_1,

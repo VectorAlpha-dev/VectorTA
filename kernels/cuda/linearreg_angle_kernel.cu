@@ -30,7 +30,7 @@ static __device__ __forceinline__ int tm_idx(int row, int num_series, int series
 }
 
 static __device__ __forceinline__ float kRad2Deg() {
-    return 57.2957795130823208767981548141051703f; 
+    return 57.2957795130823208767981548141051703f;
 }
 
 
@@ -79,7 +79,7 @@ static __device__ __forceinline__ df32 df32_sub(df32 a, df32 b) {
 
 static __device__ __forceinline__ df32 df32_add_prod(df32 acc, float a, float b) {
     float p = a * b;
-    float err = fmaf(a, b, -p);      
+    float err = fmaf(a, b, -p);
     acc = df32_add_f(acc, p);
     acc = df32_add_f(acc, err);
     return acc;
@@ -169,9 +169,9 @@ extern "C" __global__ void linearreg_angle_batch_f32(
                 df32 sum_kd = df32_sub(df32_from_float2(prefix_kd2[t + 1]),
                                        df32_from_float2(prefix_kd2[start]));
 
-                
+
                 df32 sum_xy = df32_sub(df32_mul_scalar(sum_y, (float)t), sum_kd);
-                
+
                 df32 num = df32_sub(df32_mul_scalar(sum_xy, (float)period),
                                     df32_mul_scalar(sum_y, sx_f));
                 const float slope = df32_to_float(num) * invd_f;
@@ -186,8 +186,8 @@ extern "C" __global__ void linearreg_angle_batch_f32(
 
 
 extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
-    const float* __restrict__ prices_tm, 
-    const int*   __restrict__ first_valids, 
+    const float* __restrict__ prices_tm,
+    const int*   __restrict__ first_valids,
     int cols,
     int rows,
     int period,
@@ -220,7 +220,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
         const int warm = fv + period - 1;
         for (int r = 0; r < warm; ++r) out_tm[tm_idx(r, cols, s)] = LRA_NAN_F;
 
-        
+
         df32 y_sum = df32_make(0.0f);
         df32 sum_kd = df32_make(0.0f);
         int nan_count = 0;
@@ -236,7 +236,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
             }
         }
 
-        
+
         {
             float outv = LRA_NAN_F;
             if (nan_count == 0) {
@@ -248,7 +248,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
             }
             out_tm[tm_idx(warm, cols, s)] = outv;
 
-            
+
             if (nan_count == 0) {
                 const int leave0_idx = warm - period + 1;
                 const float leave0 = prices_tm[tm_idx(leave0_idx, cols, s)];
@@ -257,10 +257,10 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
             }
         }
 
-        
+
         float next_enter = (warm + 1 < rows) ? prices_tm[tm_idx(warm + 1, cols, s)] : LRA_NAN_F;
 
-        
+
         for (int r = warm + 1; r < rows; ++r) {
             const float enter = next_enter;
             if (r + 1 < rows) next_enter = prices_tm[tm_idx(r + 1, cols, s)];
@@ -276,7 +276,7 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
 
             if (nan_count == 0) {
                 if (prev_nan_count == 0) {
-                    
+
                     y_sum  = df32_add_f(y_sum, enter);
                     sum_kd = df32_add_prod(sum_kd, (float)r, enter);
 
@@ -286,17 +286,17 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
                     const double slope_d = (double)df32_to_float(num) * (double)invd_f;
                     outv = atanf((float)slope_d) * rad2deg;
 
-                    
+
                     y_sum  = df32_sub_f(y_sum, leave);
                     sum_kd = df32_sub_prod(sum_kd, (float)(r - period + 1), leave);
                 } else {
-                    
+
                     y_sum  = df32_make(0.0f);
                     sum_kd = df32_make(0.0f);
                     for (int k = 0; k < period; ++k) {
                         const int r0 = r - period + 1 + k;
                         const float v = prices_tm[tm_idx(r0, cols, s)];
-                        
+
                         y_sum  = df32_add_f(y_sum, v);
                         sum_kd = df32_add_prod(sum_kd, (float)r0, v);
                     }
@@ -306,12 +306,12 @@ extern "C" __global__ void linearreg_angle_many_series_one_param_f32(
                     const double slope_d = (double)df32_to_float(num) * (double)invd_f;
                     outv = atanf((float)slope_d) * rad2deg;
 
-                    
+
                     y_sum  = df32_sub_f(y_sum, leave);
                     sum_kd = df32_sub_prod(sum_kd, (float)(r - period + 1), leave);
                 }
             } else {
-                
+
                 outv = LRA_NAN_F;
             }
 

@@ -37,7 +37,7 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
         block_sum = (lane < num_warps) ? warp_sums[lane] : 0.0f;
         block_sum = warp_reduce_sum(block_sum);
     }
-    return block_sum; 
+    return block_sum;
 }
 
 
@@ -76,16 +76,16 @@ static __forceinline__ __device__ void twoSum(float a, float b, float &s, float 
 
 
 static __forceinline__ __device__ void ds_rma_update(ds &s, float keep, float inc) {
-    
+
     float p_hi, p_err;
     twoProductFMA(s.hi, keep, p_hi, p_err);
-    float t_lo = s.lo * keep;               
+    float t_lo = s.lo * keep;
 
-    
+
     float sh, e_sum;
     twoSum(p_hi, inc, sh, e_sum);
 
-    
+
     float slo = e_sum + (p_err + t_lo);
     float new_hi = sh + slo;
     s.lo = slo - (new_hi - sh);
@@ -118,15 +118,15 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
         if (period <= 0 || warm < 0 || warm >= series_len) continue;
 
         const float invp = 1.0f / (float)period;
-        const float keep = 1.0f - invp; 
+        const float keep = 1.0f - invp;
 
         const int base = combo * series_len;
 
-        
+
         const int start = first_valid + 1;
-        const int stop  = first_valid + period; 
+        const int stop  = first_valid + period;
         if (stop > series_len) {
-            
+
             for (int i = threadIdx.x; i < series_len; i += blockDim.x) {
                 plus_out [base + i] = NAN;
                 minus_out[base + i] = NAN;
@@ -135,14 +135,14 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
             continue;
         }
 
-        
+
         for (int i = threadIdx.x; i < warm; i += blockDim.x) {
             plus_out [base + i] = NAN;
             minus_out[base + i] = NAN;
         }
         __syncthreads();
 
-        
+
         float lp = 0.0f, lm = 0.0f, lt = 0.0f;
         for (int t = start + threadIdx.x; t < stop; t += blockDim.x) {
             lp += up[t];
@@ -154,7 +154,7 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
         float st = block_reduce_sum(lt);
 
         if (threadIdx.x == 0) {
-            
+
             ds cur_p = ds_make(sp);
             ds cur_m = ds_make(sm);
             ds cur_t = ds_make(st);
@@ -164,7 +164,7 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
             plus_out [base + warm] = ds_value(cur_p) * scale;
             minus_out[base + warm] = ds_value(cur_m) * scale;
 
-            
+
             for (int t = warm + 1; t < series_len; ++t) {
                 ds_rma_update(cur_p, keep, up[t]);
                 ds_rma_update(cur_m, keep, dn[t]);
@@ -215,7 +215,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int first_valid = first_valids[s];
         if (first_valid < 0 || first_valid >= series_len) {
-            
+
             for (int t = lane; t < series_len; t += warpSize) {
                 plus_tm [t * stride + s] = NAN;
                 minus_tm[t * stride + s] = NAN;
@@ -224,7 +224,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
 
         const int start = first_valid + 1;
-        const int stop  = first_valid + period; 
+        const int stop  = first_valid + period;
         if (stop > series_len) {
             for (int t = lane; t < series_len; t += warpSize) {
                 plus_tm [t * stride + s] = NAN;
@@ -234,13 +234,13 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
         }
         const int warm = stop - 1;
 
-        
+
         for (int t = lane; t < warm; t += warpSize) {
             plus_tm [t * stride + s] = NAN;
             minus_tm[t * stride + s] = NAN;
         }
 
-        
+
         float lp = 0.0f, lm = 0.0f, lt = 0.0f;
         for (int t = start + lane; t < stop; t += warpSize) {
             const float ch = high_tm[t * stride + s];
@@ -261,7 +261,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
             if (lc > tr) tr = lc;
             lt += tr;
         }
-        
+
         lp = warp_reduce_sum(lp);
         lm = warp_reduce_sum(lm);
         lt = warp_reduce_sum(lt);
@@ -276,7 +276,7 @@ void di_many_series_one_param_f32(const float* __restrict__ high_tm,
             plus_tm [warm * stride + s] = ds_value(cur_p) * scale;
             minus_tm[warm * stride + s] = ds_value(cur_m) * scale;
 
-            
+
             int t  = warm + 1;
             const float* h_ptr  = high_tm  + t * stride + s;
             const float* l_ptr  = low_tm   + t * stride + s;

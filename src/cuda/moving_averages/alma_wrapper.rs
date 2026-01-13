@@ -1231,7 +1231,7 @@ impl CudaAlma {
                     return Ok(());
                 }
             }
-            ManySeriesKernelPolicy::OneD { .. } => { /* fall through to 1D below */ }
+            ManySeriesKernelPolicy::OneD { .. } => {}
             ManySeriesKernelPolicy::Auto => {
                 if cols < 16 {
                 } else if let Some(ref v) = force_ms {

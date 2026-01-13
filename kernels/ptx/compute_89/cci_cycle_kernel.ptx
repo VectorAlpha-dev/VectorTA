@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry cci_cycle_batch_f32(
 	.param .u64 cci_cycle_batch_f32_param_0,
@@ -5133,7 +5133,7 @@ $L__BB0_852:
 	ret;
 
 }
-	
+
 .visible .entry cci_cycle_many_series_one_param_f32(
 	.param .u64 cci_cycle_many_series_one_param_f32_param_0,
 	.param .u32 cci_cycle_many_series_one_param_f32_param_1,

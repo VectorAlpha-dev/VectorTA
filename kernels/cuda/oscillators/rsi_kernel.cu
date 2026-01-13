@@ -36,7 +36,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
                    int n_combos,
                    float* __restrict__ out)
 {
-    
+
     const unsigned lane = threadIdx.x & 31u;
     const unsigned warp = threadIdx.x >> 5;
     const unsigned warps_per_block = blockDim.x >> 5;
@@ -46,7 +46,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
     const int period = periods[combo];
     float* out_row = out + (size_t)combo * (size_t)series_len;
 
-    
+
     if (period <= 0 || period > series_len || first_valid < 0 || first_valid >= series_len) {
         for (int i = (int)lane; i < series_len; i += 32) out_row[i] = RSI_NAN;
         return;
@@ -58,17 +58,17 @@ void rsi_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int warm = fv + period; 
+    const int warm = fv + period;
 
-    
+
     for (int i = (int)lane; i < warm; i += 32) out_row[i] = RSI_NAN;
 
-    
+
     const float inv_p = 1.0f / (float)period;
     const float beta  = inv_p;
-    const float alpha = 1.0f - inv_p; 
+    const float alpha = 1.0f - inv_p;
 
-    
+
     float avg_g = 0.0f;
     float avg_l = 0.0f;
     int dead_i = 0;
@@ -106,7 +106,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     for (int t0 = warm + 1; t0 < series_len; t0 += 32) {
         const int t = t0 + (int)lane;
 
@@ -130,8 +130,8 @@ void rsi_batch_f32(const float* __restrict__ prices,
 
         const unsigned invalid_mask = __ballot_sync(mask, (t < series_len) && (!ok));
 
-        
-        
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev  = __shfl_up_sync(mask, A, offset);
             const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
@@ -166,7 +166,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        
+
         if (invalid_mask) {
             const int remaining = series_len - t0;
             const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
@@ -177,7 +177,7 @@ void rsi_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        
+
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         avg_g = __shfl_sync(mask, yg, last_lane);
@@ -219,7 +219,7 @@ void rsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const float inv_p = 1.0f / (float)period;
     const float beta  = 1.0f - inv_p;
 
-    
+
     float avg_g = 0.0f, avg_l = 0.0f;
     float sum_g = 0.0f, sum_l = 0.0f;
     bool  has_nan = false;
@@ -242,10 +242,10 @@ void rsi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         out_tm[warm * cols + s] = clamp_rsi(rsi);
     }
 
-    
+
     for (int t = warm + 1; t < rows; ++t) {
         const float d = prices_tm[t * cols + s] - prices_tm[(t - 1) * cols + s];
-        const float g = (d > 0.0f) ? d : 0.0f; 
+        const float g = (d > 0.0f) ? d : 0.0f;
         const float l = (d < 0.0f) ? -d : 0.0f;
         avg_g = fmaf(beta, avg_g, inv_p * g);
         avg_l = fmaf(beta, avg_l, inv_p * l);

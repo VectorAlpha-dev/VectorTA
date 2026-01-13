@@ -22,65 +22,65 @@ class TestRsmk:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_rsmk_basic_functionality(self, test_data):
         """Test RSMK with basic functionality"""
         close = test_data['close']
-        
-        
+
+
         indicator, signal = ta_indicators.rsmk(
-            close, close,  
+            close, close,
             lookback=90,
             period=3,
             signal_period=20
         )
-        
+
         assert len(indicator) == len(close)
         assert len(signal) == len(close)
-        
-        
+
+
         assert not np.all(np.isnan(indicator))
         assert not np.all(np.isnan(signal))
-    
+
     def test_rsmk_accuracy(self, test_data):
         """Test RSMK matches expected values from Rust tests"""
         close = test_data['close']
-        
+
         if 'rsmk' not in EXPECTED_OUTPUTS:
             pytest.skip("RSMK expected outputs not yet defined in test_utils.py")
-        
+
         expected = EXPECTED_OUTPUTS['rsmk']
-        
+
         indicator, signal = ta_indicators.rsmk(
             close, close,
             lookback=expected['default_params']['lookback'],
             period=expected['default_params']['period'],
             signal_period=expected['default_params']['signal_period']
         )
-        
+
         assert len(indicator) == len(close)
         assert len(signal) == len(close)
-        
-        
+
+
         assert_close(
             indicator[-5:],
             expected['indicator_last_5'],
             rtol=1e-7,
             msg="RSMK indicator last 5 values mismatch"
         )
-        
+
         assert_close(
             signal[-5:],
             expected['signal_last_5'],
             rtol=1e-7,
             msg="RSMK signal last 5 values mismatch"
         )
-    
+
     def test_rsmk_partial_params(self, test_data):
         """Test RSMK with partial parameters (None values)"""
         close = test_data['close']
-        
-        
+
+
         indicator, signal = ta_indicators.rsmk(
             close, close,
             lookback=90,
@@ -89,17 +89,17 @@ class TestRsmk:
             matype=None,
             signal_matype=None
         )
-        
+
         assert len(indicator) == len(close)
         assert len(signal) == len(close)
-    
+
     def test_rsmk_custom_ma_types(self, test_data):
         """Test RSMK with different MA type combinations"""
-        close = test_data['close'][:500]  
-        
+        close = test_data['close'][:500]
+
         ma_types = ["ema", "sma", "wma", "dema", "tema"]
-        
-        for matype in ma_types[:3]:  
+
+        for matype in ma_types[:3]:
             for signal_matype in ma_types[:3]:
                 indicator, signal = ta_indicators.rsmk(
                     close, close,
@@ -109,14 +109,14 @@ class TestRsmk:
                     matype=matype,
                     signal_matype=signal_matype
                 )
-                
+
                 assert len(indicator) == len(close), f"Failed with matype={matype}, signal_matype={signal_matype}"
                 assert len(signal) == len(close), f"Failed with matype={matype}, signal_matype={signal_matype}"
-    
+
     def test_rsmk_zero_period(self):
         """Test RSMK fails with zero period"""
         input_data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.rsmk(
                 input_data, input_data,
@@ -124,11 +124,11 @@ class TestRsmk:
                 period=0,
                 signal_period=0
             )
-    
+
     def test_rsmk_period_exceeds_length(self):
         """Test RSMK fails when period exceeds data length"""
         data_small = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.rsmk(
                 data_small, data_small,
@@ -136,11 +136,11 @@ class TestRsmk:
                 period=3,
                 signal_period=20
             )
-    
+
     def test_rsmk_insufficient_data(self):
         """Test RSMK fails with insufficient data"""
         single_point = np.array([42.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.rsmk(
                 single_point, single_point,
@@ -148,11 +148,11 @@ class TestRsmk:
                 period=3,
                 signal_period=20
             )
-    
+
     def test_rsmk_empty_input(self):
         """Test RSMK fails with empty input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Input data slice is empty|Empty data"):
             ta_indicators.rsmk(
                 empty, empty,
@@ -160,11 +160,11 @@ class TestRsmk:
                 period=3,
                 signal_period=20
             )
-    
+
     def test_rsmk_all_nan(self):
         """Test RSMK fails with all NaN values"""
         all_nan = np.full(100, np.nan)
-        
+
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.rsmk(
                 all_nan, all_nan,
@@ -172,12 +172,12 @@ class TestRsmk:
                 period=1,
                 signal_period=1
             )
-    
+
     def test_rsmk_mismatched_lengths(self):
         """Test RSMK fails with mismatched main/compare lengths"""
         main = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
         compare = np.array([1.0, 2.0, 3.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period|Mismatched lengths"):
             ta_indicators.rsmk(
                 main, compare,
@@ -185,11 +185,11 @@ class TestRsmk:
                 period=1,
                 signal_period=1
             )
-    
+
     def test_rsmk_invalid_ma_type(self):
         """Test RSMK fails with invalid MA type"""
         input_data = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0])
-        
+
         with pytest.raises(ValueError, match="Error from MA function"):
             ta_indicators.rsmk(
                 input_data, input_data,
@@ -199,124 +199,124 @@ class TestRsmk:
                 matype="nonexistent_ma",
                 signal_matype="ema"
             )
-    
+
     def test_rsmk_nan_handling(self, test_data):
         """Test RSMK handles NaN values correctly"""
         close = test_data['close']
-        
+
         indicator, signal = ta_indicators.rsmk(
             close, close,
             lookback=90,
             period=3,
             signal_period=20
         )
-        
+
         assert len(indicator) == len(close)
         assert len(signal) == len(close)
-        
-        
-        
-        
-        
-        
-        
-        
+
+
+
+
+
+
+
+
         if len(indicator) > 111:
-            
+
             assert not np.any(np.isnan(signal[150:])), "Found unexpected NaN in signal after warmup period"
-    
+
     def test_rsmk_streaming(self, test_data):
         """Test RSMK streaming matches batch calculation"""
-        close = test_data['close'][:500]  
+        close = test_data['close'][:500]
         lookback = 20
         period = 3
         signal_period = 9
-        
-        
+
+
         batch_indicator, batch_signal = ta_indicators.rsmk(
             close, close,
             lookback=lookback,
             period=period,
             signal_period=signal_period
         )
-        
-        
+
+
         stream = ta_indicators.RsmkStream(
             lookback=lookback,
             period=period,
             signal_period=signal_period,
-            matype=None,  
-            signal_matype=None  
+            matype=None,
+            signal_matype=None
         )
-        
+
         stream_indicators = []
         stream_signals = []
-        
+
         for price in close:
-            result = stream.update(price, price)  
+            result = stream.update(price, price)
             if result is not None:
                 stream_indicators.append(result[0] if result[0] is not None else np.nan)
                 stream_signals.append(result[1] if result[1] is not None else np.nan)
             else:
                 stream_indicators.append(np.nan)
                 stream_signals.append(np.nan)
-        
+
         stream_indicators = np.array(stream_indicators)
         stream_signals = np.array(stream_signals)
-        
-        
+
+
         assert len(batch_indicator) == len(stream_indicators)
         assert len(batch_signal) == len(stream_signals)
-        
-        
+
+
         for i, (b_ind, s_ind) in enumerate(zip(batch_indicator, stream_indicators)):
             if not np.isnan(b_ind) and not np.isnan(s_ind):
                 assert_close(b_ind, s_ind, rtol=1e-9, atol=1e-9,
                            msg=f"RSMK indicator streaming mismatch at index {i}")
-        
+
         for i, (b_sig, s_sig) in enumerate(zip(batch_signal, stream_signals)):
             if not np.isnan(b_sig) and not np.isnan(s_sig):
                 assert_close(b_sig, s_sig, rtol=1e-9, atol=1e-9,
                            msg=f"RSMK signal streaming mismatch at index {i}")
-    
+
     def test_rsmk_batch_single_params(self, test_data):
         """Test RSMK batch processing with single parameter set"""
-        close = test_data['close'][:500]  
-        
+        close = test_data['close'][:500]
+
         result = ta_indicators.rsmk_batch(
             close, close,
-            lookback_range=(90, 90, 0),  
-            period_range=(3, 3, 0),      
-            signal_period_range=(20, 20, 0)  
+            lookback_range=(90, 90, 0),
+            period_range=(3, 3, 0),
+            signal_period_range=(20, 20, 0)
         )
-        
-        assert 'indicator' in result  
-        assert 'signal' in result     
+
+        assert 'indicator' in result
+        assert 'signal' in result
         assert 'lookbacks' in result
         assert 'periods' in result
         assert 'signal_periods' in result
         assert 'matypes' in result
         assert 'signal_matypes' in result
-        
-        
+
+
         assert result['indicator'].shape[0] == 1
         assert result['signal'].shape[0] == 1
         assert result['indicator'].shape[1] == len(close)
         assert result['signal'].shape[1] == len(close)
-        
-        
+
+
         single_indicator, single_signal = ta_indicators.rsmk(
             close, close,
             lookback=90,
             period=3,
             signal_period=20
         )
-        
-        
+
+
         batch_indicator = result['indicator'][0]
         batch_signal = result['signal'][0]
-        
-        
+
+
         ind_mask = ~(np.isnan(batch_indicator) | np.isnan(single_indicator))
         sig_mask = ~(np.isnan(batch_signal) | np.isnan(single_signal))
 
@@ -324,82 +324,82 @@ class TestRsmk:
                      msg="RSMK batch indicator mismatch with single calculation")
         assert_close(batch_signal[sig_mask], single_signal[sig_mask], rtol=1e-9,
                      msg="RSMK batch signal mismatch with single calculation")
-    
+
     def test_rsmk_batch_multiple_params(self, test_data):
         """Test RSMK batch processing with parameter sweeps"""
-        close = test_data['close'][:200]  
-        
+        close = test_data['close'][:200]
+
         result = ta_indicators.rsmk_batch(
             close, close,
-            lookback_range=(10, 20, 10),     
-            period_range=(2, 4, 2),           
-            signal_period_range=(5, 10, 5),   
+            lookback_range=(10, 20, 10),
+            period_range=(2, 4, 2),
+            signal_period_range=(5, 10, 5),
             matype="ema",
             signal_matype="sma"
         )
-        
-        
+
+
         expected_combos = 8
         assert result['indicator'].shape[0] == expected_combos
         assert result['signal'].shape[0] == expected_combos
         assert result['indicator'].shape[1] == len(close)
         assert result['signal'].shape[1] == len(close)
-        
-        
+
+
         assert len(result['lookbacks']) == expected_combos
         assert len(result['periods']) == expected_combos
         assert len(result['signal_periods']) == expected_combos
         assert len(result['matypes']) == expected_combos
         assert len(result['signal_matypes']) == expected_combos
-        
-        
+
+
         assert all(isinstance(ma, str) for ma in result['matypes'])
         assert all(isinstance(ma, str) for ma in result['signal_matypes'])
-    
+
     def test_rsmk_compare_zero_handling(self):
         """Test RSMK handles zeros in compare data properly"""
         main = np.array([10.0, 11.0, 12.0, 13.0, 14.0, 15.0])
-        compare = np.array([10.0, 0.0, 12.0, 0.0, 14.0, 15.0])  
-        
-        
-        
+        compare = np.array([10.0, 0.0, 12.0, 0.0, 14.0, 15.0])
+
+
+
         indicator, signal = ta_indicators.rsmk(
             main, compare,
             lookback=2,
             period=2,
             signal_period=2
         )
-        
-        
+
+
         assert np.isnan(indicator[1]) or np.isnan(indicator[3]), \
             "Expected NaN values where compare is zero"
-    
+
     def test_rsmk_different_data_sources(self, test_data):
         """Test RSMK with different main and compare data"""
         close = test_data['close'][:200]
         high = test_data['high'][:200]
-        
-        
+
+
         indicator, signal = ta_indicators.rsmk(
             close, high,
             lookback=20,
             period=3,
             signal_period=9
         )
-        
+
         assert len(indicator) == len(close)
         assert len(signal) == len(close)
-        
-        
+
+
         indicator_same, signal_same = ta_indicators.rsmk(
             close, close,
             lookback=20,
             period=3,
             signal_period=9
         )
-        
-        
-        valid_idx = 50  
+
+
+        valid_idx = 50
         if not np.isnan(indicator[valid_idx]) and not np.isnan(indicator_same[valid_idx]):
             assert abs(indicator[valid_idx] - indicator_same[valid_idx]) > 1e-10, \
                 "Expected different results when using different compare data"

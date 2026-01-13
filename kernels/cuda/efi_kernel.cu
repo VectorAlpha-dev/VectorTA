@@ -25,7 +25,7 @@
 
 #if defined(EFI_USE_L2_PREFETCH)
 __device__ __forceinline__ void prefetch_L2(const void* p) {
-    
+
     asm volatile("prefetch.global.L2 [%0];" :: "l"(p));
 }
 #endif
@@ -51,7 +51,7 @@ void efi_precompute_diffs_f32(const float* __restrict__ prices,
                               const float* __restrict__ volumes,
                               int series_len,
                               float* __restrict__ diffs,
-                              int* __restrict__ warm_out /* nullable */) {
+                              int* __restrict__ warm_out ) {
     const int gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid == 0) diffs[0] = NAN;
 
@@ -61,7 +61,7 @@ void efi_precompute_diffs_f32(const float* __restrict__ prices,
     constexpr int PDIST = 128;
 #endif
 
-    
+
     for (int t = gid + 1; t < series_len; t += blockDim.x * gridDim.x) {
 #if defined(EFI_USE_L2_PREFETCH)
         if (t + PDIST < series_len) {
@@ -105,21 +105,21 @@ void efi_batch_f32(const float* __restrict__ prices,
 
     const int base = combo * series_len;
 
-    
+
     for (int i = threadIdx.x; i < warm; i += blockDim.x) {
         out[base + i] = NAN;
     }
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     float prev = (prices[warm] - prices[warm - 1]) * volumes[warm];
     out[base + warm] = prev;
 
-    
+
 #if defined(EFI_USE_L2_PREFETCH)
-    constexpr int PREFETCH_DIST = 64; 
+    constexpr int PREFETCH_DIST = 64;
 #endif
     for (int t = warm + 1; t < series_len; ++t) {
 #if defined(EFI_USE_L2_PREFETCH)
@@ -130,7 +130,7 @@ void efi_batch_f32(const float* __restrict__ prices,
         const float vc = volumes[t];
         if (isfinite(pc) && isfinite(pp) && isfinite(vc)) {
             const float diff = (pc - pp) * vc;
-            
+
             prev = __fmaf_rn(diff - prev, alpha, prev);
         }
         out[base + t] = prev;
@@ -148,27 +148,27 @@ void efi_batch_from_diff_f32(const float* __restrict__ diffs,
                              int warm,
                              int n_combos,
                              float* __restrict__ out) {
-    
+
     const int combo = blockIdx.x * blockDim.x + threadIdx.x;
     const bool active = (combo < n_combos) && (periods[combo] > 0) && (series_len > 0) && (warm < series_len);
     const unsigned warp_mask = __ballot_sync(0xffffffff, active);
-    if (warp_mask == 0) return; 
+    if (warp_mask == 0) return;
 
-    
+
     if (active) {
         const int base = combo * series_len;
-        
+
         for (int t = 0; t < warm; ++t) { out[base + t] = NAN; }
     }
 
     const int lane = threadIdx.x & 31;
-    const int src_lane = __ffs(warp_mask) - 1; 
+    const int src_lane = __ffs(warp_mask) - 1;
 
     if (!active) return;
 
     const int base = combo * series_len;
     float prev = diffs[warm];
-    float c = 0.0f; 
+    float c = 0.0f;
     const float alpha = alphas[combo];
     out[base + warm] = prev;
 
@@ -182,10 +182,10 @@ void efi_batch_from_diff_f32(const float* __restrict__ diffs,
         if (lane == src_lane && (t + PDIST) < series_len) prefetch_L2(&diffs[t + PDIST]);
 #endif
         if (lane == src_lane) d = diffs[t];
-        d = __shfl_sync(warp_mask, d, src_lane); 
+        d = __shfl_sync(warp_mask, d, src_lane);
 
         if (finite_f32(d)) {
-            
+
             const float y = __fmaf_rn(alpha, (d - prev), 0.0f);
             kahan_add(prev, y, c);
         }
@@ -202,7 +202,7 @@ void efi_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int num_series,
                                    int series_len,
                                    float* __restrict__ out_tm) {
-    
+
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= num_series || series_len <= 0 || period <= 0) return;
 
@@ -215,12 +215,12 @@ void efi_many_series_one_param_f32(const float* __restrict__ prices_tm,
         return;
     }
 
-    
+
     for (int t = 0; t < warm; ++t) {
         out_tm[t * stride + s] = NAN;
     }
 
-    
+
     const float pcw = prices_tm[warm * stride + s];
     const float ppw = prices_tm[(warm - 1) * stride + s];
     const float vcw = volumes_tm[warm * stride + s];

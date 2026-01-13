@@ -38,8 +38,8 @@
 
 
 struct KBN32 {
-    float s;  
-    float c;  
+    float s;
+    float c;
     __device__ inline void init() { s = 0.0f; c = 0.0f; }
     __device__ inline void add(float x) {
         float t = s + x;
@@ -65,14 +65,14 @@ __device__ inline float cmo_from_avgs(float avg_g, float avg_l) {
 
 
 extern "C" __global__ void cmo_batch_f32(
-    const float*  __restrict__ prices,   
-    const int*    __restrict__ periods,  
+    const float*  __restrict__ prices,
+    const int*    __restrict__ periods,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out              
+    float* __restrict__ out
 ) {
-    
+
     const unsigned lane = threadIdx.x & 31u;
     const unsigned warp = threadIdx.x >> 5;
     const unsigned warps_per_block = blockDim.x >> 5;
@@ -82,7 +82,7 @@ extern "C" __global__ void cmo_batch_f32(
     const int period = periods[combo];
     float* out_row = out + (size_t)combo * (size_t)series_len;
 
-    
+
     if (UNLIKELY(period <= 0 || period > series_len ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = (int)lane; i < series_len; i += 32) out_row[i] = CMO_NAN;
@@ -95,16 +95,16 @@ extern "C" __global__ void cmo_batch_f32(
         return;
     }
 
-    const int warm = fv + period; 
+    const int warm = fv + period;
 
-    
+
     for (int i = (int)lane; i < warm; i += 32) out_row[i] = CMO_NAN;
 
-    
-    const float beta  = 1.0f / (float)period;
-    const float alpha = 1.0f - beta; 
 
-    
+    const float beta  = 1.0f / (float)period;
+    const float alpha = 1.0f - beta;
+
+
     float avg_g = 0.0f;
     float avg_l = 0.0f;
     if (lane == 0) {
@@ -130,7 +130,7 @@ extern "C" __global__ void cmo_batch_f32(
     avg_g = __shfl_sync(mask, avg_g, 0);
     avg_l = __shfl_sync(mask, avg_l, 0);
 
-    
+
     for (int t0 = warm + 1; t0 < series_len; t0 += 32) {
         const int t = t0 + (int)lane;
 
@@ -148,8 +148,8 @@ extern "C" __global__ void cmo_batch_f32(
             Bl = beta * l;
         }
 
-        
-        
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev  = __shfl_up_sync(mask, A, offset);
             const float Bg_prev = __shfl_up_sync(mask, Bg, offset);
@@ -171,7 +171,7 @@ extern "C" __global__ void cmo_batch_f32(
             out_row[t] = cmo_from_avgs(yg, yl);
         }
 
-        
+
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         avg_g = __shfl_sync(mask, yg, last_lane);
@@ -185,11 +185,11 @@ extern "C" __global__ void cmo_batch_f32(
 
 extern "C" __global__ void cmo_many_series_one_param_f32(
     const float* __restrict__ prices_tm,
-    const int*   __restrict__ first_valids, 
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
-    float* __restrict__ out_tm 
+    float* __restrict__ out_tm
 ) {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
@@ -211,13 +211,13 @@ extern "C" __global__ void cmo_many_series_one_param_f32(
     const float beta  = 1.0f / (float)period;
     const float alpha = 1.0f - beta;
 
-    
+
     {
         float* o = out_tm + series;
         for (int r = 0; r < warm; ++r, o += num_series) *o = CMO_NAN;
     }
 
-    
+
     float prev = *(prices_tm + (size_t)fv * num_series + series);
     KBN32 sum_g, sum_l; sum_g.init(); sum_l.init();
 
@@ -234,7 +234,7 @@ extern "C" __global__ void cmo_many_series_one_param_f32(
 
     *(out_tm + (size_t)warm * num_series + series) = cmo_from_avgs(avg_g, avg_l);
 
-    
+
     for (int r = warm + 1; r < series_len; ++r) {
         float curr = *(prices_tm + (size_t)r * num_series + series);
         float diff = curr - prev; prev = curr;

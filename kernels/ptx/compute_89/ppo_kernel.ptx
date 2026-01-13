@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry ppo_batch_ema_manyparams_f32(
 	.param .u64 ppo_batch_ema_manyparams_f32_param_0,
@@ -53,9 +53,9 @@
 	mov.u32 	%r110, %ctaid.y;
 	or.b32  	%r111, %r2, %r109;
 	mad.lo.s32 	%r4, %r3, %r110, %r111;
-	
+
 	activemask.b32 %r108;
-	
+
 	setp.lt.s32 	%p19, %r4, %r106;
 	vote.sync.ballot.b32 	%r5, %p19, %r108;
 	setp.eq.s32 	%p21, %r5, 0;
@@ -1070,7 +1070,7 @@ $L__BB0_105:
 	ret;
 
 }
-	
+
 .visible .entry ppo_batch_f32(
 	.param .u64 ppo_batch_f32_param_0,
 	.param .u64 ppo_batch_f32_param_1,
@@ -1783,7 +1783,7 @@ $L__BB1_85:
 	ret;
 
 }
-	
+
 .visible .entry ppo_many_series_one_param_time_major_f32(
 	.param .u64 ppo_many_series_one_param_time_major_f32_param_0,
 	.param .u64 ppo_many_series_one_param_time_major_f32_param_1,
@@ -2470,7 +2470,7 @@ $L__BB2_77:
 	ret;
 
 }
-	
+
 .visible .entry ppo_from_ma_batch_f32(
 	.param .u64 ppo_from_ma_batch_f32_param_0,
 	.param .u64 ppo_from_ma_batch_f32_param_1,
@@ -2739,7 +2739,7 @@ $L__BB3_33:
 	ret;
 
 }
-	
+
 .visible .entry ppo_from_ma_many_series_one_param_time_major_f32(
 	.param .u64 ppo_from_ma_many_series_one_param_time_major_f32_param_0,
 	.param .u64 ppo_from_ma_many_series_one_param_time_major_f32_param_1,

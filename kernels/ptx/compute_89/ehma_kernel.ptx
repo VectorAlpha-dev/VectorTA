@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 .extern .shared .align 16 .b8 shraw[];
@@ -404,7 +404,7 @@ $L__BB0_40:
 	ret;
 
 }
-	
+
 .visible .entry ehma_multi_series_one_param_f32(
 	.param .u64 ehma_multi_series_one_param_f32_param_0,
 	.param .u64 ehma_multi_series_one_param_f32_param_1,
@@ -803,7 +803,7 @@ $L__BB1_36:
 	ret;
 
 }
-	
+
 .visible .entry ehma_batch_tiled_f32_2x_tile128(
 	.param .u64 ehma_batch_tiled_f32_2x_tile128_param_0,
 	.param .u64 ehma_batch_tiled_f32_2x_tile128_param_1,
@@ -1807,7 +1807,7 @@ $L__BB2_102:
 	ret;
 
 }
-	
+
 .visible .entry ehma_batch_tiled_f32_2x_tile256(
 	.param .u64 ehma_batch_tiled_f32_2x_tile256_param_0,
 	.param .u64 ehma_batch_tiled_f32_2x_tile256_param_1,
@@ -2811,7 +2811,7 @@ $L__BB3_102:
 	ret;
 
 }
-	
+
 .visible .entry ehma_batch_tiled_f32_2x_tile512(
 	.param .u64 ehma_batch_tiled_f32_2x_tile512_param_0,
 	.param .u64 ehma_batch_tiled_f32_2x_tile512_param_1,
@@ -3815,7 +3815,7 @@ $L__BB4_102:
 	ret;
 
 }
-	
+
 .visible .entry ehma_batch_tiled_f32_2x_tile128_async(
 	.param .u64 ehma_batch_tiled_f32_2x_tile128_async_param_0,
 	.param .u64 ehma_batch_tiled_f32_2x_tile128_async_param_1,
@@ -4069,20 +4069,20 @@ $L__BB5_48:
 	cvt.u32.u64 	%r217, %rd44;
 	shl.b32 	%r218, %r217, 2;
 	add.s32 	%r216, %r44, %r218;
-	
+
 	cp.async.ca.shared.global [%r216], [%rd39], 4, 4;
-	
+
 	add.s64 	%rd44, %rd44, %rd5;
 	setp.lt.u64 	%p54, %rd44, %rd3;
 	@%p54 bra 	$L__BB5_48;
 
 $L__BB5_49:
-	
+
 	cp.async.commit_group;
-	
-	
+
+
 	cp.async.wait_group 0;
-	
+
 	barrier.sync 	0;
 	bar.sync 	0;
 	bra.uni 	$L__BB5_50;
@@ -4707,7 +4707,7 @@ $L__BB5_96:
 	ret;
 
 }
-	
+
 .visible .entry ehma_batch_tiled_f32_2x_tile256_async(
 	.param .u64 ehma_batch_tiled_f32_2x_tile256_async_param_0,
 	.param .u64 ehma_batch_tiled_f32_2x_tile256_async_param_1,
@@ -4961,20 +4961,20 @@ $L__BB6_48:
 	cvt.u32.u64 	%r217, %rd44;
 	shl.b32 	%r218, %r217, 2;
 	add.s32 	%r216, %r44, %r218;
-	
+
 	cp.async.ca.shared.global [%r216], [%rd39], 4, 4;
-	
+
 	add.s64 	%rd44, %rd44, %rd5;
 	setp.lt.u64 	%p54, %rd44, %rd3;
 	@%p54 bra 	$L__BB6_48;
 
 $L__BB6_49:
-	
+
 	cp.async.commit_group;
-	
-	
+
+
 	cp.async.wait_group 0;
-	
+
 	barrier.sync 	0;
 	bar.sync 	0;
 	bra.uni 	$L__BB6_50;
@@ -5599,7 +5599,7 @@ $L__BB6_96:
 	ret;
 
 }
-	
+
 .visible .entry ehma_batch_tiled_f32_2x_tile512_async(
 	.param .u64 ehma_batch_tiled_f32_2x_tile512_async_param_0,
 	.param .u64 ehma_batch_tiled_f32_2x_tile512_async_param_1,
@@ -5853,20 +5853,20 @@ $L__BB7_48:
 	cvt.u32.u64 	%r217, %rd44;
 	shl.b32 	%r218, %r217, 2;
 	add.s32 	%r216, %r44, %r218;
-	
+
 	cp.async.ca.shared.global [%r216], [%rd39], 4, 4;
-	
+
 	add.s64 	%rd44, %rd44, %rd5;
 	setp.lt.u64 	%p54, %rd44, %rd3;
 	@%p54 bra 	$L__BB7_48;
 
 $L__BB7_49:
-	
+
 	cp.async.commit_group;
-	
-	
+
+
 	cp.async.wait_group 0;
-	
+
 	barrier.sync 	0;
 	bar.sync 	0;
 	bra.uni 	$L__BB7_50;
@@ -6491,7 +6491,7 @@ $L__BB7_96:
 	ret;
 
 }
-	
+
 .visible .entry ehma_ms1p_tiled_f32_tx128_ty2(
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty2_param_0,
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty2_param_1,
@@ -6973,7 +6973,7 @@ $L__BB8_46:
 	ret;
 
 }
-	
+
 .visible .entry ehma_ms1p_tiled_f32_tx128_ty4(
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty4_param_0,
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty4_param_1,
@@ -7455,7 +7455,7 @@ $L__BB9_48:
 	ret;
 
 }
-	
+
 .visible .entry ehma_ms1p_tiled_f32_tx128_ty2_async(
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty2_async_param_0,
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty2_async_param_1,
@@ -7472,7 +7472,7 @@ $L__BB9_48:
 	.reg .f32 	%f<124>;
 	.reg .b32 	%r<323>;
 	.reg .b64 	%rd<71>;
-	
+
 	.shared .align 8 .b8 _ZZ26ehma_ms1p_tiled_core_asyncILi128ELi2EEvPKfS1_ifiiPKiPfE3pss[24];
 
 	ld.param.u64 	%rd23, [ehma_ms1p_tiled_f32_tx128_ty2_async_param_0];
@@ -7689,26 +7689,26 @@ $L__BB10_19:
 	mul.lo.s32 	%r207, %r7, %r208;
 	mov.u32 	%r205, _ZZ26ehma_ms1p_tiled_core_asyncILi128ELi2EEvPKfS1_ifiiPKiPfE3pss;
 	add.s32 	%r203, %r205, 8;
-	
+
 	mbarrier.init.shared.b64 [%r203], %r207;
-	
-	
+
+
 	mbarrier.init.shared.b64 [%r205], %r207;
-	
+
 	{ .reg .b64 %tmp;
 	  cvt.u64.u32 	%tmp, %r205;
 	  cvta.shared.u64 	%rd44, %tmp; }
 	add.s64 	%rd43, %rd44, 16;
-	
+
 	st.relaxed.cta.b32 [%rd43],%r207;
-	
+
 
 $L__BB10_21:
 	mov.u32 	%r305, 0;
 	barrier.sync 	0;
-	
+
 	mov.u64 %rd45, %globaltimer;
-	
+
 	mov.u32 	%r210, shraw;
 	add.s32 	%r55, %r210, %r4;
 	cvta.to.global.u64 	%rd16, %rd25;
@@ -7722,9 +7722,9 @@ $L__BB10_67:
 
 $L__BB10_22:
 	mov.u32 	%r212, 1;
-	
+
 	{.reg .pred %p;mbarrier.test_wait.parity.shared.b64 %p, [%r211], %r212;selp.u16 %rs1, 1, 0, %p;}
-	
+
 	setp.eq.s16 	%p20, %rs1, 0;
 	@%p20 bra 	$L__BB10_62;
 	bra.uni 	$L__BB10_23;
@@ -7733,9 +7733,9 @@ $L__BB10_62:
 	setp.lt.s32 	%p48, %r305, 16;
 	@%p48 bra 	$L__BB10_67;
 
-	
+
 	mov.u64 %rd63, %globaltimer;
-	
+
 	sub.s64 	%rd22, %rd63, %rd45;
 	setp.lt.s64 	%p49, %rd22, 4000000;
 	@%p49 bra 	$L__BB10_65;
@@ -7750,16 +7750,16 @@ $L__BB10_65:
 	add.s64 	%rd66, %rd22, %rd65;
 	shr.u64 	%rd67, %rd66, 2;
 	cvt.u32.u64 	%r278, %rd67;
-	
+
 	nanosleep.u32 %r278;
-	
+
 	bra.uni 	$L__BB10_22;
 
 $L__BB10_64:
 	mov.u32 	%r277, 1000000;
-	
+
 	nanosleep.u32 %r277;
-	
+
 	bra.uni 	$L__BB10_22;
 
 $L__BB10_23:
@@ -7794,9 +7794,9 @@ $L__BB10_30:
 	mad.lo.s32 	%r220, %r61, %r114, %r58;
 	mul.wide.s32 	%rd47, %r220, 4;
 	add.s64 	%rd46, %rd18, %rd47;
-	
+
 	cp.async.ca.shared.global [%r63], [%rd46], 4, 4;
-	
+
 	bra.uni 	$L__BB10_31;
 
 $L__BB10_26:
@@ -7817,15 +7817,15 @@ $L__BB10_31:
 	@%p27 bra 	$L__BB10_25;
 
 $L__BB10_32:
-	
+
 	cp.async.mbarrier.arrive.shared.b64 [%r213];
-	
-	
-	mbarrier.arrive.shared.b64                                  %rd48,  [%r213];           
-	
-	
+
+
+	mbarrier.arrive.shared.b64                                  %rd48,  [%r213];
+
+
 	mov.u64 %rd49, %globaltimer;
-	
+
 	mov.u32 	%r223, 0;
 	mov.u32 	%r307, %r223;
 	bra.uni 	$L__BB10_33;
@@ -7834,9 +7834,9 @@ $L__BB10_61:
 	add.s32 	%r307, %r307, 1;
 
 $L__BB10_33:
-	
+
 	{.reg .pred %p;mbarrier.test_wait.parity.shared.b64 %p, [%r213], %r223;selp.u16 %rs2, 1, 0, %p;}
-	
+
 	setp.eq.s16 	%p28, %rs2, 0;
 	@%p28 bra 	$L__BB10_56;
 	bra.uni 	$L__BB10_34;
@@ -7845,9 +7845,9 @@ $L__BB10_56:
 	setp.lt.s32 	%p45, %r307, 16;
 	@%p45 bra 	$L__BB10_61;
 
-	
+
 	mov.u64 %rd58, %globaltimer;
-	
+
 	sub.s64 	%rd21, %rd58, %rd49;
 	setp.lt.s64 	%p46, %rd21, 4000000;
 	@%p46 bra 	$L__BB10_59;
@@ -7862,16 +7862,16 @@ $L__BB10_59:
 	add.s64 	%rd61, %rd21, %rd60;
 	shr.u64 	%rd62, %rd61, 2;
 	cvt.u32.u64 	%r276, %rd62;
-	
+
 	nanosleep.u32 %r276;
-	
+
 	bra.uni 	$L__BB10_33;
 
 $L__BB10_58:
 	mov.u32 	%r275, 1000000;
-	
+
 	nanosleep.u32 %r275;
-	
+
 	bra.uni 	$L__BB10_33;
 
 $L__BB10_34:
@@ -8076,12 +8076,12 @@ $L__BB10_50:
 
 $L__BB10_52:
 	bar.sync 	0;
-	
-	mbarrier.arrive.shared.b64                                  %rd53,  [%r211];           
-	
-	
+
+	mbarrier.arrive.shared.b64                                  %rd53,  [%r211];
+
+
 	activemask.b32 %r264;
-	
+
 	{ .reg .b64 %tmp;
 	  cvt.u64.u32 	%tmp, %r213;
 	  cvta.shared.u64 	%rd54, %tmp; }
@@ -8089,35 +8089,35 @@ $L__BB10_52:
 	match.any.sync.b64 	%r110, %rd55, %r264;
 	brev.b32 	%r267, %r110;
 	bfind.shiftamt.u32 	%r268, %r267;
-	
+
 	mov.u32 %r265, %laneid;
-	
+
 	setp.ne.s32 	%p43, %r265, %r268;
 	@%p43 bra 	$L__BB10_55;
 
 	popc.b32 	%r271, %r110;
 	neg.s32 	%r270, %r271;
-	
+
 	fence.sc.cta;
-	
-	
+
+
 	atom.add.acquire.cta.u32 %r269,[%rd55],%r270;
-	
+
 	setp.ne.s32 	%p44, %r269, %r271;
 	@%p44 bra 	$L__BB10_55;
 
-	
+
 	mbarrier.inval.shared.b64 [%r213];
-	
-	
+
+
 	mbarrier.inval.shared.b64 [%r211];
-	
+
 
 $L__BB10_55:
 	ret;
 
 }
-	
+
 .visible .entry ehma_ms1p_tiled_f32_tx128_ty4_async(
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty4_async_param_0,
 	.param .u64 ehma_ms1p_tiled_f32_tx128_ty4_async_param_1,
@@ -8134,7 +8134,7 @@ $L__BB10_55:
 	.reg .f32 	%f<124>;
 	.reg .b32 	%r<317>;
 	.reg .b64 	%rd<76>;
-	
+
 	.shared .align 8 .b8 _ZZ26ehma_ms1p_tiled_core_asyncILi128ELi4EEvPKfS1_ifiiPKiPfE3pss[24];
 
 	ld.param.u64 	%rd23, [ehma_ms1p_tiled_f32_tx128_ty4_async_param_0];
@@ -8351,28 +8351,28 @@ $L__BB11_19:
 	mul.lo.s32 	%r207, %r7, %r208;
 	mov.u32 	%r205, _ZZ26ehma_ms1p_tiled_core_asyncILi128ELi4EEvPKfS1_ifiiPKiPfE3pss;
 	add.s32 	%r203, %r205, 8;
-	
+
 	mbarrier.init.shared.b64 [%r203], %r207;
-	
-	
+
+
 	mbarrier.init.shared.b64 [%r205], %r207;
-	
+
 	{ .reg .b64 %tmp;
 	  cvt.u64.u32 	%tmp, %r205;
 	  cvta.shared.u64 	%rd44, %tmp; }
 	add.s64 	%rd43, %rd44, 16;
-	
+
 	st.relaxed.cta.b32 [%rd43],%r207;
-	
+
 
 $L__BB11_21:
 	mov.u32 	%r210, shraw;
 	add.s32 	%r55, %r210, %r4;
 	mov.u32 	%r299, 0;
 	barrier.sync 	0;
-	
+
 	mov.u64 %rd45, %globaltimer;
-	
+
 	cvta.to.global.u64 	%rd16, %rd25;
 	cvta.to.global.u64 	%rd17, %rd26;
 	and.b32  	%r56, %r114, 3;
@@ -8385,9 +8385,9 @@ $L__BB11_22:
 	mov.u32 	%r213, _ZZ26ehma_ms1p_tiled_core_asyncILi128ELi4EEvPKfS1_ifiiPKiPfE3pss;
 	add.s32 	%r211, %r213, 8;
 	mov.u32 	%r212, 1;
-	
+
 	{.reg .pred %p;mbarrier.test_wait.parity.shared.b64 %p, [%r211], %r212;selp.u16 %rs1, 1, 0, %p;}
-	
+
 	setp.eq.s16 	%p20, %rs1, 0;
 	@%p20 bra 	$L__BB11_65;
 	bra.uni 	$L__BB11_23;
@@ -8396,9 +8396,9 @@ $L__BB11_65:
 	setp.lt.s32 	%p50, %r299, 16;
 	@%p50 bra 	$L__BB11_70;
 
-	
+
 	mov.u64 %rd68, %globaltimer;
-	
+
 	sub.s64 	%rd22, %rd68, %rd45;
 	setp.lt.s64 	%p51, %rd22, 4000000;
 	@%p51 bra 	$L__BB11_68;
@@ -8413,16 +8413,16 @@ $L__BB11_68:
 	add.s64 	%rd71, %rd22, %rd70;
 	shr.u64 	%rd72, %rd71, 2;
 	cvt.u32.u64 	%r284, %rd72;
-	
+
 	nanosleep.u32 %r284;
-	
+
 	bra.uni 	$L__BB11_22;
 
 $L__BB11_67:
 	mov.u32 	%r283, 1000000;
-	
+
 	nanosleep.u32 %r283;
-	
+
 	bra.uni 	$L__BB11_22;
 
 $L__BB11_23:
@@ -8460,9 +8460,9 @@ $L__BB11_31:
 	mad.lo.s32 	%r223, %r62, %r114, %r60;
 	mul.wide.s32 	%rd47, %r223, 4;
 	add.s64 	%rd46, %rd18, %rd47;
-	
+
 	cp.async.ca.shared.global [%r63], [%rd46], 4, 4;
-	
+
 	bra.uni 	$L__BB11_34;
 
 $L__BB11_26:
@@ -8482,24 +8482,24 @@ $L__BB11_32:
 	add.s32 	%r224, %r55, %r229;
 	mul.wide.s32 	%rd52, %r228, 4;
 	add.s64 	%rd48, %rd18, %rd52;
-	
+
 	cp.async.ca.shared.global [%r224], [%rd48], 4, 4;
-	
+
 	add.s32 	%r225, %r224, 4;
 	add.s64 	%rd49, %rd48, 4;
-	
+
 	cp.async.ca.shared.global [%r225], [%rd49], 4, 4;
-	
+
 	add.s32 	%r226, %r224, 8;
 	add.s64 	%rd50, %rd48, 8;
-	
+
 	cp.async.ca.shared.global [%r226], [%rd50], 4, 4;
-	
+
 	add.s32 	%r227, %r224, 12;
 	add.s64 	%rd51, %rd48, 12;
-	
+
 	cp.async.ca.shared.global [%r227], [%rd51], 4, 4;
-	
+
 	bra.uni 	$L__BB11_34;
 
 $L__BB11_30:
@@ -8512,15 +8512,15 @@ $L__BB11_34:
 	@%p29 bra 	$L__BB11_25;
 
 $L__BB11_35:
-	
+
 	cp.async.mbarrier.arrive.shared.b64 [%r213];
-	
-	
-	mbarrier.arrive.shared.b64                                  %rd53,  [%r213];           
-	
-	
+
+
+	mbarrier.arrive.shared.b64                                  %rd53,  [%r213];
+
+
 	mov.u64 %rd54, %globaltimer;
-	
+
 	mov.u32 	%r232, 0;
 	mov.u32 	%r301, %r232;
 	bra.uni 	$L__BB11_36;
@@ -8529,9 +8529,9 @@ $L__BB11_64:
 	add.s32 	%r301, %r301, 1;
 
 $L__BB11_36:
-	
+
 	{.reg .pred %p;mbarrier.test_wait.parity.shared.b64 %p, [%r213], %r232;selp.u16 %rs2, 1, 0, %p;}
-	
+
 	setp.eq.s16 	%p30, %rs2, 0;
 	@%p30 bra 	$L__BB11_59;
 	bra.uni 	$L__BB11_37;
@@ -8540,9 +8540,9 @@ $L__BB11_59:
 	setp.lt.s32 	%p47, %r301, 16;
 	@%p47 bra 	$L__BB11_64;
 
-	
+
 	mov.u64 %rd63, %globaltimer;
-	
+
 	sub.s64 	%rd21, %rd63, %rd54;
 	setp.lt.s64 	%p48, %rd21, 4000000;
 	@%p48 bra 	$L__BB11_62;
@@ -8557,16 +8557,16 @@ $L__BB11_62:
 	add.s64 	%rd66, %rd21, %rd65;
 	shr.u64 	%rd67, %rd66, 2;
 	cvt.u32.u64 	%r282, %rd67;
-	
+
 	nanosleep.u32 %r282;
-	
+
 	bra.uni 	$L__BB11_36;
 
 $L__BB11_61:
 	mov.u32 	%r281, 1000000;
-	
+
 	nanosleep.u32 %r281;
-	
+
 	bra.uni 	$L__BB11_36;
 
 $L__BB11_37:
@@ -8756,12 +8756,12 @@ $L__BB11_53:
 
 $L__BB11_55:
 	bar.sync 	0;
-	
-	mbarrier.arrive.shared.b64                                  %rd58,  [%r211];           
-	
-	
+
+	mbarrier.arrive.shared.b64                                  %rd58,  [%r211];
+
+
 	activemask.b32 %r270;
-	
+
 	{ .reg .b64 %tmp;
 	  cvt.u64.u32 	%tmp, %r213;
 	  cvta.shared.u64 	%rd59, %tmp; }
@@ -8769,29 +8769,29 @@ $L__BB11_55:
 	match.any.sync.b64 	%r110, %rd60, %r270;
 	brev.b32 	%r273, %r110;
 	bfind.shiftamt.u32 	%r274, %r273;
-	
+
 	mov.u32 %r271, %laneid;
-	
+
 	setp.ne.s32 	%p45, %r271, %r274;
 	@%p45 bra 	$L__BB11_58;
 
 	popc.b32 	%r277, %r110;
 	neg.s32 	%r276, %r277;
-	
+
 	fence.sc.cta;
-	
-	
+
+
 	atom.add.acquire.cta.u32 %r275,[%rd60],%r276;
-	
+
 	setp.ne.s32 	%p46, %r275, %r277;
 	@%p46 bra 	$L__BB11_58;
 
-	
+
 	mbarrier.inval.shared.b64 [%r213];
-	
-	
+
+
 	mbarrier.inval.shared.b64 [%r211];
-	
+
 
 $L__BB11_58:
 	ret;

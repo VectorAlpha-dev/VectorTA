@@ -98,40 +98,40 @@ extern "C" __global__ void chop_batch_f32(
     __syncthreads();
 
     if (UNLIKELY(sh_k_ok == 0)) {
-        
+
         fill_all_nan();
         return;
     }
 
-    
+
     if (threadIdx.x != 0) return;
 
     const int k = sh_k;
 
-    
+
     const float inv_drift = 1.0f / (float)drift;
 
-    
+
     const float inv_log2p = 1.0f / log2f((float)period);
     const float scale_over_log2p = scalar * inv_log2p;
 
-    
+
     const int offset = 1 << k;
     const int level_base = level_offsets[k];
 
-    
+
     const bool series_has_nan = (nan_psum[series_len] - nan_psum[first_valid]) != 0;
 
-    
+
     float rma_atr = NAN;
     float sum_tr = 0.0f;
 
-    
-    int ring_idx = 0;
-    float sum_hi = 0.0f, sum_lo = 0.0f; 
 
-    
-    float ring_reg[CHOP_REG_RING_MAX]; 
+    int ring_idx = 0;
+    float sum_hi = 0.0f, sum_lo = 0.0f;
+
+
+    float ring_reg[CHOP_REG_RING_MAX];
     extern __shared__ unsigned char __smem[];
     float* ring_smem = reinterpret_cast<float*>(__smem);
 
@@ -144,7 +144,7 @@ extern "C" __global__ void chop_batch_f32(
         for (int i = 0; i < period && i < max_period; ++i) ring_smem[i] = 0.0f;
     }
 
-    
+
     float prev_close = close[first_valid];
 
     for (int t = first_valid; t < series_len; ++t) {
@@ -153,7 +153,7 @@ extern "C" __global__ void chop_batch_f32(
         const float cl = close[t];
         const int rel = t - first_valid;
 
-        
+
         float tr;
         if (rel == 0) {
             tr = hi - lo;
@@ -164,23 +164,23 @@ extern "C" __global__ void chop_batch_f32(
             tr = fmaxf(a, fmaxf(b, c));
         }
 
-        
+
         if (rel < drift) {
             sum_tr += tr;
             if (rel == drift - 1) {
                 rma_atr = sum_tr * inv_drift;
             }
         } else {
-            
+
             rma_atr = fmaf(inv_drift, (tr - rma_atr), rma_atr);
         }
         prev_close = cl;
 
-        
-        const float current_atr = (rel < drift) ? ((rel == drift - 1) ? rma_atr : NAN) : rma_atr;
-        const float add = (current_atr == current_atr) ? current_atr : 0.0f; 
 
-        
+        const float current_atr = (rel < drift) ? ((rel == drift - 1) ? rma_atr : NAN) : rma_atr;
+        const float add = (current_atr == current_atr) ? current_atr : 0.0f;
+
+
         float oldest = 0.0f;
         if (period <= CHOP_REG_RING_MAX) {
             oldest = ring_reg[ring_idx];
@@ -189,7 +189,7 @@ extern "C" __global__ void chop_batch_f32(
             oldest = ring_smem[ring_idx];
             ring_smem[ring_idx] = add;
         }
-        
+
         ring_idx += 1;
         if (ring_idx == period) ring_idx = 0;
 
@@ -200,7 +200,7 @@ extern "C" __global__ void chop_batch_f32(
         if (rel >= period - 1) {
             const int start = t - period + 1;
 
-            
+
             if (series_has_nan) {
                 if (nan_psum[t + 1] - nan_psum[start] != 0) {
                     row_out[t] = NAN;
@@ -208,7 +208,7 @@ extern "C" __global__ void chop_batch_f32(
                 }
             }
 
-            
+
             const int idx_a = level_base + start;
             const int idx_b = level_base + (t + 1 - offset);
             const float hmax = fmaxf(st_max[idx_a], st_max[idx_b]);
@@ -218,7 +218,7 @@ extern "C" __global__ void chop_batch_f32(
             if (!(range > 0.0f) || !(rolling_sum_atr > 0.0f)) {
                 row_out[t] = NAN;
             } else {
-                
+
                 const float ratio = rolling_sum_atr / range;
                 const float y = scale_over_log2p * log2f(ratio);
                 row_out[t] = y;
@@ -243,7 +243,7 @@ extern "C" __global__ void chop_many_series_one_param_f32(
     const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
-    
+
     const float inv_log2p = 1.0f / log2f((float)period);
     const float scale_over_log2p = scalar * inv_log2p;
 
@@ -261,7 +261,7 @@ extern "C" __global__ void chop_many_series_one_param_f32(
     for (int r = 0; r < warm; ++r) out_tm[(size_t)r * cols + s] = NAN;
 
     for (int r = warm; r < rows; ++r) {
-        
+
         const float sum_atr = atr_psum_tm[(size_t)(r + 1) * cols + s]
                             - atr_psum_tm[(size_t)(r + 1 - period) * cols + s];
         if (!(sum_atr > 0.0f)) {
@@ -269,7 +269,7 @@ extern "C" __global__ void chop_many_series_one_param_f32(
             continue;
         }
 
-        
+
         float hmax = -INFINITY;
         float lmin = INFINITY;
         bool nan_in_window = false;
@@ -293,7 +293,7 @@ extern "C" __global__ void chop_many_series_one_param_f32(
             continue;
         }
 
-        
+
         const float y = scale_over_log2p * log2f(sum_atr / range);
         out_tm[(size_t)r * cols + s] = y;
     }

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry rocr_prepare_inv_f32(
 	.param .u64 rocr_prepare_inv_f32_param_0,
@@ -137,7 +137,7 @@ $L__BB0_17:
 	ret;
 
 }
-	
+
 .visible .entry rocr_batch_f32(
 	.param .u64 rocr_batch_f32_param_0,
 	.param .u64 rocr_batch_f32_param_1,
@@ -890,7 +890,7 @@ $L__BB1_102:
 	ret;
 
 }
-	
+
 .visible .entry rocr_many_series_one_param_f32(
 	.param .u64 rocr_many_series_one_param_f32_param_0,
 	.param .u32 rocr_many_series_one_param_f32_param_1,

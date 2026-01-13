@@ -15,15 +15,15 @@
 
 
 #ifndef KAMA_USE_STREAMING_LOADS
-#define KAMA_USE_STREAMING_LOADS 1   
+#define KAMA_USE_STREAMING_LOADS 1
 #endif
 
 #ifndef KAMA_USE_PREFETCH
-#define KAMA_USE_PREFETCH 0          
+#define KAMA_USE_PREFETCH 0
 #endif
 
 #ifndef KAMA_PREFETCH_DIST
-#define KAMA_PREFETCH_DIST 64        
+#define KAMA_PREFETCH_DIST 64
 #endif
 
 
@@ -107,14 +107,14 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
             continue;
         }
 
-        
+
         for (int i = 0; i < warm; ++i) out_row[i] = nan_f;
 
         const int start = warm;
         int delta_start = start - period + 1;
         if (delta_start < first + 1) delta_start = first + 1;
 
-        
+
         float delta_sum = 0.0f, delta_c = 0.0f;
         for (int k = delta_start; k <= start; ++k) {
             if (k > first) {
@@ -124,13 +124,13 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        
+
         const float prev_price = (start > 0)
             ? ld_streaming_f32(prices + (start - 1))
             : ld_streaming_f32(prices + start);
         const float cur_price  = ld_streaming_f32(prices + start);
 
-        const int anchor_idx   = start - (period - 1);    
+        const int anchor_idx   = start - (period - 1);
         const float anchor_p   = ld_streaming_f32(prices + anchor_idx);
         const float direction  = fabsf(cur_price - anchor_p);
 
@@ -142,7 +142,7 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
         float prev = fmaf(sc, cur_price - prev_price, prev_price);
         out_row[start] = prev;
 
-        
+
         for (int i = start + 1; i < series_len; ++i) {
 #if KAMA_USE_PREFETCH
             if (i + KAMA_PREFETCH_DIST < series_len)
@@ -159,12 +159,12 @@ void ehlers_kama_batch_f32(const float* __restrict__ prices,
                 const float drop = fabsf(d0 - d1);
                 const float net  = newest_diff - drop;
                 kahan_add(net, delta_sum, delta_c);
-                if (delta_sum < 0.0f) delta_sum = 0.0f;   
+                if (delta_sum < 0.0f) delta_sum = 0.0f;
             } else {
                 kahan_add(newest_diff, delta_sum, delta_c);
             }
 
-            const int anchor_i  = i - (period - 1);       
+            const int anchor_i  = i - (period - 1);
             const float anchor  = ld_streaming_f32(prices + anchor_i);
             float ef_i = (delta_sum > 0.0f) ? (fabsf(newest - anchor) / delta_sum) : 0.0f;
             ef_i = __saturatef(ef_i);
@@ -275,7 +275,7 @@ void ehlers_kama_multi_series_one_param_f32(const float* __restrict__ prices_tm,
             kahan_add(newest_diff, delta_sum, delta_c);
         }
 
-        
+
         if ((t & 127) == 0) {
             float s = 0.0f;
             for (int u = t - (period - 1) + 1; u <= t; ++u) {
@@ -333,20 +333,20 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
 
     const int stride = num_series;
     const int warm = first + period - 1;
-    
+
     if (warm >= series_len) return;
 
-    
-    
-    
+
+
+
     extern __shared__ float s_ring[];
 
-    
-    
+
+
     const int rb_len = period - 1;
 
-    
-    
+
+
     const int MAX_TILE_SERIES = 128;
     const int MAX_RING        = 128;
 
@@ -359,7 +359,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
         float* ring = &s_ring[lane * rb_len];
         int head = 0;
 
-        
+
         const int delta_start = (warm - period + 1 > first + 1) ? (warm - period + 1) : (first + 1);
         for (int k = delta_start; k <= warm; ++k) {
             const int cur  = k * stride + series_idx;
@@ -370,7 +370,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             kahan_add(d, delta_sum, delta_c);
         }
 
-        
+
         const int cur0_idx   = warm * stride + series_idx;
         const int prev0_idx  = (warm > 0 ? (warm - 1) : warm) * stride + series_idx;
         const float cur0     = ld_streaming_f32(prices_tm + cur0_idx);
@@ -388,7 +388,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
         float prev = fmaf(sc0, cur0 - prev_px0, prev_px0);
         out_tm[cur0_idx] = prev;
 
-        
+
         for (int t = warm + 1; t < series_len; ++t) {
 #if KAMA_USE_PREFETCH
             if (t + KAMA_PREFETCH_DIST < series_len) {
@@ -402,8 +402,8 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             const float newest_prev = ld_streaming_f32(prices_tm + prv_idx);
             const float d_new       = fabsf(newest - newest_prev);
 
-            const float d_drop = ring[head];      
-            ring[head] = d_new;                   
+            const float d_drop = ring[head];
+            ring[head] = d_new;
             head = (head + 1) - (head + 1 == rb_len ? rb_len : 0);
             kahan_add(d_new - d_drop, delta_sum, delta_c);
             if (delta_sum < 0.0f) delta_sum = 0.0f;
@@ -422,7 +422,7 @@ void ehlers_kama_multi_series_one_param_2d_f32(const float* __restrict__ prices_
             out_tm[cur_idx] = prev;
         }
     } else {
-        
+
         const int start = warm;
         int delta_start = (start - period + 1);
         if (delta_start < first + 1) delta_start = first + 1;
@@ -529,6 +529,6 @@ void ehlers_kama_fix_first_row_nan_tm_f32(int period,
     const int warm = first + period - 1;
     if (warm > 0) {
         const float nan_f = __int_as_float(0x7fc00000);
-        out_tm[series_idx] = nan_f; 
+        out_tm[series_idx] = nan_f;
     }
 }

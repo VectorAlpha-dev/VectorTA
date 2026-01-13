@@ -51,14 +51,14 @@ void hma_batch_f32(const float* __restrict__ prices,
                    int n_combos,
                    int first_valid,
                    int max_sqrt_len,
-                   float* __restrict__ x_buf,   
+                   float* __restrict__ x_buf,
                    float* __restrict__ out) {
 
 #if HMA_RING_IN_SHARED
     extern __shared__ float sh_ring[];
 #endif
 
-    
+
     const int stride = blockDim.x * gridDim.x;
     for (int combo = blockIdx.x * blockDim.x + threadIdx.x; combo < n_combos; combo += stride) {
 
@@ -102,8 +102,8 @@ void hma_batch_f32(const float* __restrict__ prices,
             continue;
         }
 
-        
-        
+
+
         int warmup_end = first_valid + period + sqrt_len - 2;
         if (warmup_end > series_len) warmup_end = series_len;
         for (int i = 0; i < warmup_end; ++i) { out[base + i] = HMA_NAN; }
@@ -111,7 +111,7 @@ void hma_batch_f32(const float* __restrict__ prices,
         if (tail_len < period + sqrt_len - 1) { continue; }
 #endif
 
-        
+
         const float f_half   = (float)half;
         const float f_full   = (float)period;
         const float f_sqrt   = (float)sqrt_len;
@@ -124,30 +124,30 @@ void hma_batch_f32(const float* __restrict__ prices,
         const float inv_ws_full = 1.0f / ws_full;
         const float inv_ws_sqrt = 1.0f / ws_sqrt;
 
-        
+
         float sum_half = 0.0f, wsum_half = 0.0f;
         float sum_full = 0.0f, wsum_full = 0.0f;
 
-        
+
         float sum_x = 0.0f, wsum_x = 0.0f;
         int   ring_head = 0;
         int   ring_count = 0;
 
-        
+
 #if HMA_RING_IN_SHARED
-        float* ring = sh_ring + threadIdx.x * max_sqrt_len; 
+        float* ring = sh_ring + threadIdx.x * max_sqrt_len;
 #else
         float* ring = x_buf + combo * max_sqrt_len;
 #endif
-        
 
-        
+
+
         for (int j = 0; j < tail_len; ++j) {
             const int idx = first_valid + j;
 
             const float val = prices[idx];
 
-            
+
             if (j < period) {
                 const float jf = (float)(j + 1);
                 wsum_full = fmaf(jf, val, wsum_full);
@@ -159,7 +159,7 @@ void hma_batch_f32(const float* __restrict__ prices,
                 wsum_full = fmaf((float)period, val, wsum_full - prev_sum);
             }
 
-            
+
             if (j < half) {
                 const float jf = (float)(j + 1);
                 wsum_half = fmaf(jf, val, wsum_half);
@@ -171,7 +171,7 @@ void hma_batch_f32(const float* __restrict__ prices,
                 wsum_half = fmaf((float)half, val, wsum_half - prev_sum);
             }
 
-            
+
             if (j + 1 < period) { continue; }
 
             const float wma_full = wsum_full * inv_ws_full;
@@ -199,8 +199,8 @@ void hma_batch_f32(const float* __restrict__ prices,
 
                 out[base + idx] = wsum_x * inv_ws_sqrt;
             }
-        } 
-    } 
+        }
+    }
 }
 
 extern "C" __global__
@@ -210,7 +210,7 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int series_len,
                                    int period,
                                    int max_sqrt_len,
-                                   float* __restrict__ x_buf,     
+                                   float* __restrict__ x_buf,
                                    float* __restrict__ out_tm) {
 
 #if HMA_RING_IN_SHARED
@@ -271,7 +271,7 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (tail_len < period + sqrt_len - 1) { continue; }
 #endif
 
-        
+
         float sum_half = 0.0f, wsum_half = 0.0f;
         float sum_full = 0.0f, wsum_full = 0.0f;
 
@@ -285,7 +285,7 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         float* ring = x_buf + series * max_sqrt_len;
 #endif
 
-        
+
         for (int j = 0; j < tail_len; ++j) {
             const int row = first_valid + j;
             const int a   = row * num_series + series;
@@ -340,6 +340,6 @@ void hma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
                 out_tm[a] = wsum_x * inv_ws_sqrt;
             }
-        } 
-    } 
+        }
+    }
 }

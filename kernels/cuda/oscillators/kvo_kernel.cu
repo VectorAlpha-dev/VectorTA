@@ -31,10 +31,10 @@ __device__ __forceinline__ void quick_two_sum(float a, float b, float &s, float 
 }
 __device__ __forceinline__ void two_prod(float a, float b, float &p, float &e) {
     p = a * b;
-    e = fmaf(a, b, -p); 
+    e = fmaf(a, b, -p);
 }
 
-struct f2 { float hi, lo; }; 
+struct f2 { float hi, lo; };
 
 __device__ __forceinline__ f2 f2_make(float x) { f2 r; r.hi = x; r.lo = 0.0f; return r; }
 
@@ -51,7 +51,7 @@ __device__ __forceinline__ void ema_update_f2(f2 &ema, float x, float alpha)
 
     float y_hi, y_lo; two_sum(s, p_hi, y_hi, y_lo);
     y_lo += p_lo;
-    quick_two_sum(y_hi, y_lo, ema.hi, ema.lo); 
+    quick_two_sum(y_hi, y_lo, ema.hi, ema.lo);
 }
 
 
@@ -98,7 +98,7 @@ extern "C" __global__ void kvo_batch_f32(
 {
     if (len <= 0 || n_combos <= 0) return;
 
-    
+
     const unsigned mask = 0xffffffffu;
     const int lane = threadIdx.x & 31;
     const int warp_id = threadIdx.x >> 5;
@@ -112,7 +112,7 @@ extern "C" __global__ void kvo_batch_f32(
         const int l = longs[combo];
         if (s <= 0 || l < s) continue;
 
-        const int warm = first_valid + 1; 
+        const int warm = first_valid + 1;
         float* __restrict__ row_out = out + (size_t)combo * (size_t)len;
 
         const float nanv = f32_nan();
@@ -174,7 +174,7 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
     int long_p,
     float* __restrict__ out_tm)
 {
-    
+
     for (int s = blockIdx.x * blockDim.x + threadIdx.x;
          s < cols;
          s += blockDim.x * gridDim.x)
@@ -200,10 +200,10 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
         double prev_c = (double)close_tm[idx0];
         double prev_hlc = prev_h + prev_l + prev_c;
         double prev_dm  = prev_h - prev_l;
-        int    trend    = -1; 
+        int    trend    = -1;
         double cm       = 0.0;
 
-        
+
         {
             const size_t idx = (size_t)warm * (size_t)cols + s;
             const double h = (double)high_tm[idx];
@@ -224,7 +224,7 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
 
             float ema_s = vf;
             float ema_l = vf;
-            out_tm[idx] = 0.0f; 
+            out_tm[idx] = 0.0f;
 
             prev_hlc = hlc;
             prev_dm  = dm;
@@ -248,7 +248,7 @@ extern "C" __global__ void kvo_many_series_one_param_time_major_f32(
                 const double sign2  = (trend == 1) ? 1.0 : -1.0;
                 const float vf2     = (float)(v2 * temp2 * 100.0 * sign2);
 
-                
+
                 ema_s = fmaf(alpha_s, (vf2 - ema_s), ema_s);
                 ema_l = fmaf(alpha_l, (vf2 - ema_l), ema_l);
                 out_tm[j] = ema_s - ema_l;

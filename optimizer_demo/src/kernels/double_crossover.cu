@@ -1,11 +1,11 @@
 
 extern "C" __global__
 void double_cross_backtest_f32(
-    const float* __restrict__ fast_ma, 
+    const float* __restrict__ fast_ma,
     int Pf_tile,
     int Pf_total,
     int f_offset,
-    const float* __restrict__ slow_ma, 
+    const float* __restrict__ slow_ma,
     int Ps_tile,
     int Ps_total,
     int s_offset,
@@ -16,7 +16,7 @@ void double_cross_backtest_f32(
     int first_valid,
     float commission,
     int M,
-    float* __restrict__ metrics_out 
+    float* __restrict__ metrics_out
 ) {
     const int pair_local = blockIdx.x * blockDim.x + threadIdx.x;
     const int pairs = Pf_tile * Ps_tile;
@@ -36,7 +36,7 @@ void double_cross_backtest_f32(
     float peak = 1.0f;
     float max_dd = 0.0f;
     int trades = 0;
-    int pos = 0; 
+    int pos = 0;
     long long exposure_steps = 0;
     double mean = 0.0, m2 = 0.0; long long n = 0;
 

@@ -85,9 +85,9 @@ __device__ inline double pick_src(const float* prices, int idx, bool confirmed) 
 
 
 __device__ __forceinline__ int quantize_to_0p1_tie_down_i(double gstar_times10, int gain_limit_times10) {
-    int gi = __double2int_rd(gstar_times10); 
+    int gi = __double2int_rd(gstar_times10);
     double frac = gstar_times10 - static_cast<double>(gi);
-    if (frac > 0.5) gi += 1; 
+    if (frac > 0.5) gi += 1;
     if (gi >  gain_limit_times10) gi =  gain_limit_times10;
     if (gi < -gain_limit_times10) gi = -gain_limit_times10;
     return gi;
@@ -103,15 +103,15 @@ __device__ __forceinline__ float choose_best_gain_f(float alpha, float ema_val, 
     const double base = a * e + (1.0 - a) * p;
     const double d = s - base;
     const double c = a * (s - p);
-    const double sl = c * 0.1; 
+    const double sl = c * 0.1;
     const int gL = gain_limit;
 
     if (!isfinite(sl) || fabs(sl) <= DBL_MIN) {
-        
+
         return static_cast<float>(-0.1 * static_cast<double>(gL));
     }
 
-    const double k_cont = d / sl; 
+    const double k_cont = d / sl;
     if (k_cont <= -(static_cast<double>(gL) + 1.0)) {
         return static_cast<float>(-0.1 * static_cast<double>(gL));
     }
@@ -119,7 +119,7 @@ __device__ __forceinline__ float choose_best_gain_f(float alpha, float ema_val, 
         return static_cast<float>(0.1 * static_cast<double>(gL));
     }
 
-    int k0 = __double2int_rd(k_cont); 
+    int k0 = __double2int_rd(k_cont);
     int k1 = k0 + 1;
     if (k0 < -gL) k0 = -gL; else if (k0 > gL) k0 = gL;
     if (k1 < -gL) k1 = -gL; else if (k1 > gL) k1 = gL;
@@ -127,7 +127,7 @@ __device__ __forceinline__ float choose_best_gain_f(float alpha, float ema_val, 
     const double e0 = fabs(d - sl * static_cast<double>(k0));
     const double e1 = fabs(d - sl * static_cast<double>(k1));
 
-    const int k_best = (e1 < e0) ? k1 : k0; 
+    const int k_best = (e1 < e0) ? k1 : k0;
     return static_cast<float>(0.1 * static_cast<double>(k_best));
 }
 
@@ -186,9 +186,9 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
     const float nan_f = NAN;
 
     if (threadIdx.x == 0) {
-        
-        if (length <= 0 || gain_limit <= 0) { 
-            for (int i = 0; i < series_len; ++i) out[base + i] = nan_f; 
+
+        if (length <= 0 || gain_limit <= 0) {
+            for (int i = 0; i < series_len; ++i) out[base + i] = nan_f;
         }
     }
     __syncthreads();
@@ -196,7 +196,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
 
     if (threadIdx.x == 0) {
         if (first_valid < 0 || first_valid >= series_len) {
-            for (int i = 0; i < series_len; ++i) out[base + i] = nan_f; 
+            for (int i = 0; i < series_len; ++i) out[base + i] = nan_f;
         }
     }
     __syncthreads();
@@ -205,7 +205,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
     const int valid = series_len - first_valid;
     if (threadIdx.x == 0) {
         if (!pine_mode && valid < length) {
-            for (int i = 0; i < series_len; ++i) out[base + i] = nan_f; 
+            for (int i = 0; i < series_len; ++i) out[base + i] = nan_f;
         }
     }
     __syncthreads();
@@ -213,7 +213,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
 
     const int warm = pine_mode ? first_valid : first_valid + length - 1;
     if (warm >= series_len) {
-        
+
         for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
             out[base + idx] = nan_f;
         }
@@ -221,7 +221,7 @@ void ehlers_ecema_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
         out[base + idx] = nan_f;
     }
@@ -403,13 +403,13 @@ void ehlers_ecema_many_series_one_param_time_major_f32(
 
     const int warm = pine_mode ? first_valid : first_valid + length - 1;
     if (warm >= series_len) {
-        
+
         for (int t = threadIdx.x; t < series_len; t += blockDim.x)
             out_tm[t * num_series + series] = nan_f;
         __syncthreads();
         return;
     }
-    
+
     for (int t = threadIdx.x; t < warm; t += blockDim.x)
         out_tm[t * num_series + series] = nan_f;
     __syncthreads();
@@ -547,10 +547,10 @@ void ehlers_ecema_many_series_one_param_2d_f32(
     unsigned char confirmed_flag,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm) {
-    
+
     const int tx = blockDim.x;
     const int ty = blockDim.y;
-    const int series_per_grid_row = gridDim.x * tx; 
+    const int series_per_grid_row = gridDim.x * tx;
     const int local_series = threadIdx.y * tx + threadIdx.x;
     const int series = blockIdx.y * series_per_grid_row + blockIdx.x * tx + local_series;
     if (series >= num_series) { return; }
@@ -570,7 +570,7 @@ void ehlers_ecema_many_series_one_param_2d_f32(
     const int warm = pine_mode ? first_valid : first_valid + length - 1;
     if (warm >= series_len) {
         for (int t = 0; t < series_len; ++t) { out_tm[t * stride + series] = nan_f; }
-        return; 
+        return;
     }
     for (int t = 0; t < warm; ++t) { out_tm[t * stride + series] = nan_f; }
 
@@ -607,6 +607,6 @@ void ehlers_ecema_many_series_one_param_2d_f32(
 
         const float best_gain = choose_best_gain_f(alpha, ema_value, prev, src, gain_limit);
         float ec_val = ec_step(ec, alpha, ema_value, src, best_gain);
-        out_tm[idx_tm] = ec_val; 
+        out_tm[idx_tm] = ec_val;
     }
 }

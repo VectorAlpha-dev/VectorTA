@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -28,7 +28,7 @@ def _cuda_available() -> bool:
         handle, _meta = ti.cmo_cuda_batch_dev(arr, period_range=(3, 3, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "driver" in msg:
             return False
@@ -45,7 +45,7 @@ class TestCmoCuda:
         close = test_data["close"].astype(np.float64)
         period = 14
 
-        
+
         cpu = ti.cmo(close.astype(np.float32).astype(np.float64), period)
 
         handle, meta = ti.cmo_cuda_batch_dev(
@@ -67,7 +67,7 @@ class TestCmoCuda:
 
         period = 14
 
-        
+
         cpu_tm = np.zeros_like(data_tm)
         for j in range(N):
             cpu_tm[:, j] = ti.cmo(data_tm[:, j].astype(np.float32).astype(np.float64), period)

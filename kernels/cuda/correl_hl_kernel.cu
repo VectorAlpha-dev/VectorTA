@@ -21,17 +21,17 @@
 
 
 extern "C" __global__ void correl_hl_batch_f32(
-    const double* __restrict__ ps_h,   
-    const double* __restrict__ ps_h2,  
-    const double* __restrict__ ps_l,   
-    const double* __restrict__ ps_l2,  
-    const double* __restrict__ ps_hl,  
-    const int* __restrict__ ps_nan,    
+    const double* __restrict__ ps_h,
+    const double* __restrict__ ps_h2,
+    const double* __restrict__ ps_l,
+    const double* __restrict__ ps_l2,
+    const double* __restrict__ ps_hl,
+    const int* __restrict__ ps_nan,
     int len,
     int first_valid,
-    const int* __restrict__ periods,   
+    const int* __restrict__ periods,
     int n_combos,
-    float* __restrict__ out            
+    float* __restrict__ out
 ){
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -53,7 +53,7 @@ extern "C" __global__ void correl_hl_batch_f32(
         if (t >= warm) {
             const int end = t + 1;
             int start = end - period;
-            if (start < 0) start = 0; 
+            if (start < 0) start = 0;
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
                 const double sum_h  = ps_h[end]  - ps_h[start];
@@ -83,17 +83,17 @@ extern "C" __global__ void correl_hl_batch_f32(
 
 
 extern "C" __global__ void correl_hl_batch_f32ds(
-    const float2* __restrict__ ps_h,    
-    const float2* __restrict__ ps_h2,   
-    const float2* __restrict__ ps_l,    
-    const float2* __restrict__ ps_l2,   
-    const float2* __restrict__ ps_hl,   
-    const int*    __restrict__ ps_nan,  
+    const float2* __restrict__ ps_h,
+    const float2* __restrict__ ps_h2,
+    const float2* __restrict__ ps_l,
+    const float2* __restrict__ ps_l2,
+    const float2* __restrict__ ps_hl,
+    const int*    __restrict__ ps_nan,
     int len,
     int first_valid,
-    const int*    __restrict__ periods, 
+    const int*    __restrict__ periods,
     int n_combos,
-    float*        __restrict__ out      
+    float*        __restrict__ out
 ){
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -125,7 +125,7 @@ extern "C" __global__ void correl_hl_batch_f32ds(
 
             const int nan_count = ps_nan[end] - ps_nan[start];
             if (nan_count == 0) {
-                
+
                 float2 ah = ps_h[end];
                 float2 bh = ps_h[start];
                 float2 al = ps_l[end];
@@ -143,9 +143,9 @@ extern "C" __global__ void correl_hl_batch_f32ds(
                 dsf sum_l2 = ds_sub(ds_make(al2.y, al2.x), ds_make(bl2.y, bl2.x));
                 dsf sum_hl = ds_sub(ds_make(ahl.y, ahl.x), ds_make(bhl.y, bhl.x));
 
-                
+
                 dsf cov  = ds_sub(sum_hl, ds_scale(ds_mul(sum_h, sum_l), inv_pf));
-                
+
                 dsf varh = ds_sub(sum_h2, ds_scale(ds_mul(sum_h, sum_h), inv_pf));
                 dsf varl = ds_sub(sum_l2, ds_scale(ds_mul(sum_l, sum_l), inv_pf));
 
@@ -177,13 +177,13 @@ extern "C" __global__ void correl_hl_batch_f32ds(
 
 
 extern "C" __global__ void correl_hl_many_series_one_param_f32(
-    const float* __restrict__ high_tm, 
-    const float* __restrict__ low_tm,  
-    const int* __restrict__ first_valids, 
+    const float* __restrict__ high_tm,
+    const float* __restrict__ low_tm,
+    const int* __restrict__ first_valids,
     int period,
     int num_series,
     int series_len,
-    float* __restrict__ out_tm 
+    float* __restrict__ out_tm
 ){
     const int series = blockIdx.x;
     if (series >= num_series || period <= 0) return;
@@ -193,7 +193,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
 
     const int stride = num_series;
 
-    
+
     for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
         out_tm[t * stride + series] = __int_as_float(0x7fffffff);
     }
@@ -201,7 +201,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
 
     if (threadIdx.x != 0) return;
 
-    
+
     const int init_start = first_valid;
     const int init_end = min(first_valid + period, series_len);
     double sum_h = 0.0, sum_l = 0.0, sum_h2 = 0.0, sum_l2 = 0.0, sum_hl = 0.0;
@@ -236,7 +236,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
         out_tm[warm * stride + series] = out0;
     }
 
-    
+
     for (int t = warm + 1; t < series_len; ++t) {
         const int old_idx = t - period;
         const float old_h = high_tm[old_idx * stride + series];
@@ -245,7 +245,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
         const float new_l = low_tm[t * stride + series];
 
         if (isnan(old_h) || isnan(old_l) || isnan(new_h) || isnan(new_l)) {
-            
+
             sum_h = sum_l = sum_h2 = sum_l2 = sum_hl = 0.0;
             nan_in_win = 0;
             const int start = t + 1 - period;
@@ -265,7 +265,7 @@ extern "C" __global__ void correl_hl_many_series_one_param_f32(
                 }
             }
         } else {
-            
+
             const double oh = (double)old_h, ol = (double)old_l;
             const double nh = (double)new_h, nl = (double)new_l;
             sum_h += nh - oh;

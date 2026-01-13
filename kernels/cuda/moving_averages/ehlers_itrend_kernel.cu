@@ -48,20 +48,20 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
     const int warmup = warmups[combo];
     const int max_dc = max_dcs[combo];
     if (warmup <= 0 || max_dc <= 0 || max_shared_dc <= 0) return;
-    if (max_shared_dc < max_dc) return; 
+    if (max_shared_dc < max_dc) return;
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     extern __shared__ __align__(16) unsigned char shraw[];
     float* __restrict__ pfx = reinterpret_cast<float*>(shraw);
-    const int cap = max_dc; 
+    const int cap = max_dc;
     for (int i = 0; i < cap; ++i) pfx[i] = 0.0f;
 
     const int row_offset = combo * series_len;
 
-    
+
     float fir_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
     float det_buf[7] = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
     float i1_buf[7]  = {0.f,0.f,0.f,0.f,0.f,0.f,0.f};
@@ -71,9 +71,9 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
     float prev_mesa = 0.0f, prev_smooth = 0.0f;
     float prev_it1 = 0.0f, prev_it2 = 0.0f, prev_it3 = 0.0f;
 
-    int ring_ptr = 0;  
-    int pidx = 0;      
-    float pcur = 0.0f; 
+    int ring_ptr = 0;
+    int pidx = 0;
+    float pcur = 0.0f;
 
     const int warm_threshold = first_valid + warmup;
     const float c0962 = 0.0962f;
@@ -88,7 +88,7 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         const float fir_val = (4.0f * x0 + 3.0f * x1 + 2.0f * x2 + x3) * 0.1f;
         fir_buf[ring_ptr] = fir_val;
 
-        
+
         const int c  = ring_ptr;
         const int c2 = (c >= 2) ? (c - 2) : (c + 5);
         const int c4 = (c >= 4) ? (c - 4) : (c + 3);
@@ -148,7 +148,7 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
             const float phase = atan2f(im_smooth, re_smooth);
             if (phase != 0.0f) new_mesa = (2.0f * CUDART_PI_F) / phase;
         }
-        
+
         const float up_lim  = 1.5f * prev_mesa;
         const float low_lim = 0.67f * prev_mesa;
         new_mesa = clampT(new_mesa, low_lim, up_lim);
@@ -161,8 +161,8 @@ void ehlers_itrend_batch_f32(const float* __restrict__ prices,
         int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
 
-        
-        
+
+
         float old = pfx[pidx];
         pidx += 1; if (pidx >= cap) pidx = 0;
         pcur += x0;
@@ -201,10 +201,10 @@ void ehlers_itrend_many_series_one_param_f32(
 
     const int stride = num_series;
 
-    
+
     if (threadIdx.x != 0) return;
 
-    
+
     extern __shared__ __align__(16) unsigned char shraw[];
     float* __restrict__ pfx = reinterpret_cast<float*>(shraw);
     const int cap = max_dc;
@@ -219,8 +219,8 @@ void ehlers_itrend_many_series_one_param_f32(
     float prev_mesa = 0.0f, prev_smooth = 0.0f;
     float prev_it1 = 0.0f, prev_it2 = 0.0f, prev_it3 = 0.0f;
     int ring_ptr = 0;
-    int pidx = 0;      
-    float pcur = 0.0f; 
+    int pidx = 0;
+    float pcur = 0.0f;
 
     const int first_valid = first_valids[series_idx];
     const int warm_threshold = first_valid + warmup;
@@ -308,7 +308,7 @@ void ehlers_itrend_many_series_one_param_f32(
         int dcp = __float2int_rn(sp_val);
         dcp = clampT(dcp, 1, max_dc);
 
-        
+
         float old = pfx[pidx];
         pidx += 1; if (pidx >= cap) pidx = 0;
         pcur += x0;

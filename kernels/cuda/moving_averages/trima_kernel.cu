@@ -48,7 +48,7 @@ void trima_batch_f32(const float* __restrict__ prices,
 
     const int warm = warm_indices[combo];
 
-    extern __shared__ float weights[]; 
+    extern __shared__ float weights[];
     const int m1 = (period + 1) / 2;
     const int m2 = period - m1 + 1;
     const float inv_norm = 1.0f / float(m1 * m2);
@@ -98,14 +98,14 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
 
     const int warm = warm_indices[combo];
 
-    
-    
-    
+
+
+
     extern __shared__ float smem[];
     float* __restrict__ weights = smem;
     float* __restrict__ tile    = smem + max_period;
 
-    
+
     const int m1 = (period + 1) / 2;
     const int m2 = period - m1 + 1;
     const float inv_norm = 1.0f / float(m1 * m2);
@@ -118,25 +118,25 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
     }
     __syncthreads();
 
-    
-    const int TILE = blockDim.x; 
+
+    const int TILE = blockDim.x;
     const int t0   = blockIdx.x * TILE;
     if (t0 >= series_len) return;
     const int t1   = min(t0 + TILE, series_len);
 
     const int tile_base = max(t0 - period + 1, 0);
     const int tile_end  = t1 - 1;
-    const int tile_len  = tile_end - tile_base + 1; 
+    const int tile_len  = tile_end - tile_base + 1;
 
-    
-    
-    
+
+
+
     for (int i = threadIdx.x; i < tile_len; i += blockDim.x) {
         tile[i] = prices[tile_base + i];
     }
     __syncthreads();
 
-    
+
     const int t = t0 + threadIdx.x;
     if (t < t1) {
         const int out_idx = combo * series_len + t;
@@ -144,7 +144,7 @@ void trima_batch_f32_tiled(const float* __restrict__ prices,
             out[out_idx] = NAN;
         } else {
             const int start_global = t - period + 1;
-            const int start_local  = start_global - tile_base; 
+            const int start_local  = start_global - tile_base;
             float acc = 0.0f;
 #pragma unroll 4
             for (int k = 0; k < period; ++k) {
@@ -166,7 +166,7 @@ void trima_multi_series_one_param_f32(const float* __restrict__ prices_tm,
                                       int series_len,
                                       const int* __restrict__ first_valids,
                                       float* __restrict__ out_tm) {
-    extern __shared__ float shared_weights[]; 
+    extern __shared__ float shared_weights[];
     for (int i = threadIdx.x; i < period; i += blockDim.x) shared_weights[i] = weights[i];
     __syncthreads();
 
@@ -205,29 +205,29 @@ void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_
                                                int series_len,
                                                const int* __restrict__ first_valids,
                                                float* __restrict__ out_tm) {
-    
+
     extern __shared__ float smem[];
     float* __restrict__ w    = smem;
     float* __restrict__ tile = smem + period;
 
-    
+
     for (int i = threadIdx.x; i < period; i += blockDim.x) w[i] = weights_in[i];
     __syncthreads();
 
-    
+
     const int s0 = blockIdx.x * TRIMA_TS;
-    const int s  = s0 + threadIdx.x; 
+    const int s  = s0 + threadIdx.x;
     if (s >= num_series) return;
 
     const int t0 = blockIdx.y * TRIMA_TT;
     if (t0 >= series_len) return;
     const int t1 = min(t0 + TRIMA_TT, series_len);
 
-    
-    const int base  = max(t0 - period + 1, 0);
-    const int rows  = t1 - base; 
 
-    
+    const int base  = max(t0 - period + 1, 0);
+    const int rows  = t1 - base;
+
+
     for (int r = 0; r < rows; ++r) {
         const int t = base + r;
         if (s < num_series) {
@@ -236,7 +236,7 @@ void trima_multi_series_one_param_f32_tm_tiled(const float* __restrict__ prices_
     }
     __syncthreads();
 
-    
+
     const int warm = first_valids[s] + period - 1;
     for (int t = t0; t < t1; ++t) {
         const int out_idx = t * num_series + s;

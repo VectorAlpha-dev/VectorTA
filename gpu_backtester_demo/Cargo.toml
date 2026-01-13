@@ -11,7 +11,7 @@ cust = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Depend on the TA library crate at the repo root
+
 [dependencies.my_project]
 path = ".."
 features = ["cuda"]

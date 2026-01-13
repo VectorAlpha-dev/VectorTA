@@ -11,7 +11,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError as exc:  
+except ImportError as exc:
     raise SystemExit(
         "CuPy is required for CUDA benchmarks. Install with `pip install cupy-cuda12x`."
     ) from exc
@@ -21,7 +21,7 @@ def _import_module():
     candidates = ("my_project", "ta_indicators")
     for name in candidates:
         try:
-            mod = __import__(name)  
+            mod = __import__(name)
         except Exception:
             continue
         if hasattr(mod, "ehlers_ecema_cuda_batch_dev"):

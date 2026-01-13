@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry bandpass_batch_from_hp_f32(
 	.param .u64 bandpass_batch_from_hp_f32_param_0,
@@ -992,7 +992,7 @@ $L__BB0_180:
 	ret;
 
 }
-	
+
 .visible .entry bandpass_many_series_one_param_time_major_from_hp_f32(
 	.param .u64 bandpass_many_series_one_param_time_major_from_hp_f32_param_0,
 	.param .u32 bandpass_many_series_one_param_time_major_from_hp_f32_param_1,

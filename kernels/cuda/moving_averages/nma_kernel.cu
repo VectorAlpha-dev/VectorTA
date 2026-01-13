@@ -49,7 +49,7 @@ void nma_batch_f32(const float* __restrict__ prices,
 
     const int base = combo * series_len;
 
-    
+
     {
         int idx = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
@@ -67,12 +67,12 @@ void nma_batch_f32(const float* __restrict__ prices,
 
     const int warm = first_valid + period;
 
-    
+
     __shared__ float tile[NMA_MAX_TILE + NMA_MAX_PERIOD];
-    
+
     __shared__ float wbuf[NMA_MAX_PERIOD];
 
-    
+
     const bool use_const = (c_sqrt_diffs[1] > 0.0f);
     if (!use_const) {
         for (int i = threadIdx.x; i < period; i += blockDim.x) {
@@ -91,7 +91,7 @@ void nma_batch_f32(const float* __restrict__ prices,
         const int g_start = tileStart - (period - 1);
         const int load_elems = L + (period - 1);
 
-        
+
         cg::memcpy_async(block, tile, abs_diffs + g_start, sizeof(float) * load_elems);
         cg::wait(block);
         block.sync();
@@ -99,7 +99,7 @@ void nma_batch_f32(const float* __restrict__ prices,
         const int lane = threadIdx.x;
         if (lane < L) {
             const int t = tileStart + lane;
-            const int cur_idx = (period - 1) + lane; 
+            const int cur_idx = (period - 1) + lane;
 
             float num = 0.0f;
             float denom = 0.0f;
@@ -134,7 +134,7 @@ void nma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
-    
+
     const int stride = num_series;
     for (int row = 0; row < series_len; ++row) {
         out_tm[row * stride + series] = NMA_NAN;
@@ -150,7 +150,7 @@ void nma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int warm = first_valid + period;
 
-    
+
     __shared__ float wbuf[NMA_MAX_PERIOD];
     const bool use_const = (c_sqrt_diffs[1] > 0.0f);
     if (!use_const) {

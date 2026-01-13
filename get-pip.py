@@ -93,7 +93,7 @@ def monkeypatch_for_cert(tmpdir):
     """
     from pip._internal.commands.install import InstallCommand
 
-    
+
     cert_path = os.path.join(tmpdir, "cacert.pem")
     with open(cert_path, "wb") as cert:
         cert.write(pkgutil.get_data("pip._vendor.certifi", "cacert.pem"))
@@ -102,8 +102,8 @@ def monkeypatch_for_cert(tmpdir):
 
     def cert_parse_args(self, args):
         if not self.parser.get_default_values().cert:
-            
-            self.parser.defaults["cert"] = cert_path  
+
+            self.parser.defaults["cert"] = cert_path
         return install_parse_args(self, args)
 
     InstallCommand.parse_args = cert_parse_args
@@ -112,8 +112,8 @@ def monkeypatch_for_cert(tmpdir):
 def bootstrap(tmpdir):
     monkeypatch_for_cert(tmpdir)
 
-    
-    
+
+
     from pip._internal.cli.main import main as pip_entry_point
     args = determine_pip_install_arguments()
     sys.exit(pip_entry_point(args))
@@ -122,21 +122,21 @@ def bootstrap(tmpdir):
 def main():
     tmpdir = None
     try:
-        
+
         tmpdir = tempfile.mkdtemp()
 
-        
+
         pip_zip = os.path.join(tmpdir, "pip.zip")
         with open(pip_zip, "wb") as fp:
             fp.write(b85decode(DATA.replace(b"\n", b"")))
 
-        
+
         sys.path.insert(0, pip_zip)
 
-        
+
         bootstrap(tmpdir=tmpdir)
     finally:
-        
+
         if tmpdir:
             shutil.rmtree(tmpdir, ignore_errors=True)
 

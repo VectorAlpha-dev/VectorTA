@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -29,9 +29,9 @@ def _cuda_available() -> bool:
         low = data["low"][:128].astype(np.float32)
         close = data["close"][:128].astype(np.float32)
         out = ti.keltner_cuda_batch_dev(high, low, close, close, (14, 14, 0), (2.0, 2.0, 0.0))
-        _ = cp.asarray(out["upper"])  
+        _ = cp.asarray(out["upper"])
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "device" in msg:
             return False
@@ -79,7 +79,7 @@ class TestKeltnerCuda:
         close = ds["close"][:rows].astype(np.float64)
         series = np.vstack([close * (1.0 + 0.01 * j) for j in range(cols)]).T
 
-        
+
         high = series + 0.12 + 0.004 * np.sin(np.arange(rows) * 0.002)[:, None]
         low = series - 0.12 - 0.004 * np.sin(np.arange(rows) * 0.002)[:, None]
 

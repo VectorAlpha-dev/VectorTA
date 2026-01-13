@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry lrsi_batch_f32(
 	.param .u64 lrsi_batch_f32_param_0,
@@ -237,18 +237,18 @@ $L__BB0_17:
 
 $L__BB0_21:
 	ld.global.f32 	%f333, [%rd2];
-	
+
 	activemask.b32 %r89;
-	
+
 	brev.b32 	%r90, %r89;
 	bfind.shiftamt.u32 	%r31, %r90;
 	setp.ne.s32 	%p21, %r5, %r31;
 	mov.f32 	%f302, 0f00000000;
 	@%p21 bra 	$L__BB0_23;
 
-	
+
 	ld.global.nc.f32 %f302, [%rd3];
-	
+
 
 $L__BB0_23:
 	mov.b32 	%r91, %f302;
@@ -273,18 +273,18 @@ $L__BB0_23:
 	mov.f32 	%f333, %f8;
 
 $L__BB0_25:
-	
+
 	activemask.b32 %r94;
-	
+
 	brev.b32 	%r95, %r94;
 	bfind.shiftamt.u32 	%r33, %r95;
 	setp.ne.s32 	%p24, %r5, %r33;
 	mov.f32 	%f307, 0f00000000;
 	@%p24 bra 	$L__BB0_27;
 
-	
+
 	ld.global.nc.f32 %f307, [%rd4];
-	
+
 
 $L__BB0_27:
 	mov.b32 	%r96, %f307;
@@ -312,18 +312,18 @@ $L__BB0_29:
 	mov.u32 	%r167, %r7;
 	@%p27 bra 	$L__BB0_48;
 
-	
+
 	activemask.b32 %r99;
-	
+
 	brev.b32 	%r100, %r99;
 	bfind.shiftamt.u32 	%r35, %r100;
 	setp.ne.s32 	%p28, %r5, %r35;
 	mov.f32 	%f312, 0f00000000;
 	@%p28 bra 	$L__BB0_32;
 
-	
+
 	ld.global.nc.f32 %f312, [%rd5];
-	
+
 
 $L__BB0_32:
 	mov.b32 	%r101, %f312;
@@ -378,18 +378,18 @@ $L__BB0_35:
 	setp.eq.s32 	%p32, %r14, 1;
 	@%p32 bra 	$L__BB0_48;
 
-	
+
 	activemask.b32 %r105;
-	
+
 	brev.b32 	%r106, %r105;
 	bfind.shiftamt.u32 	%r37, %r106;
 	setp.ne.s32 	%p33, %r5, %r37;
 	mov.f32 	%f318, 0f00000000;
 	@%p33 bra 	$L__BB0_38;
 
-	
+
 	ld.global.nc.f32 %f318, [%rd6];
-	
+
 
 $L__BB0_38:
 	mov.b32 	%r107, %f318;
@@ -441,18 +441,18 @@ $L__BB0_41:
 	setp.eq.s32 	%p37, %r14, 2;
 	@%p37 bra 	$L__BB0_48;
 
-	
+
 	activemask.b32 %r110;
-	
+
 	brev.b32 	%r111, %r110;
 	bfind.shiftamt.u32 	%r39, %r111;
 	setp.ne.s32 	%p38, %r5, %r39;
 	mov.f32 	%f324, 0f00000000;
 	@%p38 bra 	$L__BB0_44;
 
-	
+
 	ld.global.nc.f32 %f324, [%rd7];
-	
+
 
 $L__BB0_44:
 	mov.b32 	%r112, %f324;
@@ -517,18 +517,18 @@ $L__BB0_48:
 
 $L__BB0_50:
 	mov.u64 	%rd14, %rd60;
-	
+
 	activemask.b32 %r116;
-	
+
 	brev.b32 	%r117, %r116;
 	bfind.shiftamt.u32 	%r43, %r117;
 	setp.ne.s32 	%p43, %r5, %r43;
 	mov.f32 	%f338, 0f00000000;
 	@%p43 bra 	$L__BB0_52;
 
-	
+
 	ld.global.nc.f32 %f338, [%rd61];
-	
+
 
 $L__BB0_52:
 	mov.b32 	%r118, %f338;
@@ -577,18 +577,18 @@ $L__BB0_52:
 $L__BB0_55:
 	st.global.f32 	[%rd14], %f343;
 	add.s64 	%rd16, %rd61, 4;
-	
+
 	activemask.b32 %r121;
-	
+
 	brev.b32 	%r122, %r121;
 	bfind.shiftamt.u32 	%r45, %r122;
 	setp.ne.s32 	%p47, %r5, %r45;
 	mov.f32 	%f344, 0f00000000;
 	@%p47 bra 	$L__BB0_57;
 
-	
+
 	ld.global.nc.f32 %f344, [%rd16];
-	
+
 
 $L__BB0_57:
 	mov.b32 	%r123, %f344;
@@ -637,18 +637,18 @@ $L__BB0_57:
 $L__BB0_60:
 	st.global.f32 	[%rd14+4], %f349;
 	add.s64 	%rd17, %rd61, 8;
-	
+
 	activemask.b32 %r126;
-	
+
 	brev.b32 	%r127, %r126;
 	bfind.shiftamt.u32 	%r47, %r127;
 	setp.ne.s32 	%p51, %r5, %r47;
 	mov.f32 	%f350, 0f00000000;
 	@%p51 bra 	$L__BB0_62;
 
-	
+
 	ld.global.nc.f32 %f350, [%rd17];
-	
+
 
 $L__BB0_62:
 	mov.b32 	%r128, %f350;
@@ -697,18 +697,18 @@ $L__BB0_62:
 $L__BB0_65:
 	st.global.f32 	[%rd14+8], %f355;
 	add.s64 	%rd18, %rd61, 12;
-	
+
 	activemask.b32 %r131;
-	
+
 	brev.b32 	%r132, %r131;
 	bfind.shiftamt.u32 	%r49, %r132;
 	setp.ne.s32 	%p55, %r5, %r49;
 	mov.f32 	%f356, 0f00000000;
 	@%p55 bra 	$L__BB0_67;
 
-	
+
 	ld.global.nc.f32 %f356, [%rd18];
-	
+
 
 $L__BB0_67:
 	mov.b32 	%r133, %f356;
@@ -817,7 +817,7 @@ $L__BB0_88:
 	ret;
 
 }
-	
+
 .visible .entry lrsi_many_series_one_param_f32(
 	.param .u64 lrsi_many_series_one_param_f32_param_0,
 	.param .f32 lrsi_many_series_one_param_f32_param_1,

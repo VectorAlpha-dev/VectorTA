@@ -49,10 +49,10 @@ void vwma_batch_f32(const double* __restrict__ pv_prefix,
         if (t < warm) {
             value = nan_f32();
         } else {
-            
+
             const int prev = t - period;
 
-            
+
             double sum_pv  = LDG(&pv_prefix[t]);
             double sum_vol = LDG(&vol_prefix[t]);
 
@@ -121,15 +121,15 @@ void vwma_multi_series_one_param_tm_coalesced_f32(const double* __restrict__ pv_
                                                   const int* __restrict__ first_valids,
                                                   float* __restrict__ out_tm)
 {
-    
+
     const int series_idx = blockIdx.y * blockDim.x + threadIdx.x;
     if (series_idx >= num_series) return;
 
-    
-    
+
+
     const int warm = first_valids[series_idx] + period - 1;
 
-    
+
     for (int t = blockIdx.x * blockDim.y + threadIdx.y;
          t < series_len;
          t += gridDim.x * blockDim.y)
@@ -143,7 +143,7 @@ void vwma_multi_series_one_param_tm_coalesced_f32(const double* __restrict__ pv_
 
         const int prev = t - period;
 
-        
+
         double sum_pv  = LDG(&pv_prefix_tm[out_idx]);
         double sum_vol = LDG(&vol_prefix_tm[out_idx]);
 

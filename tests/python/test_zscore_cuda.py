@@ -4,12 +4,12 @@ import pytest
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  
+except ImportError:
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -33,7 +33,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(handle)
         assert meta["periods"][0] == 3
         return True
-    except Exception as exc:  
+    except Exception as exc:
         message = str(exc).lower()
         if "cuda not available" in message or "ptx" in message:
             return False
@@ -70,20 +70,20 @@ class TestZscoreCuda:
         gpu_vals = cp.asnumpy(cp.asarray(handle)).reshape(cpu_vals.shape)
 
         assert_close(gpu_vals, cpu_vals, rtol=3e-4, atol=3e-4, msg="CUDA zscore mismatch")
-        assert np.array_equal(meta["periods"], cpu["periods"])  
-        assert np.allclose(meta["nbdevs"], cpu["nbdevs"], atol=1e-6)  
+        assert np.array_equal(meta["periods"], cpu["periods"])
+        assert np.allclose(meta["nbdevs"], cpu["nbdevs"], atol=1e-6)
         assert [*meta["ma_types"]] == ["sma"] * cpu_vals.shape[0]
-        assert np.array_equal(meta["devtypes"], cpu["devtypes"])  
+        assert np.array_equal(meta["devtypes"], cpu["devtypes"])
 
     def test_zscore_cuda_many_series_one_param_matches_cpu(self, test_data):
         if not hasattr(ti, "zscore_cuda_many_series_one_param_dev"):
             pytest.skip("many-series zscore CUDA binding not present")
 
-        
+
         cols = 4
         rows = 512
         price = test_data["close"][: rows * cols].astype(np.float64)
-        price = price.reshape(rows, cols).copy(order="C")  
+        price = price.reshape(rows, cols).copy(order="C")
         for s in range(cols):
             for t in range(0, rows, 127):
                 price[t, s] = np.nan
@@ -91,7 +91,7 @@ class TestZscoreCuda:
         period = 14
         nbdev = 2.0
 
-        
+
         cpu_tm = np.full((rows, cols), np.nan, dtype=np.float64)
         for s in range(cols):
             col = price[:, s].copy()

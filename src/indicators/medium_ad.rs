@@ -1262,8 +1262,6 @@ impl MediumAdStream {
     }
 }
 
-/* ----------------------------- Order-stat tree ----------------------------- */
-
 #[derive(Default, Debug, Clone)]
 struct OrderStatTree {
     root: Link,
@@ -1307,8 +1305,6 @@ impl OrderStatTree {
         kth_rec(&self.root, k)
     }
 }
-
-/* ------------------------------ treap internals --------------------------- */
 
 #[inline(always)]
 fn size_of(n: &Link) -> usize {

@@ -54,7 +54,7 @@ float dsf_to_float(dsf x) { return x.hi + x.lo; }
 
 extern "C" __global__ void er_batch_prefix_f32(
     const float* __restrict__ data,
-    const float2* __restrict__ prefix_ds, 
+    const float2* __restrict__ prefix_ds,
     int len,
     int first_valid,
     const int* __restrict__ periods,
@@ -78,7 +78,7 @@ extern "C" __global__ void er_batch_prefix_f32(
         float out_val = nan_f;
         if (t >= warm) {
             const int start = t + 1 - period;
-            
+
             const float2 pt = prefix_ds[t];
             const float2 ps = prefix_ds[start];
             dsf denom_ds = dsf_sub(dsf{pt.x, pt.y}, dsf{ps.x, ps.y});
@@ -86,7 +86,7 @@ extern "C" __global__ void er_batch_prefix_f32(
             if (denom > 0.0f) {
                 float delta = fabsf(data[t] - data[start]);
                 float r = delta / denom;
-                
+
                 out_val = (r > 1.0f) ? 1.0f : r;
             } else {
                 out_val = 0.0f;
@@ -117,15 +117,15 @@ extern "C" __global__ void er_batch_f32(
     const int warm = first_valid + period - 1;
     const float nan_f = nanf("");
     if (warm >= len) {
-        
+
         for (int t = 0; t < len; ++t) out[row_off + t] = nan_f;
         return;
     }
 
-    
+
     for (int t = 0; t < warm; ++t) out[row_off + t] = nan_f;
 
-    
+
     dsf roll{0.f, 0.f};
     for (int j = first_valid; j < warm; ++j) {
         float v1 = data[j + 1];
@@ -149,7 +149,7 @@ extern "C" __global__ void er_batch_f32(
 
         if (i + 1 == len) break;
 
-        
+
         float add = fabsf(data[i + 1]     - data[i]);
         float sub = fabsf(data[start + 1] - data[start]);
         roll = dsf_add_scalar(roll,  add);
@@ -162,19 +162,19 @@ extern "C" __global__ void er_batch_f32(
 
 extern "C" __global__ void er_many_series_one_param_time_major_f32(
     const float* __restrict__ data_tm,
-    int cols,   
-    int rows,   
+    int cols,
+    int rows,
     int period,
     const int* __restrict__ first_valids,
     float* __restrict__ out_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const float nan_f = nanf("");
 
     if (period <= 0 || period > rows) {
-        
+
         for (int t = 0; t < rows; ++t) out_tm[t * cols + s] = nan_f;
         return;
     }
@@ -186,10 +186,10 @@ extern "C" __global__ void er_many_series_one_param_time_major_f32(
         return;
     }
 
-    
+
     for (int t = 0; t < warm; ++t) out_tm[t * cols + s] = nan_f;
 
-    
+
     dsf roll{0.f, 0.f};
     for (int j = first_valid; j < warm; ++j) {
         float v1 = data_tm[(j + 1) * cols + s];

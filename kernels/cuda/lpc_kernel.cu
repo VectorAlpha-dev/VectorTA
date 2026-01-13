@@ -15,7 +15,7 @@ static __forceinline__ __device__ float alpha_from_period_iir_f(int p) {
     if (p < 1) p = 1;
     const float omega = 2.0f * CUDART_PI_F / (float)p;
     float s, c;
-    
+
     sincosf(omega, &s, &c);
     return (1.0f - s) / c;
 }
@@ -42,21 +42,21 @@ extern "C" __global__ void lpc_batch_f32_v2(
     const float* __restrict__ close,
     const float* __restrict__ src,
     int len,
-    const float* __restrict__ tr_opt,      
+    const float* __restrict__ tr_opt,
     const int*   __restrict__ fixed_periods,
     const float* __restrict__ cycle_mults,
     const float* __restrict__ tr_mults,
     int n_combos,
     int first_valid,
-    int cutoff_mode,                        
-    int max_cycle_limit,                    
-    const float* __restrict__ dom,          
-    
-    const float* __restrict__ alpha_lut,    
-    int alpha_lut_len,                      
-    int alpha_lut_pmin,                     
-    
-    int out_time_major,                     
+    int cutoff_mode,
+    int max_cycle_limit,
+    const float* __restrict__ dom,
+
+    const float* __restrict__ alpha_lut,
+    int alpha_lut_len,
+    int alpha_lut_pmin,
+
+    int out_time_major,
     float* __restrict__ out_filter,
     float* __restrict__ out_high,
     float* __restrict__ out_low
@@ -68,7 +68,7 @@ extern "C" __global__ void lpc_batch_f32_v2(
     const float qnan = __int_as_float(qnan_bits);
 
     for (int combo = tid; combo < n_combos; combo += stride) {
-        
+
         auto store_triplet = [&](int i, float f, float hi, float lo) {
             size_t idx = out_time_major ? (size_t)i * (size_t)n_combos + (size_t)combo
                                         : (size_t)combo * (size_t)len    + (size_t)i;
@@ -77,39 +77,39 @@ extern "C" __global__ void lpc_batch_f32_v2(
             out_low[idx]    = lo;
         };
 
-        
+
         if (first_valid > 0) {
             const int upto = first_valid < len ? first_valid : len;
             for (int i = 0; i < upto; ++i) store_triplet(i, qnan, qnan, qnan);
             if (first_valid >= len) continue;
         }
 
-        
+
         const float tm       = tr_mults[combo];
         const int   p_fixed  = fixed_periods[combo];
         const float cm       = cycle_mults[combo];
         const bool  adaptive = (cutoff_mode != 0) && (dom != nullptr);
 
-        
+
         const int i0 = first_valid;
         float s_prev = src[i0];
         float f_prev = s_prev;
 
-        
+
         float tr_prev = tr_opt ? tr_opt[i0] : (high[i0] - low[i0]);
         float ftr_prev = tr_prev;
 
-        
+
         int last_p = adaptive ? 0 : p_fixed;
         float alpha = lut_or_formula_alpha(p_fixed, alpha_lut, alpha_lut_len, alpha_lut_pmin);
 
-        
+
         store_triplet(i0, f_prev, f_prev + tm * tr_prev, f_prev - tm * tr_prev);
 
-        
+
         #pragma unroll 1
         for (int i = i0 + 1; i < len; ++i) {
-            
+
             int p_i = p_fixed;
             if (adaptive) {
                 float base = dom[i];
@@ -129,14 +129,14 @@ extern "C" __global__ void lpc_batch_f32_v2(
             const float one_m_a = 1.0f - alpha;
             const float w = 0.5f * one_m_a;
 
-            
+
             const float s_i = src[i];
-            
+
             const float f_i = fmaf(alpha, f_prev, w * (s_i + s_prev));
             s_prev = s_i;
             f_prev = f_i;
 
-            
+
             float tr_i;
             if (tr_opt) {
                 tr_i = tr_opt[i];
@@ -150,7 +150,7 @@ extern "C" __global__ void lpc_batch_f32_v2(
             tr_prev  = tr_i;
             ftr_prev = ftr_i;
 
-            
+
             const float hi = f_i + tm * ftr_i;
             const float lo = f_i - tm * ftr_i;
             store_triplet(i, f_i, hi, lo);
@@ -167,16 +167,16 @@ extern "C" __global__ void lpc_batch_f32(
     const float* __restrict__ close,
     const float* __restrict__ src,
     int len,
-    const float* __restrict__ tr_opt, 
+    const float* __restrict__ tr_opt,
     const int* __restrict__ fixed_periods,
     const float* __restrict__ cycle_mults,
     const float* __restrict__ tr_mults,
     int n_combos,
     int first_valid,
-    int cutoff_mode,           
-    int max_cycle_limit,       
-    const float* __restrict__ dom, 
-    float* __restrict__ out_filter, 
+    int cutoff_mode,
+    int max_cycle_limit,
+    const float* __restrict__ dom,
+    float* __restrict__ out_filter,
     float* __restrict__ out_high,
     float* __restrict__ out_low)
 {
@@ -194,7 +194,7 @@ extern "C" __global__ void lpc_batch_f32(
         const float cm_f = cycle_mults[combo];
         const double cm = (double)cm_f;
 
-        
+
         const uint32_t qnan_bits = 0x7fc00000u;
         const float qnan = __int_as_float(qnan_bits);
         const int warm = first_valid < len ? first_valid : len;
@@ -205,7 +205,7 @@ extern "C" __global__ void lpc_batch_f32(
         }
         if (first_valid >= len) continue;
 
-        
+
         const int i0 = first_valid;
         const double s0 = (double)src[i0];
         f_row[i0] = (float)s0;
@@ -215,9 +215,9 @@ extern "C" __global__ void lpc_batch_f32(
         hi_row[i0] = (float)(s0 + tm * tr_prev);
         lo_row[i0] = (float)(s0 - tm * tr_prev);
 
-        
+
         int last_p = (cutoff_mode == 0 ? p_fixed : 0);
-        
+
         auto alpha_from_period_iir = [](int p)->double {
             if (p < 1) p = 1;
             const double omega = 2.0 * CUDART_PI / (double)p;
@@ -227,7 +227,7 @@ extern "C" __global__ void lpc_batch_f32(
         double alpha = (cutoff_mode == 0 ? alpha_from_period_iir(p_fixed) : 0.0);
 
         for (int i = i0 + 1; i < len; ++i) {
-            
+
             int p_i = p_fixed;
             if (cutoff_mode != 0 && dom != nullptr) {
                 double base = (double)dom[i];
@@ -247,14 +247,14 @@ extern "C" __global__ void lpc_batch_f32(
             }
             const double one_m_a = 1.0 - alpha;
 
-            
+
             const double s_im1 = (double)src[i - 1];
             const double s_i   = (double)src[i];
             const double prev_f = (double)f_row[i - 1];
             const double f_i = fma(alpha, prev_f, 0.5 * one_m_a * (s_i + s_im1));
             f_row[i] = (float)f_i;
 
-            
+
             double tr_i;
             if (tr_opt) {
                 tr_i = (double)tr_opt[i];
@@ -283,14 +283,14 @@ extern "C" __global__ void lpc_many_series_one_param_time_major_f32(
     const float* __restrict__ low_tm,
     const float* __restrict__ close_tm,
     const float* __restrict__ src_tm,
-    int cols,                    
-    int rows,                    
+    int cols,
+    int rows,
     int fixed_period,
-    float cycle_mult,            
+    float cycle_mult,
     float tr_mult,
-    int cutoff_mode,             
-    int max_cycle_limit,         
-    const int* __restrict__ first_valids, 
+    int cutoff_mode,
+    int max_cycle_limit,
+    const int* __restrict__ first_valids,
     float* __restrict__ out_filter_tm,
     float* __restrict__ out_high_tm,
     float* __restrict__ out_low_tm
@@ -316,7 +316,7 @@ extern "C" __global__ void lpc_many_series_one_param_time_major_f32(
     auto AT = [&](const float* a, int t) -> float { return a[(size_t)t * (size_t)cols + (size_t)s0]; };
     auto W  = [&](float* a, int t, float v)       { a[(size_t)t * (size_t)cols + (size_t)s0] = v;  };
 
-    
+
     float s_prev = AT(src_tm, first);
     float f_prev = s_prev;
     float tr_prev = AT(high_tm, first) - AT(low_tm, first);
@@ -326,7 +326,7 @@ extern "C" __global__ void lpc_many_series_one_param_time_major_f32(
     W(out_high_tm,   first, f_prev + tm * tr_prev);
     W(out_low_tm,    first, f_prev - tm * tr_prev);
 
-    
+
     #pragma unroll 1
     for (int t = first + 1; t < rows; ++t) {
         const float one_m_a = 1.0f - alpha;

@@ -39,20 +39,20 @@ void ott_apply_single_f32(const float* __restrict__ ma,
     if (threadIdx.x != 0) return;
     if (series_len <= 0) return;
 
-    const float fark = percent * 0.01f;               
-    const float scale_minus = 1.0f - percent * 0.005f; 
+    const float fark = percent * 0.01f;
+    const float scale_minus = 1.0f - percent * 0.005f;
 
-    
+
     int i = find_first_finite(ma, 0, series_len);
     if (i >= series_len) return;
 
     float m = ma[i];
-    float long_stop = fmaf(-fark, m, m);  
-    float short_stop = fmaf( fark, m, m); 
-    int dir = 1; 
+    float long_stop = fmaf(-fark, m, m);
+    float short_stop = fmaf( fark, m, m);
+    int dir = 1;
 
-    
-    float mt0 = long_stop; 
+
+    float mt0 = long_stop;
     float scale0 = (m > mt0) ? (scale_minus + fark) : (scale_minus);
     out[i] = mt0 * scale0;
     ++i;
@@ -62,13 +62,13 @@ void ott_apply_single_f32(const float* __restrict__ ma,
         if (!isfinite(mf)) continue;
         float mavg = mf;
 
-        float cand_long = fmaf(-fark, mavg, mavg); 
-        float cand_short = fmaf( fark, mavg, mavg); 
+        float cand_long = fmaf(-fark, mavg, mavg);
+        float cand_short = fmaf( fark, mavg, mavg);
 
         float lprev = long_stop;
         float sprev = short_stop;
 
-        
+
         if (mavg > lprev) {
             long_stop = (cand_long > lprev) ? cand_long : lprev;
         } else {
@@ -80,14 +80,14 @@ void ott_apply_single_f32(const float* __restrict__ ma,
             short_stop = cand_short;
         }
 
-        
+
         if (dir == -1 && mavg > sprev) {
             dir = 1;
         } else if (dir == 1 && mavg < lprev) {
             dir = -1;
         }
 
-        
+
         float mt = (dir == 1) ? long_stop : short_stop;
         float scale = (mavg > mt) ? (scale_minus + fark) : (scale_minus);
         out[i] = mt * scale;
@@ -116,7 +116,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
 
     float* __restrict__ out_row = out + combo * series_len;
 
-    
+
     int first = -1;
     for (int i = 0; i < series_len; ++i) {
         if (isfinite(prices[i])) { first = i; break; }
@@ -127,7 +127,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
     const float scale_minus = 1.0f - percent * 0.005f;
     const float valpha_base = vidya_alpha_base(period);
 
-    
+
     float ring_u[9];
     float ring_d[9];
     #pragma unroll
@@ -135,32 +135,32 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
     float u_sum = 0.0f, d_sum = 0.0f;
     int ridx = 0;
 
-    
+
     float var = 0.0f;
 
-    
+
     float long_stop = fmaf(-fark, var, var);
     float short_stop = fmaf( fark, var, var);
     int dir = 1;
 
-    
+
     float mt0 = long_stop;
     float scale0 = (var > mt0) ? (scale_minus + fark) : (scale_minus);
     out_row[first] = mt0 * scale0;
 
-    
+
     int pre_end = (first + 8 < series_len ? first + 8 : series_len - 1);
     for (int i = first + 1; i <= pre_end; ++i) {
         float a = prices[i - 1];
         float b = prices[i];
         if (!isfinite(a) || !isfinite(b)) continue;
-        float up = b - a; if (up < 0.0f) up = 0.0f; 
+        float up = b - a; if (up < 0.0f) up = 0.0f;
         float dn = a - b; if (dn < 0.0f) dn = 0.0f;
         ring_u[ridx] = up;  u_sum += up;
         ring_d[ridx] = dn;  d_sum += dn;
         ridx = (ridx + 1) % 9;
 
-        
+
         float cand_long = fmaf(-fark, var, var);
         float cand_short = fmaf( fark, var, var);
         float lprev = long_stop, sprev = short_stop;
@@ -172,7 +172,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
         out_row[i] = mt * scale;
     }
 
-    
+
     for (int i = first + 9; i < series_len; ++i) {
         float a = prices[i - 1];
         float b = prices[i];
@@ -190,7 +190,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
         float avalpha = valpha_base * fabsf(vcmo);
         var = fmaf(avalpha, b, (1.0f - avalpha) * var);
 
-        
+
         float cand_long = fmaf(-fark, var, var);
         float cand_short = fmaf( fark, var, var);
         float lprev = long_stop, sprev = short_stop;
@@ -210,15 +210,15 @@ void ott_many_series_one_param_f32(const float* __restrict__ ma_tm,
                                    int rows,
                                    float percent,
                                    float* __restrict__ out_tm) {
-    
-    const int s = blockIdx.x; 
+
+    const int s = blockIdx.x;
     if (s >= cols || threadIdx.x != 0) return;
     if (rows <= 0) return;
 
     const float fark = percent * 0.01f;
     const float scale_minus = 1.0f - percent * 0.005f;
 
-    
+
     int t = 0;
     for (; t < rows; ++t) { if (isfinite(ma_tm[(size_t)t * (size_t)cols + s])) break; }
     if (t >= rows) return;
@@ -255,19 +255,19 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                             int period,
                                             float percent,
                                             float* __restrict__ out_tm) {
-    const int s = blockIdx.x; 
+    const int s = blockIdx.x;
     if (s >= cols || threadIdx.x != 0) return;
 
     const float fark = percent * 0.01f;
     const float scale_minus = 1.0f - percent * 0.005f;
     const float valpha_base = vidya_alpha_base(period);
 
-    
+
     int first = -1;
     for (int t = 0; t < rows; ++t) { if (isfinite(prices_tm[(size_t)t * (size_t)cols + s])) { first = t; break; } }
     if (first < 0) return;
 
-    
+
     float ring_u[9];
     float ring_d[9];
     #pragma unroll
@@ -275,7 +275,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
     float u_sum = 0.0f, d_sum = 0.0f; int ridx = 0;
     float var = 0.0f;
 
-    
+
     float long_stop = fmaf(-fark, var, var);
     float short_stop = fmaf( fark, var, var);
     int dir = 1;

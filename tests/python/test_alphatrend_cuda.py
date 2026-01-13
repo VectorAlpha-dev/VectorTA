@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -23,7 +23,7 @@ def _cuda_available() -> bool:
         return False
     if not hasattr(ti, 'alphatrend_cuda_batch_dev'):
         return False
-    
+
     try:
         data = load_test_data()
         h = data['high'][:64].astype(np.float32)
@@ -39,7 +39,7 @@ def _cuda_available() -> bool:
         _ = cp.asarray(handle['k1'])
         _ = cp.asarray(handle['k2'])
         return True
-    except Exception as e:  
+    except Exception as e:
         msg = str(e).lower()
         return not (('cuda not available' in msg) or ('ptx' in msg) or ('nvcc' in msg))
 
@@ -59,10 +59,10 @@ class TestAlphaTrendCuda:
         period = 14
         no_volume = True
 
-        
-        k1_cpu, k2_cpu = ti.alphatrend(h, l, l, c, v, coeff, period, no_volume)  
 
-        
+        k1_cpu, k2_cpu = ti.alphatrend(h, l, l, c, v, coeff, period, no_volume)
+
+
         out = ti.alphatrend_cuda_batch_dev(
             h.astype(np.float32),
             l.astype(np.float32),
@@ -79,7 +79,7 @@ class TestAlphaTrendCuda:
         assert_close(k2_gpu, k2_cpu, rtol=2e-3, atol=2e-5, msg="AlphaTrend k2 CUDA vs CPU mismatch")
 
     def test_alphatrend_cuda_many_series_one_param_matches_cpu(self, test_data):
-        
+
         T = 1024
         N = 3
         h = np.zeros((T, N), dtype=np.float64)
@@ -100,7 +100,7 @@ class TestAlphaTrendCuda:
         period = 14
         no_volume = True
 
-        
+
         k1_cpu = np.zeros_like(c)
         k2_cpu = np.zeros_like(c)
         for j in range(N):
@@ -108,7 +108,7 @@ class TestAlphaTrendCuda:
             k1_cpu[:, j] = k1_j
             k2_cpu[:, j] = k2_j
 
-        
+
         k1_h, k2_h = ti.alphatrend_cuda_many_series_one_param_dev(
             h.astype(np.float32).reshape(-1),
             l.astype(np.float32).reshape(-1),

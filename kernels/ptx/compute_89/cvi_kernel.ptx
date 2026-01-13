@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry cvi_batch_f32(
 	.param .u64 cvi_batch_f32_param_0,
@@ -478,7 +478,7 @@ $L__BB0_45:
 	ret;
 
 }
-	
+
 .visible .entry cvi_batch_from_range_f32(
 	.param .u64 cvi_batch_from_range_f32_param_0,
 	.param .u64 cvi_batch_from_range_f32_param_1,
@@ -920,7 +920,7 @@ $L__BB1_45:
 	ret;
 
 }
-	
+
 .visible .entry cvi_many_series_one_param_f32(
 	.param .u64 cvi_many_series_one_param_f32_param_0,
 	.param .u64 cvi_many_series_one_param_f32_param_1,
@@ -1282,7 +1282,7 @@ $L__BB2_28:
 	ret;
 
 }
-	
+
 .visible .entry range_from_high_low_f32(
 	.param .u64 range_from_high_low_f32_param_0,
 	.param .u64 range_from_high_low_f32_param_1,

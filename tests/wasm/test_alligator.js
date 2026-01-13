@@ -1,18 +1,15 @@
-/**
- * WASM binding tests for Alligator indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { 
-    loadTestData, 
-    assertArrayClose, 
+import {
+    loadTestData,
+    assertArrayClose,
     assertClose,
     isNaN,
     assertAllNaN,
-    assertNoNaN 
+    assertNoNaN
 } from './test_utils.js';
 import { compareWithRust } from './rust-comparison.js';
 
@@ -23,75 +20,75 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    
+
     try {
         const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        
+
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
     }
-    
+
     testData = loadTestData();
 });
 
 test('Alligator partial params', () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
-    
+
+
     const result = wasm.alligator_js(hl2Array, 14, 8, 8, 5, 5, 2);
-    
-    
+
+
     assert.strictEqual(result.length, hl2Array.length * 3);
 });
 
 test('Alligator accuracy', async () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
-    
+
+
     const expectedLastFiveJaw = [60742.4, 60632.6, 60555.1, 60442.7, 60308.7];
     const expectedLastFiveTeeth = [59908.0, 59757.2, 59684.3, 59653.5, 59621.1];
     const expectedLastFiveLips = [59355.2, 59371.7, 59376.2, 59334.1, 59316.2];
-    
-    const result = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3); 
-    
-    
+
+    const result = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
+
+
     const len = hl2Array.length;
     const jaw = result.slice(0, len);
     const teeth = result.slice(len, 2 * len);
     const lips = result.slice(2 * len, 3 * len);
-    
+
     assert.strictEqual(jaw.length, len);
     assert.strictEqual(teeth.length, len);
     assert.strictEqual(lips.length, len);
-    
-    
+
+
     const jawLast5 = jaw.slice(-5);
     const teethLast5 = teeth.slice(-5);
     const lipsLast5 = lips.slice(-5);
-    
+
     assertArrayClose(
         jawLast5,
         expectedLastFiveJaw,
-        0.1, 
+        0.1,
         "Alligator jaw last 5 values mismatch"
     );
-    
+
     assertArrayClose(
         teethLast5,
         expectedLastFiveTeeth,
         0.1,
         "Alligator teeth last 5 values mismatch"
     );
-    
+
     assertArrayClose(
         lipsLast5,
         expectedLastFiveLips,
@@ -101,104 +98,104 @@ test('Alligator accuracy', async () => {
 });
 
 test('Alligator default candles', () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
+
     const result = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
     assert.strictEqual(result.length, hl2Array.length * 3);
 });
 
 test('Alligator zero jaw period', () => {
-    
+
     const data = new Float64Array([10.0, 20.0, 30.0]);
-    
+
     assert.throws(() => {
         wasm.alligator_js(data, 0, 8, 8, 5, 5, 3);
     }, /Invalid jaw period/);
 });
 
 test('Alligator zero teeth period', () => {
-    
+
     const data = new Float64Array([10.0, 20.0, 30.0]);
-    
+
     assert.throws(() => {
         wasm.alligator_js(data, 13, 8, 0, 5, 5, 3);
     }, /Invalid teeth period|Invalid jaw period/);
 });
 
 test('Alligator zero lips period', () => {
-    
+
     const data = new Float64Array([10.0, 20.0, 30.0]);
-    
+
     assert.throws(() => {
         wasm.alligator_js(data, 13, 8, 8, 5, 0, 3);
     }, /Invalid lips period|Invalid jaw period/);
 });
 
 test('Alligator period exceeds length', () => {
-    
+
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
-    
+
     assert.throws(() => {
         wasm.alligator_js(dataSmall, 10, 8, 8, 5, 5, 3);
     }, /Invalid jaw period/);
 });
 
 test('Alligator offset exceeds length', () => {
-    
+
     const data = new Float64Array([10.0, 20.0, 30.0, 40.0, 50.0]);
-    
+
     assert.throws(() => {
         wasm.alligator_js(data, 3, 10, 3, 5, 3, 3);
     }, /Invalid jaw offset/);
-    
+
     assert.throws(() => {
         wasm.alligator_js(data, 3, 3, 3, 10, 3, 3);
     }, /Invalid teeth offset/);
-    
+
     assert.throws(() => {
         wasm.alligator_js(data, 3, 3, 3, 3, 3, 10);
     }, /Invalid lips offset/);
 });
 
 test('Alligator all NaN input', () => {
-    
+
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
-    
+
     assert.throws(() => {
         wasm.alligator_js(allNaN, 13, 8, 8, 5, 5, 3);
     }, /All values are NaN/);
 });
 
 test('Alligator reinput', () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
-    
+
+
     const firstResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
     const len = hl2Array.length;
     const firstJaw = firstResult.slice(0, len);
-    
-    
+
+
     const secondResult = wasm.alligator_js(new Float64Array(firstJaw), 13, 8, 8, 5, 5, 3);
     assert.strictEqual(secondResult.length, firstJaw.length * 3);
 });
 
 test('Alligator NaN handling', () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
+
     const result = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
     const len = hl2Array.length;
     const jaw = result.slice(0, len);
     const teeth = result.slice(len, 2 * len);
     const lips = result.slice(2 * len, 3 * len);
-    
-    
+
+
     if (jaw.length > 50) {
         for (let i = 50; i < jaw.length; i++) {
             assert(!isNaN(jaw[i]), `Found unexpected NaN in jaw at index ${i}`);
@@ -209,152 +206,152 @@ test('Alligator NaN handling', () => {
 });
 
 test('Alligator batch single parameter set', () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
-    
+
+
     const batchResult = wasm.alligator_batch_js(
         hl2Array,
-        13, 13, 0,  
-        8, 8, 0,    
-        8, 8, 0,    
-        5, 5, 0,    
-        5, 5, 0,    
-        3, 3, 0     
+        13, 13, 0,
+        8, 8, 0,
+        8, 8, 0,
+        5, 5, 0,
+        5, 5, 0,
+        3, 3, 0
     );
-    
-    
+
+
     const singleResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
-    
-    
-    
+
+
+
     assert.strictEqual(batchResult.length, singleResult.length);
-    
-    
+
+
     const len = hl2Array.length;
     const batchJaw = batchResult.slice(0, len);
     const batchTeeth = batchResult.slice(len, 2 * len);
     const batchLips = batchResult.slice(2 * len, 3 * len);
-    
+
     const singleJaw = singleResult.slice(0, len);
     const singleTeeth = singleResult.slice(len, 2 * len);
     const singleLips = singleResult.slice(2 * len, 3 * len);
-    
+
     assertArrayClose(batchJaw, singleJaw, 1e-10, "Batch vs single jaw mismatch");
     assertArrayClose(batchTeeth, singleTeeth, 1e-10, "Batch vs single teeth mismatch");
     assertArrayClose(batchLips, singleLips, 1e-10, "Batch vs single lips mismatch");
 });
 
 test('Alligator batch multiple jaw periods', () => {
-    
+
     const hl2 = testData.high.slice(0, 100).map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
-    
+
+
     const batchResult = wasm.alligator_batch_js(
         hl2Array,
-        13, 17, 2,  
-        8, 8, 0,    
-        8, 8, 0,    
-        5, 5, 0,    
-        5, 5, 0,    
-        3, 3, 0     
+        13, 17, 2,
+        8, 8, 0,
+        8, 8, 0,
+        5, 5, 0,
+        5, 5, 0,
+        3, 3, 0
     );
-    
-    
+
+
     assert.strictEqual(batchResult.length, 3 * 100 * 3);
-    
-    
+
+
     const jawPeriods = [13, 15, 17];
-    const totalArraySize = 3 * 100; 
-    
+    const totalArraySize = 3 * 100;
+
     for (let i = 0; i < jawPeriods.length; i++) {
         const rowStartJaw = i * 100;
         const rowEndJaw = rowStartJaw + 100;
         const rowJaw = batchResult.slice(rowStartJaw, rowEndJaw);
-        
+
         const rowStartTeeth = totalArraySize + i * 100;
         const rowEndTeeth = rowStartTeeth + 100;
         const rowTeeth = batchResult.slice(rowStartTeeth, rowEndTeeth);
-        
+
         const rowStartLips = 2 * totalArraySize + i * 100;
         const rowEndLips = rowStartLips + 100;
         const rowLips = batchResult.slice(rowStartLips, rowEndLips);
-        
+
         const singleResult = wasm.alligator_js(hl2Array, jawPeriods[i], 8, 8, 5, 5, 3);
         const singleJaw = singleResult.slice(0, 100);
         const singleTeeth = singleResult.slice(100, 200);
         const singleLips = singleResult.slice(200, 300);
-        
+
         assertArrayClose(
-            rowJaw, 
-            singleJaw, 
-            1e-10, 
+            rowJaw,
+            singleJaw,
+            1e-10,
             `Jaw period ${jawPeriods[i]} mismatch`
         );
         assertArrayClose(
-            rowTeeth, 
-            singleTeeth, 
-            1e-10, 
+            rowTeeth,
+            singleTeeth,
+            1e-10,
             `Teeth period ${jawPeriods[i]} mismatch`
         );
         assertArrayClose(
-            rowLips, 
-            singleLips, 
-            1e-10, 
+            rowLips,
+            singleLips,
+            1e-10,
             `Lips period ${jawPeriods[i]} mismatch`
         );
     }
 });
 
 test('Alligator batch metadata', () => {
-    
+
     const metadata = wasm.alligator_batch_metadata_js(
-        13, 14, 1,  
-        8, 9, 1,    
-        8, 8, 0,    
-        5, 5, 0,    
-        5, 5, 0,    
-        3, 3, 0     
+        13, 14, 1,
+        8, 9, 1,
+        8, 8, 0,
+        5, 5, 0,
+        5, 5, 0,
+        3, 3, 0
     );
-    
-    
-    
+
+
+
     assert.strictEqual(metadata.length, 4 * 6);
-    
-    
-    assert.strictEqual(metadata[0], 13);  
-    assert.strictEqual(metadata[1], 8);   
-    assert.strictEqual(metadata[2], 8);   
-    assert.strictEqual(metadata[3], 5);   
-    assert.strictEqual(metadata[4], 5);   
-    assert.strictEqual(metadata[5], 3);   
-    
-    
-    assert.strictEqual(metadata[18], 14); 
-    assert.strictEqual(metadata[19], 9);  
-    assert.strictEqual(metadata[20], 8);  
-    assert.strictEqual(metadata[21], 5);  
-    assert.strictEqual(metadata[22], 5);  
-    assert.strictEqual(metadata[23], 3);  
+
+
+    assert.strictEqual(metadata[0], 13);
+    assert.strictEqual(metadata[1], 8);
+    assert.strictEqual(metadata[2], 8);
+    assert.strictEqual(metadata[3], 5);
+    assert.strictEqual(metadata[4], 5);
+    assert.strictEqual(metadata[5], 3);
+
+
+    assert.strictEqual(metadata[18], 14);
+    assert.strictEqual(metadata[19], 9);
+    assert.strictEqual(metadata[20], 8);
+    assert.strictEqual(metadata[21], 5);
+    assert.strictEqual(metadata[22], 5);
+    assert.strictEqual(metadata[23], 3);
 });
 
 test('Alligator batch full parameter sweep', () => {
-    
+
     const hl2 = testData.high.slice(0, 50).map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
+
     const batchResult = wasm.alligator_batch_js(
         hl2Array,
-        13, 14, 1,  
-        8, 8, 0,    
-        8, 8, 0,    
-        5, 5, 0,    
-        5, 6, 1,    
-        3, 3, 0     
+        13, 14, 1,
+        8, 8, 0,
+        8, 8, 0,
+        5, 5, 0,
+        5, 6, 1,
+        3, 3, 0
     );
-    
+
     const metadata = wasm.alligator_batch_metadata_js(
         13, 14, 1,
         8, 8, 0,
@@ -363,18 +360,18 @@ test('Alligator batch full parameter sweep', () => {
         5, 6, 1,
         3, 3, 0
     );
-    
-    
+
+
     const numCombos = metadata.length / 6;
     assert.strictEqual(numCombos, 4);
-    assert.strictEqual(batchResult.length, 4 * 50 * 3); 
+    assert.strictEqual(batchResult.length, 4 * 50 * 3);
 });
 
 test('Alligator batch edge cases', () => {
-    
+
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    
-    
+
+
     const singleBatch = wasm.alligator_batch_js(
         data,
         5, 5, 1,
@@ -384,10 +381,10 @@ test('Alligator batch edge cases', () => {
         3, 3, 1,
         1, 1, 1
     );
-    
-    assert.strictEqual(singleBatch.length, 15 * 3); 
-    
-    
+
+    assert.strictEqual(singleBatch.length, 15 * 3);
+
+
     assert.throws(() => {
         wasm.alligator_batch_js(
             new Float64Array([]),
@@ -403,10 +400,10 @@ test('Alligator batch edge cases', () => {
 
 
 test('Alligator batch - new ergonomic API with single parameter', () => {
-    
+
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
+
     const result = wasm.alligator_batch(hl2Array, {
         jaw_period_range: [13, 13, 0],
         jaw_offset_range: [8, 8, 0],
@@ -415,24 +412,24 @@ test('Alligator batch - new ergonomic API with single parameter', () => {
         lips_period_range: [5, 5, 0],
         lips_offset_range: [3, 3, 0]
     });
-    
-    
+
+
     assert(result.jaw, 'Should have jaw array');
     assert(result.teeth, 'Should have teeth array');
     assert(result.lips, 'Should have lips array');
     assert(result.combos, 'Should have combos array');
     assert(typeof result.rows === 'number', 'Should have rows count');
     assert(typeof result.cols === 'number', 'Should have cols count');
-    
-    
+
+
     assert.strictEqual(result.rows, 1);
     assert.strictEqual(result.cols, hl2Array.length);
     assert.strictEqual(result.combos.length, 1);
     assert.strictEqual(result.jaw.length, hl2Array.length);
     assert.strictEqual(result.teeth.length, hl2Array.length);
     assert.strictEqual(result.lips.length, hl2Array.length);
-    
-    
+
+
     const combo = result.combos[0];
     assert.strictEqual(combo.jaw_period, 13);
     assert.strictEqual(combo.jaw_offset, 8);
@@ -440,16 +437,16 @@ test('Alligator batch - new ergonomic API with single parameter', () => {
     assert.strictEqual(combo.teeth_offset, 5);
     assert.strictEqual(combo.lips_period, 5);
     assert.strictEqual(combo.lips_offset, 3);
-    
-    
+
+
     const oldResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
     const oldJaw = oldResult.slice(0, hl2Array.length);
     const oldTeeth = oldResult.slice(hl2Array.length, 2 * hl2Array.length);
     const oldLips = oldResult.slice(2 * hl2Array.length, 3 * hl2Array.length);
-    
+
     for (let i = 0; i < hl2Array.length; i++) {
         if (isNaN(oldJaw[i]) && isNaN(result.jaw[i])) {
-            continue; 
+            continue;
         }
         assert(Math.abs(oldJaw[i] - result.jaw[i]) < 1e-10,
                `Jaw value mismatch at index ${i}`);
@@ -461,35 +458,35 @@ test('Alligator batch - new ergonomic API with single parameter', () => {
 });
 
 test('Alligator batch - new API with multiple parameters', () => {
-    
+
     const hl2 = testData.high.slice(0, 50).map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
+
     const result = wasm.alligator_batch(hl2Array, {
-        jaw_period_range: [13, 14, 1],     
-        jaw_offset_range: [8, 8, 0],       
-        teeth_period_range: [8, 8, 0],     
-        teeth_offset_range: [5, 5, 0],     
-        lips_period_range: [5, 6, 1],      
-        lips_offset_range: [3, 3, 0]       
+        jaw_period_range: [13, 14, 1],
+        jaw_offset_range: [8, 8, 0],
+        teeth_period_range: [8, 8, 0],
+        teeth_offset_range: [5, 5, 0],
+        lips_period_range: [5, 6, 1],
+        lips_offset_range: [3, 3, 0]
     });
-    
-    
+
+
     assert.strictEqual(result.rows, 4);
     assert.strictEqual(result.cols, 50);
     assert.strictEqual(result.combos.length, 4);
-    assert.strictEqual(result.jaw.length, 200);  
+    assert.strictEqual(result.jaw.length, 200);
     assert.strictEqual(result.teeth.length, 200);
     assert.strictEqual(result.lips.length, 200);
-    
-    
+
+
     const expectedCombos = [
         { jaw_period: 13, jaw_offset: 8, teeth_period: 8, teeth_offset: 5, lips_period: 5, lips_offset: 3 },
         { jaw_period: 13, jaw_offset: 8, teeth_period: 8, teeth_offset: 5, lips_period: 6, lips_offset: 3 },
         { jaw_period: 14, jaw_offset: 8, teeth_period: 8, teeth_offset: 5, lips_period: 5, lips_offset: 3 },
         { jaw_period: 14, jaw_offset: 8, teeth_period: 8, teeth_offset: 5, lips_period: 6, lips_offset: 3 }
     ];
-    
+
     for (let i = 0; i < expectedCombos.length; i++) {
         assert.strictEqual(result.combos[i].jaw_period, expectedCombos[i].jaw_period);
         assert.strictEqual(result.combos[i].jaw_offset, expectedCombos[i].jaw_offset);
@@ -503,11 +500,11 @@ test('Alligator batch - new API with multiple parameters', () => {
 test('Alligator batch - new API error handling', () => {
     const hl2 = testData.high.slice(0, 10).map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
-    
-    
+
+
     assert.throws(() => {
         wasm.alligator_batch(hl2Array, {
-            jaw_period_range: [13, 13], 
+            jaw_period_range: [13, 13],
             jaw_offset_range: [8, 8, 0],
             teeth_period_range: [8, 8, 0],
             teeth_offset_range: [5, 5, 0],
@@ -515,8 +512,8 @@ test('Alligator batch - new API error handling', () => {
             lips_offset_range: [3, 3, 0]
         });
     }, /Invalid config/);
-    
-    
+
+
     assert.throws(() => {
         wasm.alligator_batch(hl2Array, {
             jaw_period_range: [13, 13, 0],
@@ -524,11 +521,11 @@ test('Alligator batch - new API error handling', () => {
             teeth_period_range: [8, 8, 0],
             teeth_offset_range: [5, 5, 0],
             lips_period_range: [5, 5, 0]
-            
+
         });
     }, /Invalid config/);
-    
-    
+
+
     assert.throws(() => {
         wasm.alligator_batch(hl2Array, {
             jaw_period_range: "invalid",
@@ -546,40 +543,40 @@ test('Alligator fast API - basic functionality', () => {
     const hl2 = testData.high.map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
     const len = hl2Array.length;
-    
-    
+
+
     const inPtr = wasm.alligator_alloc(len);
     const jawPtr = wasm.alligator_alloc(len);
     const teethPtr = wasm.alligator_alloc(len);
     const lipsPtr = wasm.alligator_alloc(len);
-    
+
     try {
-        
+
         const inView = new Float64Array(wasm.__wasm.memory.buffer, inPtr, len);
         inView.set(hl2Array);
-        
-        
+
+
         wasm.alligator_into(
             inPtr, jawPtr, teethPtr, lipsPtr, len,
             13, 8, 8, 5, 5, 3
         );
-        
-        
+
+
         const jawResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, jawPtr, len));
         const teethResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, teethPtr, len));
         const lipsResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, lipsPtr, len));
-        
-        
+
+
         const safeResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
         const safeJaw = safeResult.slice(0, len);
         const safeTeeth = safeResult.slice(len, 2 * len);
         const safeLips = safeResult.slice(2 * len, 3 * len);
-        
+
         assertArrayClose(jawResult, safeJaw, 1e-10, "Fast API jaw mismatch");
         assertArrayClose(teethResult, safeTeeth, 1e-10, "Fast API teeth mismatch");
         assertArrayClose(lipsResult, safeLips, 1e-10, "Fast API lips mismatch");
     } finally {
-        
+
         wasm.alligator_free(inPtr, len);
         wasm.alligator_free(jawPtr, len);
         wasm.alligator_free(teethPtr, len);
@@ -591,39 +588,39 @@ test('Alligator fast API - in-place operation (aliasing)', () => {
     const hl2 = testData.high.slice(0, 100).map((h, i) => (h + testData.low[i]) / 2);
     const hl2Array = new Float64Array(hl2);
     const len = hl2Array.length;
-    
-    
+
+
     const dataPtr = wasm.alligator_alloc(len);
     const teethPtr = wasm.alligator_alloc(len);
     const lipsPtr = wasm.alligator_alloc(len);
-    
+
     try {
-        
+
         const dataView = new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len);
         dataView.set(hl2Array);
-        
-        
+
+
         wasm.alligator_into(
-            dataPtr, dataPtr, teethPtr, lipsPtr, len,  
+            dataPtr, dataPtr, teethPtr, lipsPtr, len,
             13, 8, 8, 5, 5, 3
         );
-        
-        
+
+
         const jawResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, dataPtr, len));
         const teethResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, teethPtr, len));
         const lipsResult = Array.from(new Float64Array(wasm.__wasm.memory.buffer, lipsPtr, len));
-        
-        
+
+
         const safeResult = wasm.alligator_js(hl2Array, 13, 8, 8, 5, 5, 3);
         const safeJaw = safeResult.slice(0, len);
         const safeTeeth = safeResult.slice(len, 2 * len);
         const safeLips = safeResult.slice(2 * len, 3 * len);
-        
+
         assertArrayClose(jawResult, safeJaw, 1e-10, "In-place jaw mismatch");
         assertArrayClose(teethResult, safeTeeth, 1e-10, "In-place teeth mismatch");
         assertArrayClose(lipsResult, safeLips, 1e-10, "In-place lips mismatch");
     } finally {
-        
+
         wasm.alligator_free(dataPtr, len);
         wasm.alligator_free(teethPtr, len);
         wasm.alligator_free(lipsPtr, len);
@@ -638,22 +635,22 @@ test('Alligator fast API - null pointer handling', () => {
 
 test('Alligator memory allocation and deallocation', () => {
     const len = 1000;
-    
-    
+
+
     const ptr = wasm.alligator_alloc(len);
     assert(ptr !== 0, "Allocation should return non-zero pointer");
-    
-    
+
+
     const view = new Float64Array(wasm.__wasm.memory.buffer, ptr, len);
     view[0] = 42.0;
     view[len - 1] = 99.0;
     assert.strictEqual(view[0], 42.0);
     assert.strictEqual(view[len - 1], 99.0);
-    
-    
+
+
     wasm.alligator_free(ptr, len);
-    
-    
+
+
     wasm.alligator_free(0, len);
 });
 

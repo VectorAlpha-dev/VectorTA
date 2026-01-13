@@ -8,25 +8,25 @@ import my_project as ta
 
 def test_gatorosc_basic():
     """Test basic GatorOsc calculation."""
-    
+
     data = np.random.randn(100) * 10 + 50
-    
-    
+
+
     upper, lower, upper_change, lower_change = ta.gatorosc(data)
-    
-    
+
+
     assert len(upper) == len(data)
     assert len(lower) == len(data)
     assert len(upper_change) == len(data)
     assert len(lower_change) == len(data)
-    
-    
+
+
     assert not np.all(np.isnan(upper))
     assert not np.all(np.isnan(lower))
     assert not np.all(np.isnan(upper_change))
     assert not np.all(np.isnan(lower_change))
-    
-    
+
+
     valid_upper = upper[~np.isnan(upper)]
     valid_lower = lower[~np.isnan(lower)]
     assert np.all(valid_upper >= 0)
@@ -35,18 +35,18 @@ def test_gatorosc_basic():
 def test_gatorosc_custom_params():
     """Test GatorOsc with custom parameters."""
     data = np.random.randn(200) * 10 + 50
-    
-    
+
+
     upper, lower, upper_change, lower_change = ta.gatorosc(
-        data, 
-        jaws_length=21, 
+        data,
+        jaws_length=21,
         jaws_shift=10,
         teeth_length=13,
         teeth_shift=7,
         lips_length=8,
         lips_shift=5
     )
-    
+
     assert len(upper) == len(data)
     assert len(lower) == len(data)
     assert len(upper_change) == len(data)
@@ -54,31 +54,31 @@ def test_gatorosc_custom_params():
 
 def test_gatorosc_errors():
     """Test GatorOsc error handling."""
-    
+
     with pytest.raises(ValueError):
         ta.gatorosc(np.array([]))
-    
-    
+
+
     with pytest.raises(ValueError):
         ta.gatorosc(np.full(50, np.nan))
-    
-    
+
+
     with pytest.raises(ValueError):
         ta.gatorosc(np.random.randn(50), jaws_length=0)
 
 def test_gatorosc_stream():
     """Test GatorOsc streaming functionality."""
     stream = ta.GatorOscStream()
-    
-    
-    
-    
+
+
+
+
     for i in range(20):
         result = stream.update(50.0 + i)
-        if i < 12:  
+        if i < 12:
             assert result is None
-    
-    
+
+
     for i in range(50):
         result = stream.update(50.0 + i)
         if result is not None:
@@ -100,17 +100,17 @@ def test_gatorosc_stream_custom_params():
         lips_length=8,
         lips_shift=5
     )
-    
-    
+
+
     for i in range(50):
         result = stream.update(50.0 + i * 0.1)
-        
+
 
 def test_gatorosc_batch():
     """Test GatorOsc batch calculation."""
     data = np.random.randn(100) * 10 + 50
-    
-    
+
+
     result = ta.gatorosc_batch(
         data,
         jaws_length_range=(10, 15, 5),
@@ -120,8 +120,8 @@ def test_gatorosc_batch():
         lips_length_range=(3, 6, 3),
         lips_shift_range=(2, 4, 2)
     )
-    
-    
+
+
     assert 'upper' in result
     assert 'lower' in result
     assert 'upper_change' in result
@@ -132,9 +132,9 @@ def test_gatorosc_batch():
     assert 'teeth_shifts' in result
     assert 'lips_lengths' in result
     assert 'lips_shifts' in result
-    
-    
-    n_combos = 2 * 3 * 3 * 2 * 2 * 2  
+
+
+    n_combos = 2 * 3 * 3 * 2 * 2 * 2
     assert result['upper'].shape == (n_combos, len(data))
     assert result['lower'].shape == (n_combos, len(data))
     assert result['upper_change'].shape == (n_combos, len(data))
@@ -145,12 +145,12 @@ def test_gatorosc_consistency():
     """Test that GatorOsc produces consistent results."""
     np.random.seed(42)
     data = np.random.randn(100) * 10 + 50
-    
-    
+
+
     upper1, lower1, upper_change1, lower_change1 = ta.gatorosc(data)
     upper2, lower2, upper_change2, lower_change2 = ta.gatorosc(data)
-    
-    
+
+
     np.testing.assert_array_equal(upper1, upper2)
     np.testing.assert_array_equal(lower1, lower2)
     np.testing.assert_array_equal(upper_change1, upper_change2)
@@ -159,47 +159,47 @@ def test_gatorosc_consistency():
 def test_gatorosc_kernel_options():
     """Test GatorOsc with different kernel options."""
     data = np.random.randn(100) * 10 + 50
-    
-    
+
+
     for kernel in [None, "scalar", "avx2", "avx512"]:
         try:
             upper, lower, upper_change, lower_change = ta.gatorosc(data, kernel=kernel)
             assert len(upper) == len(data)
             assert len(lower) == len(data)
         except ValueError:
-            
+
             pass
 
 def test_gatorosc_nan_handling():
     """Test GatorOsc handling of NaN values in input."""
     data = np.random.randn(100) * 10 + 50
-    data[40:45] = np.nan  
-    
-    
+    data[40:45] = np.nan
+
+
     upper, lower, upper_change, lower_change = ta.gatorosc(data)
-    
+
     assert len(upper) == len(data)
     assert len(lower) == len(data)
     assert len(upper_change) == len(data)
     assert len(lower_change) == len(data)
-    
-    
+
+
     assert not np.all(np.isnan(upper))
     assert not np.all(np.isnan(lower))
 
 def test_gatorosc_value_ranges():
     """Test that GatorOsc outputs are in expected ranges."""
-    
+
     trend_up = np.linspace(40, 60, 100) + np.random.randn(100) * 0.5
     trend_down = np.linspace(60, 40, 100) + np.random.randn(100) * 0.5
-    
-    
+
+
     upper_up, lower_up, _, _ = ta.gatorosc(trend_up)
-    
-    
+
+
     upper_down, lower_down, _, _ = ta.gatorosc(trend_down)
-    
-    
+
+
     assert not np.all(np.isnan(upper_up))
     assert not np.all(np.isnan(lower_up))
     assert not np.all(np.isnan(upper_down))

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Final test runner with proper error detection and setup instructions
+
 
 set -e
 
@@ -7,16 +7,16 @@ YELLOW='\033[1;33m'
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 echo -e "${BLUE}🧪 Testing Python and WASM Bindings for Technical Indicators${NC}"
 echo "============================================================"
 
-# Function to run tests and report results
+
 run_test() {
     local test_name=$1
     local test_cmd=$2
-    
+
     echo -e "\n${YELLOW}Running $test_name...${NC}"
     if eval "$test_cmd"; then
         echo -e "${GREEN}✓ $test_name passed${NC}"
@@ -27,7 +27,7 @@ run_test() {
     fi
 }
 
-# Check for cargo
+
 if ! command -v cargo &> /dev/null; then
     if [ -f "$HOME/.cargo/bin/cargo" ]; then
         export PATH="$HOME/.cargo/bin:$PATH"
@@ -40,7 +40,7 @@ fi
 echo -e "${BLUE}Step 1: Testing Basic Rust Compilation${NC}"
 echo "---------------------------------------"
 
-# Test basic compilation
+
 if cargo check --quiet 2>/dev/null; then
     echo -e "${GREEN}✓ Basic Rust compilation successful${NC}"
 else
@@ -52,7 +52,7 @@ fi
 echo -e "\n${BLUE}Step 2: Testing Python Bindings${NC}"
 echo "--------------------------------"
 
-# Check Python bindings compilation
+
 echo -n "Checking Python binding compilation... "
 if cargo check --features python --quiet 2>/dev/null; then
     echo -e "${GREEN}✓ Success${NC}"
@@ -64,12 +64,12 @@ else
     PYTHON_BINDINGS_OK=false
 fi
 
-# Python environment check
+
 if command -v python3 &> /dev/null; then
     echo -e "\n${BLUE}Python Environment:${NC}"
     echo "  Python version: $(python3 --version)"
-    
-    # Check for virtual environment
+
+
     if [ -n "$VIRTUAL_ENV" ]; then
         echo -e "  ${GREEN}✓ Virtual environment active: $(basename $VIRTUAL_ENV)${NC}"
         VENV_ACTIVE=true
@@ -82,8 +82,8 @@ if command -v python3 &> /dev/null; then
         echo -e "  ${YELLOW}  Create one with: python3 -m venv .venv${NC}"
         VENV_ACTIVE=false
     fi
-    
-    # Check for maturin
+
+
     if python3 -c "import maturin" 2>/dev/null || command -v maturin &> /dev/null; then
         echo -e "  ${GREEN}✓ maturin is installed${NC}"
         MATURIN_OK=true
@@ -92,21 +92,21 @@ if command -v python3 &> /dev/null; then
         echo -e "  ${YELLOW}  Install with: pip install maturin${NC}"
         MATURIN_OK=false
     fi
-    
-    # Try to build if everything is OK
+
+
     if [ "$PYTHON_BINDINGS_OK" = true ] && [ "$MATURIN_OK" = true ]; then
         echo -e "\n${BLUE}Building Python module:${NC}"
-        
+
         if [ "$VENV_ACTIVE" = true ]; then
             echo "Using maturin develop (virtual environment active)..."
             if maturin develop --features python --quiet 2>/dev/null; then
                 echo -e "${GREEN}✓ Python module built and installed${NC}"
-                
-                # Run simple test
+
+
                 echo -e "\n${BLUE}Testing Python module:${NC}"
                 if python3 -c "import ta_indicators; print('✓ Module imports successfully')" 2>/dev/null; then
                     echo -e "${GREEN}✓ Python module works${NC}"
-                    
+
                     if [ -f "test_python_simple.py" ]; then
                         echo "Running integration tests..."
                         python3 test_python_simple.py || true
@@ -136,16 +136,16 @@ fi
 echo -e "\n${BLUE}Step 3: Testing WASM Bindings${NC}"
 echo "------------------------------"
 
-# Check if wasm target is installed
+
 if rustup target list --installed | grep -q wasm32-unknown-unknown; then
     echo -e "${GREEN}✓ WASM target installed${NC}"
-    
-    # Test WASM compilation
+
+
     echo -n "Checking WASM binding compilation... "
     if cargo check --features wasm --target wasm32-unknown-unknown --quiet 2>/dev/null; then
         echo -e "${GREEN}✓ Success${NC}"
-        
-        # Check for wasm-pack
+
+
         if command -v wasm-pack &> /dev/null; then
             echo -e "${GREEN}✓ wasm-pack installed${NC}"
             echo "You can run WASM tests with:"
@@ -167,7 +167,7 @@ fi
 echo -e "\n${BLUE}Step 4: Running Rust Tests${NC}"
 echo "--------------------------"
 
-# Run basic tests
+
 echo "Running unit tests..."
 if cargo test --lib --quiet -- --test-threads=1 2>/dev/null; then
     echo -e "${GREEN}✓ All Rust tests passed${NC}"
@@ -176,7 +176,7 @@ else
     echo "Run 'cargo test --lib' for details"
 fi
 
-# Summary and next steps
+
 echo -e "\n${BLUE}============================================================${NC}"
 echo -e "${BLUE}Summary and Next Steps:${NC}"
 echo -e "${BLUE}============================================================${NC}"

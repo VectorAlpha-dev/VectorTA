@@ -45,7 +45,7 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
     float block_sum = 0.0f;
     if (wid == 0 && lane == 0) {
         const int num_warps = (blockDim.x + warpSize - 1) / warpSize;
-        
+
         float c = 0.0f;
         #pragma unroll 1
         for (int i = 0; i < num_warps; ++i) {
@@ -56,7 +56,7 @@ static __forceinline__ __device__ float block_reduce_sum(float v) {
         }
         block_sum += c;
     }
-    
+
     return (wid == 0 && lane == 0) ? block_sum : 0.0f;
 }
 
@@ -70,7 +70,7 @@ __device__ __forceinline__ float safe_scale_100_over_close(float c) {
 
 
 __device__ __forceinline__ void ema_update_kahan(float& atr, float& c, float alpha, float x) {
-    
+
     float y = __fmaf_rn(alpha, x - (atr + c), 0.0f);
     float t = atr + y;
     c = (t - atr) - y;
@@ -117,7 +117,7 @@ extern "C" __global__ void natr_batch_f32(
     const int warm = first_valid + period - 1;
     const int base = combo * series_len;
 
-    
+
     if (first_valid >= series_len || warm >= series_len) {
         for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
             out[base + idx] = dev_nan();
@@ -125,13 +125,13 @@ extern "C" __global__ void natr_batch_f32(
         return;
     }
 
-    
+
     for (int idx = threadIdx.x; idx < warm; idx += blockDim.x) {
         out[base + idx] = dev_nan();
     }
     __syncthreads();
 
-    
+
     const int start = first_valid;
     float local_sum = 0.0f;
     float local_c   = 0.0f;
@@ -142,15 +142,15 @@ extern "C" __global__ void natr_batch_f32(
         local_c = (t - local_sum) - y;
         local_sum = t;
     }
-    local_sum += local_c; 
+    local_sum += local_c;
     const float sum_f = block_reduce_sum(local_sum);
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
 
     const double inv_p = 1.0 / static_cast<double>(period);
     double atr = static_cast<double>(sum_f) * inv_p;
 
-    
+
     {
         float c = close[warm];
         float scale = safe_scale_100_over_close(c);
@@ -159,7 +159,7 @@ extern "C" __global__ void natr_batch_f32(
 
     for (int t = warm + 1; t < series_len; ++t) {
         const double trv = static_cast<double>(tr[t]);
-        atr = (trv - atr) * inv_p + atr; 
+        atr = (trv - atr) * inv_p + atr;
         float c = close[t];
         float scale = safe_scale_100_over_close(c);
         out[base + t] = (scale == scale) ? static_cast<float>(atr * static_cast<double>(scale)) : dev_nan();
@@ -170,7 +170,7 @@ extern "C" __global__ void natr_batch_f32(
 
 extern "C" __global__ void natr_batch_f32_with_inv(
     const float* __restrict__ tr,
-    const float* __restrict__ inv_close100, 
+    const float* __restrict__ inv_close100,
     const int*   __restrict__ periods,
     int series_len,
     int first_valid,
@@ -270,7 +270,7 @@ extern "C" __global__ void natr_batch_warp_io_f32(
         out[base + idx] = dev_nan();
     }
 
-    
+
     const int start = first_valid;
     float local_sum = 0.0f;
     float local_c   = 0.0f;
@@ -329,7 +329,7 @@ extern "C" __global__ void natr_batch_warp_io_f32(
 
 extern "C" __global__ void natr_batch_warp_io_f32_with_inv(
     const float* __restrict__ tr,
-    const float* __restrict__ inv_close100, 
+    const float* __restrict__ inv_close100,
     const int*   __restrict__ periods,
     int series_len,
     int first_valid,
@@ -451,7 +451,7 @@ extern "C" __global__ void natr_many_series_one_param_f32(
             continue;
         }
 
-        const int warm_end = fv + period; 
+        const int warm_end = fv + period;
         if (warm_end > series_len) {
             for (int t = lane; t < series_len; t += warpSize) {
                 out_tm[t * stride + s] = dev_nan();
@@ -464,7 +464,7 @@ extern "C" __global__ void natr_many_series_one_param_f32(
             out_tm[t * stride + s] = dev_nan();
         }
 
-        
+
         float local = 0.0f, csum = 0.0f;
         #pragma unroll 1
         for (int k = lane; k < period; k += warpSize) {

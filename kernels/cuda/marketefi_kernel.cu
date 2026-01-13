@@ -33,13 +33,13 @@ extern "C" __global__ void marketefi_kernel_f32(const float* __restrict__ high,
     const int stride = blockDim.x * gridDim.x;
     const int first  = first_valid < 0 ? 0 : first_valid;
 
-    
+
     constexpr int ILP = 4;
 
     for (int base = tid; base < len; base += stride * ILP) {
 #pragma unroll
         for (int k = 0; k < ILP; ++k) {
-            int i = base + k * blockDim.x; 
+            int i = base + k * blockDim.x;
             if (i < len) {
                 const bool ok = (i >= first);
                 const float h = high[i];
@@ -65,27 +65,27 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
     const float* __restrict__ high_tm,
     const float* __restrict__ low_tm,
     const float* __restrict__ volume_tm,
-    const int*   __restrict__ first_valids,  
+    const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     float* __restrict__ out_tm) {
 
     if (num_series <= 0 || series_len <= 0) return;
 
-    
+
     const bool legacy_1d = (gridDim.y == 1) && (gridDim.x == num_series);
     if (legacy_1d) {
-        
+
         const int s = blockIdx.x;
         if (s >= num_series) return;
         const int first = first_valids ? (first_valids[s] < 0 ? 0 : first_valids[s]) : 0;
-        const int stride_series = num_series; 
+        const int stride_series = num_series;
 
-        
+
         for (int t = threadIdx.x; t < min(first, series_len); t += blockDim.x) {
             out_tm[t * stride_series + s] = CUDART_NAN_F;
         }
-        
+
         for (int t = threadIdx.x + first; t < series_len; t += blockDim.x) {
             const int idx = t * stride_series + s;
             const float h = high_tm[idx];
@@ -96,7 +96,7 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
         return;
     }
 
-    
+
     const uintptr_t mask16 = 0xF;
     const bool aligned16 =
         (((uintptr_t)high_tm   | (uintptr_t)low_tm |
@@ -105,12 +105,12 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
     const bool vec_ok = aligned16 && ((num_series & 3) == 0);
 
     if (vec_ok) {
-        
-        const int series4 = num_series >> 2; 
-        const int s4 = blockIdx.y * blockDim.x + threadIdx.x; 
+
+        const int series4 = num_series >> 2;
+        const int s4 = blockIdx.y * blockDim.x + threadIdx.x;
         if (s4 >= series4) return;
 
-        
+
         int4 fv4 = make_int4(0, 0, 0, 0);
         if (first_valids) {
             const int4* __restrict__ fv_ptr = reinterpret_cast<const int4*>(first_valids);
@@ -145,16 +145,16 @@ extern "C" __global__ void marketefi_many_series_one_param_f32(
                 out4.z = mfi_elem(h4.z, l4.z, v4.z, t >= fv4.z);
                 out4.w = mfi_elem(h4.w, l4.w, v4.w, t >= fv4.w);
 
-                O[idx4] = out4; 
+                O[idx4] = out4;
             }
         }
     } else {
-        
-        const int s = blockIdx.y * blockDim.x + threadIdx.x; 
+
+        const int s = blockIdx.y * blockDim.x + threadIdx.x;
         if (s >= num_series) return;
 
         const int first = first_valids ? (first_valids[s] < 0 ? 0 : first_valids[s]) : 0;
-        const int stride_series = num_series; 
+        const int stride_series = num_series;
 
         for (int t0 = blockIdx.x * MKT_T_TILE; t0 < series_len; t0 += gridDim.x * MKT_T_TILE) {
             const int t_end = min(series_len, t0 + MKT_T_TILE);

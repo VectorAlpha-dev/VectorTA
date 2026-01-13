@@ -24,7 +24,7 @@
 
 
 static __device__ __forceinline__ float qnan() {
-    
+
     return __int_as_float(0x7fffffff);
 }
 
@@ -44,12 +44,12 @@ void mwdx_batch_f32(const float* __restrict__ prices,
                     int first_valid,
                     int n_combos,
                     float* __restrict__ out) {
-    const int combo = blockIdx.y; 
+    const int combo = blockIdx.y;
     if (combo >= n_combos || series_len <= 0) {
         return;
     }
 
-    
+
 #if __CUDACC_VER_MAJOR__ >= 12
     const float* __restrict__ prices_persist =
         cuda::associate_access_property(prices, cuda::access_property::persisting{});
@@ -61,26 +61,26 @@ void mwdx_batch_f32(const float* __restrict__ prices,
     const float beta = 1.0f - fac;
     const int row_offset = combo * series_len;
 
-    
+
     if (first_valid < 0 || first_valid >= series_len) {
         for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
             out[row_offset + idx] = qnan();
         }
-        return; 
+        return;
     }
 
-    
+
     for (int idx = threadIdx.x; idx < first_valid; idx += blockDim.x) {
         out[row_offset + idx] = qnan();
     }
-    
 
-    
+
+
     if (threadIdx.x == 0) {
         float prev = prices_persist[first_valid];
         out[row_offset + first_valid] = prev;
 
-        
+
         const int PDIST = 64;
         for (int t = first_valid + 1; t < series_len; ++t) {
 #if __CUDA_ARCH__ >= 800
@@ -110,7 +110,7 @@ void mwdx_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int stride = num_series;
     const int first_valid = first_valids[series_idx];
 
-    
+
     if (first_valid < 0 || first_valid >= series_len) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_tm[t * stride + series_idx] = qnan();
@@ -118,12 +118,12 @@ void mwdx_many_series_one_param_f32(const float* __restrict__ prices_tm,
         return;
     }
 
-    
+
     for (int t = threadIdx.x; t < first_valid; t += blockDim.x) {
         out_tm[t * stride + series_idx] = qnan();
     }
 
-    
+
     if (threadIdx.x == 0) {
         int offset = first_valid * stride + series_idx;
         float prev = prices_tm[offset];
@@ -157,14 +157,14 @@ __device__ void mwdx_many_series_one_param_tiled2d_f32_core(
     const int first_valid = first_valids[s_local];
 
     if (first_valid < 0 || first_valid >= series_len) {
-        
+
         for (int t = threadIdx.x; t < series_len; t += TX) {
             out_tm[t * stride + s_local] = qnan();
         }
         return;
     }
 
-    
+
     for (int t = threadIdx.x; t < first_valid; t += TX) {
         out_tm[t * stride + s_local] = qnan();
     }

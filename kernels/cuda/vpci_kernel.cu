@@ -33,7 +33,7 @@ __device__ __forceinline__ dsf ds_div(dsf num, dsf den) {
     dsf t = ds_scale(den, q1);
     dsf r = ds_sub(num, t);
     float q2 = r.hi / den.hi;
-    
+
     float s = q1 + q2;
     float e = q2 - (s - q1);
     return ds_norm(s, e);
@@ -50,7 +50,7 @@ __device__ __forceinline__ void kahan_add(float x, float& sum, float& c) {
 
 __device__ __forceinline__ float warp_bcast_f32_first(float v_any) {
     unsigned mask = __activemask();
-    int first = __ffs(mask) - 1; 
+    int first = __ffs(mask) - 1;
     return __shfl_sync(mask, v_any, first);
 }
 __device__ __forceinline__ dsf warp_bcast_dsf_first(dsf v_any) {
@@ -64,17 +64,17 @@ __device__ __forceinline__ dsf warp_bcast_dsf_first(dsf v_any) {
 
 
 extern "C" __global__ void vpci_batch_f32(
-    const float2* __restrict__ pfx_c,   
-    const float2* __restrict__ pfx_v,   
-    const float2* __restrict__ pfx_cv,  
-    const float*  __restrict__ volume,  
-    const int*    __restrict__ shorts,  
-    const int*    __restrict__ longs,   
+    const float2* __restrict__ pfx_c,
+    const float2* __restrict__ pfx_v,
+    const float2* __restrict__ pfx_cv,
+    const float*  __restrict__ volume,
+    const int*    __restrict__ shorts,
+    const int*    __restrict__ longs,
     int series_len,
     int n_rows,
     int first_valid,
-    float* __restrict__ out_vpci,       
-    float* __restrict__ out_vpcis       
+    float* __restrict__ out_vpci,
+    float* __restrict__ out_vpcis
 ) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
     if (row >= n_rows) return;
@@ -99,27 +99,27 @@ extern "C" __global__ void vpci_batch_f32(
 
     const int warm = first_valid + long_p - 1;
 
-    
+
     for (int i = 0; i < warm; ++i) { y_vpci[i] = nan_f32(); y_vpcis[i] = nan_f32(); }
 
     const float inv_long  = 1.0f / (float)long_p;
     const float inv_short = 1.0f / (float)short_p;
 
-    float sum_vpci_vol_short = 0.0f;  
-    float sum_comp           = 0.0f;  
+    float sum_vpci_vol_short = 0.0f;
+    float sum_comp           = 0.0f;
 
     for (int i = warm; i < series_len; ++i) {
         const int idx_long_prev  = i - long_p;
         const int idx_short_prev = i - short_p;
 
-        
-        
+
+
         dsf c_cur  = load_dsf_f2(pfx_c,  i);
         dsf v_cur  = load_dsf_f2(pfx_v,  i);
         dsf cv_cur = load_dsf_f2(pfx_cv, i);
         float vol_i = volume[i];
 
-        
+
         const dsf c_prev_l  = load_dsf_f2(pfx_c,  idx_long_prev);
         const dsf v_prev_l  = load_dsf_f2(pfx_v,  idx_long_prev);
         const dsf cv_prev_l = load_dsf_f2(pfx_cv, idx_long_prev);
@@ -127,7 +127,7 @@ extern "C" __global__ void vpci_batch_f32(
         const dsf v_prev_s  = load_dsf_f2(pfx_v,  idx_short_prev);
         const dsf cv_prev_s = load_dsf_f2(pfx_cv, idx_short_prev);
 
-        
+
         const dsf sc_l  = ds_sub(c_cur,  c_prev_l);
         const dsf sv_l  = ds_sub(v_cur,  v_prev_l);
         const dsf scv_l = ds_sub(cv_cur, cv_prev_l);
@@ -135,13 +135,13 @@ extern "C" __global__ void vpci_batch_f32(
         const dsf sv_s  = ds_sub(v_cur,  v_prev_s);
         const dsf scv_s = ds_sub(cv_cur, cv_prev_s);
 
-        
+
         const dsf sma_l   = ds_scale(sc_l,  inv_long);
         const dsf sma_s   = ds_scale(sc_s,  inv_short);
         const dsf sma_v_l = ds_scale(sv_l,  inv_long);
         const dsf sma_v_s = ds_scale(sv_s,  inv_short);
 
-        
+
         const dsf vwma_l = ds_div(scv_l, sv_l);
         const dsf vwma_s = ds_div(scv_s, sv_s);
 
@@ -157,7 +157,7 @@ extern "C" __global__ void vpci_batch_f32(
 
         y_vpci[i] = vpci;
 
-        
+
         const float contrib = isfinite(vpci) ? (vpci * vol_i) : 0.0f;
         kahan_add(contrib, sum_vpci_vol_short, sum_comp);
         if (i >= warm + short_p) {
@@ -167,7 +167,7 @@ extern "C" __global__ void vpci_batch_f32(
             kahan_add(-rm_contrib, sum_vpci_vol_short, sum_comp);
         }
 
-        
+
         const float denom = ds_to_f(sma_v_s);
         if (denom != 0.0f && isfinite(denom)) {
             y_vpcis[i] = (sum_vpci_vol_short * inv_short) / denom;
@@ -180,17 +180,17 @@ extern "C" __global__ void vpci_batch_f32(
 
 
 extern "C" __global__ void vpci_many_series_one_param_f32(
-    const float2* __restrict__ pfx_c_tm,   
+    const float2* __restrict__ pfx_c_tm,
     const float2* __restrict__ pfx_v_tm,
     const float2* __restrict__ pfx_cv_tm,
-    const float*  __restrict__ volume_tm,  
-    const int*    __restrict__ first_valids, 
+    const float*  __restrict__ volume_tm,
+    const int*    __restrict__ first_valids,
     int cols,
     int rows,
     int short_p,
     int long_p,
-    float* __restrict__ out_vpci_tm,      
-    float* __restrict__ out_vpcis_tm      
+    float* __restrict__ out_vpci_tm,
+    float* __restrict__ out_vpcis_tm
 ) {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= cols) return;

@@ -23,77 +23,77 @@ class TestLpc:
     def test_data(self):
         """Load test data from CSV file"""
         return load_test_data()
-    
+
     def test_lpc_accuracy(self, test_data):
         """Test LPC matches expected values from Rust tests - mirrors check_lpc_accuracy"""
         expected = EXPECTED_OUTPUTS['lpc']
-        
-        
+
+
         filter_out, high_band, low_band = my_project.lpc(
             test_data['high'],
             test_data['low'],
             test_data['close'],
-            test_data['close'],  
+            test_data['close'],
             cutoff_type=expected['default_params']['cutoff_type'],
             fixed_period=expected['default_params']['fixed_period'],
             max_cycle_limit=expected['default_params']['max_cycle_limit'],
             cycle_mult=expected['default_params']['cycle_mult'],
             tr_mult=expected['default_params']['tr_mult']
         )
-        
+
         assert len(filter_out) == len(test_data['close']), "Filter output length should match input"
         assert len(high_band) == len(test_data['close']), "High band output length should match input"
         assert len(low_band) == len(test_data['close']), "Low band output length should match input"
-        
-        
+
+
         assert_close(
             filter_out[-5:],
             expected['last_5_filter'],
             rtol=1e-8,
             msg="LPC Filter last 5 values mismatch"
         )
-        
+
         assert_close(
             high_band[-5:],
             expected['last_5_high_band'],
             rtol=1e-8,
             msg="LPC High Band last 5 values mismatch"
         )
-        
+
         assert_close(
             low_band[-5:],
             expected['last_5_low_band'],
             rtol=1e-8,
             msg="LPC Low Band last 5 values mismatch"
         )
-        
-        
+
+
         warmup_period = expected.get('warmup_period', 1)
         if warmup_period > 0:
             for i in range(min(warmup_period, len(filter_out))):
                 if np.isnan(filter_out[i]):
-                    break  
-            
-        
+                    break
+
+
         for i in range(20, min(100, len(filter_out))):
             if not np.isnan(filter_out[i]) and not np.isnan(high_band[i]) and not np.isnan(low_band[i]):
                 assert low_band[i] <= filter_out[i] <= high_band[i], \
                     f"Filter should be between bands at index {i}"
-    
+
     def test_lpc_partial_params(self, test_data):
         """Test LPC with default parameters - mirrors check_lpc_partial_params"""
-        
+
         filter_out, high_band, low_band = my_project.lpc(
             test_data['high'],
             test_data['low'],
             test_data['close'],
-            test_data['close']  
+            test_data['close']
         )
-        
+
         assert len(filter_out) == len(test_data['close'])
         assert len(high_band) == len(test_data['close'])
         assert len(low_band) == len(test_data['close'])
-    
+
     def test_lpc_fixed_mode(self, test_data):
         """Test LPC with fixed cutoff type"""
         filter_out, high_band, low_band = my_project.lpc(
@@ -104,56 +104,56 @@ class TestLpc:
             cutoff_type="fixed",
             fixed_period=20
         )
-        
+
         assert len(filter_out) == len(test_data['close'])
         assert len(high_band) == len(test_data['close'])
         assert len(low_band) == len(test_data['close'])
-        
-        
+
+
         for i in range(20, min(100, len(filter_out))):
             if not np.isnan(filter_out[i]) and not np.isnan(high_band[i]) and not np.isnan(low_band[i]):
                 assert low_band[i] <= filter_out[i] <= high_band[i], \
                     f"Filter should be between bands at index {i}"
-    
+
     def test_lpc_invalid_period(self):
         """Test LPC fails with invalid period"""
         data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             my_project.lpc(data, data, data, data, fixed_period=0)
-    
+
     def test_lpc_period_exceeds_length(self):
         """Test LPC fails when period exceeds data length"""
         data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             my_project.lpc(data, data, data, data, fixed_period=10)
-    
+
     def test_lpc_empty_input(self):
         """Test LPC fails with empty input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Input data slice is empty"):
             my_project.lpc(empty, empty, empty, empty)
-    
+
     def test_lpc_all_nan(self):
         """Test LPC handles all NaN values"""
         nan_data = np.full(10, np.nan)
-        
-        
+
+
         with pytest.raises(ValueError, match="All values are NaN"):
             my_project.lpc(nan_data, nan_data, nan_data, nan_data)
-    
+
     def test_lpc_mismatched_lengths(self):
         """Test LPC fails with mismatched array lengths"""
         high_data = np.array([10.0, 20.0, 30.0])
-        low_data = np.array([8.0, 18.0])  
+        low_data = np.array([8.0, 18.0])
         close_data = np.array([9.0, 19.0, 29.0])
         src_data = np.array([9.0, 19.0, 29.0])
-        
+
         with pytest.raises(ValueError, match="All arrays must have the same length"):
             my_project.lpc(high_data, low_data, close_data, src_data)
-    
+
     def test_lpc_invalid_cutoff_type(self, test_data):
         """Test LPC fails with invalid cutoff type"""
         with pytest.raises(ValueError, match="Invalid cutoff type"):
@@ -164,10 +164,10 @@ class TestLpc:
                 test_data['close'][:100],
                 cutoff_type="invalid"
             )
-    
+
     def test_lpc_different_multipliers(self, test_data):
         """Test LPC with different multiplier values"""
-        
+
         filter1, high1, low1 = my_project.lpc(
             test_data['high'][:100],
             test_data['low'][:100],
@@ -177,8 +177,8 @@ class TestLpc:
             cycle_mult=2.0,
             tr_mult=1.0
         )
-        
-        
+
+
         filter2, high2, low2 = my_project.lpc(
             test_data['high'][:100],
             test_data['low'][:100],
@@ -188,16 +188,16 @@ class TestLpc:
             cycle_mult=1.0,
             tr_mult=2.0
         )
-        
-        
+
+
         check_idx = 50
         if not np.isnan(high1[check_idx]) and not np.isnan(high2[check_idx]):
             band_width1 = high1[check_idx] - low1[check_idx]
             band_width2 = high2[check_idx] - low2[check_idx]
-            
+
             assert band_width2 > band_width1 * 1.5, \
                 "Higher tr_mult should produce wider bands"
-    
+
     def test_lpc_nan_handling(self, test_data):
         """Test LPC handles NaN values correctly"""
         filter_out, high_band, low_band = my_project.lpc(
@@ -208,24 +208,24 @@ class TestLpc:
             cutoff_type="fixed",
             fixed_period=10
         )
-        
+
         assert len(filter_out) == len(test_data['close'])
         assert len(high_band) == len(test_data['close'])
         assert len(low_band) == len(test_data['close'])
-        
-        
+
+
         if len(filter_out) > 240:
             for i in range(240, len(filter_out)):
                 assert not np.isnan(filter_out[i]), f"Found unexpected NaN in filter at index {i}"
                 assert not np.isnan(high_band[i]), f"Found unexpected NaN in high_band at index {i}"
                 assert not np.isnan(low_band[i]), f"Found unexpected NaN in low_band at index {i}"
-    
+
     def test_lpc_streaming(self, test_data):
         """Test LPC streaming functionality"""
         cutoff_type = "fixed"
         fixed_period = 20
-        
-        
+
+
         batch_filter, batch_high, batch_low = my_project.lpc(
             test_data['high'][:100],
             test_data['low'][:100],
@@ -234,8 +234,8 @@ class TestLpc:
             cutoff_type=cutoff_type,
             fixed_period=fixed_period
         )
-        
-        
+
+
         stream = my_project.LpcStream(
             cutoff_type=cutoff_type,
             fixed_period=fixed_period
@@ -243,15 +243,15 @@ class TestLpc:
         stream_filter = []
         stream_high = []
         stream_low = []
-        
+
         for i in range(100):
             result = stream.update(
                 test_data['high'][i],
                 test_data['low'][i],
                 test_data['close'][i],
-                test_data['close'][i]  
+                test_data['close'][i]
             )
-            
+
             if result is None:
                 stream_filter.append(np.nan)
                 stream_high.append(np.nan)
@@ -261,26 +261,26 @@ class TestLpc:
                 stream_filter.append(filt)
                 stream_high.append(high)
                 stream_low.append(low)
-        
+
         stream_filter = np.array(stream_filter)
         stream_high = np.array(stream_high)
         stream_low = np.array(stream_low)
-        
+
         assert len(batch_filter) == len(stream_filter)
         assert len(batch_high) == len(stream_high)
         assert len(batch_low) == len(stream_low)
-        
-        
+
+
         for i in range(20, 100):
             if not np.isnan(stream_filter[i]) and not np.isnan(stream_high[i]) and not np.isnan(stream_low[i]):
                 assert stream_low[i] <= stream_filter[i] <= stream_high[i], \
                     f"Filter should be between bands at index {i}"
                 assert stream_high[i] > stream_low[i], \
                     f"High band should be greater than low band at index {i}"
-    
+
     def test_lpc_adaptive_vs_fixed(self, test_data):
         """Test difference between adaptive and fixed modes - mirrors Rust tests"""
-        
+
         filter_adaptive, high_adaptive, low_adaptive = my_project.lpc(
             test_data['high'][:200],
             test_data['low'][:200],
@@ -289,8 +289,8 @@ class TestLpc:
             cutoff_type="adaptive",
             fixed_period=20
         )
-        
-        
+
+
         filter_fixed, high_fixed, low_fixed = my_project.lpc(
             test_data['high'][:200],
             test_data['low'][:200],
@@ -299,33 +299,33 @@ class TestLpc:
             cutoff_type="fixed",
             fixed_period=20
         )
-        
-        
+
+
         differences = 0
         for i in range(100, 200):
             if not np.isnan(filter_adaptive[i]) and not np.isnan(filter_fixed[i]):
                 if abs(filter_adaptive[i] - filter_fixed[i]) > 1e-6:
                     differences += 1
-        
-        
+
+
         assert differences > 10, \
             "Adaptive and fixed modes should produce different results"
-    
+
     def test_lpc_batch(self, test_data):
         """Test LPC batch processing - mirrors check_batch_shapes from Rust"""
-        
+
         result = my_project.lpc_batch(
             test_data['high'],
             test_data['low'],
             test_data['close'],
-            test_data['close'],  
-            fixed_period_range=(10, 12, 1),  
-            cycle_mult_range=(1.0, 1.0, 0.0),  
-            tr_mult_range=(1.0, 1.0, 0.0),  
+            test_data['close'],
+            fixed_period_range=(10, 12, 1),
+            cycle_mult_range=(1.0, 1.0, 0.0),
+            tr_mult_range=(1.0, 1.0, 0.0),
             cutoff_type="fixed",
             max_cycle_limit=60
         )
-        
+
         assert 'values' in result, "Batch result should have 'values' field"
         assert 'fixed_periods' in result, "Batch result should have 'fixed_periods' field"
         assert 'cycle_mults' in result, "Batch result should have 'cycle_mults' field"
@@ -333,27 +333,27 @@ class TestLpc:
         assert 'rows' in result, "Batch result should have 'rows' field"
         assert 'cols' in result, "Batch result should have 'cols' field"
         assert 'order' in result, "Batch result should have 'order' field showing output ordering"
-        
-        
-        combos = 3  
-        expected_rows = combos * 3  
+
+
+        combos = 3
+        expected_rows = combos * 3
         assert result['rows'] == expected_rows, f"Expected {expected_rows} rows, got {result['rows']}"
         assert result['cols'] == len(test_data['close']), "Columns should match input length"
-        
-        
+
+
         values_shape = result['values'].shape
         assert values_shape == (expected_rows, len(test_data['close'])), \
             f"Values shape {values_shape} doesn't match expected ({expected_rows}, {len(test_data['close'])})"
-        
-        
+
+
         assert result['order'] == ['filter', 'high', 'low'], \
             "Order should indicate filter, high, low outputs"
-    
+
     def test_lpc_kernel_param(self, test_data):
         """Test LPC with different kernel parameters"""
-        
+
         try:
-            
+
             filter_out, high_band, low_band = my_project.lpc(
                 test_data['high'][:100],
                 test_data['low'][:100],
@@ -363,27 +363,27 @@ class TestLpc:
             )
             assert len(filter_out) == 100, "Scalar kernel should produce correct length output"
         except (TypeError, ValueError):
-            
+
             pass
-    
+
     def test_lpc_batch_parameter_sweep(self, test_data):
         """Test LPC batch with multiple parameter combinations"""
-        
+
         result = my_project.lpc_batch(
             test_data['high'][:100],
             test_data['low'][:100],
             test_data['close'][:100],
             test_data['close'][:100],
-            fixed_period_range=(10, 20, 10),  
-            cycle_mult_range=(1.0, 2.0, 1.0),  
-            tr_mult_range=(0.5, 1.0, 0.5),  
+            fixed_period_range=(10, 20, 10),
+            cycle_mult_range=(1.0, 2.0, 1.0),
+            tr_mult_range=(0.5, 1.0, 0.5),
             cutoff_type="adaptive"
         )
-        
-        
+
+
         expected_combos = 8
-        expected_rows = expected_combos * 3  
-        
+        expected_rows = expected_combos * 3
+
         assert result['rows'] == expected_rows, \
             f"Expected {expected_rows} rows for {expected_combos} combos"
         assert len(result['fixed_periods']) == expected_combos, \

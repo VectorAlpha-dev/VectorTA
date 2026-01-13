@@ -10,7 +10,7 @@
 #include <math.h>
 
 #ifndef SRWMA_USE_ASYNC_COPY
-#define SRWMA_USE_ASYNC_COPY 0  
+#define SRWMA_USE_ASYNC_COPY 0
 #endif
 
 #if SRWMA_USE_ASYNC_COPY
@@ -42,29 +42,29 @@ void srwma_batch_f32(const float* __restrict__ prices,
 
     const int wlen = period - 1;
     const int warm = warm_indices[combo];
-    const int start_t = max(warm, wlen - 1);  
+    const int start_t = max(warm, wlen - 1);
     const int row_offset = combo * series_len;
     const float inv_norm = inv_norms[combo];
 
     extern __shared__ float smem[];
-    float* __restrict__ w_rev = smem;                      
-    float* __restrict__ tile  = smem + max_wlen;           
+    float* __restrict__ w_rev = smem;
+    float* __restrict__ tile  = smem + max_wlen;
 
-    
+
     const int wbase = combo * max_wlen;
     for (int k = threadIdx.x; k < wlen; k += blockDim.x) {
-        
+
         w_rev[k] = weights_flat[wbase + (wlen - 1 - k)];
     }
     __syncthreads();
 
-    
-    const int tile_span = blockDim.x + wlen - 1;   
+
+    const int tile_span = blockDim.x + wlen - 1;
     for (int base = blockIdx.x * blockDim.x; base < series_len; base += gridDim.x * blockDim.x) {
-        
+
         const int t0 = base - (wlen - 1);
 
-        
+
         for (int i = threadIdx.x; i < tile_span; i += blockDim.x) {
             const int src = t0 + i;
             float v = 0.0f;
@@ -73,27 +73,27 @@ void srwma_batch_f32(const float* __restrict__ prices,
             tile[i] = v;
         }
 
-        
-        
+
+
 #if SRWMA_USE_ASYNC_COPY && (__CUDA_ARCH__ >= 800)
-        
-        
-        
-        
-        
-        
+
+
+
+
+
+
 #endif
 
         __syncthreads();
 
-        
+
         const int t = base + threadIdx.x;
         if (t < series_len) {
             const int out_idx = row_offset + t;
             if (t < start_t) {
                 out[out_idx] = NAN;
             } else {
-                
+
                 const float* __restrict__ win = tile + threadIdx.x;
                 float acc = 0.0f;
                 #pragma unroll 4
@@ -122,14 +122,14 @@ void srwma_batch_f32(const float* __restrict__ prices,
 #define SRWMA_USE_CONST_WEIGHTS 0
 #endif
 #if SRWMA_USE_CONST_WEIGHTS
-__constant__ float srwma_const_w[4096];  
+__constant__ float srwma_const_w[4096];
 #endif
 
 extern "C" __global__
 void srwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                      const int*   __restrict__ first_valids,
 #if SRWMA_USE_CONST_WEIGHTS
-                                     const float* __restrict__ weights_unused, 
+                                     const float* __restrict__ weights_unused,
 #else
                                      const float* __restrict__ weights,
 #endif
@@ -145,20 +145,20 @@ void srwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const int wlen = period - 1;
     const int first_valid = first_valids[series_idx];
-    
+
     const int warm = first_valid + period + 1;
     const int start_t = max(warm, wlen - 1);
 
     const int stride = num_series;
 
     extern __shared__ float smem[];
-    float* __restrict__ w_rev = smem;                     
-    float* __restrict__ tile  = smem + wlen;              
+    float* __restrict__ w_rev = smem;
+    float* __restrict__ tile  = smem + wlen;
 
-    
+
 #if SRWMA_USE_CONST_WEIGHTS
-    
-    
+
+
     for (int k = threadIdx.x; k < wlen; k += blockDim.x) {
         w_rev[k] = srwma_const_w[wlen - 1 - k];
     }
@@ -174,7 +174,7 @@ void srwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
     for (int base = blockIdx.x * blockDim.x; base < series_len; base += gridDim.x * blockDim.x) {
         const int t0 = base - (wlen - 1);
 
-        
+
         for (int i = threadIdx.x; i < tile_span; i += blockDim.x) {
             const int src_t = t0 + i;
             float v = 0.0f;
@@ -185,8 +185,8 @@ void srwma_many_series_one_param_f32(const float* __restrict__ prices_tm,
         }
 
 #if SRWMA_USE_ASYNC_COPY && (__CUDA_ARCH__ >= 800)
-        
-        
+
+
 #endif
 
         __syncthreads();

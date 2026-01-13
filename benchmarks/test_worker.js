@@ -10,8 +10,8 @@ worker.on('message', (msg) => {
     console.log('Worker message:', msg);
     if (msg.type === 'ready') {
         console.log('Worker is ready!');
-        
-        
+
+
         const testData = new Float64Array([1, 2, 3, 4, 5]);
         worker.postMessage({
             type: 'compute',

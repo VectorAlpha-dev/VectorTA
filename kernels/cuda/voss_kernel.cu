@@ -76,7 +76,7 @@ __device__ __forceinline__ dsfloat ds_fma_scalar(dsfloat a, float s, dsfloat c) 
 
 
 extern "C" __global__ void voss_batch_f32(
-    const double* __restrict__ prices,   
+    const double* __restrict__ prices,
     int len,
     int first_valid,
     const int* __restrict__ periods,
@@ -86,10 +86,10 @@ extern "C" __global__ void voss_batch_f32(
     float* __restrict__ out_voss,
     float* __restrict__ out_filt)
 {
-    const int row = blockIdx.y;         
+    const int row = blockIdx.y;
     if (row >= nrows) return;
 
-    if (threadIdx.x != 0) return;       
+    if (threadIdx.x != 0) return;
 
     const int p  = periods[row];
     const int q  = predicts[row];
@@ -101,20 +101,20 @@ extern "C" __global__ void voss_batch_f32(
     const int start     = first_valid + min_index;
     const int row_off   = row * len;
 
-    
+
     const int warm_end = (start < len ? start : len);
     for (int t = 0; t < warm_end; ++t) {
         out_voss[row_off + t] = f32_nan();
         out_filt[row_off + t] = f32_nan();
     }
 
-    
+
     if (start - 2 >= 0 && start - 2 < len) out_filt[row_off + (start - 2)] = 0.0f;
     if (start - 1 >= 0 && start - 1 < len) out_filt[row_off + (start - 1)] = 0.0f;
 
     if (start >= len) return;
 
-    
+
     const float TWO_PI = 6.2831853071795864769f;
     const float w0 = TWO_PI / (float)p;
     const float f1 = cosf(w0);
@@ -125,11 +125,11 @@ extern "C" __global__ void voss_batch_f32(
     const float c3 = -s1;
     const float scale = 0.5f * (3.0f + (float)order);
 
-    
+
     dsfloat prev_f1 = ds_from_float(0.0f);
     dsfloat prev_f2 = ds_from_float(0.0f);
 
-    
+
     float x_im2 = (float)prices[start - 2];
     float x_im1 = (float)prices[start - 1];
 
@@ -138,7 +138,7 @@ extern "C" __global__ void voss_batch_f32(
             const float xi   = (float)prices[i];
             const float diff = xi - x_im2;
 
-            
+
             const dsfloat t = ds_fma_scalar(prev_f2, c3, ds_from_float(c1 * diff));
             const dsfloat f = ds_fma_scalar(prev_f1, c2, t);
 
@@ -146,7 +146,7 @@ extern "C" __global__ void voss_batch_f32(
             out_filt[row_off + i] = f_out;
             out_voss[row_off + i] = scale * f_out;
 
-            
+
             prev_f2 = prev_f1;
             prev_f1 = f;
             x_im2 = x_im1;
@@ -155,16 +155,16 @@ extern "C" __global__ void voss_batch_f32(
         return;
     }
 
-    
-    dsfloat a_sum = ds_from_float(0.0f);            
-    dsfloat d_sum = ds_from_float(0.0f);            
+
+    dsfloat a_sum = ds_from_float(0.0f);
+    dsfloat d_sum = ds_from_float(0.0f);
     const float inv_m = 1.0f / (float)order;
 
     for (int i = start; i < len; ++i) {
         const float xi   = (float)prices[i];
         const float diff = xi - x_im2;
 
-        
+
         const dsfloat t = ds_fma_scalar(prev_f2, c3, ds_from_float(c1 * diff));
         const dsfloat f = ds_fma_scalar(prev_f1, c2, t);
         const float   f_out = ds_to_float(f);
@@ -173,14 +173,14 @@ extern "C" __global__ void voss_batch_f32(
         prev_f2 = prev_f1;
         prev_f1 = f;
 
-        
+
         const float sumc = ds_to_float(d_sum) * inv_m;
         const float vi   = scale * f_out - sumc;
         out_voss[row_off + i] = vi;
 
         const float v_new_nz = isnan(vi) ? 0.0f : vi;
 
-        
+
         const int j_old = i - order;
         float v_old = 0.0f;
         if (j_old >= start) {
@@ -189,12 +189,12 @@ extern "C" __global__ void voss_batch_f32(
         }
 
         const dsfloat a_prev = a_sum;
-        
+
         a_sum = ds_add(ds_sub(a_prev, ds_from_float(v_old)), ds_from_float(v_new_nz));
-        
+
         d_sum = ds_add(ds_sub(d_sum, a_prev), ds_from_float((float)order * v_new_nz));
 
-        
+
         x_im2 = x_im1;
         x_im1 = xi;
     }
@@ -202,7 +202,7 @@ extern "C" __global__ void voss_batch_f32(
 
 
 extern "C" __global__ void voss_many_series_one_param_time_major_f32(
-    const double* __restrict__ data_tm,     
+    const double* __restrict__ data_tm,
     const int*    __restrict__ first_valids,
     int cols,
     int rows,
@@ -212,13 +212,13 @@ extern "C" __global__ void voss_many_series_one_param_time_major_f32(
     float* __restrict__ out_voss_tm,
     float* __restrict__ out_filt_tm)
 {
-    const int s = blockIdx.y * blockDim.y + threadIdx.y;  
+    const int s = blockIdx.y * blockDim.y + threadIdx.y;
     if (s >= cols) return;
-    if (threadIdx.x != 0) return;                         
+    if (threadIdx.x != 0) return;
 
     const int fv = first_valids[s];
     if (fv < 0 || fv >= rows) {
-        
+
         for (int t = 0; t < rows; ++t) {
             const int idx = t * cols + s;
             out_voss_tm[idx] = f32_nan();
@@ -231,7 +231,7 @@ extern "C" __global__ void voss_many_series_one_param_time_major_f32(
     const int min_index = max(max(period, 5), order);
     const int start     = fv + min_index;
 
-    
+
     const int warm_end = (start < rows ? start : rows);
     for (int t = 0; t < warm_end; ++t) {
         const int idx = t * cols + s;
@@ -243,7 +243,7 @@ extern "C" __global__ void voss_many_series_one_param_time_major_f32(
 
     if (start >= rows) return;
 
-    
+
     const float TWO_PI = 6.2831853071795864769f;
     const float w0 = TWO_PI / (float)period;
     const float f1 = cosf(w0);
@@ -257,7 +257,7 @@ extern "C" __global__ void voss_many_series_one_param_time_major_f32(
     dsfloat prev_f1 = ds_from_float(0.0f);
     dsfloat prev_f2 = ds_from_float(0.0f);
 
-    
+
     float x_im2 = (float)data_tm[(start - 2) * cols + s];
     float x_im1 = (float)data_tm[(start - 1) * cols + s];
 

@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -25,7 +25,7 @@ def _cuda_available() -> bool:
         return False
     try:
         x = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
-        
+
         high = x + 1
         low = x - 1
         close = x
@@ -52,10 +52,10 @@ class TestAdoscCuda:
         close = test_data['close'].astype(np.float64)
         volume = test_data['volume'].astype(np.float64)
 
-        
+
         cpu = ti.adosc(high, low, close, volume, short_period=3, long_period=10)
 
-        
+
         handle = ti.adosc_cuda_batch_dev(
             high.astype(np.float32),
             low.astype(np.float32),

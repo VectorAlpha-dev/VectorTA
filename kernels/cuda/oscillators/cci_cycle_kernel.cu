@@ -62,18 +62,18 @@ extern "C" __global__ void cci_cycle_batch_f32(
         const float factor = factors[row];
         float* row_out     = out + static_cast<size_t>(row) * len;
 
-        
+
         if (L <= 0 || L > len) {
             for (int i = 0; i < len; ++i) row_out[i] = CUDART_NAN_F;
             continue;
         }
-        const int needed = L * 2; 
+        const int needed = L * 2;
         if (len - first_valid < needed) {
             for (int i = 0; i < len; ++i) row_out[i] = CUDART_NAN_F;
             continue;
         }
         if (L > CCI_RING_MAX) {
-            
+
             for (int i = 0; i < len; ++i) row_out[i] = CUDART_NAN_F;
             continue;
         }
@@ -84,11 +84,11 @@ extern "C" __global__ void cci_cycle_batch_f32(
         const float beta_s  = 1.0f - alpha_s;
         const float alpha_l = 2.0f / (L + 1.0f);
         const float beta_l  = 1.0f - alpha_l;
-        const int   smma_p  = max(1, (int)rintf(sqrtf((float)L))); 
+        const int   smma_p  = max(1, (int)rintf(sqrtf((float)L)));
 
-        
+
         const int i0 = first_valid;
-        const int i1 = first_valid + L; 
+        const int i1 = first_valid + L;
         float sum = 0.0f;
         for (int i = i0; i < i1; ++i) sum += prices[i];
         float sma = sum * invL;
@@ -98,39 +98,39 @@ extern "C" __global__ void cci_cycle_batch_f32(
 
         const int out_start = first_valid + L - 1;
 
-        
+
         for (int i = 0; i < out_start; ++i) row_out[i] = CUDART_NAN_F;
 
         float denom = 0.015f * (sum_abs * invL);
         float cci   = (denom == 0.0f) ? 0.0f : ((prices[out_start] - sma) / denom);
 
-        
+
         float ema_s = cci;
         float ema_l = cci;
 
-        
+
         float smma        = CUDART_NAN_F;
         float smma_sum    = 0.0f;
         int   smma_count  = 0;
         bool  smma_inited = false;
 
-        
+
         float prev_f1  = CUDART_NAN_F;
         float prev_pf  = CUDART_NAN_F;
         float prev_out = CUDART_NAN_F;
 
-        
+
         float ccis_ring[CCI_RING_MAX]; int ccis_valid = 0;
         float  pf_ring[CCI_RING_MAX];  int  pf_valid  = 0;
 
         for (int i = out_start; i < len; ++i) {
-            
+
             const float entering = prices[i];
             const float exiting  = prices[i - L];
             sum = sum - exiting + entering;
             sma = sum * invL;
 
-            
+
             float sabs = 0.0f;
             const int wstart = i + 1 - L;
             #pragma unroll
@@ -142,12 +142,12 @@ extern "C" __global__ void cci_cycle_batch_f32(
             float denom2 = 0.015f * (sabs * invL);
             float cci2   = (denom2 == 0.0f) ? 0.0f : ((entering - sma) / denom2);
 
-            
+
             ema_s = fmaf(beta_s, ema_s, alpha_s * cci2);
             ema_l = fmaf(beta_l, ema_l, alpha_l * cci2);
-            const float de = ema_s + ema_s - ema_l; 
+            const float de = ema_s + ema_s - ema_l;
 
-            
+
             if (!smma_inited) {
                 if (is_finitef(de)) {
                     smma_sum += de;
@@ -160,15 +160,15 @@ extern "C" __global__ void cci_cycle_batch_f32(
                 smma = (smma * (smma_p - 1) + de) / (float)smma_p;
             }
 
-            
+
             const int pos = i % L;
-            ccis_ring[pos] = smma;            
+            ccis_ring[pos] = smma;
             if (ccis_valid < L) ccis_valid++;
 
-            
+
             float pf = CUDART_NAN_F;
             {
-                const int have  = ccis_valid;                    
+                const int have  = ccis_valid;
                 int start = (i - have + 1) % L; if (start < 0) start += L;
                 float mn1, mx1;
                 scan_minmax_ring(ccis_ring, L, have, start, mn1, mx1);
@@ -188,10 +188,10 @@ extern "C" __global__ void cci_cycle_batch_f32(
                 }
             }
 
-            
+
             pf_ring[pos] = pf; if (pf_valid < L) pf_valid++;
 
-            
+
             float out_i = CUDART_NAN_F;
             {
                 const int have  = pf_valid;
@@ -227,7 +227,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
     float factor,
     float* __restrict__ out_tm
 ) {
-    const int rid = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int rid = blockIdx.x * blockDim.x + threadIdx.x;
     if (rid >= rows) return;
 
     const int L = length;
@@ -255,7 +255,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
 
     const float* prices = data_tm + (size_t)rid * cols;
 
-    
+
     const int i0 = first_valid;
     const int i1 = first_valid + L;
     float sum = 0.0f;
@@ -279,7 +279,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
     float  pf_ring[CCI_RING_MAX];  int  pf_valid  = 0;
 
     for (int i = out_start; i < cols; ++i) {
-        
+
         const float entering = prices[i];
         const float exiting  = prices[i - L];
         sum = sum - exiting + entering;
@@ -295,7 +295,7 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
         denom = 0.015f * (sabs * invL);
         cci   = (denom == 0.0f) ? 0.0f : ((entering - sma) / denom);
 
-        
+
         ema_s = fmaf(beta_s, ema_s, alpha_s * cci);
         ema_l = fmaf(beta_l, ema_l, alpha_l * cci);
         const float de = ema_s + ema_s - ema_l;
@@ -304,10 +304,10 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
             if (is_finitef(de)) { smma_sum += de; if (++smma_count >= smma_p) { smma = smma_sum / (float)smma_p; smma_inited = true; } }
         } else { smma = (smma * (smma_p - 1) + de) / (float)smma_p; }
 
-        
+
         const int pos = i % L; ccis_ring[pos] = smma; if (ccis_valid < L) ccis_valid++;
 
-        
+
         float pf = CUDART_NAN_F;
         {
             const int have  = ccis_valid;
@@ -322,10 +322,10 @@ extern "C" __global__ void cci_cycle_many_series_one_param_f32(
             }
         }
 
-        
+
         pf_ring[pos] = pf; if (pf_valid < L) pf_valid++;
 
-        
+
         float out_i = CUDART_NAN_F;
         {
             const int have  = pf_valid; float mn2, mx2; int start = (i - have + 1) % L; if (start < 0) start += L;

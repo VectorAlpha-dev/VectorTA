@@ -45,7 +45,7 @@ extern "C" __global__ void sma_exclusive_prefix_f64(
     const float* __restrict__ prices,
     int series_len,
     int first_valid,
-    double* __restrict__ prefix 
+    double* __restrict__ prefix
 ) {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
     if (series_len <= 0) return;
@@ -63,12 +63,12 @@ extern "C" __global__ void sma_exclusive_prefix_f64(
 }
 
 extern "C" __global__ void sma_batch_from_prefix_f64(
-    const double* __restrict__ prefix, 
-    const int* __restrict__ periods,   
+    const double* __restrict__ prefix,
+    const int* __restrict__ periods,
     int series_len,
     int n_combos,
     int first_valid,
-    float* __restrict__ out            
+    float* __restrict__ out
 ) {
     const int combo = blockIdx.y;
     if (combo >= n_combos) return;
@@ -125,7 +125,7 @@ extern "C" __global__ void sma_batch_f32(const float* __restrict__ prices,
     const int  base    = combo * series_len;
     float*     out_ptr = out + base;
 
-    
+
     if (UNLIKELY(period <= 0 || period > series_len ||
                  first_valid < 0 || first_valid >= series_len)) {
         for (int i = 0; i < series_len; ++i) out_ptr[i] = SMA_NAN;
@@ -138,21 +138,21 @@ extern "C" __global__ void sma_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int   warm = first_valid + period - 1;  
+    const int   warm = first_valid + period - 1;
     const float inv  = 1.0f / static_cast<float>(period);
 
-    
+
     for (int i = 0; i < warm; ++i) out_ptr[i] = SMA_NAN;
 
     if (period == 1) {
-        
+
         const float* src = prices + first_valid;
         float*       dst = out_ptr + first_valid;
         for (int i = first_valid; i < series_len; ++i) *dst++ = *src++;
         return;
     }
 
-    
+
     float sum = 0.0f;
 #ifdef SMA_USE_KAHAN
     float c = 0.0f;
@@ -170,7 +170,7 @@ extern "C" __global__ void sma_batch_f32(const float* __restrict__ prices,
     }
     out_ptr[warm] = sum * inv;
 
-    
+
     const float* cur = prices + (warm + 1);
     const float* old = prices + first_valid;
     float*       dst = out_ptr + (warm + 1);
@@ -191,21 +191,21 @@ extern "C" __global__ void sma_batch_f32(const float* __restrict__ prices,
 }
 
 extern "C" __global__ void sma_many_series_one_param_f32(
-    const float* __restrict__ prices_tm,   
+    const float* __restrict__ prices_tm,
     const int*   __restrict__ first_valids,
     int num_series,
     int series_len,
     int period,
-    float* __restrict__ out_tm)            
+    float* __restrict__ out_tm)
 {
     const int series = blockIdx.x * blockDim.x + threadIdx.x;
     if (series >= num_series) return;
 
-    
+
     const float* __restrict__ col_in  = prices_tm + series;
     float*       __restrict__ col_out = out_tm    + series;
 
-    
+
     if (UNLIKELY(period <= 0 || period > series_len)) {
         float* o = col_out;
         for (int row = 0; row < series_len; ++row, o += num_series) *o = SMA_NAN;
@@ -229,14 +229,14 @@ extern "C" __global__ void sma_many_series_one_param_f32(
     const int   warm = first_valid + period - 1;
     const float inv  = 1.0f / static_cast<float>(period);
 
-    
+
     {
         float* o = col_out;
         for (int row = 0; row < warm; ++row, o += num_series) *o = SMA_NAN;
     }
 
     if (period == 1) {
-        
+
         const float* src = col_in  + static_cast<size_t>(first_valid) * num_series;
         float*       dst = col_out + static_cast<size_t>(first_valid) * num_series;
         for (int row = first_valid; row < series_len; ++row, src += num_series, dst += num_series)
@@ -244,7 +244,7 @@ extern "C" __global__ void sma_many_series_one_param_f32(
         return;
     }
 
-    
+
     float sum = 0.0f;
 #ifdef SMA_USE_KAHAN
     float c = 0.0f;
@@ -261,10 +261,10 @@ extern "C" __global__ void sma_many_series_one_param_f32(
 #endif
     }
 
-    
+
     *(col_out + static_cast<size_t>(warm) * num_series) = sum * inv;
 
-    
+
     const float* cur = col_in  + static_cast<size_t>(warm + 1)    * num_series;
     const float* old = col_in  + static_cast<size_t>(first_valid) * num_series;
     float*       dst = col_out + static_cast<size_t>(warm + 1)    * num_series;

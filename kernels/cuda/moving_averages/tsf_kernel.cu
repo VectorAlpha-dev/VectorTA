@@ -137,7 +137,7 @@ void tsf_batch_f32(const float* __restrict__ prices,
         const int base   = combo * series_len;
         const int period = periods[combo];
 
-        
+
         if (period <= 1 || period > series_len || first_valid < 0 || first_valid >= series_len) {
             for (int i = 0; i < series_len; ++i) out[base + i] = TSF_NAN;
             continue;
@@ -155,10 +155,10 @@ void tsf_batch_f32(const float* __restrict__ prices,
         const double denom_inv  = static_cast<double>(denom_invs[combo]);
         const double inv_period = static_cast<double>(inv_periods[combo]);
 
-        
+
         for (int i = 0; i < warm; ++i) out[base + i] = TSF_NAN;
 
-        
+
         double y_sum = 0.0;
         double xy_sum = 0.0;
         for (int k = 0; k < period - 1; ++k) {
@@ -168,10 +168,10 @@ void tsf_batch_f32(const float* __restrict__ prices,
             xy_sum  = fma(val, x, xy_sum);
         }
 
-        
+
         double latest = static_cast<double>(prices[warm]);
 
-        
+
         const double period_next = period_f + 1.0;
         for (int idx = warm; idx < series_len; ++idx) {
             y_sum  += latest;

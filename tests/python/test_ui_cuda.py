@@ -6,8 +6,8 @@ import pytest
 import numpy as np
 
 try:
-    import cupy as cp  
-except ImportError:  
+    import cupy as cp
+except ImportError:
     cp = None
 
 try:
@@ -32,7 +32,7 @@ def _cuda_available() -> bool:
         )
         _ = cp.asarray(handle)
         return True
-    except Exception as e:  
+    except Exception as e:
         msg = str(e).lower()
         if 'cuda not available' in msg or 'nvcc' in msg or 'ptx' in msg:
             return False
@@ -42,7 +42,7 @@ def _cuda_available() -> bool:
 @pytest.mark.skipif(not _cuda_available(), reason="CUDA not available or cuda bindings not built")
 class TestUiCuda:
     def test_ui_cuda_batch_matches_cpu(self):
-        
+
         n = 4096
         x = np.full(n, np.nan, dtype=np.float64)
         for i in range(8, n):
@@ -52,10 +52,10 @@ class TestUiCuda:
         period = 14
         scalar = 100.0
 
-        
+
         cpu = ti.ui(x, period, scalar)
 
-        
+
         handle = ti.ui_cuda_batch_dev(
             x.astype(np.float32),
             period_range=(period, period, 0),
@@ -78,7 +78,7 @@ class TestUiCuda:
         period = 14
         scalar = 100.0
 
-        
+
         cpu_tm = np.zeros_like(tm)
         for j in range(N):
             cpu_tm[:, j] = ti.ui(tm[:, j], period, scalar)

@@ -22,244 +22,244 @@ class TestCoppock:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_coppock_accuracy(self, test_data):
         """Test COPPOCK matches expected values from Rust tests"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['coppock']
-        
-        
+
+
         result = ta_indicators.coppock(
-            close, 
+            close,
             expected['default_params']['short'],
             expected['default_params']['long'],
             expected['default_params']['ma']
         )
-        
+
         assert len(result) == len(close)
-        
-        
+
+
         for i, expected_val in enumerate(expected['last_5_values']):
             assert_close(result[-(5-i)], expected_val, rtol=1e-8)
-    
+
     def test_coppock_partial_params(self, test_data):
         """Test COPPOCK with default parameters"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.coppock(close, 11, 14, 10)
         assert len(result) == len(close)
-    
+
     def test_coppock_default_ma_type(self, test_data):
         """Test COPPOCK with default MA type"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.coppock(close, 11, 14, 10)
         assert len(result) == len(close)
-        
-        
+
+
         result_sma = ta_indicators.coppock(close, 11, 14, 10, "sma")
         assert len(result_sma) == len(close)
-    
+
     def test_coppock_zero_period(self):
         """Test COPPOCK fails with zero period"""
         input_data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(Exception, match="Invalid period"):
             ta_indicators.coppock(input_data, 0, 14, 10)
-    
+
     def test_coppock_period_exceeds_length(self):
         """Test COPPOCK fails when period exceeds data length"""
         data_small = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(Exception, match="Invalid period"):
             ta_indicators.coppock(data_small, 14, 20, 10)
-    
+
     def test_coppock_very_small_dataset(self):
         """Test COPPOCK fails with insufficient data"""
         single_point = np.array([42.0])
-        
+
         with pytest.raises(Exception, match="Invalid period|Not enough valid data"):
             ta_indicators.coppock(single_point, 11, 14, 10)
-    
+
     def test_coppock_empty_input(self):
         """Test COPPOCK fails with empty input"""
         empty = np.array([])
-        
+
         with pytest.raises(Exception, match="Empty data provided"):
             ta_indicators.coppock(empty, 11, 14, 10)
-    
+
     def test_coppock_all_nan_input(self):
         """Test COPPOCK fails with all NaN values"""
         all_nan = np.full(100, np.nan)
-        
+
         with pytest.raises(Exception, match="All values are NaN"):
             ta_indicators.coppock(all_nan, 11, 14, 10)
-    
+
     def test_coppock_nan_handling(self, test_data):
         """Test COPPOCK handles NaN values correctly"""
         close = test_data['close']
-        
+
         short = 11
         long = 14
         ma = 10
-        
+
         result = ta_indicators.coppock(close, short, long, ma)
         assert len(result) == len(close)
-        
-        
-        warmup = max(short, long) + (ma - 1)  
-        
-        
+
+
+        warmup = max(short, long) + (ma - 1)
+
+
         if len(result) > warmup:
             non_nan_portion = result[warmup:]
             assert not np.any(np.isnan(non_nan_portion)), f"Found NaN after warmup period {warmup}"
-    
+
     def test_coppock_streaming(self, test_data):
         """Test CoppockStream produces same results as batch"""
         close = test_data['close']
-        
-        
+
+
         batch_result = ta_indicators.coppock(close, 11, 14, 10)
-        
-        
+
+
         stream = ta_indicators.CoppockStream(11, 14, 10, "wma")
         stream_result = []
-        
+
         for price in close:
             value = stream.update(price)
             stream_result.append(value if value is not None else np.nan)
-        
+
         stream_result = np.array(stream_result)
         assert len(stream_result) == len(batch_result)
-        
-        
+
+
         for i, (b, s) in enumerate(zip(batch_result, stream_result)):
             if np.isnan(b) and np.isnan(s):
                 continue
             assert_close(b, s, rtol=1e-7)
-    
+
     def test_coppock_batch_single_param(self, test_data):
         """Test batch with single parameter combination"""
         close = test_data['close']
-        
-        
+
+
         batch_result = ta_indicators.coppock_batch(
             close,
-            (11, 11, 0),    
-            (14, 14, 0),    
-            (10, 10, 0)     
+            (11, 11, 0),
+            (14, 14, 0),
+            (10, 10, 0)
         )
-        
-        
+
+
         single_result = ta_indicators.coppock(close, 11, 14, 10)
-        
+
         assert 'values' in batch_result
-        batch_values = batch_result['values'][0]  
-        
-        
-        
+        batch_values = batch_result['values'][0]
+
+
+
         np.testing.assert_allclose(batch_values, single_result, rtol=0.0, atol=1e-9)
-    
+
     def test_coppock_batch_multiple_params(self, test_data):
         """Test batch with multiple parameter combinations"""
-        close = test_data['close'][:100]  
-        
-        
+        close = test_data['close'][:100]
+
+
         batch_result = ta_indicators.coppock_batch(
             close,
-            (10, 12, 2),    
-            (14, 16, 2),    
-            (8, 10, 2)      
+            (10, 12, 2),
+            (14, 16, 2),
+            (8, 10, 2)
         )
-        
+
         assert 'values' in batch_result
         assert 'shorts' in batch_result
         assert 'longs' in batch_result
         assert 'ma_periods' in batch_result
-        
-        
+
+
         assert batch_result['values'].shape == (8, 100)
         assert len(batch_result['shorts']) == 8
         assert len(batch_result['longs']) == 8
         assert len(batch_result['ma_periods']) == 8
-    
+
     def test_coppock_kernel_selection(self, test_data):
         """Test COPPOCK with different kernel selections"""
         close = test_data['close']
-        
-        
+
+
         result_auto = ta_indicators.coppock(close, 11, 14, 10)
-        
-        
+
+
         result_scalar = ta_indicators.coppock(close, 11, 14, 10, kernel="scalar")
-        
-        
+
+
         np.testing.assert_allclose(result_auto, result_scalar, rtol=1e-10)
-    
+
     def test_coppock_invalid_ma_type(self, test_data):
         """Test COPPOCK fails with invalid MA type"""
         close = test_data['close']
-        
-        
+
+
         with pytest.raises(Exception, match="Unknown moving average type|Underlying MA error"):
             ta_indicators.coppock(close, 11, 14, 10, "invalid_ma")
-    
+
     def test_coppock_negative_periods(self, test_data):
         """Test COPPOCK fails with negative periods"""
         close = test_data['close']
-        
-        
+
+
         with pytest.raises(OverflowError, match="can't convert negative"):
             ta_indicators.coppock(close, -11, 14, 10)
-        
-        
+
+
         with pytest.raises(OverflowError, match="can't convert negative"):
             ta_indicators.coppock(close, 11, -14, 10)
-        
-        
+
+
         with pytest.raises(OverflowError, match="can't convert negative"):
             ta_indicators.coppock(close, 11, 14, -10)
-    
+
     def test_coppock_warmup_period(self, test_data):
         """Test COPPOCK warmup period matches expected formula"""
         close = test_data['close']
-        
+
         short = 11
         long = 14
         ma = 10
-        
+
         result = ta_indicators.coppock(close, short, long, ma)
-        
-        
-        
+
+
+
         expected_warmup = max(short, long) + (ma - 1)
-        
-        
+
+
         for i in range(min(expected_warmup - 1, len(result))):
             assert np.isnan(result[i]), f"Expected NaN at index {i} during warmup"
-        
-        
+
+
         if len(result) > expected_warmup:
             assert not np.isnan(result[expected_warmup]), f"Expected valid value at index {expected_warmup}"
-    
+
     def test_coppock_supported_ma_types(self, test_data):
         """Test COPPOCK with supported MA types"""
-        close = test_data['close'][:100]  
-        
-        
+        close = test_data['close'][:100]
+
+
         supported_ma_types = ['sma', 'ema', 'wma']
-        
+
         results = {}
         for ma_type in supported_ma_types:
             result = ta_indicators.coppock(close, 11, 14, 10, ma_type)
             assert len(result) == len(close)
-            
+
             assert not np.all(np.isnan(result))
             results[ma_type] = result
-        
-        
+
+
         assert not np.allclose(results['sma'], results['ema'], equal_nan=True)
         assert not np.allclose(results['wma'], results['ema'], equal_nan=True)
 

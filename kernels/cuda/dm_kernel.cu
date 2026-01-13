@@ -59,7 +59,7 @@ __device__ __forceinline__ void dm_step(float ch, float cl, float& prev_h, float
     const float ap = (dp > 0.0f) ? dp : 0.0f;
     const float am = (dm > 0.0f) ? dm : 0.0f;
 
-    
+
     const bool take_p = (ap > am);
     plus_val  = take_p ? ap : 0.0f;
     minus_val = take_p ? 0.0f : am;
@@ -67,11 +67,11 @@ __device__ __forceinline__ void dm_step(float ch, float cl, float& prev_h, float
 
 
 struct CompSum {
-    float s;   
-    float c;   
+    float s;
+    float c;
     __device__ __forceinline__ void init() { s = 0.0f; c = 0.0f; }
     __device__ __forceinline__ void add(float x) {
-        
+
         float y = x - c;
         float t = s + y;
         c = (t - s) - y;
@@ -83,14 +83,14 @@ struct CompSum {
 
 
 struct CompEMA {
-    float s;  
-    float c;  
+    float s;
+    float c;
     __device__ __forceinline__ void init(float s0) { s = s0; c = 0.0f; }
     __device__ __forceinline__ void update(float one_minus_rp, float x) {
-        
+
         float prod = s * one_minus_rp;
         float perr = __fmaf_rn(s, one_minus_rp, -prod);
-        
+
         float y = (x + perr) - c;
         float t = prod + y;
         c = (t - prod) - y;
@@ -119,7 +119,7 @@ void dm_batch_f32(const float* __restrict__ high,
 
     const int p = periods[combo];
     if (p <= 0) {
-        
+
         fill_nan_prefix(plus_row, series_len);
         fill_nan_prefix(minus_row, series_len);
         return;
@@ -131,19 +131,19 @@ void dm_batch_f32(const float* __restrict__ high,
     }
 
     const int i0 = first_valid;
-    const int warm_end = i0 + p - 1; 
+    const int warm_end = i0 + p - 1;
 
-    
+
     if (warm_end > 0) {
         fill_nan_prefix(plus_row,  warm_end);
         fill_nan_prefix(minus_row, warm_end);
     }
 
-    
+
     float prev_h = ro_load(high + i0);
     float prev_l = ro_load(low  + i0);
 
-    
+
     CompSum wplus, wminus; wplus.init(); wminus.init();
     for (int i = i0 + 1; i <= warm_end; ++i) {
         const float ch = ro_load(high + i);
@@ -154,17 +154,17 @@ void dm_batch_f32(const float* __restrict__ high,
         if (mv != 0.0f) wminus.add(mv);
     }
 
-    
+
     plus_row [warm_end] = wplus.value();
     minus_row[warm_end] = wminus.value();
 
-    
+
     if (warm_end + 1 >= series_len) return;
 
     const float rp = 1.0f / (float)p;
     const float one_minus_rp = 1.0f - rp;
 
-    
+
     CompEMA splus, sminus;
     splus.init(plus_row [warm_end]);
     sminus.init(minus_row[warm_end]);
@@ -197,12 +197,12 @@ void dm_many_series_one_param_time_major_f32(
     float* __restrict__ plus_tm,
     float* __restrict__ minus_tm)
 {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols) return;
 
     const int fv = first_valids[s];
     if (period <= 0 || fv < 0 || fv + period - 1 >= rows) {
-        
+
         for (int t = 0; t < rows; ++t) {
             const int idx = t * cols + s;
             plus_tm [idx] = qnan();
@@ -211,13 +211,13 @@ void dm_many_series_one_param_time_major_f32(
         return;
     }
 
-    
+
     auto at = [&](int t) { return t * cols + s; };
 
     const int i0 = fv;
     const int warm_end = i0 + period - 1;
 
-    
+
     for (int t = 0; t < warm_end; ++t) {
         const int idx = at(t);
         plus_tm [idx] = qnan();
@@ -227,7 +227,7 @@ void dm_many_series_one_param_time_major_f32(
     float prev_h = ro_load(high_tm + at(i0));
     float prev_l = ro_load(low_tm  + at(i0));
 
-    
+
     CompSum wplus, wminus; wplus.init(); wminus.init();
     for (int t = i0 + 1; t <= warm_end; ++t) {
         const float ch = ro_load(high_tm + at(t));

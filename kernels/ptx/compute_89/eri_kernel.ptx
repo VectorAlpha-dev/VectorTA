@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -445,7 +445,7 @@ $L__BB0_58:
 	ret;
 
 }
-	
+
 .visible .entry eri_many_series_one_param_time_major_f32(
 	.param .u64 eri_many_series_one_param_time_major_f32_param_0,
 	.param .u64 eri_many_series_one_param_time_major_f32_param_1,
@@ -995,7 +995,7 @@ $L__BB1_64:
 	ret;
 
 }
-	
+
 .visible .entry eri_one_series_many_params_time_major_f32(
 	.param .u64 eri_one_series_many_params_time_major_f32_param_0,
 	.param .u64 eri_one_series_many_params_time_major_f32_param_1,
@@ -1014,9 +1014,9 @@ $L__BB1_64:
 	.reg .f32 	%f<136>;
 	.reg .b32 	%r<341>;
 	.reg .b64 	%rd<168>;
-	
+
 	.shared .align 4 .b8 _ZZ41eri_one_series_many_params_time_major_f32E7sh_high[64];
-	
+
 	.shared .align 4 .b8 _ZZ41eri_one_series_many_params_time_major_f32E6sh_low[64];
 
 	ld.param.u64 	%rd25, [eri_one_series_many_params_time_major_f32_param_0];
@@ -2016,7 +2016,7 @@ $L__BB2_117:
 	ret;
 
 }
-	
+
 .visible .entry transpose_rm_to_tm_32x32_pad_f32(
 	.param .u64 transpose_rm_to_tm_32x32_pad_f32_param_0,
 	.param .u32 transpose_rm_to_tm_32x32_pad_f32_param_1,
@@ -2028,7 +2028,7 @@ $L__BB2_117:
 	.reg .f32 	%f<3>;
 	.reg .b32 	%r<24>;
 	.reg .b64 	%rd<9>;
-	
+
 	.shared .align 4 .b8 _ZZ32transpose_rm_to_tm_32x32_pad_f32E4tile[4224];
 
 	ld.param.u64 	%rd1, [transpose_rm_to_tm_32x32_pad_f32_param_0];

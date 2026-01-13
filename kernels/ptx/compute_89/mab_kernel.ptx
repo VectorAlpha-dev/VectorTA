@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry mab_batch_from_prefix_sma_f32(
 	.param .u64 mab_batch_from_prefix_sma_f32_param_0,
@@ -582,7 +582,7 @@ $L__BB0_52:
 	ret;
 
 }
-	
+
 .visible .entry mab_dev_from_ma_f32(
 	.param .u64 mab_dev_from_ma_f32_param_0,
 	.param .u64 mab_dev_from_ma_f32_param_1,
@@ -909,7 +909,7 @@ $L__BB1_24:
 	ret;
 
 }
-	
+
 .visible .entry mab_apply_dev_shared_ma_batch_f32(
 	.param .u64 mab_apply_dev_shared_ma_batch_f32_param_0,
 	.param .u64 mab_apply_dev_shared_ma_batch_f32_param_1,
@@ -1151,7 +1151,7 @@ $L__BB2_18:
 	ret;
 
 }
-	
+
 .visible .entry mab_single_row_from_ma_f32(
 	.param .u64 mab_single_row_from_ma_f32_param_0,
 	.param .u64 mab_single_row_from_ma_f32_param_1,
@@ -1551,7 +1551,7 @@ $L__BB3_23:
 	ret;
 
 }
-	
+
 .visible .entry mab_many_series_one_param_time_major_f32(
 	.param .u64 mab_many_series_one_param_time_major_f32_param_0,
 	.param .u64 mab_many_series_one_param_time_major_f32_param_1,

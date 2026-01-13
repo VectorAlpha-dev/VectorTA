@@ -22,7 +22,7 @@ def assert_close(actual, expected, rtol=1e-8, atol=1e-12, msg=""):
         actual = np.array(actual)
     if isinstance(expected, (list, tuple)):
         expected = np.array(expected)
-    
+
     if not np.allclose(actual, expected, rtol=rtol, atol=atol, equal_nan=True):
         diff = np.abs(actual - expected)
         max_diff_idx = np.nanargmax(diff)
@@ -37,28 +37,28 @@ def assert_close(actual, expected, rtol=1e-8, atol=1e-12, msg=""):
 
 class TestAvsl:
     """Test suite for AVSL indicator"""
-    
+
     @pytest.fixture(scope='class')
     def test_data(self):
         """Load test data from CSV file"""
-        csv_path = os.path.join(os.path.dirname(__file__), 
-                                '..', '..', 'src', 'data', 
+        csv_path = os.path.join(os.path.dirname(__file__),
+                                '..', '..', 'src', 'data',
                                 '2018-09-01-2024-Bitfinex_Spot-4h.csv')
-        
+
         df = np.loadtxt(csv_path, delimiter=',')
         return {
-            'close': np.ascontiguousarray(df[:, 2], dtype=np.float64),  
-            'low': np.ascontiguousarray(df[:, 4], dtype=np.float64),    
-            'volume': np.ascontiguousarray(df[:, 5], dtype=np.float64)  
+            'close': np.ascontiguousarray(df[:, 2], dtype=np.float64),
+            'low': np.ascontiguousarray(df[:, 4], dtype=np.float64),
+            'volume': np.ascontiguousarray(df[:, 5], dtype=np.float64)
         }
-    
+
     def test_avsl_accuracy(self, test_data):
         """Test AVSL matches expected values from Rust tests"""
         close = test_data['close']
         low = test_data['low']
         volume = test_data['volume']
-        
-        
+
+
         expected_last_five = [
             56471.61721191,
             56267.11946706,
@@ -66,8 +66,8 @@ class TestAvsl:
             55910.07971214,
             55765.37864229,
         ]
-        
-        
+
+
         result = my_project.avsl(
             close,
             low,
@@ -76,202 +76,202 @@ class TestAvsl:
             slow_period=26,
             multiplier=2.0
         )
-        
+
         assert len(result) == len(close), "Result length should match input length"
-        
-        
+
+
         last_5 = result[-5:]
         for i, (actual, expected) in enumerate(zip(last_5, expected_last_five)):
-            tolerance = abs(expected) * 0.01  
+            tolerance = abs(expected) * 0.01
             diff = abs(actual - expected)
             assert diff < tolerance, (
                 f"AVSL value mismatch at index {i}: "
                 f"got {actual}, expected {expected}, diff {diff}"
             )
-    
+
     def test_avsl_empty_input(self):
         """Test AVSL fails with empty input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Input data slice is empty"):
             my_project.avsl(empty, empty, empty)
-    
+
     def test_avsl_mismatched_lengths(self):
         """Test AVSL fails with mismatched input lengths"""
         close = np.array([10.0, 20.0, 30.0])
-        low = np.array([9.0, 19.0])  
+        low = np.array([9.0, 19.0])
         volume = np.array([100.0, 200.0, 300.0])
-        
+
         with pytest.raises(ValueError, match="Data length mismatch"):
             my_project.avsl(close, low, volume)
-    
+
     def test_avsl_invalid_period(self):
         """Test AVSL fails with invalid period"""
         data = np.array([10.0, 20.0, 30.0])
         volume = np.array([100.0, 200.0, 300.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             my_project.avsl(data, data, volume, fast_period=0)
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             my_project.avsl(data, data, volume, slow_period=100)
-    
+
     def test_avsl_all_nan(self):
         """Test AVSL fails with all NaN values"""
         nan_data = np.array([np.nan, np.nan, np.nan])
-        
+
         with pytest.raises(ValueError, match="All values are NaN"):
             my_project.avsl(nan_data, nan_data, nan_data)
-    
+
     def test_avsl_different_parameters(self, test_data):
         """Test AVSL with different parameter combinations"""
         close = test_data['close']
-        low = test_data['low'] 
+        low = test_data['low']
         volume = test_data['volume']
-        
-        
+
+
         result1 = my_project.avsl(close, low, volume, fast_period=10, slow_period=20)
         assert len(result1) == len(close)
-        
-        
+
+
         result2 = my_project.avsl(close, low, volume, multiplier=1.5)
         assert len(result2) == len(close)
-        
-        
+
+
         assert not np.array_equal(result1[-10:], result2[-10:])
-    
+
     def test_avsl_invalid_multiplier(self):
         """Test AVSL fails with invalid multiplier values"""
         data = np.ones(100)
         volume = np.ones(100)
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid multiplier"):
             my_project.avsl(data, data, volume, multiplier=-1.0)
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid multiplier"):
             my_project.avsl(data, data, volume, multiplier=0.0)
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid multiplier"):
             my_project.avsl(data, data, volume, multiplier=float('nan'))
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid multiplier"):
             my_project.avsl(data, data, volume, multiplier=float('inf'))
-    
+
     def test_avsl_warmup_period(self, test_data):
         """Test AVSL warmup period NaN handling"""
         close = test_data['close']
         low = test_data['low']
         volume = test_data['volume']
-        
+
         fast_period = 12
         slow_period = 26
-        
+
         result = my_project.avsl(
             close, low, volume,
             fast_period=fast_period,
             slow_period=slow_period,
             multiplier=2.0
         )
-        
-        
+
+
         first_valid = next((i for i, v in enumerate(result) if not np.isnan(v)), None)
-        
-        
+
+
         expected_warmup = slow_period - 1
         assert first_valid >= expected_warmup, (
             f"First valid value at index {first_valid}, "
             f"expected >= {expected_warmup}"
         )
-        
-        
+
+
         assert np.all(np.isnan(result[:expected_warmup])), (
             "Expected all NaN values during warmup period"
         )
-        
-        
+
+
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), (
                 "Found unexpected NaN after warmup period"
             )
-    
+
     def test_avsl_streaming(self, test_data):
         """Test AVSL streaming matches batch calculation"""
-        close = test_data['close'][:500]  
+        close = test_data['close'][:500]
         low = test_data['low'][:500]
         volume = test_data['volume'][:500]
-        
+
         fast_period = 12
         slow_period = 26
         multiplier = 2.0
-        
-        
+
+
         batch_result = my_project.avsl(
             close, low, volume,
             fast_period=fast_period,
             slow_period=slow_period,
             multiplier=multiplier
         )
-        
-        
+
+
         stream = my_project.AvslStream(
             fast_period=fast_period,
             slow_period=slow_period,
             multiplier=multiplier
         )
-        
+
         stream_values = []
         for i in range(len(close)):
             result = stream.update(close[i], low[i], volume[i])
             stream_values.append(result if result is not None else np.nan)
-        
+
         stream_values = np.array(stream_values)
-        
-        
-        batch_last = next((batch_result[i] for i in range(len(batch_result)-1, -1, -1) 
+
+
+        batch_last = next((batch_result[i] for i in range(len(batch_result)-1, -1, -1)
                           if not np.isnan(batch_result[i])), None)
-        stream_last = next((stream_values[i] for i in range(len(stream_values)-1, -1, -1) 
+        stream_last = next((stream_values[i] for i in range(len(stream_values)-1, -1, -1)
                            if not np.isnan(stream_values[i])), None)
-        
+
         if batch_last is not None and stream_last is not None:
-            
+
             tolerance = abs(batch_last) * 0.01
             diff = abs(batch_last - stream_last)
             assert diff < tolerance, (
                 f"Streaming vs batch mismatch: {stream_last} vs {batch_last}, "
                 f"diff {diff}"
             )
-    
+
     def test_avsl_batch(self, test_data):
         """Test AVSL batch processing"""
         close = test_data['close']
         low = test_data['low']
         volume = test_data['volume']
-        
-        
+
+
         result = my_project.avsl_batch(
             close, low, volume,
-            fast_range=(12, 12, 0),  
-            slow_range=(26, 26, 0),  
-            mult_range=(2.0, 2.0, 0.0)  
+            fast_range=(12, 12, 0),
+            slow_range=(26, 26, 0),
+            mult_range=(2.0, 2.0, 0.0)
         )
-        
+
         assert 'values' in result
         assert 'fast_periods' in result
         assert 'slow_periods' in result
         assert 'multipliers' in result
-        
-        
+
+
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
-        
-        
+
+
         default_row = result['values'][0]
-        
-        
+
+
         expected_last_five = [
             56471.61721191,
             56267.11946706,
@@ -279,8 +279,8 @@ class TestAvsl:
             55910.07971214,
             55765.37864229,
         ]
-        
-        
+
+
         last_5 = default_row[-5:]
         for i, (actual, expected) in enumerate(zip(last_5, expected_last_five)):
             tolerance = abs(expected) * 0.01
@@ -289,70 +289,70 @@ class TestAvsl:
                 f"Batch default row mismatch at index {i}: "
                 f"got {actual}, expected {expected}, diff {diff}"
             )
-    
+
     def test_avsl_batch_multiple_params(self, test_data):
         """Test AVSL batch with multiple parameter combinations"""
-        close = test_data['close'][:100]  
+        close = test_data['close'][:100]
         low = test_data['low'][:100]
         volume = test_data['volume'][:100]
-        
+
         result = my_project.avsl_batch(
             close, low, volume,
-            fast_range=(10, 15, 5),  
-            slow_range=(20, 30, 10),  
-            mult_range=(1.5, 2.5, 0.5)  
+            fast_range=(10, 15, 5),
+            slow_range=(20, 30, 10),
+            mult_range=(1.5, 2.5, 0.5)
         )
-        
-        
+
+
         assert result['values'].shape[0] == 12
         assert result['values'].shape[1] == 100
         assert len(result['fast_periods']) == 12
         assert len(result['slow_periods']) == 12
         assert len(result['multipliers']) == 12
-        
-        
+
+
         expected_fast = [10, 10, 10, 10, 10, 10, 15, 15, 15, 15, 15, 15]
         expected_slow = [20, 20, 20, 30, 30, 30, 20, 20, 20, 30, 30, 30]
         expected_mult = [1.5, 2.0, 2.5, 1.5, 2.0, 2.5, 1.5, 2.0, 2.5, 1.5, 2.0, 2.5]
-        
+
         np.testing.assert_array_equal(result['fast_periods'], expected_fast)
         np.testing.assert_array_equal(result['slow_periods'], expected_slow)
         np.testing.assert_array_almost_equal(result['multipliers'], expected_mult, decimal=10)
-    
+
     def test_avsl_partial_nan_handling(self, test_data):
         """Test AVSL with partial NaN values in data"""
         close = test_data['close'][:100].copy()
         low = test_data['low'][:100].copy()
         volume = test_data['volume'][:100].copy()
-        
-        
+
+
         close[10:15] = np.nan
         low[20:22] = np.nan
         volume[30:32] = np.nan
-        
-        
-        
-        
+
+
+
+
         try:
             result = my_project.avsl(close, low, volume)
             assert len(result) == len(close)
-            
-            
+
+
         except ValueError as e:
-            
-            
+
+
             assert "All values are NaN" in str(e)
-    
+
     def test_avsl_very_small_dataset(self):
         """Test AVSL with dataset smaller than slow period"""
         small_data = np.array([10.0, 11.0, 12.0, 13.0, 14.0])
         small_volume = np.array([100.0, 110.0, 120.0, 130.0, 140.0])
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             my_project.avsl(small_data, small_data, small_volume)
-        
-        
+
+
         result = my_project.avsl(
             small_data, small_data, small_volume,
             fast_period=2, slow_period=3

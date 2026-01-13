@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry frama_batch_f32(
 	.param .u64 frama_batch_f32_param_0,
@@ -956,7 +956,7 @@ $L__BB0_117:
 	ret;
 
 }
-	
+
 .visible .entry frama_many_series_one_param_f32(
 	.param .u64 frama_many_series_one_param_f32_param_0,
 	.param .u64 frama_many_series_one_param_f32_param_1,

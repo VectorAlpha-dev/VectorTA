@@ -803,7 +803,7 @@ pub fn ehma_batch_slice(
     sweep: &EhmaBatchRange,
     kern: Kernel,
 ) -> Result<EhmaBatchOutput, EhmaError> {
-    ehma_batch_inner(data, sweep, kern, /*parallel=*/ false)
+    ehma_batch_inner(data, sweep, kern, false)
 }
 
 #[inline(always)]
@@ -812,7 +812,7 @@ pub fn ehma_batch_par_slice(
     sweep: &EhmaBatchRange,
     kern: Kernel,
 ) -> Result<EhmaBatchOutput, EhmaError> {
-    ehma_batch_inner(data, sweep, kern, /*parallel=*/ true)
+    ehma_batch_inner(data, sweep, kern, true)
 }
 
 pub fn ehma_batch_with_kernel(
@@ -834,7 +834,7 @@ pub fn ehma_batch_with_kernel(
         Kernel::ScalarBatch => Kernel::Scalar,
         _ => unreachable!(),
     };
-    ehma_batch_inner(data, sweep, simd, /*parallel=*/ true)
+    ehma_batch_inner(data, sweep, simd, true)
 }
 
 pub fn ehma_batch_with_kernel_slice(
@@ -1193,7 +1193,7 @@ pub fn ehma_batch_py<'py>(
                 Kernel::ScalarBatch => Kernel::Scalar,
                 _ => unreachable!(),
             };
-            ehma_batch_inner_into(slice_in, &sweep, simd, /*parallel=*/ true, slice_out)
+            ehma_batch_inner_into(slice_in, &sweep, simd, true, slice_out)
         })
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
@@ -1431,7 +1431,7 @@ pub fn ehma_batch_into(
             _ => Kernel::Scalar,
         };
 
-        ehma_batch_inner_into(data, &sweep, simd, /*parallel=*/ false, out)
+        ehma_batch_inner_into(data, &sweep, simd, false, out)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         Ok(rows)
     }

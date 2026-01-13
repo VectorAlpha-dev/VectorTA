@@ -29,7 +29,7 @@ __device__ __forceinline__ Float2 f2_two_sum(float a, float b) {
     float s  = a + b;
     float bp = s - a;
     float e  = (a - (s - bp)) + (b - bp);
-    
+
     float t  = s + e;
     r.lo     = e - (t - s);
     r.hi     = t;
@@ -40,7 +40,7 @@ __device__ __forceinline__ Float2 f2_two_sum(float a, float b) {
 __device__ __forceinline__ Float2 f2_add_f(Float2 a, float b) {
     Float2 s = f2_two_sum(a.hi, b);
     s.lo += a.lo;
-    
+
     float t = s.hi + s.lo;
     s.lo = s.lo - (t - s.hi);
     s.hi = t;
@@ -58,8 +58,8 @@ __device__ __forceinline__ Float2 f2_mul_f(Float2 a, float b) {
 
 
 __device__ __forceinline__ Float2 f2_fma(float a, float b, Float2 c) {
-    float ph = fmaf(a, b, c.hi);        
-    float pe = fmaf(a, b, - (ph - c.hi)) + c.lo; 
+    float ph = fmaf(a, b, c.hi);
+    float pe = fmaf(a, b, - (ph - c.hi)) + c.lo;
     float t  = ph + pe;
     Float2 r = { t, pe - (t - ph) };
     return r;
@@ -69,10 +69,10 @@ __device__ __forceinline__ Float2 f2_fma(float a, float b, Float2 c) {
 __device__ __forceinline__ Float2 f2_div_int(Float2 a, int den) {
     float d      = (float)den;
     float inv_d  = 1.0f / d;
-    
+
     float q0     = (a.hi + a.lo) * inv_d;
-    
-    float r      = (a.hi + a.lo) - q0 * d; 
+
+    float r      = (a.hi + a.lo) - q0 * d;
     float q1     = r * inv_d;
     Float2 q     = f2_make(q0 + q1);
     return q;
@@ -84,7 +84,7 @@ __device__ __forceinline__ float f2_ratio(Float2 num, Float2 den) {
     float D  = den.hi + den.lo;
     float invD = 1.0f / D;
     float y  = N * invD;
-    
+
     float corr = (num.lo - y * den.lo) * invD;
     return y + corr;
 }
@@ -115,48 +115,48 @@ __device__ __forceinline__ int warp_min_i(int v, unsigned mask) {
 
 
 extern "C" __global__ void ppo_batch_ema_manyparams_f32(
-    const float* __restrict__ data,   
+    const float* __restrict__ data,
     int len,
     int first_valid,
-    const int* __restrict__ fasts,    
-    const int* __restrict__ slows,    
+    const int* __restrict__ fasts,
+    const int* __restrict__ slows,
     int n_combos,
-    float* __restrict__ out)          
+    float* __restrict__ out)
 {
     if (len <= 0 || n_combos <= 0) return;
 
     const unsigned lane  = threadIdx.x & 31;
     const unsigned warp  = threadIdx.x >> 5;
-    const unsigned wpb   = blockDim.x >> 5;                
+    const unsigned wpb   = blockDim.x >> 5;
     if (wpb == 0) return;
 
     const int combos_per_block = (int)(wpb * 32);
     const int base_combo = (int)blockIdx.y * combos_per_block + (int)warp * 32;
     const int combo      = base_combo + (int)lane;
 
-    
-    
+
+
     const unsigned full_mask  = __activemask();
     const bool     valid_lane = (combo < n_combos);
     const unsigned mask       = __ballot_sync(full_mask, valid_lane);
-    if (mask == 0u) return; 
-    if (!valid_lane) return; 
+    if (mask == 0u) return;
+    if (!valid_lane) return;
 
-    
+
     int fast = 0, slow = 0;
     if (valid_lane) {
         fast = fasts[combo];
         slow = slows[combo];
     }
-    
+
     const bool periods_ok = valid_lane && (fast > 0) && (slow > 0);
     const float nanf = f32_nan();
 
-    
+
     int start_idx = 0;
     if (periods_ok) start_idx = first_valid + slow - 1;
 
-    
+
     if (periods_ok) {
         const int row_off = combo * len;
         for (int t = 0; t < min(start_idx, len); ++t) {
@@ -164,8 +164,8 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         }
     }
 
-    
-    
+
+
     int warp_slow_min = periods_ok ? slow : INT_MAX;
     int warp_slow_max = periods_ok ? slow : 0;
     int warp_fast_min = periods_ok ? fast : INT_MAX;
@@ -174,11 +174,11 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
     warp_slow_max = warp_max_i(warp_slow_max, mask);
     warp_fast_min = warp_min_i(warp_fast_min, mask);
 
-    
+
     Float2 slow_sum = f2_make(0.0f);
     Float2 fast_sum = f2_make(0.0f);
     int overlap = 0;
-    if (periods_ok) overlap = slow - fast; 
+    if (periods_ok) overlap = slow - fast;
 
     for (int k = 0; k < warp_slow_max && k + first_valid < len; ++k) {
         float v = 0.0f;
@@ -192,7 +192,7 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         }
     }
 
-    
+
     Float2 fast_ema = f2_make(0.0f), slow_ema = f2_make(0.0f);
     float fa = 0.0f, fb = 0.0f, sa = 0.0f, sb = 0.0f;
     int row_off = 0;
@@ -206,8 +206,8 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         row_off = combo * len;
     }
 
-    
-    
+
+
     const int i_begin = first_valid + warp_fast_min;
     const int i_end   = first_valid + warp_slow_max - 1;
     for (int i = i_begin; i <= i_end && i < len; ++i) {
@@ -216,14 +216,14 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         x = __shfl_sync(mask, x, 0);
         if (periods_ok) {
             if (i >= first_valid + fast && i <= first_valid + slow - 1) {
-                
+
                 Float2 tmp = f2_mul_f(fast_ema, fb);
                 fast_ema = f2_fma(fa, x, tmp);
             }
         }
     }
 
-    
+
     if (periods_ok && start_idx < len) {
         float y0 = nanf;
         float den = slow_ema.hi + slow_ema.lo;
@@ -234,7 +234,7 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         out[row_off + start_idx] = y0;
     }
 
-    
+
     int warp_start_min = periods_ok ? start_idx : INT_MAX;
     warp_start_min = warp_min_i(warp_start_min, mask);
     for (int t = warp_start_min + 1; t < len; ++t) {
@@ -242,10 +242,10 @@ extern "C" __global__ void ppo_batch_ema_manyparams_f32(
         if (lane == 0u) x = data[t];
         x = __shfl_sync(mask, x, 0);
         if (periods_ok && t > start_idx) {
-            
+
             fast_ema = f2_fma(fa, x, f2_mul_f(fast_ema, fb));
             slow_ema = f2_fma(sa, x, f2_mul_f(slow_ema, sb));
-            
+
             float y = nanf;
             float den = slow_ema.hi + slow_ema.lo;
             if (isfinite(den) && den != 0.0f) {
@@ -280,12 +280,12 @@ extern "C" __global__ void ppo_batch_f32(
     const int fast = fasts[combo];
     const int slow = slows[combo];
     if (fast <= 0 || slow <= 0) return;
-    const int warm_idx = first_valid + max(fast, slow) - 1; 
+    const int warm_idx = first_valid + max(fast, slow) - 1;
     const int row_off = combo * len;
     const float nanf = f32_nan();
 
     if (ma_mode == 0) {
-        
+
         int t = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
         while (t < len) {
@@ -307,9 +307,9 @@ extern "C" __global__ void ppo_batch_f32(
         return;
     }
 
-    
-    
-    const int start_idx = first_valid + slow - 1; 
+
+
+    const int start_idx = first_valid + slow - 1;
     for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < min(start_idx, len); idx += gridDim.x * blockDim.x) {
         out[row_off + idx] = nanf;
     }
@@ -323,7 +323,7 @@ extern "C" __global__ void ppo_batch_f32(
     const double fb = 1.0 - fa;
     const double sb = 1.0 - sa;
 
-    
+
     double slow_sum = 0.0;
     double fast_sum = 0.0;
     const int overlap = slow - fast;
@@ -336,13 +336,13 @@ extern "C" __global__ void ppo_batch_f32(
     double fast_ema = fast_sum / (double)fast;
     double slow_ema = slow_sum / (double)slow;
 
-    
+
     for (int i = first_valid + fast; i <= start_idx; ++i) {
         const double x = (double)data[i];
         fast_ema = fa * x + fb * fast_ema;
     }
 
-    
+
     float y0 = nanf;
     if (isfinite(fast_ema) && isfinite(slow_ema) && slow_ema != 0.0) {
         const double ratio = fast_ema / slow_ema;
@@ -350,7 +350,7 @@ extern "C" __global__ void ppo_batch_f32(
     }
     out[row_off + start_idx] = y0;
 
-    
+
     for (int j = start_idx + 1; j < len; ++j) {
         const double x = (double)data[j];
         fast_ema = fa * x + fb * fast_ema;
@@ -381,16 +381,16 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     float* __restrict__ out_tm)
 {
     if (cols <= 0 || rows <= 0) return;
-    const int s = blockIdx.y * blockDim.y + threadIdx.y; 
+    const int s = blockIdx.y * blockDim.y + threadIdx.y;
     if (s >= cols) return;
     const int fv = max(0, first_valids[s]);
     const int warm_idx = fv + max(fast, slow) - 1;
     const float nanf = f32_nan();
 
     if (ma_mode == 0) {
-        
-        
-        
+
+
+
         const int tx = blockIdx.x * blockDim.x + threadIdx.x;
         const int stride = gridDim.x * blockDim.x;
         for (int t = tx; t < rows; t += stride) {
@@ -413,10 +413,10 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
         return;
     }
 
-    
-    if (!(threadIdx.x == 0)) return; 
 
-    
+    if (!(threadIdx.x == 0)) return;
+
+
     const int start_idx = fv + slow - 1;
     for (int t = 0; t < min(start_idx, rows); ++t) {
         out_tm[t * cols + s] = nanf;
@@ -428,7 +428,7 @@ extern "C" __global__ void ppo_many_series_one_param_time_major_f32(
     const double fb = 1.0 - fa;
     const double sb = 1.0 - sa;
 
-    
+
     double slow_sum = 0.0;
     double fast_sum = 0.0;
     const int overlap = slow - fast;
@@ -478,7 +478,7 @@ extern "C" __global__ void ppo_from_ma_batch_f32(
     int row_start,
     float* __restrict__ out)
 {
-    const int r = row_start + blockIdx.y; 
+    const int r = row_start + blockIdx.y;
     if (r >= nf * ns) return;
     const int fi = r / ns;
     const int si = r - fi * ns;

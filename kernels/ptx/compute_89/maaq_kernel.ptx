@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 diffs[];
 
 .visible .entry maaq_batch_f32(
@@ -502,7 +502,7 @@ $L__BB0_47:
 	ret;
 
 }
-	
+
 .visible .entry maaq_multi_series_one_param_f32(
 	.param .u64 maaq_multi_series_one_param_f32_param_0,
 	.param .u32 maaq_multi_series_one_param_f32_param_1,

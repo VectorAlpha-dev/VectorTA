@@ -56,20 +56,20 @@ void ema_batch_f32(const float* __restrict__ prices,
     const float one_minus_alpha = 1.0f - alpha;
     const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    
+
     for (int idx = threadIdx.x; idx < first_valid; idx += blockDim.x) {
         out[base + static_cast<size_t>(idx)] = NAN;
     }
 
-    
+
     if (blockDim.x < 32) {
         if (threadIdx.x != 0) return;
 
-        
+
         int warm_end = first_valid + period;
         if (warm_end > series_len) warm_end = series_len;
 
-        
+
         float mean = prices[first_valid];
         out[base + static_cast<size_t>(first_valid)] = mean;
         int valid_count = 1;
@@ -82,10 +82,10 @@ void ema_batch_f32(const float* __restrict__ prices,
             }
             out[base + static_cast<size_t>(i)] = mean;
         }
-        
+
         float prev = mean;
 #if defined(EMA_USE_L2_PREFETCH)
-        constexpr int PREFETCH_DIST = 64; 
+        constexpr int PREFETCH_DIST = 64;
 #endif
         for (int i = warm_end; i < series_len; ++i) {
 #if defined(EMA_USE_L2_PREFETCH)
@@ -93,7 +93,7 @@ void ema_batch_f32(const float* __restrict__ prices,
 #endif
             const float x = prices[i];
             if (isfinite(x)) {
-                
+
                 prev = __fmaf_rn(x - prev, alpha, prev);
             }
             out[base + static_cast<size_t>(i)] = prev;
@@ -101,20 +101,20 @@ void ema_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    
-    
+
+
     if (threadIdx.x >= 32) return;
 
-    const unsigned lane = static_cast<unsigned>(threadIdx.x); 
+    const unsigned lane = static_cast<unsigned>(threadIdx.x);
     const unsigned mask = 0xffffffffu;
 
-    
+
     int warm_end = first_valid + period;
     if (warm_end > series_len) warm_end = series_len;
 
     float prev = 0.0f;
     if (lane == 0) {
-        
+
         float mean = prices[first_valid];
         out[base + static_cast<size_t>(first_valid)] = mean;
         int valid_count = 1;
@@ -129,11 +129,11 @@ void ema_batch_f32(const float* __restrict__ prices,
         }
         prev = mean;
     }
-    
+
     prev = __shfl_sync(mask, prev, 0);
 
 #if defined(EMA_USE_L2_PREFETCH)
-    constexpr int PREFETCH_DIST = 256; 
+    constexpr int PREFETCH_DIST = 256;
 #endif
     for (int t0 = warm_end; t0 < series_len; t0 += 32) {
 #if defined(EMA_USE_L2_PREFETCH)
@@ -144,7 +144,7 @@ void ema_batch_f32(const float* __restrict__ prices,
 #endif
         const int t = t0 + static_cast<int>(lane);
 
-        
+
         float A = 1.0f;
         float B = 0.0f;
         if (t < series_len) {
@@ -155,9 +155,9 @@ void ema_batch_f32(const float* __restrict__ prices,
             }
         }
 
-        
-        
-        
+
+
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const float A_prev = __shfl_up_sync(mask, A, offset);
             const float B_prev = __shfl_up_sync(mask, B, offset);
@@ -174,7 +174,7 @@ void ema_batch_f32(const float* __restrict__ prices,
             out[base + static_cast<size_t>(t)] = y;
         }
 
-        
+
         const int remaining = series_len - t0;
         const int last_lane = remaining >= 32 ? 31 : (remaining - 1);
         prev = __shfl_sync(mask, y, last_lane);
@@ -202,12 +202,12 @@ void ema_batch_f64_to_f32(const float* __restrict__ prices,
     const double one_minus_alpha = 1.0 - alpha;
     const size_t base = static_cast<size_t>(combo) * static_cast<size_t>(series_len);
 
-    
+
     for (int idx = threadIdx.x; idx < first_valid; idx += blockDim.x) {
         out[base + static_cast<size_t>(idx)] = NAN;
     }
 
-    
+
     if (blockDim.x < 32) {
         if (threadIdx.x != 0) return;
 
@@ -224,7 +224,7 @@ void ema_batch_f64_to_f32(const float* __restrict__ prices,
                 ++valid_count;
                 const double x = static_cast<double>(xf);
                 const double vc = static_cast<double>(valid_count);
-                
+
                 mean = ((vc - 1.0) * mean + x) / vc;
             }
             out[base + static_cast<size_t>(i)] = static_cast<float>(mean);
@@ -235,7 +235,7 @@ void ema_batch_f64_to_f32(const float* __restrict__ prices,
             const float xf = prices[i];
             if (isfinite(xf)) {
                 const double x = static_cast<double>(xf);
-                
+
                 prev = (one_minus_alpha * prev) + (alpha * x);
             }
             out[base + static_cast<size_t>(i)] = static_cast<float>(prev);
@@ -243,7 +243,7 @@ void ema_batch_f64_to_f32(const float* __restrict__ prices,
         return;
     }
 
-    
+
     if (threadIdx.x >= 32) return;
     const unsigned lane = static_cast<unsigned>(threadIdx.x);
     const unsigned mask = 0xffffffffu;
@@ -273,7 +273,7 @@ void ema_batch_f64_to_f32(const float* __restrict__ prices,
     for (int t0 = warm_end; t0 < series_len; t0 += 32) {
         const int t = t0 + static_cast<int>(lane);
 
-        
+
         double A = 1.0;
         double B = 0.0;
         if (t < series_len) {
@@ -284,7 +284,7 @@ void ema_batch_f64_to_f32(const float* __restrict__ prices,
             }
         }
 
-        
+
         for (int offset = 1; offset < 32; offset <<= 1) {
             const double A_prev = __shfl_up_sync(mask, A, offset);
             const double B_prev = __shfl_up_sync(mask, B, offset);
@@ -315,15 +315,15 @@ void ema_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                    int num_series,
                                    int series_len,
                                    float* __restrict__ out_tm) {
-    const int series_idx = blockIdx.x; 
+    const int series_idx = blockIdx.x;
     if (series_idx >= num_series || period <= 0 || series_len <= 0) return;
 
-    const int stride = num_series; 
+    const int stride = num_series;
     int first_valid  = first_valids[series_idx];
     if (first_valid < 0) first_valid = 0;
     if (first_valid >= series_len)    return;
 
-    
+
     for (int t = threadIdx.x; t < first_valid; t += blockDim.x) {
         out_tm[t * stride + series_idx] = NAN;
     }
@@ -371,11 +371,11 @@ void ema_many_series_one_param_f32_coalesced(const float* __restrict__ prices_tm
     const int series_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (series_idx >= num_series || period <= 0 || series_len <= 0) return;
 
-    const int stride      = num_series; 
+    const int stride      = num_series;
     const int first_valid = max(0, first_valids[series_idx]);
     const int warm_end    = min(series_len, first_valid + period);
 
-    
+
     for (int t = 0; t < first_valid; ++t) {
         out_tm[t * stride + series_idx] = NAN;
     }

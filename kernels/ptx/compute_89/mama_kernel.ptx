@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry mama_inv_dp_f32(
 	.param .u64 mama_inv_dp_f32_param_0,
@@ -363,7 +363,7 @@ $L__BB0_28:
 	ret;
 
 }
-	
+
 .visible .entry mama_batch_from_inv_dp_f32(
 	.param .u64 mama_batch_from_inv_dp_f32_param_0,
 	.param .u64 mama_batch_from_inv_dp_f32_param_1,
@@ -914,7 +914,7 @@ $L__BB1_36:
 	bra.uni 	$L__BB1_57;
 
 }
-	
+
 .visible .entry mama_batch_f32(
 	.param .u64 mama_batch_f32_param_0,
 	.param .u64 mama_batch_f32_param_1,
@@ -1849,7 +1849,7 @@ $L__BB2_49:
 	bra.uni 	$L__BB2_49;
 
 }
-	
+
 .visible .entry mama_many_series_one_param_f32(
 	.param .u64 mama_many_series_one_param_f32_param_0,
 	.param .f32 mama_many_series_one_param_f32_param_1,

@@ -37,8 +37,8 @@ static __device__ __forceinline__ float trendflex_round_half(float v) {
 
 static __device__ __forceinline__ float inv_sqrt_pos(float x) {
 #if TRENDFLEX_USE_RSQRT_NR
-    
-    
+
+
     float y = rsqrtf(x);
     y = y * (1.5f - 0.5f * x * y * y);
     return y;
@@ -71,7 +71,7 @@ extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
     if (ss_period < 1) ss_period = 1;
     if (tail_len < ss_period) return;
 
-    
+
     const double PI    = 3.1415926535897932384626433832795;
     const double ROOT2 = 1.4142135623730951;
 
@@ -95,14 +95,14 @@ extern "C" __global__ void trendflex_batch_f32(const float* __restrict__ prices,
 #endif
     if (warm >= series_len) return;
 
-    
+
     extern __shared__ __align__(16) unsigned char shraw[];
     float* __restrict__ sh = reinterpret_cast<float*>(shraw);
     float* __restrict__ ring = sh + (size_t)threadIdx.x * (size_t)max_period;
 
     const int fidx = first_valid;
 
-    
+
     double prev2 = (double)prices[fidx];
     ring[0] = (float)prev2;
     double rolling_sum = (double)ring[0];
@@ -200,7 +200,7 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
     const float  b      = (float)b_d;
     const float  c      = (float)c_d;
 
-    
+
     auto at = [stride, series](int row) { return row * stride + series; };
 
     const int warm = first_valid + period;
@@ -212,15 +212,15 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
 #endif
     if (warm >= series_len) return;
 
-    
+
     const int fidx = first_valid;
 
-    
+
     float prev2 = prices_tm[at(fidx)];
     ssf_tm[at(fidx)] = prev2;
     float rolling_sum = prev2;
 
-    
+
     float prev1, prev_price;
     if (tail_len > 1) {
         const float p1 = prices_tm[at(fidx + 1)];
@@ -232,7 +232,7 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
         return;
     }
 
-    
+
     for (int t = 2; t < period; ++t) {
         const float cur_price = prices_tm[at(fidx + t)];
         const float ss = fmaf(c, (cur_price + prev_price),
@@ -244,7 +244,7 @@ extern "C" __global__ void trendflex_many_series_one_param_f32(
         prev_price = cur_price;
     }
 
-    
+
     const float tp_f   = (float)period;
     const float inv_tp = 1.0f / tp_f;
     float ms_prev = 0.0f;

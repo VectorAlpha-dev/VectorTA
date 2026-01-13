@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry chande_batch_f32(
 	.param .u64 chande_batch_f32_param_0,
@@ -653,7 +653,7 @@ $L__BB0_66:
 	ret;
 
 }
-	
+
 .visible .entry chande_batch_from_tr_f32(
 	.param .u64 chande_batch_from_tr_f32_param_0,
 	.param .u64 chande_batch_from_tr_f32_param_1,
@@ -1123,7 +1123,7 @@ $L__BB1_45:
 	ret;
 
 }
-	
+
 .visible .entry chande_many_series_one_param_f32(
 	.param .u64 chande_many_series_one_param_f32_param_0,
 	.param .u64 chande_many_series_one_param_f32_param_1,
@@ -1897,7 +1897,7 @@ $L__BB2_66:
 	ret;
 
 }
-	
+
 .visible .entry chande_one_series_many_params_f32(
 	.param .u64 chande_one_series_many_params_f32_param_0,
 	.param .u64 chande_one_series_many_params_f32_param_1,
@@ -2313,7 +2313,7 @@ $L__BB3_47:
 	ret;
 
 }
-	
+
 .visible .entry chande_one_series_many_params_from_tr_f32(
 	.param .u64 chande_one_series_many_params_from_tr_f32_param_0,
 	.param .u64 chande_one_series_many_params_from_tr_f32_param_1,

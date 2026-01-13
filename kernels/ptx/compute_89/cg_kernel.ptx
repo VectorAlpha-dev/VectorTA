@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry cg_batch_f32(
 	.param .u64 cg_batch_f32_param_0,
@@ -966,7 +966,7 @@ $L__BB0_9:
 	bra.uni 	$L__BB0_9;
 
 }
-	
+
 .visible .entry cg_many_series_one_param_f32(
 	.param .u64 cg_many_series_one_param_f32_param_0,
 	.param .u64 cg_many_series_one_param_f32_param_1,
@@ -2416,7 +2416,7 @@ $L__BB1_17:
 	bra.uni 	$L__BB1_17;
 
 }
-	
+
 .visible .entry cg_prefix_prepare_f32(
 	.param .u64 cg_prefix_prepare_f32_param_0,
 	.param .u32 cg_prefix_prepare_f32_param_1,
@@ -2598,7 +2598,7 @@ $L__BB2_22:
 	ret;
 
 }
-	
+
 .visible .entry cg_batch_f32_from_prefix(
 	.param .u64 cg_batch_f32_from_prefix_param_0,
 	.param .u64 cg_batch_f32_from_prefix_param_1,

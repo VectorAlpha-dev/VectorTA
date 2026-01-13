@@ -2988,7 +2988,7 @@ pub fn halftrend_batch_py<'py>(
     let h = high.as_slice()?;
     let l = low.as_slice()?;
     let c = close.as_slice()?;
-    let kern = validate_kernel(kernel, /*batch=*/ true)?;
+    let kern = validate_kernel(kernel, true)?;
 
     let mut range = HalfTrendBatchRange::default();
     if let (Some(s), Some(e), Some(st)) = (amplitude_start, amplitude_end, amplitude_step) {

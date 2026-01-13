@@ -7,7 +7,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -33,7 +33,7 @@ def _cuda_available() -> bool:
             mode='tradition_mg',
             use_volume=False,
         )
-        _ = cp.asarray(out['wavetrend'])  
+        _ = cp.asarray(out['wavetrend'])
         return True
     except Exception as e:
         msg = str(e).lower()
@@ -53,10 +53,10 @@ class TestModGodModeCuda:
         n1, n2, n3 = 17, 6, 4
         mode = 'tradition_mg'
 
-        
+
         wt_cpu, sig_cpu, hist_cpu = ti.mod_god_mode(h, l, c, None, n1, n2, n3, mode, False)
 
-        
+
         out = ti.mod_god_mode_cuda_batch_dev(
             h.astype(np.float32), l.astype(np.float32), c.astype(np.float32),
             (n1, n1, 0), (n2, n2, 0), (n3, n3, 0), mode, False
@@ -65,7 +65,7 @@ class TestModGodModeCuda:
         sig = cp.asnumpy(cp.asarray(out['signal']))[0]
         hist = cp.asnumpy(cp.asarray(out['histogram']))[0]
 
-        
+
         assert_close(wt, wt_cpu, rtol=8e-3, atol=1e-3, msg='wt mismatch')
         assert_close(sig, sig_cpu, rtol=8e-3, atol=1e-3, msg='sig mismatch')
         assert_close(hist, hist_cpu, rtol=8e-3, atol=1e-3, msg='hist mismatch')

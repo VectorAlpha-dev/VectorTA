@@ -27,11 +27,11 @@
 
 
 #ifndef BA_ENABLE_L2_PREFETCH
-#define BA_ENABLE_L2_PREFETCH 1   
+#define BA_ENABLE_L2_PREFETCH 1
 #endif
 
 #ifndef BA_EXP2_NR_STEPS
-#define BA_EXP2_NR_STEPS 1        
+#define BA_EXP2_NR_STEPS 1
 #endif
 
 __device__ __forceinline__ float qnan32() {
@@ -75,21 +75,21 @@ __device__ __forceinline__ f2 sub_f2(f2 x, f2 y) {
 }
 
 __device__ __forceinline__ float div_f2(f2 n, f2 d) {
-    
+
     if (d.hi == 0.0f && d.lo == 0.0f) return 0.0f;
-    
+
     float rcp = __frcp_rn(d.hi);
 #if BA_EXP2_NR_STEPS >= 1
     rcp = fmaf(rcp, (2.0f - d.hi * rcp), 0.0f);
 #endif
-    
+
     float q0 = n.hi * rcp;
     float r  = fmaf(-q0, d.hi, n.hi);
     r        = fmaf(-q0, d.lo, r);
     r       += n.lo;
     float q1 = r * rcp;
 #if BA_EXP2_NR_STEPS >= 2
-    
+
     float r2 = fmaf(-(q0 + q1), d.hi, n.hi);
     r2       = fmaf(-(q0 + q1), d.lo, r2);
     r2      += n.lo;
@@ -126,7 +126,7 @@ extern "C" __global__ void buff_averages_batch_prefix_f32(
         float so = qnan32();
 
 #if BA_ENABLE_L2_PREFETCH
-        
+
         int t_pref = t + stride;
         if (t_pref + 1 < len + 1) {
             const float* p0 = prefix_pv + (t_pref + 1);
@@ -270,15 +270,15 @@ extern "C" __global__ void buff_averages_batch_prefix_tiled_f32_tile512(
 
 
 extern "C" __global__ void buff_averages_many_series_one_param_f32(
-    const float* __restrict__ pv_prefix_tm,  
-    const float* __restrict__ vv_prefix_tm,  
+    const float* __restrict__ pv_prefix_tm,
+    const float* __restrict__ vv_prefix_tm,
     int fast_period,
     int slow_period,
     int num_series,
     int series_len,
     const int* __restrict__ first_valids,
-    float* __restrict__ fast_out_tm,         
-    float* __restrict__ slow_out_tm) {       
+    float* __restrict__ fast_out_tm,
+    float* __restrict__ slow_out_tm) {
     const int series = blockIdx.y;
     if (series >= num_series) return;
     if (fast_period <= 0 || slow_period <= 0) return;
@@ -317,8 +317,8 @@ extern "C" __global__ void buff_averages_many_series_one_param_f32(
 
 template<int TX, int TY>
 __device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_impl(
-    const float* __restrict__ pv_prefix_tm,  
-    const float* __restrict__ vv_prefix_tm,  
+    const float* __restrict__ pv_prefix_tm,
+    const float* __restrict__ vv_prefix_tm,
     int fast_period,
     int slow_period,
     int num_series,
@@ -395,22 +395,22 @@ extern "C" __global__ void buff_averages_many_series_one_param_tiled2d_f32_tx128
 
 template<int SX, int TY>
 __device__ __forceinline__ void buff_averages_many_series_one_param_tiled2d_swizzled_f32(
-    const float* __restrict__ pv_prefix_tm,  
-    const float* __restrict__ vv_prefix_tm,  
+    const float* __restrict__ pv_prefix_tm,
+    const float* __restrict__ vv_prefix_tm,
     int fast_period,
     int slow_period,
     int num_series,
     int series_len,
     const int* __restrict__ first_valids,
-    float* __restrict__ fast_out_tm,         
+    float* __restrict__ fast_out_tm,
     float* __restrict__ slow_out_tm) {
 
     if (fast_period <= 0 || slow_period <= 0) return;
 
-    const int s = blockIdx.y * SX + threadIdx.x;   
+    const int s = blockIdx.y * SX + threadIdx.x;
     if (s >= num_series) return;
 
-    const int t = blockIdx.x * TY + threadIdx.y;   
+    const int t = blockIdx.x * TY + threadIdx.y;
     if (t >= series_len) return;
 
     const int warm = first_valids[s] + slow_period - 1;

@@ -75,24 +75,24 @@ void compute_log_returns_f32(const float* __restrict__ prices,
 
 extern "C" __global__
 void double_cross_backtest_tm_flex_f32(
-    const float* __restrict__ fast_ma_T,   
-    const float* __restrict__ slow_ma_T,   
-    const float* __restrict__ lr,          
+    const float* __restrict__ fast_ma_T,
+    const float* __restrict__ slow_ma_T,
+    const float* __restrict__ lr,
 
     int T,
     int Pf_tile, int Ps_tile,
     int Pf_total, int Ps_total,
-    int f_offset, int s_offset,            
+    int f_offset, int s_offset,
 
-    const int* __restrict__ fast_periods,  
-    const int* __restrict__ slow_periods,  
+    const int* __restrict__ fast_periods,
+    const int* __restrict__ slow_periods,
     int first_valid,
 
-    float commission,                      
-    float eps_rel,                         
-    unsigned int flags,                    
+    float commission,
+    float eps_rel,
+    unsigned int flags,
     int M,
-    float* __restrict__ metrics_out        
+    float* __restrict__ metrics_out
 ){
     const float log_comm = (commission > 0.0f) ? log1pf(-commission) : 0.0f;
 
@@ -137,8 +137,8 @@ void double_cross_backtest_tm_flex_f32(
             continue;
         }
 
-        int   pos         = 0;      
-        float log_eq      = 0.0f;   
+        int   pos         = 0;
+        float log_eq      = 0.0f;
         float log_peak    = 0.0f;
         float max_dd      = 0.0f;
         int   trades      = 0;
@@ -165,11 +165,11 @@ void double_cross_backtest_tm_flex_f32(
                     pos = (sign == 0) ? 0 : sign;
                 } else {
                     if (flags & STRAT_NO_FLIP) {
-                        if (commission > 0.0f) log_eq += log_comm; 
+                        if (commission > 0.0f) log_eq += log_comm;
                         trades += 1;
                         pos = 0;
                     } else {
-                        if (commission > 0.0f) log_eq += 2.0f * log_comm; 
+                        if (commission > 0.0f) log_eq += 2.0f * log_comm;
                         trades += 2;
                         pos = sign;
                     }
@@ -197,12 +197,12 @@ void double_cross_backtest_tm_flex_f32(
         const float exposure = (n > 0) ? (float)((double)sum_abs_pos / (double)n) : 0.0f;
         const float net_expo = (n > 0) ? (float)((double)sum_pos / (double)n)     : 0.0f;
 
-        if (M > 0) metrics_out[base + 0] = expf(log_eq) - 1.0f; 
-        if (M > 1) metrics_out[base + 1] = (float)trades;       
-        if (M > 2) metrics_out[base + 2] = max_dd;              
-        if (M > 3) metrics_out[base + 3] = mean;                
-        if (M > 4) metrics_out[base + 4] = sqrtf(variance);     
-        if (M > 5) metrics_out[base + 5] = exposure;            
+        if (M > 0) metrics_out[base + 0] = expf(log_eq) - 1.0f;
+        if (M > 1) metrics_out[base + 1] = (float)trades;
+        if (M > 2) metrics_out[base + 2] = max_dd;
+        if (M > 3) metrics_out[base + 3] = mean;
+        if (M > 4) metrics_out[base + 4] = sqrtf(variance);
+        if (M > 5) metrics_out[base + 5] = exposure;
         if (M > 6) metrics_out[base + 6] = (flags & STRAT_SIGNED_EXPOSURE) ? net_expo : 0.0f;
     }
 }

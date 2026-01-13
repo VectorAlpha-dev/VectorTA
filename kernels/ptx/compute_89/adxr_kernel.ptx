@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 smem[];
 
 .visible .entry adxr_batch_f32(
@@ -904,7 +904,7 @@ $L__BB0_53:
 	bra.uni 	$L__BB0_98;
 
 }
-	
+
 .visible .entry adxr_many_series_one_param_f32(
 	.param .u64 adxr_many_series_one_param_f32_param_0,
 	.param .u64 adxr_many_series_one_param_f32_param_1,
@@ -1831,7 +1831,7 @@ $L__BB1_53:
 	bra.uni 	$L__BB1_98;
 
 }
-	
+
 .visible .entry adxr_one_series_many_params_f32_opt(
 	.param .u64 adxr_one_series_many_params_f32_opt_param_0,
 	.param .u64 adxr_one_series_many_params_f32_opt_param_1,
@@ -2552,7 +2552,7 @@ $L__BB2_72:
 	ret;
 
 }
-	
+
 .visible .entry adxr_many_series_one_param_time_major_f32_opt(
 	.param .u64 adxr_many_series_one_param_time_major_f32_opt_param_0,
 	.param .u64 adxr_many_series_one_param_time_major_f32_opt_param_1,

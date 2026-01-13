@@ -415,7 +415,7 @@ impl CudaRvi {
                     first_valid,
                     count,
                     max_ma_len,
-                    /*row_offset=*/ 0 + start,
+                    0 + start,
                     shmem_stddev,
                     &mut d_out,
                 )?;
@@ -476,7 +476,7 @@ impl CudaRvi {
                     count,
                     max_period,
                     max_ma_len,
-                    /*row_offset=*/ rows_std + start,
+                    rows_std + start,
                     shmem_mad,
                 )?;
             }
@@ -524,7 +524,7 @@ impl CudaRvi {
                     count,
                     max_period,
                     max_ma_len,
-                    /*row_offset=*/ start,
+                    start,
                     shmem_all,
                 )?;
             }

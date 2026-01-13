@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 .extern .shared .align 16 .b8 smem_raw[];
 
 .visible .entry mod_god_mode_batch_f32(
@@ -1667,7 +1667,7 @@ $L__BB0_208:
 	ret;
 
 }
-	
+
 .visible .entry mod_god_mode_many_series_one_param_time_major_f32(
 	.param .u64 mod_god_mode_many_series_one_param_time_major_f32_param_0,
 	.param .u64 mod_god_mode_many_series_one_param_time_major_f32_param_1,
@@ -2903,7 +2903,7 @@ $L__BB1_116:
 	ret;
 
 }
-	
+
 .visible .entry mod_god_mode_batch_f32_shared_fast(
 	.param .u64 mod_god_mode_batch_f32_shared_fast_param_0,
 	.param .u64 mod_god_mode_batch_f32_shared_fast_param_1,

@@ -4,7 +4,7 @@
 
 
 #include <cuda_runtime.h>
-#include <math_constants.h>  
+#include <math_constants.h>
 
 
 struct dsfloat {
@@ -25,13 +25,13 @@ __device__ __forceinline__ void ds_renorm(dsfloat& a, float t) {
 
 
 __device__ __forceinline__ dsfloat ds_add(dsfloat a, dsfloat b) {
-    
+
     float s  = a.hi + b.hi;
     float bb = s - a.hi;
     float err = (a.hi - (s - bb)) + (b.hi - bb);
-    
+
     float t = a.lo + b.lo + err;
-    
+
     dsfloat r;
     r.hi = s + t;
     r.lo = t - (r.hi - s);
@@ -41,8 +41,8 @@ __device__ __forceinline__ dsfloat ds_add(dsfloat a, dsfloat b) {
 
 __device__ __forceinline__ dsfloat ds_mul_scalar(dsfloat a, float b) {
     float p = a.hi * b;
-    float e = fmaf(a.hi, b, -p);     
-    float t = a.lo * b + e;          
+    float e = fmaf(a.hi, b, -p);
+    float t = a.lo * b + e;
     dsfloat r;
     r.hi = p + t;
     r.lo = t - (r.hi - p);
@@ -64,27 +64,27 @@ extern "C" __global__ void nvi_batch_f32(
 {
     if (len <= 0) return;
 
-    
-    
+
+
     if (blockIdx.x != 0) return;
-    
-    
+
+
     const int lane = threadIdx.x & 31;
     if (threadIdx.x >= 16) return;
     const unsigned mask = 0x0000ffffu;
 
     const int fv = first_valid < 0 ? 0 : first_valid;
 
-    
+
     const float nan_f = CUDART_NAN_F;
     for (int i = lane; i < fv && i < len; i += 16) out[i] = nan_f;
     if (fv >= len) return;
 
-    
+
     if (lane == 0) out[fv] = 1000.0f;
     if (fv + 1 >= len) return;
 
-    double nvi0 = 1000.0; 
+    double nvi0 = 1000.0;
 
     for (int t0 = fv + 1; t0 < len; t0 += 16) {
         const int i = t0 + lane;
@@ -100,7 +100,7 @@ extern "C" __global__ void nvi_batch_f32(
             }
         }
 
-        
+
         double prefix = f;
         for (int offset = 1; offset < 16; offset <<= 1) {
             double other = __shfl_up_sync(mask, prefix, offset, 16);
@@ -117,33 +117,33 @@ extern "C" __global__ void nvi_batch_f32(
 
 
 extern "C" __global__ void nvi_many_series_one_param_f32(
-    const float* __restrict__ close_tm,   
-    const float* __restrict__ volume_tm,  
+    const float* __restrict__ close_tm,
+    const float* __restrict__ volume_tm,
     int cols,
     int rows,
-    const int* __restrict__ first_valids, 
-    float* __restrict__ out_tm)           
+    const int* __restrict__ first_valids,
+    float* __restrict__ out_tm)
 {
     if (rows <= 0 || cols <= 0) return;
     const float nan_f = CUDART_NAN_F;
 
-    
+
     for (int s = blockIdx.x * blockDim.x + threadIdx.x;
          s < cols;
          s += blockDim.x * gridDim.x)
     {
         const int fv = first_valids[s] < 0 ? 0 : first_valids[s];
 
-        
+
         if (fv >= rows) {
             for (int t = 0; t < rows; ++t) out_tm[t * cols + s] = nan_f;
             continue;
         }
 
-        
+
         for (int t = 0; t < fv; ++t) out_tm[t * cols + s] = nan_f;
 
-        
+
         dsfloat nvi = ds_make(1000.0f);
         out_tm[fv * cols + s] = ds_to_float(nvi);
         if (fv + 1 >= rows) continue;

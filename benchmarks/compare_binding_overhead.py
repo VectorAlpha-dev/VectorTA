@@ -11,12 +11,12 @@ import csv
 csv_path = Path(__file__).parent.parent / 'src/data/1MillionCandles.csv'
 closes = []
 with open(csv_path, 'r') as f:
-    f.readline()  
+    f.readline()
     reader = csv.reader(f)
     for row in reader:
         if len(row) >= 7:
             try:
-                closes.append(float(row[4]))  
+                closes.append(float(row[4]))
             except ValueError:
                 continue
 
@@ -25,21 +25,21 @@ print(f"Loaded {len(data)} candles from CSV\n")
 
 def benchmark_indicator(name, func, *args, **kwargs):
     """Benchmark a single indicator function."""
-    
+
     for _ in range(10):
         _ = func(data, *args, **kwargs)
-    
-    
+
+
     times = []
     for _ in range(100):
         start = time.perf_counter()
         _ = func(data, *args, **kwargs)
         times.append(time.perf_counter() - start)
-    
+
     times_ms = [t * 1000 for t in times]
     times_ms.sort()
     median = times_ms[len(times_ms) // 2]
-    
+
     print(f"{name}:")
     print(f"  Median: {median:.3f} ms")
     print(f"  Min: {min(times_ms):.3f} ms")

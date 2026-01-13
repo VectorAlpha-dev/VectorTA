@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -25,7 +25,7 @@ def _cuda_available() -> bool:
         handle = ti.dema_cuda_batch_dev(sample, period_range=(3, 3, 0))
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
@@ -52,7 +52,7 @@ class TestDemaCuda:
         gpu = cp.asarray(handle)
         gpu_first = cp.asnumpy(gpu)[0]
 
-        
+
         assert_close(gpu_first, cpu, rtol=5e-6, atol=5e-7, msg="DEMA CUDA batch vs CPU mismatch")
 
     def test_dema_cuda_matches_rust_last5(self, test_data):
@@ -60,7 +60,7 @@ class TestDemaCuda:
         close = test_data["close"]
         period = 30
 
-        
+
         expected_last5 = np.array([
             59189.73193987478,
             59129.24920772847,
@@ -75,7 +75,7 @@ class TestDemaCuda:
         )
         gpu = cp.asnumpy(cp.asarray(handle))[0]
 
-        
+
         assert_close(gpu[-5:], expected_last5, rtol=1e-6, atol=2e-6, msg="DEMA CUDA last-5 mismatch vs Rust ref")
 
     def test_dema_cuda_batch_multiple_periods(self, test_data):

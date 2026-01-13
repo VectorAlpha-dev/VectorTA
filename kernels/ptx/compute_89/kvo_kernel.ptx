@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry kvo_batch_f32(
 	.param .u64 kvo_batch_f32_param_0,
@@ -451,7 +451,7 @@ $L__BB0_53:
 	ret;
 
 }
-	
+
 .visible .entry kvo_many_series_one_param_time_major_f32(
 	.param .u64 kvo_many_series_one_param_time_major_f32_param_0,
 	.param .u64 kvo_many_series_one_param_time_major_f32_param_1,

@@ -30,7 +30,7 @@
    - 10k: 3.48x speedup
    - 100k: 2.81x speedup
    - 1M: 2.18x speedup
-   
+
    This shows the zero-copy optimization is working correctly.
 
 ## Conclusion

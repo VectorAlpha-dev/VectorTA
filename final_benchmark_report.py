@@ -21,18 +21,18 @@ PERIOD = 14
 
 def benchmark_python(ma_type, iterations=ITERATIONS):
     """Benchmark Python binding performance"""
-    
+
     for _ in range(10):
         _ = ta.ma(data, ma_type, PERIOD)
-    
-    
+
+
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
         _ = ta.ma(data, ma_type, PERIOD)
         elapsed = (time.perf_counter() - start) * 1000
         times.append(elapsed)
-    
+
     times.sort()
     return {
         'median': times[len(times) // 2],
@@ -74,11 +74,11 @@ for ma_type in MA_TYPES:
     rust_time = rust_results[ma_type]
     python_time = python_results[ma_type]['median']
     overhead = ((python_time - rust_time) / rust_time) * 100
-    
+
     status = "PASS (<10%)" if overhead < 10 else "FAIL (>10%)"
     if overhead >= 10:
         all_pass = False
-    
+
     print(f"{ma_type:>7} | {rust_time:9.2f} | {python_time:11.2f} | {overhead:10.1f}% | {status}")
 
 

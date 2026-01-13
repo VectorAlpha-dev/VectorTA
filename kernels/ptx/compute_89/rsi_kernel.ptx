@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 .visible .entry rsi_batch_f32(
 	.param .u64 rsi_batch_f32_param_0,
@@ -629,7 +629,7 @@ $L__BB0_75:
 	ret;
 
 }
-	
+
 .visible .entry rsi_many_series_one_param_f32(
 	.param .u64 rsi_many_series_one_param_f32_param_0,
 	.param .u64 rsi_many_series_one_param_f32_param_1,

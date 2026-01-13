@@ -1,16 +1,4 @@
 @echo off
-REM Build and run Python CUDA benchmarks
-REM Usage:
-REM   run_cuda_python_benchmarks.bat           -> run all CUDA python benches (ALMA, WMA, SuperSmoother3Pole, TrAdjEMA)
-REM   run_cuda_python_benchmarks.bat alma      -> run only ALMA CUDA python benches
-REM   run_cuda_python_benchmarks.bat wma       -> run only WMA CUDA python benches
-REM   run_cuda_python_benchmarks.bat epma      -> run only EPMA CUDA python benches
-REM   run_cuda_python_benchmarks.bat highpass  -> run only HighPass CUDA python benches
-REM   run_cuda_python_benchmarks.bat sinwma    -> run only SINWMA CUDA python benches
-REM   run_cuda_python_benchmarks.bat kama      -> run only KAMA CUDA python benches
-REM   run_cuda_python_benchmarks.bat nama      -> run only NAMA CUDA python benches
-REM   run_cuda_python_benchmarks.bat ss3p      -> run only SuperSmoother 3-Pole CUDA python benches
-REM   run_cuda_python_benchmarks.bat tradjema  -> run only TrAdjEMA CUDA python benches
 
 setlocal enabledelayedexpansion
 
@@ -28,7 +16,6 @@ call .venv\Scripts\activate.bat || goto :fail
 .venv\Scripts\python.exe -m pip install --upgrade pip --quiet
 .venv\Scripts\python.exe -m pip install maturin numpy --quiet
 
-REM Clean any existing installed module to avoid stale symbols
 .venv\Scripts\python.exe -c "import sys,shutil,pathlib; site=[p for p in sys.path if p.endswith('site-packages')][0]; [shutil.rmtree(str(p), ignore_errors=True) for pat in ('my_project*','ta_indicators*') for p in pathlib.Path(site).glob(pat)]"
 
 echo Building Python module (python+cuda)...

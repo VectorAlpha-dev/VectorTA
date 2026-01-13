@@ -75,12 +75,12 @@ void vwap_batch_f32(const long long* __restrict__ timestamps,
     if (combo >= n_combos) return;
 
     const int count = counts[combo];
-    const int unit = unit_codes[combo]; 
+    const int unit = unit_codes[combo];
     long long divisor = divisors[combo];
     int warm = first_valids[combo];
 
     const int base = combo * series_len;
-    const float nan = __int_as_float(0x7fffffff); 
+    const float nan = __int_as_float(0x7fffffff);
 
     if (count <= 0 || series_len <= 0) {
         for (int t = threadIdx.x; t < series_len; t += BLOCK_THREADS) {
@@ -185,10 +185,10 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
                                      const float* __restrict__ volumes_tm,
                                      const float* __restrict__ prices_tm,
                                      int count,
-                                     int unit_code,           
-                                     long long divisor,       
-                                     const int* __restrict__ first_valids, 
-                                     const int* __restrict__ month_ids,    
+                                     int unit_code,
+                                     long long divisor,
+                                     const int* __restrict__ first_valids,
+                                     const int* __restrict__ month_ids,
                                      int num_series,
                                      int series_len,
                                      float* __restrict__ out_tm)
@@ -201,9 +201,9 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
     if (warm < 0) warm = 0;
     if (warm > series_len) warm = series_len;
 
-    const float nan = __int_as_float(0x7fffffff); 
+    const float nan = __int_as_float(0x7fffffff);
 
-    
+
     for (int t = 0; t < warm; ++t)
         out_tm[t * num_series + series_idx] = nan;
 
@@ -214,8 +214,8 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
     const long long div  = (unit_code != 3 && divisor > 0) ? divisor : 1;
 
     long long current_gid = LLONG_MIN;
-    long long next_boundary_ll = LLONG_MIN; 
-    int       next_boundary_i  = INT_MIN;   
+    long long next_boundary_ll = LLONG_MIN;
+    int       next_boundary_i  = INT_MIN;
 
     long long last_ts = LLONG_MIN;
     bool monotonic_ts = true;
@@ -282,7 +282,7 @@ void vwap_multi_series_one_param_f32(const long long* __restrict__ timestamps,
         const float pr  = ld_ro(&prices_tm[idx]);
 
         volume_sum    += vol;
-        vol_price_sum  = fmaf(vol, pr, vol_price_sum); 
+        vol_price_sum  = fmaf(vol, pr, vol_price_sum);
 
         out_tm[idx] = (volume_sum > 0.0f) ? (vol_price_sum / volume_sum) : nan;
     }

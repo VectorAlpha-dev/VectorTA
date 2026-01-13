@@ -49,25 +49,25 @@ void rocp_batch_f32(const float* __restrict__ data,
 
     const int base = row * len;
 
-    const int start = first_valid + period; 
+    const int start = first_valid + period;
 
-    
+
     const int warm = (start < len) ? start : len;
     for (int t = threadIdx.x; t < warm; t += blockDim.x) {
         out[base + t] = ROCP_QNAN;
     }
 
-    if (start >= len) return; 
+    if (start >= len) return;
 
-    
+
     int t = start + threadIdx.x;
     const int stride = blockDim.x;
 
-    
+
     for (; t + 3*stride < len; t += 4*stride) {
         const float c0  = data[t];
         const float ip0 = inv[t - period];
-        out[base + t] = fmaf(c0, ip0, -1.0f); 
+        out[base + t] = fmaf(c0, ip0, -1.0f);
 
         const int t1 = t + stride;
         const float c1  = data[t1];
@@ -85,7 +85,7 @@ void rocp_batch_f32(const float* __restrict__ data,
         out[base + t3] = fmaf(c3, ip3, -1.0f);
     }
 
-    
+
     for (; t < len; t += stride) {
         const float c  = data[t];
         const float ip = inv[t - period];
@@ -108,31 +108,31 @@ void rocp_many_series_one_param_f32(const float* __restrict__ data_tm,
                                     int rows,
                                     int period,
                                     float* __restrict__ out) {
-    const int s = blockIdx.x * blockDim.x + threadIdx.x; 
+    const int s = blockIdx.x * blockDim.x + threadIdx.x;
     if (s >= cols || period <= 0) return;
 
     const int first = firsts[s];
     if (first >= rows) {
-        
+
         for (int t = 0; t < rows; ++t) {
             out[t * cols + s] = ROCP_QNAN;
         }
         return;
     }
 
-    const int warm = first + period; 
-    
+    const int warm = first + period;
+
     const int limit = (warm < rows) ? warm : rows;
     for (int t = 0; t < limit; ++t) {
         out[t * cols + s] = ROCP_QNAN;
     }
     if (warm >= rows) return;
 
-    
+
     for (int t = warm; t < rows; ++t) {
         const float c = data_tm[t * cols + s];
         const float p = data_tm[(t - period) * cols + s];
-        out[t * cols + s] = (c - p) / p; 
+        out[t * cols + s] = (c - p) / p;
     }
 }
 

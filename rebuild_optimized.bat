@@ -1,5 +1,4 @@
 @echo off
-REM Rebuild with maximum optimizations
 
 echo Cleaning previous builds...
 cargo clean

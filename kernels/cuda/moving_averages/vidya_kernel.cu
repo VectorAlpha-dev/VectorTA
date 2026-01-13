@@ -36,7 +36,7 @@ void vidya_batch_f32(const float* __restrict__ prices,
     const float alpha = alphas[combo];
     const int base = combo * series_len;
 
-    
+
     bool invalid = (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
                    (first_valid < 0) || (first_valid >= series_len) ||
                    (lp > (series_len - first_valid));
@@ -48,19 +48,19 @@ void vidya_batch_f32(const float* __restrict__ prices,
         return;
     }
 
-    const int warm_end = first_valid + lp; 
+    const int warm_end = first_valid + lp;
     const int idx_m2 = warm_end - 2;
     const int idx_m1 = warm_end - 1;
-    const int warmup_prefix = idx_m2; 
+    const int warmup_prefix = idx_m2;
 
-    
+
     for (int i = threadIdx.x; i < warmup_prefix; i += blockDim.x) {
         out[base + i] = CUDART_NAN_F;
     }
 
     if (threadIdx.x != 0) return;
 
-    
+
     double long_sum = 0.0;
     double long_sum2 = 0.0;
     double short_sum = 0.0;
@@ -80,7 +80,7 @@ void vidya_batch_f32(const float* __restrict__ prices,
         short_sum2 += x * x;
     }
 
-    
+
     float val = prices[idx_m2];
     out[base + idx_m2] = val;
 
@@ -101,18 +101,18 @@ void vidya_batch_f32(const float* __restrict__ prices,
         out[base + idx_m1] = val;
     }
 
-    
+
     for (int t = warm_end; t < series_len; ++t) {
         const double x_new = static_cast<double>(prices[t]);
         const double x_new2 = x_new * x_new;
 
-        
+
         long_sum += x_new;
         long_sum2 += x_new2;
         short_sum += x_new;
         short_sum2 += x_new2;
 
-        
+
         const double x_long_out = static_cast<double>(prices[t - lp]);
         const double x_short_out = static_cast<double>(prices[t - sp]);
         long_sum -= x_long_out;
@@ -278,7 +278,7 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
                                      int num_series,
                                      int series_len,
                                      float* __restrict__ out_tm) {
-    const int series_idx = blockIdx.x; 
+    const int series_idx = blockIdx.x;
     if (series_idx >= num_series || series_len <= 0) return;
 
     const int sp = short_period;
@@ -289,7 +289,7 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const bool invalid = (sp < 2) || (lp < sp) || (lp < 2) || (alpha < 0.0f) || (alpha > 1.0f) ||
                          (lp > (series_len - first_valid));
-    const int stride = num_series; 
+    const int stride = num_series;
 
     if (invalid) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
@@ -302,14 +302,14 @@ void vidya_many_series_one_param_f32(const float* __restrict__ prices_tm,
     const int idx_m2 = warm_end - 2;
     const int idx_m1 = warm_end - 1;
 
-    
+
     for (int t = threadIdx.x; t < idx_m2; t += blockDim.x) {
         out_tm[t * stride + series_idx] = CUDART_NAN_F;
     }
 
     if (threadIdx.x != 0) return;
 
-    
+
     double long_sum = 0.0;
     double long_sum2 = 0.0;
     double short_sum = 0.0;

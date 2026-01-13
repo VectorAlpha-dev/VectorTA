@@ -58,7 +58,7 @@ def find_indicator_file(indicator: str) -> Path:
     candidates = list((REPO_ROOT / "src/indicators").rglob(f"{indicator}.rs"))
     if not candidates:
         die(f"could not find src/indicators/**/{indicator}.rs")
-    
+
     candidates.sort(key=lambda p: len(str(p)))
     return candidates[0]
 
@@ -94,7 +94,7 @@ def detect_python_tests(indicator: str) -> Tuple[List[Path], List[Path]]:
     if exact_cuda.exists():
         cuda.append(exact_cuda)
 
-    
+
     call_cpu = re.compile(rf"\b(?:my_project|ta_indicators|ti)\.{re.escape(indicator)}\s*\(")
     call_cuda = re.compile(rf"\b(?:my_project|ta_indicators|ti)\.{re.escape(indicator)}_cuda")
 
@@ -116,11 +116,11 @@ def detect_python_tests(indicator: str) -> Tuple[List[Path], List[Path]]:
 
 def detect_rust_cuda_test(indicator: str) -> Optional[Path]:
     tests_dir = REPO_ROOT / "tests"
-    
+
     name_matches = list(tests_dir.glob(f"{indicator}_cuda.rs"))
     if name_matches:
         return name_matches[0]
-    
+
     for p in tests_dir.glob("*_cuda.rs"):
         try:
             text = p.read_text(encoding="utf-8", errors="ignore")
@@ -132,17 +132,17 @@ def detect_rust_cuda_test(indicator: str) -> Optional[Path]:
 
 
 def compute_mod_path(indicator_file: Path) -> str:
-    
+
     rel = indicator_file.relative_to(REPO_ROOT / "src/indicators")
     parts = list(rel.parts)
     assert parts[-1].endswith(".rs")
-    parts[-1] = parts[-1][:-3]  
+    parts[-1] = parts[-1][:-3]
     mod_path = "indicators::" + "::".join([p for p in parts])
     return mod_path
 
 
 def strip_comments_keep_header(src: str) -> str:
-    
+
     lines = src.splitlines()
     header_end = 0
     in_block = False
@@ -159,26 +159,26 @@ def strip_comments_keep_header(src: str) -> str:
         if s.startswith("/*"):
             in_block = True
             header_end = i + 1
-            
+
             if s.endswith("*/") or "*/" in s:
                 in_block = False
             continue
         if s.startswith("//"):
             header_end = i + 1
             continue
-        
+
         break
 
     header = "\n".join(lines[:header_end])
     body = "\n".join(lines[header_end:])
 
-    
+
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
-    
+
     body = re.sub(r"(^|\s)//.*?$", r"\1", body, flags=re.M)
-    
+
     body = re.sub(r"\n{3,}", "\n\n", body)
-    
+
     body = body.strip("\n")
     return (header + "\n\n" + body + "\n") if header else (body + "\n")
 
@@ -211,11 +211,11 @@ def have_nvcc() -> bool:
 
 def ensure_python_env(auto_install: bool) -> bool:
     try:
-        import importlib  
-        import numpy  
-        
+        import importlib
+        import numpy
+
         try:
-            import maturin  
+            import maturin
         except Exception:
             pass
         return True
@@ -249,7 +249,7 @@ def run_rust_scalar_tests(mod_path: str) -> bool:
 
 
 def run_rust_cuda_test(test_file: Path, use_cuda_stub: bool) -> bool:
-    name = test_file.stem  
+    name = test_file.stem
     env = os.environ.copy()
     if use_cuda_stub and not have_nvcc():
         env["NVCC"] = str(REPO_ROOT / "nvcc_stub.sh")
@@ -305,7 +305,7 @@ def main() -> None:
     if args.emit_only:
         return
 
-    
+
     run_rust = args.rust or (not args.python)
     run_python = args.python or (not args.rust)
 
@@ -315,7 +315,7 @@ def main() -> None:
         print("[rust] running scalar module tests...")
         ok &= run_rust_scalar_tests(mod_path)
 
-    
+
 
     if args.with_cuda and rust_cuda_test:
         print("\n[rust] running CUDA integration test...")
@@ -327,7 +327,7 @@ def main() -> None:
         if not ensure_python_env(auto_install=args.auto_install_deps):
             die("python test environment missing; re-run with --auto-install-deps or install manually")
 
-        
+
         want_cuda_build = args.with_cuda and (py_cuda or rust_cuda_test or cuda_file is not None)
         print("\n[python] building extension module (features: {} )...".format("python,cuda" if want_cuda_build else "python"))
         if not build_python_module(with_cuda=want_cuda_build, use_cuda_stub=args.cuda_stub):

@@ -10,7 +10,7 @@
 .target sm_89
 .address_size 64
 
-	
+
 
 
 
@@ -33,13 +33,13 @@
 	.reg .b32 	%r<84>;
 	.reg .f64 	%fd<76>;
 	.reg .b64 	%rd<73>;
-	
+
 	.shared .align 4 .b8 _ZZ16stddev_batch_f32E8s_period[16];
-	
+
 	.shared .align 4 .b8 _ZZ16stddev_batch_f32E6s_warm[16];
-	
+
 	.shared .align 4 .b8 _ZZ16stddev_batch_f32E4s_nb[16];
-	
+
 	.shared .align 8 .b8 _ZZ16stddev_batch_f32E7s_inv_n[32];
 
 	ld.param.u64 	%rd28, [stddev_batch_f32_param_0];
@@ -432,7 +432,7 @@ $L__BB0_42:
 	ret;
 
 }
-	
+
 .visible .entry stddev_many_series_one_param_f32(
 	.param .u64 stddev_many_series_one_param_f32_param_0,
 	.param .u64 stddev_many_series_one_param_f32_param_1,

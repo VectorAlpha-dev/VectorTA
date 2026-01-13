@@ -1136,7 +1136,7 @@ pub fn ehlers_ecema_batch_slice(
             Kernel::Auto => detect_best_kernel(),
             k => k,
         },
-        /*parallel=*/ false,
+        false,
     )
 }
 
@@ -1153,7 +1153,7 @@ pub fn ehlers_ecema_batch_par_slice(
             Kernel::Auto => detect_best_kernel(),
             k => k,
         },
-        /*parallel=*/ true,
+        true,
     )
 }
 

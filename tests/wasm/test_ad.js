@@ -1,19 +1,16 @@
-/**
- * WASM binding tests for AD indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { 
-    loadTestData, 
-    assertArrayClose, 
+import {
+    loadTestData,
+    assertArrayClose,
     assertClose,
     isNaN,
     assertAllNaN,
     assertNoNaN,
-    EXPECTED_OUTPUTS 
+    EXPECTED_OUTPUTS
 } from './test_utils.js';
 import { compareWithRust } from './rust-comparison.js';
 
@@ -24,75 +21,75 @@ let wasm;
 let testData;
 
 test.before(async () => {
-    
+
     try {
         const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
-        
+
     } catch (error) {
         console.error('Failed to load WASM module. Run "wasm-pack build --features wasm --target nodejs" first');
         throw error;
     }
-    
+
     testData = loadTestData();
 });
 
 test('AD partial params', () => {
-    
+
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
-    
-    
+
+
     const result = wasm.ad_js(high, low, close, volume);
     assert.strictEqual(result.length, close.length);
 });
 
 test('AD accuracy', async () => {
-    
+
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
     const expected = EXPECTED_OUTPUTS.ad;
-    
+
     const result = wasm.ad_js(high, low, close, volume);
-    
+
     assert.strictEqual(result.length, close.length);
-    
-    
+
+
     const last5 = result.slice(-5);
     assertArrayClose(
         last5,
         expected.last5Values,
-        1e-1,  
+        1e-1,
         "AD last 5 values mismatch"
     );
-    
-    
+
+
     await compareWithRust('ad', result, 'ohlcv', expected.defaultParams);
 });
 
 test('AD reinput', () => {
-    
+
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
-    
-    
+
+
     const firstResult = wasm.ad_js(high, low, close, volume);
     assert.strictEqual(firstResult.length, close.length);
-    
-    
+
+
     const secondResult = wasm.ad_js(firstResult, firstResult, firstResult, firstResult);
     assert.strictEqual(secondResult.length, firstResult.length);
-    
-    
+
+
     if (secondResult.length > 50) {
         for (let i = 50; i < secondResult.length; i++) {
             assert(!isNaN(secondResult[i]), `Found unexpected NaN at index ${i}`);
@@ -101,16 +98,16 @@ test('AD reinput', () => {
 });
 
 test('AD NaN handling', () => {
-    
+
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
-    
+
     const result = wasm.ad_js(high, low, close, volume);
     assert.strictEqual(result.length, close.length);
-    
-    
+
+
     if (result.length > 50) {
         for (let i = 50; i < result.length; i++) {
             assert(!isNaN(result[i]), `Found unexpected NaN at index ${i}`);
@@ -119,65 +116,65 @@ test('AD NaN handling', () => {
 });
 
 test('AD data length mismatch', () => {
-    
+
     const high = new Float64Array(testData.high);
-    const low = new Float64Array(testData.low.slice(0, 100)); 
+    const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
-    
+
     assert.throws(() => {
         wasm.ad_js(high, low, close, volume);
     }, /Data length mismatch/);
 });
 
 test('AD empty input', () => {
-    
+
     const empty = new Float64Array([]);
-    
+
     assert.throws(() => {
         wasm.ad_js(empty, empty, empty, empty);
     }, /Not enough data/);
 });
 
 test('AD batch single security', () => {
-    
+
     const high = new Float64Array(testData.high);
     const low = new Float64Array(testData.low);
     const close = new Float64Array(testData.close);
     const volume = new Float64Array(testData.volume);
-    
-    
+
+
     const batchResult = wasm.ad_batch_js(
         high,
         low,
         close,
         volume,
-        1  
+        1
     );
-    
-    
+
+
     const singleResult = wasm.ad_js(high, low, close, volume);
-    
+
     assert.strictEqual(batchResult.length, singleResult.length);
     assertArrayClose(batchResult, singleResult, 1e-10, "Batch vs single mismatch");
 });
 
 test('AD batch multiple securities', () => {
-    
-    const high = new Float64Array(testData.high.slice(0, 100)); 
+
+    const high = new Float64Array(testData.high.slice(0, 100));
     const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close.slice(0, 100));
     const volume = new Float64Array(testData.volume.slice(0, 100));
-    
-    
+
+
     const rows = 3;
     const cols = 100;
     const highsFlat = new Float64Array(rows * cols);
     const lowsFlat = new Float64Array(rows * cols);
     const closesFlat = new Float64Array(rows * cols);
     const volumesFlat = new Float64Array(rows * cols);
-    
-    
+
+
     for (let i = 0; i < rows; i++) {
         for (let j = 0; j < cols; j++) {
             const idx = i * cols + j;
@@ -187,7 +184,7 @@ test('AD batch multiple securities', () => {
             volumesFlat[idx] = volume[j];
         }
     }
-    
+
     const batchResult = wasm.ad_batch_js(
         highsFlat,
         lowsFlat,
@@ -195,17 +192,17 @@ test('AD batch multiple securities', () => {
         volumesFlat,
         rows
     );
-    
-    
+
+
     assert.strictEqual(batchResult.length, rows * cols);
-    
-    
+
+
     const singleResult = wasm.ad_js(high, low, close, volume);
     for (let i = 0; i < rows; i++) {
         const rowStart = i * cols;
         const rowEnd = rowStart + cols;
         const rowData = batchResult.slice(rowStart, rowEnd);
-        
+
         assertArrayClose(
             rowData,
             singleResult,
@@ -216,23 +213,23 @@ test('AD batch multiple securities', () => {
 });
 
 test('AD batch metadata', () => {
-    
+
     const metadata = wasm.ad_batch_metadata_js(3, 100);
-    
-    
+
+
     assert.strictEqual(metadata.length, 2);
     assert.strictEqual(metadata[0], 3);
     assert.strictEqual(metadata[1], 100);
 });
 
 test('AD batch edge cases', () => {
-    
+
     const high = new Float64Array([1, 2, 3, 4, 5]);
     const low = new Float64Array([0.5, 1.5, 2.5, 3.5, 4.5]);
     const close = new Float64Array([0.8, 1.8, 2.8, 3.8, 4.8]);
     const volume = new Float64Array([100, 200, 300, 400, 500]);
-    
-    
+
+
     const singleBatch = wasm.ad_batch_js(
         high,
         low,
@@ -240,10 +237,10 @@ test('AD batch edge cases', () => {
         volume,
         1
     );
-    
+
     assert.strictEqual(singleBatch.length, 5);
-    
-    
+
+
     assert.throws(() => {
         wasm.ad_batch_js(
             new Float64Array([]),
@@ -256,74 +253,74 @@ test('AD batch edge cases', () => {
 });
 
 test('AD all NaN input', () => {
-    
+
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
-    
-    
+
+
     const result = wasm.ad_js(allNaN, allNaN, allNaN, allNaN);
     assert.strictEqual(result.length, allNaN.length);
-    
-    
+
+
     for (let i = 0; i < result.length; i++) {
         assert(isNaN(result[i]), `Expected NaN at index ${i}`);
     }
 });
 
 test('AD no warmup period', () => {
-    
+
     const high = new Float64Array(testData.high.slice(0, 50));
     const low = new Float64Array(testData.low.slice(0, 50));
     const close = new Float64Array(testData.close.slice(0, 50));
     const volume = new Float64Array(testData.volume.slice(0, 50));
-    
+
     const result = wasm.ad_js(high, low, close, volume);
-    
-    
+
+
     assert(!isNaN(result[0]), "AD should not have NaN at index 0");
 });
 
 test('AD high-low validation', () => {
-    
+
     const high = new Float64Array([100.0, 90.0, 95.0]);
-    const low = new Float64Array([105.0, 95.0, 90.0]); 
+    const low = new Float64Array([105.0, 95.0, 90.0]);
     const close = new Float64Array([102.0, 92.0, 93.0]);
     const volume = new Float64Array([1000.0, 1500.0, 1200.0]);
-    
-    
+
+
     const result = wasm.ad_js(high, low, close, volume);
     assert.strictEqual(result.length, close.length);
 });
 
 test('AD zero volume', () => {
-    
+
     const high = new Float64Array([100, 101, 102, 103, 104]);
     const low = new Float64Array([99, 100, 101, 102, 103]);
     const close = new Float64Array([99.5, 100.5, 101.5, 102.5, 103.5]);
-    const volume = new Float64Array([1000, 0, 2000, 0, 3000]); 
-    
+    const volume = new Float64Array([1000, 0, 2000, 0, 3000]);
+
     const result = wasm.ad_js(high, low, close, volume);
-    
-    
+
+
     assertClose(result[1], result[0], 1e-10, "AD should not change when volume is 0");
     assertClose(result[3], result[2], 1e-10, "AD should not change when volume is 0");
 });
 
 test('AD batch - new ergonomic API', () => {
-    
+
     const high = new Float64Array(testData.high.slice(0, 100));
     const low = new Float64Array(testData.low.slice(0, 100));
     const close = new Float64Array(testData.close.slice(0, 100));
     const volume = new Float64Array(testData.volume.slice(0, 100));
-    
-    
+
+
     const rows = 2;
     const cols = 100;
     const highsFlat = new Float64Array(rows * cols);
     const lowsFlat = new Float64Array(rows * cols);
     const closesFlat = new Float64Array(rows * cols);
     const volumesFlat = new Float64Array(rows * cols);
-    
+
     for (let i = 0; i < rows; i++) {
         for (let j = 0; j < cols; j++) {
             const idx = i * cols + j;
@@ -333,11 +330,11 @@ test('AD batch - new ergonomic API', () => {
             volumesFlat[idx] = volume[j];
         }
     }
-    
-    
+
+
     const result = wasm.ad_batch(highsFlat, lowsFlat, closesFlat, volumesFlat, rows);
-    
-    
+
+
     assert(result.values, 'Should have values array');
     assert(typeof result.rows === 'number', 'Should have rows count');
     assert(typeof result.cols === 'number', 'Should have cols count');
@@ -347,52 +344,52 @@ test('AD batch - new ergonomic API', () => {
 });
 
 test('AD zero-copy API', () => {
-    
+
     const data_len = 10;
     const high = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     const low = new Float64Array([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]);
     const close = new Float64Array([0.8, 1.8, 2.8, 3.8, 4.8, 5.8, 6.8, 7.8, 8.8, 9.8]);
     const volume = new Float64Array([100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]);
-    
-    
+
+
     const highPtr = wasm.ad_alloc(data_len);
     const lowPtr = wasm.ad_alloc(data_len);
     const closePtr = wasm.ad_alloc(data_len);
     const volumePtr = wasm.ad_alloc(data_len);
     const outPtr = wasm.ad_alloc(data_len);
-    
+
     assert(highPtr !== 0, 'Failed to allocate high buffer');
     assert(lowPtr !== 0, 'Failed to allocate low buffer');
     assert(closePtr !== 0, 'Failed to allocate close buffer');
     assert(volumePtr !== 0, 'Failed to allocate volume buffer');
     assert(outPtr !== 0, 'Failed to allocate output buffer');
-    
+
     try {
-        
+
         const highView = new Float64Array(wasm.__wasm.memory.buffer, highPtr, data_len);
         const lowView = new Float64Array(wasm.__wasm.memory.buffer, lowPtr, data_len);
         const closeView = new Float64Array(wasm.__wasm.memory.buffer, closePtr, data_len);
         const volumeView = new Float64Array(wasm.__wasm.memory.buffer, volumePtr, data_len);
-        
+
         highView.set(high);
         lowView.set(low);
         closeView.set(close);
         volumeView.set(volume);
-        
-        
+
+
         wasm.ad_into(highPtr, lowPtr, closePtr, volumePtr, outPtr, data_len);
-        
-        
+
+
         const outView = new Float64Array(wasm.__wasm.memory.buffer, outPtr, data_len);
-        
-        
+
+
         const regularResult = wasm.ad_js(high, low, close, volume);
         for (let i = 0; i < data_len; i++) {
-            assertClose(outView[i], regularResult[i], 1e-10, 
+            assertClose(outView[i], regularResult[i], 1e-10,
                        `Zero-copy mismatch at index ${i}`);
         }
     } finally {
-        
+
         wasm.ad_free(highPtr, data_len);
         wasm.ad_free(lowPtr, data_len);
         wasm.ad_free(closePtr, data_len);
@@ -402,66 +399,66 @@ test('AD zero-copy API', () => {
 });
 
 test('AD memory management', () => {
-    
+
     const sizes = [100, 1000, 10000];
-    
+
     for (const size of sizes) {
         const ptr = wasm.ad_alloc(size);
         assert(ptr !== 0, `Failed to allocate ${size} elements`);
-        
-        
+
+
         const view = new Float64Array(wasm.__wasm.memory.buffer, ptr, size);
         for (let i = 0; i < Math.min(10, size); i++) {
             view[i] = i * 1.5;
         }
-        
-        
+
+
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(view[i], i * 1.5, `Memory corruption at index ${i}`);
         }
-        
+
         wasm.ad_free(ptr, size);
     }
 });
 
 test('AD SIMD128 consistency', () => {
-    
+
     const testCases = [
         { size: 10 },
         { size: 100 },
         { size: 1000 }
     ];
-    
+
     for (const testCase of testCases) {
         const high = new Float64Array(testCase.size);
         const low = new Float64Array(testCase.size);
         const close = new Float64Array(testCase.size);
         const volume = new Float64Array(testCase.size);
-        
+
         for (let i = 0; i < testCase.size; i++) {
-            
+
             const base = 100 + Math.sin(i * 0.1) * 10;
             const range = 5 + Math.abs(Math.sin(i * 0.15)) * 5;
             high[i] = base + range;
             low[i] = base - range;
-            
+
             const closeRatio = 0.5 + 0.4 * Math.sin(i * 0.2);
             close[i] = low[i] + (high[i] - low[i]) * closeRatio;
             volume[i] = 1000 + i * 10;
         }
-        
+
         const result = wasm.ad_js(high, low, close, volume);
-        
-        
+
+
         assert.strictEqual(result.length, testCase.size);
-        
-        
+
+
         for (let i = 0; i < result.length; i++) {
             assert(!isNaN(result[i]), `Unexpected NaN at index ${i} for size=${testCase.size}`);
         }
-        
-        
-        
+
+
+
         if (testCase.size > 10) {
             let hasVariation = false;
             for (let i = 1; i < result.length; i++) {

@@ -10,7 +10,7 @@ from pathlib import Path
 try:
     import my_project as ta_indicators
 except ImportError:
-    
+
     try:
         import my_project as ta_indicators
     except ImportError:
@@ -24,202 +24,202 @@ class TestAlma:
     @pytest.fixture(scope='class')
     def test_data(self):
         return load_test_data()
-    
+
     def test_alma_partial_params(self, test_data):
         """Test ALMA with partial parameters (None values) - mirrors check_alma_partial_params"""
         close = test_data['close']
-        
-        
-        result = ta_indicators.alma(close, 9, 0.85, 6.0)  
+
+
+        result = ta_indicators.alma(close, 9, 0.85, 6.0)
         assert len(result) == len(close)
-    
+
     def test_alma_accuracy(self, test_data):
         """Test ALMA matches expected values from Rust tests - mirrors check_alma_accuracy"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['alma']
-        
+
         result = ta_indicators.alma(
             close,
             period=expected['default_params']['period'],
             offset=expected['default_params']['offset'],
             sigma=expected['default_params']['sigma']
         )
-        
+
         assert len(result) == len(close)
-        
-        
+
+
         assert_close(
-            result[-5:], 
+            result[-5:],
             expected['last_5_values'],
             rtol=1e-8,
             msg="ALMA last 5 values mismatch"
         )
-        
-        
+
+
         compare_with_rust('alma', result, 'close', expected['default_params'])
-    
+
     def test_alma_default_candles(self, test_data):
         """Test ALMA with default parameters - mirrors check_alma_default_candles"""
         close = test_data['close']
-        
-        
+
+
         result = ta_indicators.alma(close, 9, 0.85, 6.0)
         assert len(result) == len(close)
-    
+
     def test_alma_zero_period(self):
         """Test ALMA fails with zero period - mirrors check_alma_zero_period"""
         input_data = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.alma(input_data, period=0, offset=0.85, sigma=6.0)
-    
+
     def test_alma_period_exceeds_length(self):
         """Test ALMA fails when period exceeds data length - mirrors check_alma_period_exceeds_length"""
         data_small = np.array([10.0, 20.0, 30.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period"):
             ta_indicators.alma(data_small, period=10, offset=0.85, sigma=6.0)
-    
+
     def test_alma_very_small_dataset(self):
         """Test ALMA fails with insufficient data - mirrors check_alma_very_small_dataset"""
         single_point = np.array([42.0])
-        
+
         with pytest.raises(ValueError, match="Invalid period|Not enough valid data"):
             ta_indicators.alma(single_point, period=9, offset=0.85, sigma=6.0)
-    
+
     def test_alma_empty_input(self):
         """Test ALMA fails with empty input - mirrors check_alma_empty_input"""
         empty = np.array([])
-        
+
         with pytest.raises(ValueError, match="Input data slice is empty"):
             ta_indicators.alma(empty, period=9, offset=0.85, sigma=6.0)
-    
+
     def test_alma_invalid_sigma(self):
         """Test ALMA fails with invalid sigma - mirrors check_alma_invalid_sigma"""
         data = np.array([1.0, 2.0, 3.0])
-        
+
         with pytest.raises(ValueError, match="Invalid sigma"):
             ta_indicators.alma(data, period=2, offset=0.85, sigma=0.0)
-        
+
         with pytest.raises(ValueError, match="Invalid sigma"):
             ta_indicators.alma(data, period=2, offset=0.85, sigma=-1.0)
-    
+
     def test_alma_invalid_offset(self):
         """Test ALMA fails with invalid offset - mirrors check_alma_invalid_offset"""
         data = np.array([1.0, 2.0, 3.0])
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid offset"):
             ta_indicators.alma(data, period=2, offset=float('nan'), sigma=6.0)
-        
-        
+
+
         with pytest.raises(ValueError, match="Invalid offset"):
             ta_indicators.alma(data, period=2, offset=1.5, sigma=6.0)
-        
+
         with pytest.raises(ValueError, match="Invalid offset"):
             ta_indicators.alma(data, period=2, offset=-0.1, sigma=6.0)
-    
+
     def test_alma_reinput(self, test_data):
         """Test ALMA applied twice (re-input) - mirrors check_alma_reinput"""
         close = test_data['close']
         expected = EXPECTED_OUTPUTS['alma']
-        
-        
+
+
         first_result = ta_indicators.alma(close, period=9, offset=0.85, sigma=6.0)
         assert len(first_result) == len(close)
-        
-        
+
+
         second_result = ta_indicators.alma(first_result, period=9, offset=0.85, sigma=6.0)
         assert len(second_result) == len(first_result)
-        
-        
+
+
         assert_close(
             second_result[-5:],
             expected['reinput_last_5'],
             rtol=1e-8,
             msg="ALMA re-input last 5 values mismatch"
         )
-    
+
     def test_alma_nan_handling(self, test_data):
         """Test ALMA handles NaN values correctly - mirrors check_alma_nan_handling"""
         close = test_data['close']
-        
+
         result = ta_indicators.alma(close, period=9, offset=0.85, sigma=6.0)
         assert len(result) == len(close)
-        
-        
+
+
         if len(result) > 240:
             assert not np.any(np.isnan(result[240:])), "Found unexpected NaN after warmup period"
-        
-        
+
+
         assert np.all(np.isnan(result[:8])), "Expected NaN in warmup period"
-    
+
     def test_alma_streaming(self, test_data):
         """Test ALMA streaming matches batch calculation - mirrors check_alma_streaming"""
         close = test_data['close']
         period = 9
         offset = 0.85
         sigma = 6.0
-        
-        
+
+
         batch_result = ta_indicators.alma(close, period=period, offset=offset, sigma=sigma)
-        
-        
+
+
         stream = ta_indicators.AlmaStream(period=period, offset=offset, sigma=sigma)
         stream_values = []
-        
+
         for price in close:
             result = stream.update(price)
             stream_values.append(result if result is not None else np.nan)
-        
+
         stream_values = np.array(stream_values)
-        
-        
+
+
         assert len(batch_result) == len(stream_values)
-        
-        
+
+
         for i, (b, s) in enumerate(zip(batch_result, stream_values)):
             if np.isnan(b) and np.isnan(s):
                 continue
-            assert_close(b, s, rtol=1e-9, atol=1e-9, 
+            assert_close(b, s, rtol=1e-9, atol=1e-9,
                         msg=f"ALMA streaming mismatch at index {i}")
-    
+
     def test_alma_batch(self, test_data):
         """Test ALMA batch processing - mirrors check_batch_default_row"""
         close = test_data['close']
-        
+
         result = ta_indicators.alma_batch(
             close,
-            period_range=(9, 9, 0),  
-            offset_range=(0.85, 0.85, 0.0),  
-            sigma_range=(6.0, 6.0, 0.0)  
+            period_range=(9, 9, 0),
+            offset_range=(0.85, 0.85, 0.0),
+            sigma_range=(6.0, 6.0, 0.0)
         )
-        
+
         assert 'values' in result
         assert 'periods' in result
         assert 'offsets' in result
         assert 'sigmas' in result
-        
-        
+
+
         assert result['values'].shape[0] == 1
         assert result['values'].shape[1] == len(close)
-        
-        
+
+
         default_row = result['values'][0]
         expected = EXPECTED_OUTPUTS['alma']['last_5_values']
-        
-        
+
+
         assert_close(
             default_row[-5:],
             expected,
             rtol=1e-8,
             msg="ALMA batch default row mismatch"
         )
-    
+
     def test_alma_all_nan_input(self):
         """Test ALMA with all NaN values"""
         all_nan = np.full(100, np.nan)
-        
+
         with pytest.raises(ValueError, match="All values are NaN"):
             ta_indicators.alma(all_nan, period=9, offset=0.85, sigma=6.0)
 

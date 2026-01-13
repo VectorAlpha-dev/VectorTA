@@ -47,7 +47,7 @@ void chande_batch_f32(const float* __restrict__ high,
                       const float* __restrict__ close,
                       const int* __restrict__ periods,
                       const float* __restrict__ mults,
-                      const int* __restrict__ dirs,   
+                      const int* __restrict__ dirs,
                       const float* __restrict__ alphas,
                       const int* __restrict__ warm_indices,
                       int series_len,
@@ -65,22 +65,22 @@ void chande_batch_f32(const float* __restrict__ high,
     if (period <= 0 || warm >= series_len || first_valid >= series_len) return;
 
     const int base = combo * series_len;
-    
+
     for (int idx = threadIdx.x; idx < series_len; idx += blockDim.x) {
         out[base + idx] = NAN;
     }
     __syncthreads();
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
 
-    
+
     double sum_tr = 0.0;
     for (int t = first_valid; t < first_valid + period; ++t) {
         sum_tr += (double)tr_at(high, low, close, t, first_valid);
     }
     double atr = sum_tr / (double)period;
-    
-    
+
+
     {
         float extrema = (dir != 0) ? -FLT_MAX : FLT_MAX;
         const int wstart = warm + 1 - period;
@@ -92,7 +92,7 @@ void chande_batch_f32(const float* __restrict__ high,
         out[base + warm] = (dir != 0) ? (extrema - mult * (float)atr) : (extrema + mult * (float)atr);
     }
 
-    
+
     for (int t = warm + 1; t < series_len; ++t) {
         const float tri = tr_at(high, low, close, t, first_valid);
         atr = fma((double)tri - atr, (double)alpha, atr);
@@ -136,7 +136,7 @@ void chande_batch_from_tr_f32(const float* __restrict__ high,
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    
+
     double sum_tr = 0.0;
     for (int t = first_valid; t < first_valid + period; ++t) { sum_tr += (double)tr[t]; }
     double atr = sum_tr / (double)period;
@@ -171,10 +171,10 @@ extern "C" __global__
 void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
                                       const float* __restrict__ low_tm,
                                       const float* __restrict__ close_tm,
-                                      const int* __restrict__ first_valids, 
+                                      const int* __restrict__ first_valids,
                                       int period,
                                       float mult,
-                                      int dir, 
+                                      int dir,
                                       float alpha,
                                       int num_series,
                                       int series_len,
@@ -193,7 +193,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     for (int s = warp_idx; s < num_series; s += wstep) {
         const int first_valid = first_valids[s];
-        
+
         for (int t = lane; t < series_len; t += warpSize) {
             out_tm[t * stride + s] = NAN;
         }
@@ -202,7 +202,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
         if (warm >= series_len) continue;
 
         if (lane == 0) {
-            
+
             double sum_tr = 0.0;
             for (int t = first_valid; t < first_valid + period; ++t) {
                 const float hi = high_tm[t * stride + s];
@@ -222,7 +222,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
                 sum_tr += (double)tri;
             }
             double atr = sum_tr / (double)period;
-            
+
             {
                 float extrema = (dir != 0) ? -FLT_MAX : FLT_MAX;
                 const int wstart = warm + 1 - period;
@@ -233,7 +233,7 @@ void chande_many_series_one_param_f32(const float* __restrict__ high_tm,
                 }
                 out_tm[warm * stride + s] = (dir != 0) ? (extrema - mult * (float)atr) : (extrema + mult * (float)atr);
             }
-            
+
             for (int t = warm + 1; t < series_len; ++t) {
                 const float hi = high_tm[t * stride + s];
                 const float lo = low_tm[t * stride + s];
@@ -289,7 +289,7 @@ static __forceinline__ __device__ void dq_push_monotone(
     int& head, int& tail,
     int idx_new, float val_new, bool keep_max)
 {
-    
+
     while (head != tail) {
         unsigned int last = (static_cast<unsigned int>(tail - 1)) & mask;
         float back_val = val_buf[last];
@@ -333,12 +333,12 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
                                        const float* __restrict__ close,
                                        const int*   __restrict__ periods,
                                        const float* __restrict__ mults,
-                                       const int*   __restrict__ dirs,   
+                                       const int*   __restrict__ dirs,
                                        const float* __restrict__ alphas,
                                        int first_valid,
                                        int series_len,
                                        int n_combos,
-                                       int queue_cap,          
+                                       int queue_cap,
                                        int*   __restrict__ dq_idx,
                                        float* __restrict__ dq_val,
                                        float* __restrict__ out)
@@ -367,32 +367,32 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
         const int base = combo * series_len;
 
         if (period <= 0 || warm >= series_len || first_valid >= series_len) {
-            
+
             for (int t0 = 0; t0 < series_len; ++t0) {
                 out[base + t0] = NAN;
             }
             continue;
         }
 
-        
+
         for (int t0 = 0; t0 < warm; ++t0) {
             out[base + t0] = NAN;
         }
 
-        
+
         int*   ring_idx = dq_idx + combo * queue_cap;
         float* ring_val = dq_val + combo * queue_cap;
         int head = 0, tail = 0;
 
-        
+
         float seed_sum = 0.0f, c = 0.0f;
         float atr = 0.0f;
         bool  atr_seeded = false;
 
-        
-        float prev_close_b = 0.0f; 
+
+        float prev_close_b = 0.0f;
         for (int t = 0; t < series_len; ++t) {
-            
+
             float hi = 0.0f, lo = 0.0f, pc = 0.0f;
             if (lane == 0) {
                 hi = high[t];
@@ -403,19 +403,19 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
             lo = __shfl_sync(full_mask, lo, 0);
             if (t > 0) prev_close_b = __shfl_sync(full_mask, pc, 0);
 
-            
+
             if (t >= first_valid) {
-                const float v = (dir != 0) ? hi : lo; 
-                dq_push_monotone(ring_idx, ring_val, qmask, head, tail, t, v, /*keep_max=*/(dir != 0));
-                
+                const float v = (dir != 0) ? hi : lo;
+                dq_push_monotone(ring_idx, ring_val, qmask, head, tail, t, v, (dir != 0));
+
                 const int wstart = t + 1 - period;
                 dq_pop_expired(ring_idx, qmask, head, tail, wstart);
             }
 
-            
+
             if (t >= first_valid && !atr_seeded) {
                 const float tri = tr_from_hlpc(hi, lo, prev_close_b, t, first_valid);
-                
+
                 const float y = tri - c;
                 const float tmp = seed_sum + y;
                 c = (tmp - seed_sum) - y;
@@ -425,16 +425,16 @@ void chande_one_series_many_params_f32(const float* __restrict__ high,
                     atr = seed_sum / static_cast<float>(period);
                     atr_seeded = true;
 
-                    
+
                     const float ext = dq_front_value(ring_val, qmask, head);
                     out[base + t] = (dir != 0) ? (ext - mult * atr) : (ext + mult * atr);
                 }
             } else if (atr_seeded && t > warm) {
-                
-                const float tri = tr_from_hlpc(hi, lo, prev_close_b, t, first_valid);
-                atr = __fmaf_rn(alpha, (tri - atr), atr); 
 
-                
+                const float tri = tr_from_hlpc(hi, lo, prev_close_b, t, first_valid);
+                atr = __fmaf_rn(alpha, (tri - atr), atr);
+
+
                 const float ext = dq_front_value(ring_val, qmask, head);
                 out[base + t] = (dir != 0) ? (ext - mult * atr) : (ext + mult * atr);
             }
@@ -454,7 +454,7 @@ void chande_one_series_many_params_from_tr_f32(const float* __restrict__ high,
                                                int first_valid,
                                                int series_len,
                                                int n_combos,
-                                               int queue_cap,          
+                                               int queue_cap,
                                                int*   __restrict__ dq_idx,
                                                float* __restrict__ dq_val,
                                                float* __restrict__ out)
@@ -508,7 +508,7 @@ void chande_one_series_many_params_from_tr_f32(const float* __restrict__ high,
 
             if (t >= first_valid) {
                 const float v = (dir != 0) ? hi : lo;
-                dq_push_monotone(ring_idx, ring_val, qmask, head, tail, t, v, /*keep_max=*/(dir != 0));
+                dq_push_monotone(ring_idx, ring_val, qmask, head, tail, t, v, (dir != 0));
                 const int wstart = t + 1 - period;
                 dq_pop_expired(ring_idx, qmask, head, tail, wstart);
             }

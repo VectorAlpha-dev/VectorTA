@@ -42,19 +42,19 @@ void mfi_batch_f32(const float* __restrict__ typical,
     const int row_off = combo * series_len;
     const int warm = first_valid + period - 1;
 
-    
+
     if (blockIdx.x != 0) return;
 
-    
+
     for (int t = threadIdx.x; t < min(warm, series_len); t += blockDim.x) {
         out[row_off + t] = qnan();
     }
-    
+
     if (threadIdx.x != 0) return;
     if (first_valid < 0 || first_valid >= series_len) return;
     if (warm >= series_len) return;
 
-    
+
     dsf pos_sum = ds_set(0.0f), neg_sum = ds_set(0.0f);
     float prev = typical[first_valid];
     for (int i = first_valid + 1; i <= warm; ++i) {
@@ -63,21 +63,21 @@ void mfi_batch_f32(const float* __restrict__ typical,
         const float diff = tp - prev;
         prev = tp;
         const float flow = tp * vol;
-        
+
         const float posf = (diff > 0.0f) ? flow : 0.0f;
         const float negf = (diff < 0.0f) ? flow : 0.0f;
         pos_sum = ds_add(pos_sum, ds_set(posf));
         neg_sum = ds_add(neg_sum, ds_set(negf));
     }
-    
+
     float pos0 = ds_to_f(pos_sum);
     float neg0 = ds_to_f(neg_sum);
     float tot = pos0 + neg0;
     out[row_off + warm] = (tot <= 1e-14f) ? 0.0f : (100.0f * (pos0 / tot));
 
-    
+
     for (int t = warm + 1; t < series_len; ++t) {
-        
+
         const float tp_new = typical[t];
         const float vol_new = volume[t];
         const float diff_new = tp_new - typical[t - 1];
@@ -85,7 +85,7 @@ void mfi_batch_f32(const float* __restrict__ typical,
         if (diff_new > 0.0f) pos_sum = ds_add(pos_sum, ds_set(flow_new));
         else if (diff_new < 0.0f) neg_sum = ds_add(neg_sum, ds_set(flow_new));
 
-        
+
         {
             const int i = t - period;
             const float tp_old = typical[i];
@@ -119,7 +119,7 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
     const int first = first_valids[s];
     const int stride = num_series;
 
-    
+
     if (first < 0 || first >= series_len) {
         for (int t = threadIdx.x; t < series_len; t += blockDim.x) {
             out_tm[t * stride + s] = qnan();
@@ -131,16 +131,16 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
         out_tm[t * stride + s] = qnan();
     }
 
-    if (threadIdx.x != 0) return; 
+    if (threadIdx.x != 0) return;
 
-    
+
     extern __shared__ float2 shared[];
     float2* pos_buf = shared;
     float2* neg_buf = shared + period;
-    
+
     for (int i = 0; i < period; ++i) { pos_buf[i] = make_float2(0.0f, 0.0f); neg_buf[i] = make_float2(0.0f, 0.0f); }
 
-    
+
     dsf pos_sum = ds_set(0.0f), neg_sum = ds_set(0.0f);
     float prev = typical_tm[first * stride + s];
     int ring = 0;
@@ -160,12 +160,12 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
     }
 
     if (warm < series_len) {
-        
+
         const float tot0 = ds_to_f(pos_sum) + ds_to_f(neg_sum);
         out_tm[warm * stride + s] = (tot0 <= 1e-14f) ? 0.0f : (100.0f * (ds_to_f(pos_sum) / tot0));
     }
 
-    
+
     for (int t = warm + 1; t < series_len; ++t) {
         const float tp = typical_tm[t * stride + s];
         const float vol = volume_tm[t * stride + s];
@@ -173,12 +173,12 @@ void mfi_many_series_one_param_f32(const float* __restrict__ typical_tm,
         prev = tp;
         const float flow = tp * vol;
 
-        
+
         dsf old_pos = ds_make(pos_buf[ring].x, pos_buf[ring].y);
         dsf old_neg = ds_make(neg_buf[ring].x, neg_buf[ring].y);
         pos_sum = ds_sub(pos_sum, old_pos); neg_sum = ds_sub(neg_sum, old_neg);
 
-        
+
         const float posv = (diff > 0.0f) ? flow : 0.0f;
         const float negv = (diff < 0.0f) ? flow : 0.0f;
         pos_buf[ring] = make_float2(posv, 0.0f);

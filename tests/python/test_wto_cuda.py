@@ -4,12 +4,12 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
     import my_project as ti
-except ImportError:  
+except ImportError:
     pytest.skip(
         "Python module not built. Run 'maturin develop --features python,cuda' first",
         allow_module_level=True,
@@ -26,9 +26,9 @@ def _cuda_available() -> bool:
     try:
         series = np.array([np.nan, 1.0, 2.0, 3.5, 4.0, 5.0], dtype=np.float32)
         handle = ti.wto_cuda_batch_dev(series, (4, 4, 0), (7, 7, 0))
-        _ = cp.asarray(handle["wt1"])  
+        _ = cp.asarray(handle["wt1"])
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "ptx" in msg or "device" in msg:
             return False

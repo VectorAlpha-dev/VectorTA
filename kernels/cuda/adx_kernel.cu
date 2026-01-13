@@ -46,37 +46,37 @@ void adx_batch_f32(const float* __restrict__ high,
                    int n_combos,
                    int first_valid,
                    float* __restrict__ out) {
-    const int tid  = blockIdx.x * blockDim.x + threadIdx.x;   
+    const int tid  = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_combos) return;
 
-    const int lane = threadIdx.x & 31;                        
+    const int lane = threadIdx.x & 31;
 
-    
+
     const int p = periods[tid];
     float* row = out + (size_t)tid * series_len;
 
-    
+
     if (p <= 0 || first_valid < 0 || first_valid + p >= series_len) {
-        
+
         const float nanv = qnan_f32();
         for (int i = 0; i < series_len; ++i) row[i] = nanv;
         return;
     }
 
-    
+
     const int warm_end_excl = min(series_len, first_valid + 2 * p);
     const float nanv = qnan_f32();
     for (int i = 0; i < warm_end_excl; ++i) row[i] = nanv;
 
-    
+
     const float rp = 1.0f / (float)p;
     const float one_minus_rp = 1.0f - rp;
     const float pm1_over_p = ((float)p - 1.0f) * rp;
 
-    
+
     const int t0 = first_valid;
 
-    
+
     const unsigned mask = __activemask();
     const int leader = __ffs(mask) - 1;
 
@@ -90,7 +90,7 @@ void adx_batch_f32(const float* __restrict__ high,
     prev_l = __shfl_sync(mask, prev_l, leader);
     prev_c = __shfl_sync(mask, prev_c, leader);
 
-    
+
     int warm_j = 0;
     KahanF tr_sum; tr_sum.reset();
     KahanF plus_sum; plus_sum.reset();
@@ -166,7 +166,7 @@ void adx_batch_f32(const float* __restrict__ high,
             }
         }
 
-        
+
         prev_h = ch; prev_l = cl; prev_c = cc;
     }
 }
@@ -187,13 +187,13 @@ void adx_many_series_one_param_time_major_f32(
         const int fv = first_valids[s];
         auto at = [&](int t) { return t * cols + s; };
 
-        
+
         const int warm_end_excl = (period > 0 && fv >= 0) ? min(rows, fv + 2 * period) : rows;
         const float nanv = qnan_f32();
         for (int t = 0; t < warm_end_excl; ++t) out_tm[at(t)] = nanv;
         if (period <= 0 || fv < 0 || fv + period >= rows) continue;
 
-        
+
         int i0 = fv;
         float prev_h = high_tm[at(i0)];
         float prev_l = low_tm[at(i0)];
@@ -227,7 +227,7 @@ void adx_many_series_one_param_time_major_f32(
         const float one_minus_rp = 1.0f - rp;
         const float pm1_over_p = ((float)period - 1.0f) * rp;
 
-        
+
         KahanF dx_sum; dx_sum.reset();
         {
             const float inv_atr = (atr != 0.f) ? (100.f / atr) : 0.f;

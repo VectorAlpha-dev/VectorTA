@@ -1,7 +1,4 @@
-/**
- * WASM binding tests for OTTO indicator.
- * These tests mirror the Rust unit tests to ensure WASM bindings work correctly.
- */
+
 import test from 'node:test';
 import assert from 'node:assert';
 import path from 'path';
@@ -15,10 +12,10 @@ const __dirname = path.dirname(__filename);
 let wasm;
 
 test.before(async () => {
-    
+
     try {
         const wasmPath = path.join(__dirname, '../../pkg/vector_ta.js');
-        const importPath = process.platform === 'win32' 
+        const importPath = process.platform === 'win32'
             ? 'file:///' + wasmPath.replace(/\\/g, '/')
             : wasmPath;
         wasm = await import(importPath);
@@ -40,7 +37,7 @@ function assertArrayClose(actual, expected, tolerance, msg) {
             assert(isNaN(actual[i]), `${msg}: Expected NaN at index ${i}`);
         } else {
             const diff = Math.abs(actual[i] - expected[i]);
-            assert(diff <= tolerance, 
+            assert(diff <= tolerance,
                 `${msg}: Value mismatch at index ${i}: ${actual[i]} vs ${expected[i]} (diff: ${diff})`);
         }
     }
@@ -48,7 +45,7 @@ function assertArrayClose(actual, expected, tolerance, msg) {
 
 function assertClose(actual, expected, tolerance, msg) {
     const diff = Math.abs(actual - expected);
-    assert(diff < tolerance, 
+    assert(diff < tolerance,
         `${msg}: ${actual} vs ${expected} (diff: ${diff})`);
 }
 
@@ -84,10 +81,10 @@ const defaultParams = {
 };
 
 test('OTTO partial params', () => {
-    
+
     const data = loadCloseFromCsv();
-    
-    
+
+
     const result = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -97,14 +94,14 @@ test('OTTO partial params', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     assert.strictEqual(result.values.length, data.length * 2);
 });
 
 test('OTTO accuracy', async () => {
-    
+
     const data = loadCloseFromCsv();
-    
+
     const result = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -114,26 +111,26 @@ test('OTTO accuracy', async () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
-    
+
+
     const hott = result.values.slice(0, data.length);
     const lott = result.values.slice(data.length);
-    
-    
+
+
     const hottLast5 = hott.slice(-5);
     const lottLast5 = lott.slice(-5);
-    
-    
+
+
     assertArrayClose(hottLast5, expectedHott, 1e-8, "OTTO HOTT last 5 values mismatch");
     assertArrayClose(lottLast5, expectedLott, 1e-8, "OTTO LOTT last 5 values mismatch");
-    
-    
+
+
 });
 
 test('OTTO default candles', () => {
-    
+
     const data = loadCloseFromCsv();
-    
+
     const result = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -143,71 +140,71 @@ test('OTTO default candles', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     assert.strictEqual(result.values.length, data.length * 2);
     assert.strictEqual(result.rows, 2);
     assert.strictEqual(result.cols, data.length);
 });
 
 test('OTTO zero period', () => {
-    
+
     const inputData = new Float64Array([10.0, 20.0, 30.0]);
-    
+
     assert.throws(() => {
         wasm.otto_js(inputData, 0, 0.6, 10, 25, 100000, "VAR");
     }, /Invalid|period/i);
 });
 
 test('OTTO period exceeds length', () => {
-    
+
     const dataSmall = new Float64Array([10.0, 20.0, 30.0]);
-    
+
     assert.throws(() => {
         wasm.otto_js(dataSmall, 10, 0.6, 10, 25, 100000, "VAR");
     });
 });
 
 test('OTTO very small dataset', () => {
-    
+
     const data = new Float64Array(15).fill(1.0);
-    
-    
+
+
     const result = wasm.otto_js(
         data,
-        1,      
-        0.5,    
-        1,      
-        2,      
-        1.0,    
-        "SMA"   
+        1,
+        0.5,
+        1,
+        2,
+        1.0,
+        "SMA"
     );
-    
+
     assert.strictEqual(result.values.length, data.length * 2);
 });
 
 test('OTTO empty input', () => {
-    
+
     const empty = new Float64Array([]);
-    
+
     assert.throws(() => {
         wasm.otto_js(empty, 2, 0.6, 10, 25, 100000, "VAR");
     }, /empty/i);
 });
 
 test('OTTO invalid MA type', () => {
-    
+
     const data = loadCloseFromCsv();
-    
+
     assert.throws(() => {
         wasm.otto_js(data, 2, 0.6, 10, 25, 100000, "INVALID_MA");
     }, /Invalid moving average type/i);
 });
 
 test('OTTO all MA types', () => {
-    
+
     const data = loadCloseFromCsv();
     const maTypes = ["SMA", "EMA", "WMA", "DEMA", "TMA", "VAR", "ZLEMA", "TSF", "HULL"];
-    
+
     for (const maType of maTypes) {
         const result = wasm.otto_js(
             data,
@@ -218,16 +215,16 @@ test('OTTO all MA types', () => {
             defaultParams.correcting_constant,
             maType
         );
-        
+
         assert.strictEqual(result.values.length, data.length * 2, `Failed for MA type: ${maType}`);
     }
 });
 
 test('OTTO reinput', () => {
-    
+
     const data = loadCloseFromCsv();
-    
-    
+
+
     const firstResult = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -237,14 +234,14 @@ test('OTTO reinput', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     const firstHott = firstResult.values.slice(0, data.length);
     const firstLott = firstResult.values.slice(data.length);
-    
+
     assert.strictEqual(firstHott.length, data.length);
     assert.strictEqual(firstLott.length, data.length);
-    
-    
+
+
     const secondResult = wasm.otto_js(
         firstHott,
         defaultParams.ott_period,
@@ -254,15 +251,15 @@ test('OTTO reinput', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     const secondHott = secondResult.values.slice(0, data.length);
     const secondLott = secondResult.values.slice(data.length);
-    
+
     assert.strictEqual(secondHott.length, firstHott.length);
     assert.strictEqual(secondLott.length, firstHott.length);
-    
-    
-    
+
+
+
     const thirdResult = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -272,11 +269,11 @@ test('OTTO reinput', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     const thirdHott = thirdResult.values.slice(0, data.length);
     const thirdLott = thirdResult.values.slice(data.length);
-    
-    
+
+
     for (let i = 0; i < data.length; i++) {
         if (!isNaN(firstHott[i]) && !isNaN(thirdHott[i])) {
             assertClose(firstHott[i], thirdHott[i], 1e-10,
@@ -290,14 +287,14 @@ test('OTTO reinput', () => {
 });
 
 test('OTTO NaN handling', () => {
-    
+
     const data = loadCloseFromCsv();
-    
-    
+
+
     data[100] = NaN;
     data[150] = NaN;
     data[200] = NaN;
-    
+
     const result = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -307,13 +304,13 @@ test('OTTO NaN handling', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     assert.strictEqual(result.values.length, data.length * 2);
-    
-    
+
+
     const hott = result.values.slice(0, data.length);
     const lott = result.values.slice(data.length);
-    
+
     let validCount = 0;
     for (let i = 250; i < data.length; i++) {
         if (!isNaN(hott[i]) && !isNaN(lott[i])) {
@@ -324,21 +321,21 @@ test('OTTO NaN handling', () => {
 });
 
 test('OTTO all NaN input', () => {
-    
+
     const allNaN = new Float64Array(100);
     allNaN.fill(NaN);
-    
+
     assert.throws(() => {
         wasm.otto_js(allNaN, 2, 0.6, 10, 25, 100000, "VAR");
     }, /All values are NaN/i);
 });
 
 test.skip('OTTO batch single parameter set', () => {
-    
-    
-    
+
+
+
     const data = generateOttoTestData();
-    
+
     const batchResult = wasm.otto_batch(data, {
         ott_period: [defaultParams.ott_period, defaultParams.ott_period, 0],
         ott_percent: [defaultParams.ott_percent, defaultParams.ott_percent, 0],
@@ -347,26 +344,26 @@ test.skip('OTTO batch single parameter set', () => {
         correcting_constant: [defaultParams.correcting_constant, defaultParams.correcting_constant, 0],
         ma_types: [defaultParams.ma_type]
     });
-    
-    
+
+
     assert.strictEqual(batchResult.combos.length, 1);
     assert.strictEqual(batchResult.rows_per_combo, 2);
     assert.strictEqual(batchResult.rows, 2);
     assert.strictEqual(batchResult.cols, data.length);
     assert.strictEqual(batchResult.values.length, 2 * data.length);
-    
-    
+
+
     const hottRow = batchResult.values.slice(0, data.length);
     const lottRow = batchResult.values.slice(data.length, 2 * data.length);
-    
-    
+
+
     assertArrayClose(
         hottRow.slice(-5),
         expectedHott,
         1e-6,
         "Batch HOTT mismatch"
     );
-    
+
     assertArrayClose(
         lottRow.slice(-5),
         expectedLott,
@@ -376,71 +373,71 @@ test.skip('OTTO batch single parameter set', () => {
 });
 
 test.skip('OTTO batch multiple parameters', () => {
-    
-    
-    const data = generateOttoTestData().slice(0, 100); 
-    
+
+
+    const data = generateOttoTestData().slice(0, 100);
+
     const batchResult = wasm.otto_batch(data, {
-        ott_period: [2, 3, 1],        
-        ott_percent: [0.5, 0.6, 0.1], 
-        fast_vidya: [10, 10, 0],      
-        slow_vidya: [25, 25, 0],      
-        correcting_constant: [100000, 100000, 0], 
-        ma_types: ["VAR", "EMA"]      
+        ott_period: [2, 3, 1],
+        ott_percent: [0.5, 0.6, 0.1],
+        fast_vidya: [10, 10, 0],
+        slow_vidya: [25, 25, 0],
+        correcting_constant: [100000, 100000, 0],
+        ma_types: ["VAR", "EMA"]
     });
-    
-    
+
+
     assert.strictEqual(batchResult.combos.length, 8);
     assert.strictEqual(batchResult.rows_per_combo, 2);
-    assert.strictEqual(batchResult.rows, 16); 
+    assert.strictEqual(batchResult.rows, 16);
     assert.strictEqual(batchResult.cols, 100);
     assert.strictEqual(batchResult.values.length, 16 * 100);
-    
-    
+
+
     const singleResult = wasm.otto_js(data, 2, 0.5, 10, 25, 100000, "VAR");
     const firstHott = batchResult.values.slice(0, 100);
     const firstLott = batchResult.values.slice(100, 200);
     const singleHott = singleResult.values.slice(0, 100);
     const singleLott = singleResult.values.slice(100, 200);
-    
+
     assertArrayClose(firstHott, singleHott, 1e-10, "First combo HOTT mismatch");
     assertArrayClose(firstLott, singleLott, 1e-10, "First combo LOTT mismatch");
 });
 
 test.skip('OTTO batch metadata', () => {
-    
-    
+
+
     const data = new Float64Array(50).fill(100);
-    
+
     const result = wasm.otto_batch(data, {
-        ott_period: [2, 3, 1],         
-        ott_percent: [0.5, 0.6, 0.1],  
-        fast_vidya: [10, 10, 0],       
-        slow_vidya: [25, 25, 0],       
-        correcting_constant: [100000, 100000, 0], 
-        ma_types: ["VAR"]              
+        ott_period: [2, 3, 1],
+        ott_percent: [0.5, 0.6, 0.1],
+        fast_vidya: [10, 10, 0],
+        slow_vidya: [25, 25, 0],
+        correcting_constant: [100000, 100000, 0],
+        ma_types: ["VAR"]
     });
-    
-    
+
+
     assert.strictEqual(result.combos.length, 4);
-    
-    
+
+
     assert.strictEqual(result.combos[0].ott_period, 2);
     assert.strictEqual(result.combos[0].ott_percent, 0.5);
     assert.strictEqual(result.combos[0].fast_vidya_length, 10);
     assert.strictEqual(result.combos[0].slow_vidya_length, 25);
     assert.strictEqual(result.combos[0].correcting_constant, 100000);
     assert.strictEqual(result.combos[0].ma_type, "VAR");
-    
-    
+
+
     assert.strictEqual(result.combos[3].ott_period, 3);
     assertClose(result.combos[3].ott_percent, 0.6, 1e-10, "percent mismatch");
     assert.strictEqual(result.combos[3].fast_vidya_length, 10);
     assert.strictEqual(result.combos[3].slow_vidya_length, 25);
     assert.strictEqual(result.combos[3].correcting_constant, 100000);
     assert.strictEqual(result.combos[3].ma_type, "VAR");
-    
-    
+
+
     for (let i = 0; i < result.combos.length; i++) {
         assert(result.combos[i].ott_period !== undefined, `Missing ott_period at index ${i}`);
         assert(result.combos[i].ott_percent !== undefined, `Missing ott_percent at index ${i}`);
@@ -452,34 +449,34 @@ test.skip('OTTO batch metadata', () => {
 });
 
 test.skip('OTTO batch full parameter sweep', () => {
-    
-    
+
+
     const data = generateOttoTestData().slice(0, 50);
-    
+
     const batchResult = wasm.otto_batch(data, {
-        ott_period: [2, 4, 1],         
-        ott_percent: [0.5, 0.7, 0.1],  
-        fast_vidya: [10, 12, 1],       
-        slow_vidya: [20, 22, 1],       
-        correcting_constant: [100000, 100000, 0], 
-        ma_types: ["VAR", "EMA"]       
+        ott_period: [2, 4, 1],
+        ott_percent: [0.5, 0.7, 0.1],
+        fast_vidya: [10, 12, 1],
+        slow_vidya: [20, 22, 1],
+        correcting_constant: [100000, 100000, 0],
+        ma_types: ["VAR", "EMA"]
     });
-    
-    
+
+
     assert.strictEqual(batchResult.combos.length, 162);
     assert.strictEqual(batchResult.rows_per_combo, 2);
-    assert.strictEqual(batchResult.rows, 324); 
+    assert.strictEqual(batchResult.rows, 324);
     assert.strictEqual(batchResult.cols, 50);
     assert.strictEqual(batchResult.values.length, 324 * 50);
-    
-    
+
+
     for (let combo = 0; combo < Math.min(5, batchResult.combos.length); combo++) {
         const hottStart = combo * 2 * 50;
         const lottStart = hottStart + 50;
         const hottData = batchResult.values.slice(hottStart, hottStart + 50);
         const lottData = batchResult.values.slice(lottStart, lottStart + 50);
-        
-        
+
+
         let hottValid = 0;
         let lottValid = 0;
         for (let i = 40; i < 50; i++) {
@@ -492,11 +489,11 @@ test.skip('OTTO batch full parameter sweep', () => {
 });
 
 test.skip('OTTO batch edge cases', () => {
-    
-    
+
+
     const data = new Float64Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    
-    
+
+
     const singleBatch = wasm.otto_batch(data, {
         ott_period: [1, 1, 1],
         ott_percent: [0.5, 0.5, 0.1],
@@ -505,11 +502,11 @@ test.skip('OTTO batch edge cases', () => {
         correcting_constant: [1.0, 1.0, 1.0],
         ma_types: ["SMA"]
     });
-    
+
     assert.strictEqual(singleBatch.combos.length, 1);
     assert.strictEqual(singleBatch.values.length, 2 * 15);
-    
-    
+
+
     assert.throws(() => {
         wasm.otto_batch(new Float64Array([]), {
             ott_period: [2, 2, 0],
@@ -524,11 +521,11 @@ test.skip('OTTO batch edge cases', () => {
 
 test('OTTO batch error handling', () => {
     const data = loadCloseFromCsv().slice(0, 20);
-    
-    
+
+
     assert.throws(() => {
         wasm.otto_batch(data, {
-            ott_period: [2, 2], 
+            ott_period: [2, 2],
             ott_percent: [0.6, 0.6, 0],
             fast_vidya: [10, 10, 0],
             slow_vidya: [25, 25, 0],
@@ -536,13 +533,13 @@ test('OTTO batch error handling', () => {
             ma_types: ["VAR"]
         });
     }, /Invalid config/);
-    
-    
+
+
     assert.throws(() => {
         wasm.otto_batch(data, {
             ott_period: [2, 2, 0],
             ott_percent: [0.6, 0.6, 0],
-            
+
             slow_vidya: [25, 25, 0],
             correcting_constant: [100000, 100000, 0],
             ma_types: ["VAR"]
@@ -552,34 +549,34 @@ test('OTTO batch error handling', () => {
 
 
 test('OTTO zero-copy API', () => {
-    
+
     const data = loadCloseFromCsv().slice(0, 50);
     const testParams = {
         ott_period: 2,
         ott_percent: 0.6,
-        fast_vidya_length: 5,  
-        slow_vidya_length: 10, 
+        fast_vidya_length: 5,
+        slow_vidya_length: 10,
         correcting_constant: 100000,
         ma_type: "VAR"
     };
-    
-    
+
+
     const hottPtr = wasm.otto_alloc(data.length);
     const lottPtr = wasm.otto_alloc(data.length);
     assert(hottPtr !== 0, 'Failed to allocate HOTT buffer');
     assert(lottPtr !== 0, 'Failed to allocate LOTT buffer');
-    
+
     try {
-        
+
         const memory = wasm.__wasm.memory;
         const dataView = new Float64Array(memory.buffer, hottPtr, data.length);
         dataView.set(data);
-        
-        
+
+
         wasm.otto_into(
-            hottPtr, 
-            hottPtr, 
-            lottPtr, 
+            hottPtr,
+            hottPtr,
+            lottPtr,
             data.length,
             testParams.ott_period,
             testParams.ott_percent,
@@ -588,13 +585,13 @@ test('OTTO zero-copy API', () => {
             testParams.correcting_constant,
             testParams.ma_type
         );
-        
-        
+
+
         const memory2 = wasm.__wasm.memory;
         const hottView = new Float64Array(memory2.buffer, hottPtr, data.length);
         const lottView = new Float64Array(memory2.buffer, lottPtr, data.length);
-        
-        
+
+
         const regularResult = wasm.otto_js(
             data,
             testParams.ott_period,
@@ -604,25 +601,25 @@ test('OTTO zero-copy API', () => {
             testParams.correcting_constant,
             testParams.ma_type
         );
-        
+
         const regularHott = regularResult.values.slice(0, data.length);
         const regularLott = regularResult.values.slice(data.length);
-        
+
         for (let i = 0; i < data.length; i++) {
             if (isNaN(regularHott[i]) && isNaN(hottView[i])) {
-                continue; 
+                continue;
             }
             assertClose(hottView[i], regularHott[i], 1e-10,
                 `Zero-copy HOTT mismatch at index ${i}`);
-            
+
             if (isNaN(regularLott[i]) && isNaN(lottView[i])) {
-                continue; 
+                continue;
             }
             assertClose(lottView[i], regularLott[i], 1e-10,
                 `Zero-copy LOTT mismatch at index ${i}`);
         }
     } finally {
-        
+
         wasm.otto_free(hottPtr, data.length);
         wasm.otto_free(lottPtr, data.length);
     }
@@ -634,21 +631,21 @@ test('OTTO zero-copy with large dataset', () => {
     for (let i = 0; i < size; i++) {
         data[i] = Math.sin(i * 0.01) + Math.random() * 0.1 + 100;
     }
-    
+
     const hottPtr = wasm.otto_alloc(size);
     const lottPtr = wasm.otto_alloc(size);
     assert(hottPtr !== 0, 'Failed to allocate large HOTT buffer');
     assert(lottPtr !== 0, 'Failed to allocate large LOTT buffer');
-    
+
     try {
         const memory = wasm.__wasm.memory;
         const dataView = new Float64Array(memory.buffer, hottPtr, size);
         dataView.set(data);
-        
+
         wasm.otto_into(
-            hottPtr, 
-            hottPtr, 
-            lottPtr, 
+            hottPtr,
+            hottPtr,
+            lottPtr,
             size,
             defaultParams.ott_period,
             defaultParams.ott_percent,
@@ -657,13 +654,13 @@ test('OTTO zero-copy with large dataset', () => {
             defaultParams.correcting_constant,
             defaultParams.ma_type
         );
-        
-        
+
+
         const memory2 = wasm.__wasm.memory;
         const hottView = new Float64Array(memory2.buffer, hottPtr, size);
         const lottView = new Float64Array(memory2.buffer, lottPtr, size);
-        
-        
+
+
         let hottValid = 0;
         let lottValid = 0;
         for (let i = size - 100; i < size; i++) {
@@ -679,21 +676,21 @@ test('OTTO zero-copy with large dataset', () => {
 });
 
 test('OTTO zero-copy error handling', () => {
-    
+
     assert.throws(() => {
         wasm.otto_into(0, 0, 0, 10, 2, 0.6, 3, 5, 100000, "VAR");
     }, /null pointer/i);
-    
-    
+
+
     const ptr1 = wasm.otto_alloc(20);
     const ptr2 = wasm.otto_alloc(20);
     try {
-        
+
         assert.throws(() => {
             wasm.otto_into(ptr1, ptr1, ptr2, 20, 0, 0.6, 3, 5, 100000, "VAR");
         }, /Invalid|period/i);
-        
-        
+
+
         assert.throws(() => {
             wasm.otto_into(ptr1, ptr1, ptr2, 20, 2, 0.6, 3, 5, 100000, "INVALID");
         }, /Invalid moving average type/i);
@@ -704,66 +701,66 @@ test('OTTO zero-copy error handling', () => {
 });
 
 test('OTTO zero-copy memory management', () => {
-    
+
     const sizes = [100, 1000, 5000];
-    
+
     for (const size of sizes) {
         const ptr1 = wasm.otto_alloc(size);
         const ptr2 = wasm.otto_alloc(size);
         assert(ptr1 !== 0, `Failed to allocate ${size} elements for HOTT`);
         assert(ptr2 !== 0, `Failed to allocate ${size} elements for LOTT`);
-        
-        
+
+
         const memory = wasm.__wasm.memory;
         const view1 = new Float64Array(memory.buffer, ptr1, size);
         const view2 = new Float64Array(memory.buffer, ptr2, size);
-        
+
         for (let i = 0; i < Math.min(10, size); i++) {
             view1[i] = i * 1.5;
             view2[i] = i * 2.5;
         }
-        
-        
+
+
         for (let i = 0; i < Math.min(10, size); i++) {
             assert.strictEqual(view1[i], i * 1.5, `HOTT memory corruption at index ${i}`);
             assert.strictEqual(view2[i], i * 2.5, `LOTT memory corruption at index ${i}`);
         }
-        
-        
+
+
         wasm.otto_free(ptr1, size);
         wasm.otto_free(ptr2, size);
     }
 });
 
 test('OTTO zero-copy mismatched buffer sizes', () => {
-    
+
     const dataSize = 100;
     const hottSize = 100;
-    const lottSize = 50; 
-    
+    const lottSize = 50;
+
     const dataPtr = wasm.otto_alloc(dataSize);
     const hottPtr = wasm.otto_alloc(hottSize);
     const lottPtr = wasm.otto_alloc(lottSize);
-    
+
     assert(dataPtr !== 0, 'Failed to allocate data buffer');
     assert(hottPtr !== 0, 'Failed to allocate HOTT buffer');
     assert(lottPtr !== 0, 'Failed to allocate LOTT buffer');
-    
+
     try {
         const memory = wasm.__wasm.memory;
         const dataView = new Float64Array(memory.buffer, dataPtr, dataSize);
-        
-        
+
+
         for (let i = 0; i < dataSize; i++) {
             dataView[i] = 100 + Math.sin(i * 0.1);
         }
-        
-        
-        
-        
-        
-        
-        
+
+
+
+
+
+
+
     } finally {
         wasm.otto_free(dataPtr, dataSize);
         wasm.otto_free(hottPtr, hottSize);
@@ -772,91 +769,91 @@ test('OTTO zero-copy mismatched buffer sizes', () => {
 });
 
 test('OTTO zero-copy concurrent allocations', () => {
-    
+
     const allocations = [];
     const numAllocs = 10;
     const size = 1000;
-    
-    
+
+
     for (let i = 0; i < numAllocs; i++) {
         const ptr = wasm.otto_alloc(size);
         assert(ptr !== 0, `Failed to allocate buffer ${i}`);
         allocations.push({ ptr, size });
     }
-    
-    
+
+
     const memory = wasm.__wasm.memory;
     for (let i = 0; i < allocations.length; i++) {
         const view = new Float64Array(memory.buffer, allocations[i].ptr, size);
-        
+
         for (let j = 0; j < 10; j++) {
             view[j] = i * 100 + j;
         }
     }
-    
-    
-    const memory2 = wasm.__wasm.memory; 
+
+
+    const memory2 = wasm.__wasm.memory;
     for (let i = 0; i < allocations.length; i++) {
         const view = new Float64Array(memory2.buffer, allocations[i].ptr, size);
         for (let j = 0; j < 10; j++) {
-            assert.strictEqual(view[j], i * 100 + j, 
+            assert.strictEqual(view[j], i * 100 + j,
                 `Pattern corrupted in buffer ${i} at index ${j}`);
         }
     }
-    
-    
+
+
     for (const alloc of allocations) {
         wasm.otto_free(alloc.ptr, alloc.size);
     }
 });
 
 test('OTTO zero-copy stress test', () => {
-    
+
     const iterations = 50;
     const sizes = [100, 500, 1000, 2000];
-    
+
     for (let iter = 0; iter < iterations; iter++) {
         const size = sizes[iter % sizes.length];
-        
+
         const ptr1 = wasm.otto_alloc(size);
         const ptr2 = wasm.otto_alloc(size);
-        
+
         if (ptr1 === 0 || ptr2 === 0) {
-            
+
             if (ptr1 !== 0) wasm.otto_free(ptr1, size);
             if (ptr2 !== 0) wasm.otto_free(ptr2, size);
             continue;
         }
-        
-        
+
+
         const memory = wasm.__wasm.memory;
         const view1 = new Float64Array(memory.buffer, ptr1, size);
         view1[0] = iter;
         view1[size - 1] = iter + 0.5;
-        
+
         assert.strictEqual(view1[0], iter, `First value mismatch at iteration ${iter}`);
         assert.strictEqual(view1[size - 1], iter + 0.5, `Last value mismatch at iteration ${iter}`);
-        
-        
+
+
         wasm.otto_free(ptr1, size);
         wasm.otto_free(ptr2, size);
     }
 });
 
 test('OTTO consistency across kernels', () => {
-    
+
     const testCases = [
-        { size: 50, period: 2, fast: 5, slow: 10 },   
-        { size: 300, period: 3, fast: 10, slow: 25 }, 
-        { size: 500, period: 5, fast: 10, slow: 25 }  
+        { size: 50, period: 2, fast: 5, slow: 10 },
+        { size: 300, period: 3, fast: 10, slow: 25 },
+        { size: 500, period: 5, fast: 10, slow: 25 }
     ];
-    
+
     for (const testCase of testCases) {
         const data = new Float64Array(testCase.size);
         for (let i = 0; i < testCase.size; i++) {
             data[i] = Math.sin(i * 0.1) + Math.cos(i * 0.05) + 100;
         }
-        
+
         const result = wasm.otto_js(
             data,
             testCase.period,
@@ -866,18 +863,18 @@ test('OTTO consistency across kernels', () => {
             100000,
             "VAR"
         );
-        
-        
+
+
         assert.strictEqual(result.values.length, data.length * 2);
-        
+
         const hott = result.values.slice(0, data.length);
         const lott = result.values.slice(data.length);
-        
-        
+
+
         let hottSum = 0;
         let lottSum = 0;
         let count = 0;
-        
+
         for (let i = Math.floor(testCase.size * 0.9); i < testCase.size; i++) {
             if (!isNaN(hott[i]) && !isNaN(lott[i])) {
                 hottSum += hott[i];
@@ -885,26 +882,26 @@ test('OTTO consistency across kernels', () => {
                 count++;
             }
         }
-        
+
         if (count > 0) {
             const hottAvg = hottSum / count;
             const lottAvg = lottSum / count;
-            
-            
+
+
             assert(Math.abs(hottAvg) < 1000, `HOTT average ${hottAvg} seems unreasonable`);
             assert(Math.abs(lottAvg) < 1000, `LOTT average ${lottAvg} seems unreasonable`);
-            
-            
-            assert(Math.abs(hottAvg - lottAvg) > 1e-10, 
+
+
+            assert(Math.abs(hottAvg - lottAvg) > 1e-10,
                 `HOTT and LOTT averages too similar: ${hottAvg} vs ${lottAvg}`);
         }
     }
 });
 
 test('OTTO warmup period validation', () => {
-    
+
     const data = loadCloseFromCsv();
-    
+
     const result = wasm.otto_js(
         data,
         defaultParams.ott_period,
@@ -914,14 +911,14 @@ test('OTTO warmup period validation', () => {
         defaultParams.correcting_constant,
         defaultParams.ma_type
     );
-    
+
     const hott = result.values.slice(0, data.length);
     const lott = result.values.slice(data.length);
-    
-    
-    
+
+
+
     const warmup = 250;
-    
+
     for (let i = warmup; i < data.length; i++) {
         assert(!isNaN(hott[i]), `Expected valid HOTT at index ${i}`);
         assert(!isNaN(lott[i]), `Expected valid LOTT at index ${i}`);

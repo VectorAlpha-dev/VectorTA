@@ -4,7 +4,7 @@ import numpy as np
 
 try:
     import cupy as cp
-except ImportError:  
+except ImportError:
     cp = None
 
 try:
@@ -31,7 +31,7 @@ def _cuda_available() -> bool:
         handle = ti.chande_cuda_batch_dev(h, l, c, (22, 22, 0), (3.0, 3.0, 0.0), "long")
         _ = cp.asarray(handle)
         return True
-    except Exception as exc:  
+    except Exception as exc:
         msg = str(exc).lower()
         if "cuda not available" in msg or "nvcc" in msg or "ptx" in msg:
             return False
@@ -63,11 +63,11 @@ class TestChandeCuda:
         gpu = cp.asnumpy(cp.asarray(handle))
         assert gpu.shape == (len(periods) * len(mults), high.shape[0])
 
-        
+
         combos = [(p, m) for p in periods for m in mults]
         for row, (p, m) in enumerate(combos):
             cpu = ti.chande(high, low, close, p, m, "long")
-            
+
             assert_close(gpu[row], cpu, rtol=1e-6, atol=1e-3,
                          msg=f"Chande CUDA batch mismatch (p={p}, m={m})")
 
