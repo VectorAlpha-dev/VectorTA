@@ -524,6 +524,104 @@ impl CudaHma {
         Ok((dev, combos))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn hma_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_sqrt_len: usize,
+        d_ring: &mut DeviceBuffer<f32>,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaHmaError> {
+        if series_len == 0 || n_combos == 0 {
+            return Err(CudaHmaError::InvalidInput(
+                "series_len and n_combos must be positive".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaHmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+        if d_prices.len() != series_len {
+            return Err(CudaHmaError::InvalidInput(
+                "prices buffer length mismatch".into(),
+            ));
+        }
+        if d_periods.len() < n_combos {
+            return Err(CudaHmaError::InvalidInput(
+                "periods buffer length mismatch".into(),
+            ));
+        }
+
+        let ring_elems = n_combos
+            .checked_mul(max_sqrt_len)
+            .ok_or(CudaHmaError::ArithmeticOverflow {
+                what: "n_combos * max_sqrt_len",
+            })?;
+        if d_ring.len() < ring_elems {
+            return Err(CudaHmaError::InvalidInput(format!(
+                "ring buffer too small: got {}, need {}",
+                d_ring.len(),
+                ring_elems
+            )));
+        }
+        if d_out.len() != n_combos * series_len {
+            return Err(CudaHmaError::InvalidInput(format!(
+                "output buffer wrong length: got {}, expected {}",
+                d_out.len(),
+                n_combos * series_len
+            )));
+        }
+
+        let block_x = match self.policy.batch {
+            BatchKernelPolicy::Plain { block_x } => block_x,
+            _ => match std::env::var("HMA_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+            {
+                Some(v) if v > 0 => v,
+                _ => 1,
+            },
+        };
+        unsafe {
+            let this = self as *const _ as *mut CudaHma;
+            (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
+        }
+        self.maybe_log_batch_debug();
+
+        let periods_ptr = unsafe { d_periods.as_device_ptr().as_raw() };
+        let ring_ptr = unsafe { d_ring.as_device_ptr().as_raw() };
+        let out_ptr = unsafe { d_out.as_device_ptr().as_raw() };
+        let shared_bytes: usize = if Self::ring_in_shared() {
+            max_sqrt_len
+                .checked_mul(block_x as usize)
+                .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+                .ok_or(CudaHmaError::ArithmeticOverflow {
+                    what: "shared_bytes",
+                })?
+        } else {
+            0
+        };
+
+        self.launch_batch_kernel(
+            d_prices,
+            periods_ptr,
+            series_len,
+            n_combos,
+            first_valid,
+            max_sqrt_len,
+            ring_ptr,
+            out_ptr,
+            block_x,
+            shared_bytes,
+        )
+    }
+
     pub fn hma_batch_into_host_f32(
         &self,
         data_f32: &[f32],

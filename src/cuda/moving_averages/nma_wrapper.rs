@@ -380,6 +380,132 @@ impl CudaNma {
         Ok(())
     }
 
+    fn launch_abs_log_diffs_kernel(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_abs_diffs: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNmaError> {
+        let func = self
+            .module
+            .get_function("nma_abs_log_diffs_f32")
+            .map_err(|_| CudaNmaError::MissingKernelSymbol {
+                name: "nma_abs_log_diffs_f32",
+            })?;
+
+        let block_x: u32 = 256;
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_abs_diffs.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
+    pub fn nma_abs_log_diffs_f32_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_abs_diffs: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNmaError> {
+        if series_len == 0 {
+            return Err(CudaNmaError::InvalidInput(
+                "series_len must be positive".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaNmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+        if d_prices.len() != series_len {
+            return Err(CudaNmaError::InvalidInput(
+                "prices buffer length mismatch".into(),
+            ));
+        }
+        if d_abs_diffs.len() != series_len {
+            return Err(CudaNmaError::InvalidInput(
+                "abs_diffs buffer length mismatch".into(),
+            ));
+        }
+        self.launch_abs_log_diffs_kernel(d_prices, series_len, first_valid, d_abs_diffs)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn nma_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_abs_diffs: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaNmaError> {
+        if series_len == 0 || n_combos == 0 {
+            return Err(CudaNmaError::InvalidInput(
+                "series_len and n_combos must be positive".into(),
+            ));
+        }
+        if first_valid >= series_len {
+            return Err(CudaNmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, series_len
+            )));
+        }
+        if d_prices.len() != series_len || d_abs_diffs.len() != series_len {
+            return Err(CudaNmaError::InvalidInput(
+                "input buffer length mismatch".into(),
+            ));
+        }
+        if d_periods.len() < n_combos {
+            return Err(CudaNmaError::InvalidInput(
+                "periods buffer length mismatch".into(),
+            ));
+        }
+        if d_out.len() != n_combos * series_len {
+            return Err(CudaNmaError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        self.ensure_const_weights(max_period)?;
+
+        for (start, chunk_len) in Self::grid_y_chunks(n_combos) {
+            let periods_ptr = unsafe { d_periods.as_device_ptr().add(start) };
+            let out_ptr = unsafe { d_out.as_device_ptr().add(start * series_len) };
+            self.launch_batch_kernel(
+                d_prices,
+                d_abs_diffs,
+                periods_ptr,
+                series_len,
+                chunk_len,
+                first_valid,
+                max_period,
+                out_ptr,
+            )?;
+        }
+        Ok(())
+    }
+
     fn launch_batch_kernel(
         &self,
         d_prices: &DeviceBuffer<f32>,

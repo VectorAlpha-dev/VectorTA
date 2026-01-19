@@ -112,6 +112,55 @@ extern "C" __global__ void sma_batch_from_prefix_f64(
     }
 }
 
+extern "C" __global__ void sma_batch_from_prefix_f64_tm(
+    const double* __restrict__ prefix,
+    const int* __restrict__ periods,
+    int series_len,
+    int n_combos,
+    int first_valid,
+    float* __restrict__ out_tm
+) {
+    const int combo = blockIdx.y;
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    const int stride = gridDim.x * blockDim.x;
+
+    if (UNLIKELY(series_len <= 0)) return;
+    if (UNLIKELY(first_valid < 0 || first_valid >= series_len)) {
+        while (t < series_len) {
+            out_tm[(size_t)t * (size_t)n_combos + (size_t)combo] = SMA_NAN;
+            t += stride;
+        }
+        return;
+    }
+
+    if (UNLIKELY(period <= 0 || period > series_len || (series_len - first_valid) < period)) {
+        while (t < series_len) {
+            out_tm[(size_t)t * (size_t)n_combos + (size_t)combo] = SMA_NAN;
+            t += stride;
+        }
+        return;
+    }
+
+    const int warm = first_valid + period - 1;
+    const double inv_p = 1.0 / static_cast<double>(period);
+
+    while (t < series_len) {
+        float outv = SMA_NAN;
+        if (t >= warm) {
+            const int t1 = t + 1;
+            const int start = t1 - period;
+            const double sum = prefix[t1] - prefix[start];
+            outv = static_cast<float>(sum * inv_p);
+        }
+        out_tm[(size_t)t * (size_t)n_combos + (size_t)combo] = outv;
+        t += stride;
+    }
+}
+
 extern "C" __global__ void sma_batch_f32(const float* __restrict__ prices,
                                          const int*   __restrict__ periods,
                                          int series_len,

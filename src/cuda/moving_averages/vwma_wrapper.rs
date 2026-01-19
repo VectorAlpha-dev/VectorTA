@@ -132,6 +132,69 @@ impl CudaVwma {
         self.device_id
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaVwmaError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    pub fn vwma_prefix_pv_vol_f64_device_into(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_volumes: &DeviceBuffer<f32>,
+        series_len: usize,
+        first_valid: usize,
+        d_pv_prefix: &mut DeviceBuffer<f64>,
+        d_vol_prefix: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaVwmaError> {
+        if series_len == 0 {
+            return Err(CudaVwmaError::InvalidInput("series_len must be > 0".into()));
+        }
+        if series_len > i32::MAX as usize {
+            return Err(CudaVwmaError::InvalidInput(
+                "series too long for kernel argument width".into(),
+            ));
+        }
+        if d_prices.len() != series_len || d_volumes.len() != series_len {
+            return Err(CudaVwmaError::InvalidInput(
+                "d_prices/d_volumes length mismatch".into(),
+            ));
+        }
+        if d_pv_prefix.len() < series_len || d_vol_prefix.len() < series_len {
+            return Err(CudaVwmaError::InvalidInput(
+                "prefix buffers too small".into(),
+            ));
+        }
+
+        let func = self
+            .module
+            .get_function("vwma_prefix_pv_vol_f64_f32")
+            .map_err(|_| CudaVwmaError::MissingKernelSymbol {
+                name: "vwma_prefix_pv_vol_f64_f32",
+            })?;
+        let grid: GridSize = (1, 1, 1).into();
+        let block: BlockSize = (1, 1, 1).into();
+
+        unsafe {
+            let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+            let mut volumes_ptr = d_volumes.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut pv_ptr = d_pv_prefix.as_device_ptr().as_raw();
+            let mut vol_ptr = d_vol_prefix.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prices_ptr as *mut _ as *mut c_void,
+                &mut volumes_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut pv_ptr as *mut _ as *mut c_void,
+                &mut vol_ptr as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+        Ok(())
+    }
+
     pub fn vwma_batch_dev(
         &self,
         prices: &[f32],

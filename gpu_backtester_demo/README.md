@@ -2,6 +2,15 @@
 
 This is a standalone Rust binary that demonstrates a GPU-only, tiled, brute-force optimizer for a double-crossover MA strategy using ALMA kernels.
 
+> Note: This crate is kept mostly for reference. The maintained demo is the Tauri GUI app in `ta_desktop_demo`.
+
+To run the GUI demo:
+
+```
+cd ta_desktop_demo
+cargo run -p ta_desktop_demo_app --release --features cuda,cuda-backtest-kernel
+```
+
 - Loads a single price series to GPU once.
 - Computes ALMA tiles for fast and slow parameter grids on GPU.
 - Runs a double-crossover backtest kernel entirely on GPU, writing per-pair metrics.
@@ -36,8 +45,11 @@ Notes:
 - If the global result buffer does not fit in VRAM, results are copied back per tile and scattered on host.
 
 Env:
-- `CUDA_ARCH` overrides the PTX arch (default compute_61).
+- `CUDA_ARCH` overrides the PTX arch (default compute_89).
 - You can disable VRAM guardrails by omitting, though tiling mitigates memory pressure.
+
+Windows note:
+- `nvcc` also needs MSVC (`cl.exe`). Easiest is running from a “Developer PowerShell for VS” / “x64 Native Tools Command Prompt”.
 
 Future work:
 - Multi-stream overlap between ALMA tile compute and backtest evaluates.

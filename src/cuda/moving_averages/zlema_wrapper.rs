@@ -178,6 +178,12 @@ impl CudaZlema {
         self.stream.as_inner() as usize
     }
 
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaZlemaError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     fn prepare_batch_inputs(
         data_f32: &[f32],
         sweep: &ZlemaBatchRange,
@@ -555,6 +561,92 @@ impl CudaZlema {
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn zlema_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_lags: &DeviceBuffer<i32>,
+        d_alphas: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        max_lag: i32,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaZlemaError> {
+        if len == 0 || n_combos == 0 {
+            return Err(CudaZlemaError::InvalidInput(
+                "len and n_combos must be positive".into(),
+            ));
+        }
+        if first_valid >= len {
+            return Err(CudaZlemaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+        if d_prices.len() != len {
+            return Err(CudaZlemaError::InvalidInput(
+                "device prices length mismatch".into(),
+            ));
+        }
+        if d_periods.len() != n_combos {
+            return Err(CudaZlemaError::InvalidInput(
+                "device periods length mismatch".into(),
+            ));
+        }
+        if d_out.len() != n_combos * len {
+            return Err(CudaZlemaError::InvalidInput(
+                "device output length mismatch".into(),
+            ));
+        }
+
+        let has_warp_scan = self
+            .module
+            .get_function("zlema_batch_warp_scan_f32")
+            .is_ok();
+        let use_warp_scan = has_warp_scan && Self::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
+
+        if use_warp_scan {
+            self.launch_batch_kernel_warp_scan(d_prices, d_periods, len, first_valid, n_combos, d_out)?;
+            return Ok(());
+        }
+
+        if d_lags.len() != n_combos || d_alphas.len() != n_combos {
+            return Err(CudaZlemaError::InvalidInput(
+                "device lags/alphas length mismatch".into(),
+            ));
+        }
+
+        let use_tiled = (n_combos >= 64) && (len >= 4096);
+        if use_tiled {
+            self.launch_batch_kernel_tiled(
+                d_prices,
+                d_periods,
+                d_lags,
+                d_alphas,
+                len,
+                first_valid,
+                n_combos,
+                max_lag,
+                d_out,
+            )?;
+        } else {
+            self.launch_batch_kernel(
+                d_prices,
+                d_periods,
+                d_lags,
+                d_alphas,
+                len,
+                first_valid,
+                n_combos,
+                d_out,
+            )?;
+        }
+
+        Ok(())
     }
 
     pub fn zlema_batch_dev(

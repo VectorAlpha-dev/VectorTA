@@ -112,6 +112,8 @@ pub mod wclprice_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wma_wrapper;
 pub mod zlema_wrapper;
+#[cfg(feature = "cuda")]
+pub mod vram_ma;
 
 pub use alma_wrapper::{CudaAlma, DeviceArrayF32};
 #[cfg(feature = "cuda")]

@@ -1,4 +1,5 @@
 use crate::indicators::alma::{alma, AlmaData, AlmaInput, AlmaParams};
+use crate::indicators::cora_wave::{cora_wave, CoraWaveData, CoraWaveInput, CoraWaveParams};
 use crate::indicators::cwma::{cwma, CwmaData, CwmaInput, CwmaParams};
 use crate::indicators::dema::{dema, DemaData, DemaInput, DemaParams};
 use crate::indicators::edcf::{edcf, EdcfData, EdcfInput, EdcfParams};
@@ -28,6 +29,7 @@ use crate::indicators::moving_averages::ehlers_ecema::{
 use crate::indicators::moving_averages::ehlers_kama::{
     ehlers_kama, EhlersKamaData, EhlersKamaInput, EhlersKamaParams,
 };
+use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use crate::indicators::moving_averages::ehma::{ehma, EhmaData, EhmaInput, EhmaParams};
 use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
 use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
@@ -66,6 +68,7 @@ use std::error::Error;
 use thiserror::Error;
 
 use crate::indicators::alma::alma_with_kernel;
+use crate::indicators::cora_wave::cora_wave_with_kernel;
 use crate::indicators::cwma::cwma_with_kernel;
 use crate::indicators::dema::dema_with_kernel;
 use crate::indicators::edcf::edcf_with_kernel;
@@ -88,6 +91,7 @@ use crate::indicators::moving_averages::dma::dma_with_kernel;
 use crate::indicators::moving_averages::ehlers_ecema::ehlers_ecema_with_kernel;
 use crate::indicators::moving_averages::ehlers_kama::ehlers_kama_with_kernel;
 use crate::indicators::moving_averages::ehma::ehma_with_kernel;
+use crate::indicators::moving_averages::frama::frama_with_kernel;
 use crate::indicators::moving_averages::nama::nama_with_kernel;
 use crate::indicators::moving_averages::sama::sama_with_kernel;
 use crate::indicators::moving_averages::volatility_adjusted_ma::vama_with_kernel;
@@ -232,6 +236,29 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             Ok(output.values)
         }
 
+        "cora_wave" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CoraWaveInput {
+                    data: CoraWaveData::Candles { candles, source },
+                    params: CoraWaveParams {
+                        period: Some(period),
+                        r_multi: None,
+                        smooth: None,
+                    },
+                },
+                MaData::Slice(slice) => CoraWaveInput {
+                    data: CoraWaveData::Slice(slice),
+                    params: CoraWaveParams {
+                        period: Some(period),
+                        r_multi: None,
+                        smooth: None,
+                    },
+                },
+            };
+            let output = cora_wave(&input)?;
+            Ok(output.values)
+        }
+
         "dema" => {
             let input = match data {
                 MaData::Candles { candles, source } => DemaInput {
@@ -369,7 +396,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             Ok(output.values)
         }
 
-        "highpass2" => {
+        "highpass2" | "highpass_2_pole" => {
             let input = match data {
                 MaData::Candles { candles, source } => HighPass2Input {
                     data: HighPass2Data::Candles { candles, source },
@@ -1107,7 +1134,26 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
         }
 
         "frama" => {
-            return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
+            let input = match data {
+                MaData::Candles { candles, .. } => FramaInput::from_candles(
+                    candles,
+                    FramaParams {
+                        window: Some(period),
+                        ..Default::default()
+                    },
+                ),
+                MaData::Slice(slice) => FramaInput::from_slices(
+                    slice,
+                    slice,
+                    slice,
+                    FramaParams {
+                        window: Some(period),
+                        ..Default::default()
+                    },
+                ),
+            };
+            let output = frama(&input)?;
+            Ok(output.values)
         }
 
         "nama" => {
@@ -1163,7 +1209,7 @@ pub fn ma<'a>(ma_type: &str, data: MaData<'a>, period: usize) -> Result<Vec<f64>
             return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
-        "volatility_adjusted_ma" => {
+        "volatility_adjusted_ma" | "vama" => {
             let input = match data {
                 MaData::Candles { candles, source } => VamaInput {
                     data: VamaData::Candles { candles, source },
@@ -1266,6 +1312,29 @@ pub fn ma_with_kernel<'a>(
                 },
             };
             let output = cwma_with_kernel(&input, kernel)?;
+            Ok(output.values)
+        }
+
+        "cora_wave" => {
+            let input = match data {
+                MaData::Candles { candles, source } => CoraWaveInput {
+                    data: CoraWaveData::Candles { candles, source },
+                    params: CoraWaveParams {
+                        period: Some(period),
+                        r_multi: None,
+                        smooth: None,
+                    },
+                },
+                MaData::Slice(slice) => CoraWaveInput {
+                    data: CoraWaveData::Slice(slice),
+                    params: CoraWaveParams {
+                        period: Some(period),
+                        r_multi: None,
+                        smooth: None,
+                    },
+                },
+            };
+            let output = cora_wave_with_kernel(&input, kernel)?;
             Ok(output.values)
         }
 
@@ -1406,7 +1475,7 @@ pub fn ma_with_kernel<'a>(
             Ok(output.values)
         }
 
-        "highpass2" => {
+        "highpass2" | "highpass_2_pole" => {
             let input = match data {
                 MaData::Candles { candles, source } => HighPass2Input {
                     data: HighPass2Data::Candles { candles, source },
@@ -2091,7 +2160,26 @@ pub fn ma_with_kernel<'a>(
         }
 
         "frama" => {
-            return Err(MaError::RequiresHighLow { indicator: "frama" }.into());
+            let input = match data {
+                MaData::Candles { candles, .. } => FramaInput::from_candles(
+                    candles,
+                    FramaParams {
+                        window: Some(period),
+                        ..Default::default()
+                    },
+                ),
+                MaData::Slice(slice) => FramaInput::from_slices(
+                    slice,
+                    slice,
+                    slice,
+                    FramaParams {
+                        window: Some(period),
+                        ..Default::default()
+                    },
+                ),
+            };
+            let output = frama_with_kernel(&input, kernel)?;
+            Ok(output.values)
         }
 
         "nama" => {
@@ -2147,7 +2235,7 @@ pub fn ma_with_kernel<'a>(
             return Err(MaError::RequiresVolume { indicator: "uma" }.into());
         }
 
-        "volatility_adjusted_ma" => {
+        "volatility_adjusted_ma" | "vama" => {
             let input = match data {
                 MaData::Candles { candles, source } => VamaInput {
                     data: VamaData::Candles { candles, source },
@@ -2268,6 +2356,7 @@ mod tests {
             "hwma",
             "jma",
             "jsa",
+            "frama",
             "linreg",
             "maaq",
             "mwdx",

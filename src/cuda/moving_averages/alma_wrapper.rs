@@ -592,6 +592,36 @@ impl CudaAlma {
         )
     }
 
+    pub fn alma_batch_device_tm(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_inv_norms: &DeviceBuffer<f32>,
+        max_period: i32,
+        series_len: i32,
+        n_combos: i32,
+        first_valid: i32,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAlmaError> {
+        if series_len <= 0 || n_combos <= 0 || max_period <= 0 {
+            return Err(CudaAlmaError::InvalidInput(
+                "series_len, n_combos, and max_period must be positive".into(),
+            ));
+        }
+        self.launch_batch_kernel_precomputed_tm(
+            d_prices,
+            d_weights,
+            d_periods,
+            d_inv_norms,
+            series_len as usize,
+            n_combos as usize,
+            first_valid.max(0) as usize,
+            max_period as usize,
+            d_out_tm,
+        )
+    }
+
     pub fn alma_batch_dev(
         &self,
         data_f32: &[f32],
@@ -1144,6 +1174,187 @@ impl CudaAlma {
                         )
                     )?;
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn launch_batch_kernel_precomputed_tm(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_inv_norms: &DeviceBuffer<f32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        max_period: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaAlmaError> {
+        let mut use_tiled = series_len > 8192;
+        let mut block_x: u32 = 256;
+        let mut force_tile: Option<u32> = None;
+        let mut force_two_per_thread: Option<bool> = None;
+        match self.policy.batch {
+            BatchKernelPolicy::Auto => {}
+            BatchKernelPolicy::Plain { block_x: bx } => {
+                use_tiled = false;
+                block_x = bx;
+            }
+            BatchKernelPolicy::Tiled { tile, per_thread } => {
+                use_tiled = true;
+                force_tile = Some(tile);
+                force_two_per_thread = Some(matches!(per_thread, BatchThreadsPerOutput::Two));
+            }
+        }
+
+        if use_tiled {
+            block_x = force_tile
+                .unwrap_or_else(|| self.pick_tiled_block(max_period, series_len, n_combos));
+            let tile = block_x as usize;
+
+            let two_x_name = match block_x {
+                128 => Some("alma_batch_tiled_f32_2x_tile128_tm"),
+                256 => Some("alma_batch_tiled_f32_2x_tile256_tm"),
+                512 => Some("alma_batch_tiled_f32_2x_tile512_tm"),
+                _ => None,
+            };
+            let two_x_available = match two_x_name {
+                Some(n) => self.has_function(n),
+                None => false,
+            };
+
+            let use_two_per_thread = if let Some(v) = force_two_per_thread {
+                v
+            } else {
+                let force_2x = matches!(
+                    std::env::var("ALMA_FORCE_2X"),
+                    Ok(v) if v == "1" || v.eq_ignore_ascii_case("true")
+                );
+                let force_1x = matches!(
+                    std::env::var("ALMA_FORCE_1X"),
+                    Ok(v) if v == "1" || v.eq_ignore_ascii_case("true")
+                );
+                if force_2x && two_x_available {
+                    true
+                } else if force_1x {
+                    false
+                } else {
+                    two_x_available
+                }
+            };
+            let threads_x = if use_two_per_thread {
+                (block_x / 2).max(1)
+            } else {
+                block_x
+            };
+
+            let elems = max_period + (tile + max_period - 1);
+            let shared_bytes = (elems * std::mem::size_of::<f32>()) as u32;
+
+            let base = if use_two_per_thread {
+                if block_x == 128 {
+                    "alma_batch_tiled_f32_2x_tile128_tm"
+                } else if block_x == 256 {
+                    "alma_batch_tiled_f32_2x_tile256_tm"
+                } else if block_x == 512 {
+                    "alma_batch_tiled_f32_2x_tile512_tm"
+                } else {
+                    "alma_batch_tiled_f32_2x_tile256_tm"
+                }
+            } else {
+                if block_x == 128 {
+                    "alma_batch_tiled_f32_tile128_tm"
+                } else if block_x == 256 {
+                    "alma_batch_tiled_f32_tile256_tm"
+                } else if block_x == 512 {
+                    "alma_batch_tiled_f32_tile512_tm"
+                } else {
+                    "alma_batch_tiled_f32_tile256_tm"
+                }
+            };
+            let func = self
+                .module
+                .get_function(base)
+                .map_err(|_| CudaAlmaError::MissingKernelSymbol { name: base })?;
+
+            unsafe {
+                let this = self as *const _ as *mut CudaAlma;
+                (*this).last_batch = Some(if use_two_per_thread {
+                    BatchKernelSelected::Tiled2x { tile: block_x }
+                } else {
+                    BatchKernelSelected::Tiled1x { tile: block_x }
+                });
+            }
+            self.maybe_log_batch_debug();
+
+            let grid_x = ((series_len as u32) + (block_x - 1)) / block_x;
+            let grid: GridSize = (grid_x, n_combos as u32, 1).into();
+            let block: BlockSize = (threads_x, 1, 1).into();
+            self.validate_launch(grid_x, n_combos as u32, 1, threads_x, 1, 1)?;
+
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, shared_bytes, stream>>>(
+                        d_prices.as_device_ptr(),
+                        d_weights.as_device_ptr(),
+                        d_periods.as_device_ptr(),
+                        d_inv_norms.as_device_ptr(),
+                        (max_period as i32),
+                        (series_len as i32),
+                        (n_combos as i32),
+                        (first_valid as i32),
+                        d_out_tm.as_device_ptr()
+                    )
+                )?;
+            }
+        } else {
+            let shared_bytes = (max_period * std::mem::size_of::<f32>()) as u32;
+            let func = self.module.get_function("alma_batch_f32_tm").map_err(|_| {
+                CudaAlmaError::MissingKernelSymbol {
+                    name: "alma_batch_f32_tm",
+                }
+            })?;
+
+            block_x = match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x,
+                _ => match std::env::var("ALMA_BLOCK_X")
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                {
+                    Some(v) if v == 128 || v == 256 || v == 512 => v,
+                    _ => 256,
+                },
+            };
+
+            unsafe {
+                let this = self as *const _ as *mut CudaAlma;
+                (*this).last_batch = Some(BatchKernelSelected::Plain { block_x });
+            }
+            self.maybe_log_batch_debug();
+
+            let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+            let grid: GridSize = (grid_x, n_combos as u32, 1).into();
+            let block: BlockSize = (block_x, 1, 1).into();
+            self.validate_launch(grid_x, n_combos as u32, 1, block_x, 1, 1)?;
+
+            let stream = &self.stream;
+            unsafe {
+                launch!(
+                    func<<<grid, block, shared_bytes, stream>>>(
+                        d_prices.as_device_ptr(),
+                        d_weights.as_device_ptr(),
+                        d_periods.as_device_ptr(),
+                        d_inv_norms.as_device_ptr(),
+                        (max_period as i32),
+                        (series_len as i32),
+                        (n_combos as i32),
+                        (first_valid as i32),
+                        d_out_tm.as_device_ptr()
+                    )
+                )?;
             }
         }
 

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::{source_type, CandleFieldFlags, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -1540,6 +1540,13 @@ impl AlphaTrendBatchBuilder {
             low: low.to_vec(),
             close: close.to_vec(),
             volume: volume.to_vec(),
+            fields: CandleFieldFlags {
+                open: true,
+                high: true,
+                low: true,
+                close: true,
+                volume: true,
+            },
             hl2: vec![],
             hlc3: vec![],
             ohlc4: vec![],

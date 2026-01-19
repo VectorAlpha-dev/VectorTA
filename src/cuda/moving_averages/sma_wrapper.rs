@@ -352,6 +352,99 @@ impl CudaSma {
         Ok(())
     }
 
+    fn launch_batch_from_prefix_kernel_tm(
+        &self,
+        d_prefix: &DeviceBuffer<f64>,
+        d_periods: &DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSmaError> {
+        let mut func: Function = self
+            .module
+            .get_function("sma_batch_from_prefix_f64_tm")
+            .map_err(|_| CudaSmaError::MissingKernelSymbol {
+                name: "sma_batch_from_prefix_f64_tm",
+            })?;
+
+        if let Some(cfg) = Self::parse_cache_pref() {
+            let _ = func.set_cache_config(cfg);
+        }
+
+        let block_x: u32 = match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
+            Some(s) if s.eq_ignore_ascii_case("auto") => {
+                let (_min_grid, suggested) =
+                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                suggested.max(32)
+            }
+            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
+            None => 256,
+        };
+
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid_y = n_combos as u32;
+        let grid: GridSize = (grid_x.max(1), grid_y.max(1), 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        let dev = Device::get_device(self.device_id)?;
+        let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+        if block_x > max_threads {
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if grid_x > max_grid_x {
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+        let max_grid_y = dev.get_attribute(DeviceAttribute::MaxGridDimY)? as u32;
+        if grid_y > max_grid_y {
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: grid_y,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+
+        unsafe {
+            let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+            let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let mut combos_i = n_combos as i32;
+            let mut first_valid_i = first_valid as i32;
+            let mut out_ptr = d_out_tm.as_device_ptr().as_raw();
+
+            let args: &mut [*mut c_void] = &mut [
+                &mut prefix_ptr as *mut _ as *mut c_void,
+                &mut periods_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+                &mut combos_i as *mut _ as *mut c_void,
+                &mut first_valid_i as *mut _ as *mut c_void,
+                &mut out_ptr as *mut _ as *mut c_void,
+            ];
+
+            self.stream.launch(&func, grid, block, 0, args)?;
+        }
+
+        Ok(())
+    }
+
     fn run_batch_kernel(
         &self,
         data_f32: &[f32],
@@ -761,6 +854,129 @@ impl CudaSma {
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    pub fn sma_prefix_f64_device_into(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        len: usize,
+        first_valid: usize,
+        d_prefix: &mut DeviceBuffer<f64>,
+    ) -> Result<(), CudaSmaError> {
+        if d_prices.len() != len {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "input length mismatch: expected {}, got {}",
+                len,
+                d_prices.len()
+            )));
+        }
+        if d_prefix.len() != len + 1 {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "prefix length mismatch: expected {}, got {}",
+                len + 1,
+                d_prefix.len()
+            )));
+        }
+        if first_valid >= len {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        self.launch_batch_kernel(d_prices, len, first_valid, d_prefix)?;
+        Ok(())
+    }
+
+    pub fn sma_batch_from_prefix_f64_device_into(
+        &self,
+        d_prefix: &DeviceBuffer<f64>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        n_periods: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSmaError> {
+        if d_prefix.len() != len + 1 {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "prefix length mismatch: expected {}, got {}",
+                len + 1,
+                d_prefix.len()
+            )));
+        }
+        if d_periods.len() < n_periods {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "periods length mismatch: expected >= {}, got {}",
+                n_periods,
+                d_periods.len()
+            )));
+        }
+        let out_elems = n_periods.saturating_mul(len);
+        if d_out.len() < out_elems {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "output length mismatch: expected >= {}, got {}",
+                out_elems,
+                d_out.len()
+            )));
+        }
+        if first_valid >= len {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        self.launch_batch_from_prefix_kernel(d_prefix, d_periods, len, n_periods, first_valid, d_out)?;
+        Ok(())
+    }
+
+    pub fn sma_batch_from_prefix_f64_device_into_tm(
+        &self,
+        d_prefix: &DeviceBuffer<f64>,
+        d_periods: &DeviceBuffer<i32>,
+        len: usize,
+        n_periods: usize,
+        first_valid: usize,
+        d_out_tm: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSmaError> {
+        if d_prefix.len() != len + 1 {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "prefix length mismatch: expected {}, got {}",
+                len + 1,
+                d_prefix.len()
+            )));
+        }
+        if d_periods.len() < n_periods {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "periods length mismatch: expected >= {}, got {}",
+                n_periods,
+                d_periods.len()
+            )));
+        }
+        let out_elems = n_periods.saturating_mul(len);
+        if d_out_tm.len() < out_elems {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "output length mismatch: expected >= {}, got {}",
+                out_elems,
+                d_out_tm.len()
+            )));
+        }
+        if first_valid >= len {
+            return Err(CudaSmaError::InvalidInput(format!(
+                "first_valid {} out of range for len {}",
+                first_valid, len
+            )));
+        }
+
+        self.launch_batch_from_prefix_kernel_tm(
+            d_prefix,
+            d_periods,
+            len,
+            n_periods,
+            first_valid,
+            d_out_tm,
+        )?;
+        Ok(())
     }
 
     pub fn sma_multi_series_one_param_time_major_dev_from_device(

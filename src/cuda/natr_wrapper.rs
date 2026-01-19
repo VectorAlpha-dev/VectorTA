@@ -449,7 +449,7 @@ impl CudaNatr {
 
         let warp_io_enabled = std::env::var("NATR_BATCH_WARP_IO")
             .map(|v| v != "0")
-            .unwrap_or(true);
+            .unwrap_or(false);
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Auto => {

@@ -414,6 +414,7 @@ pub fn cuda_available() -> bool {
     #[cfg(feature = "cuda")]
     {
         static CUDA_AVAILABLE_CACHED: OnceLock<bool> = OnceLock::new();
+        static CUDA_PROBE_CONTEXT_0: OnceLock<Option<cust::context::Context>> = OnceLock::new();
 
         if std::env::var("CUDA_PLACEHOLDER_ON_FAIL").ok().as_deref() == Some("1")
             || std::env::var("CUDA_FORCE_SKIP").ok().as_deref() == Some("1")
@@ -492,15 +493,19 @@ pub fn cuda_available() -> bool {
                 }
             };
 
-            let _context = match cust::context::Context::new(device) {
-                Ok(c) => c,
+            let ctx0 = CUDA_PROBE_CONTEXT_0.get_or_init(|| match cust::context::Context::new(device)
+            {
+                Ok(c) => Some(c),
                 Err(err) => {
                     if debug {
                         eprintln!("cuda_available: Context::new failed: {err:?}");
                     }
-                    return false;
+                    None
                 }
-            };
+            });
+            if ctx0.is_none() {
+                return false;
+            }
 
             let mut module_opt = None;
             if debug {

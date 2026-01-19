@@ -110,6 +110,12 @@ impl CudaSuperSmoother {
     }
 
     #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaSuperSmootherError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    #[inline]
     fn mem_check_enabled() -> bool {
         match env::var("CUDA_MEM_CHECK") {
             Ok(v) => v != "0" && v.to_lowercase() != "false",
@@ -590,6 +596,39 @@ impl CudaSuperSmoother {
             rows: combos.len(),
             cols: len,
         })
+    }
+
+    pub fn supersmoother_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaSuperSmootherError> {
+        if series_len == 0 || n_combos == 0 {
+            return Err(CudaSuperSmootherError::InvalidInput(
+                "series_len and n_combos must be positive".into(),
+            ));
+        }
+        if d_prices.len() != series_len {
+            return Err(CudaSuperSmootherError::InvalidInput(
+                "prices buffer length mismatch".into(),
+            ));
+        }
+        if d_periods.len() != n_combos {
+            return Err(CudaSuperSmootherError::InvalidInput(
+                "periods buffer length mismatch".into(),
+            ));
+        }
+        if d_out.len() != n_combos * series_len {
+            return Err(CudaSuperSmootherError::InvalidInput(
+                "output buffer length mismatch".into(),
+            ));
+        }
+
+        self.launch_batch_kernel(d_prices, d_periods, series_len, n_combos, first_valid, d_out)
     }
 
     pub fn supersmoother_batch_into_pinned_host_f32(

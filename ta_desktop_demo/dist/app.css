@@ -132,6 +132,11 @@ button.primary {
   background: rgba(56, 189, 248, 0.12);
 }
 
+button.danger-btn {
+  border-color: rgba(251, 113, 133, 0.35);
+  background: rgba(251, 113, 133, 0.12);
+}
+
 button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -144,6 +149,36 @@ button:disabled {
 
 .muted {
   color: var(--muted);
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.35rem;
+}
+
+.badge {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #0b1220;
+  user-select: none;
+}
+
+.badge.on {
+  border-color: rgba(52, 211, 153, 0.35);
+  background: rgba(52, 211, 153, 0.08);
+  color: var(--ok);
+}
+
+.badge.off {
+  border-color: rgba(251, 113, 133, 0.35);
+  background: rgba(251, 113, 133, 0.08);
+  color: var(--danger);
+  opacity: 0.9;
 }
 
 .danger {
@@ -174,4 +209,87 @@ pre {
   .split {
     grid-template-columns: 1fr;
   }
+}
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #0b1220;
+  overflow: auto;
+  max-height: 520px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+th,
+td {
+  padding: 0.45rem 0.55rem;
+  border-bottom: 1px solid var(--border);
+  text-align: right;
+  white-space: nowrap;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  background: #0b1220;
+  cursor: pointer;
+  user-select: none;
+}
+
+.left {
+  text-align: left;
+}
+
+tbody tr:hover {
+  background: rgba(56, 189, 248, 0.06);
+}
+
+tbody tr.selected {
+  background: rgba(56, 189, 248, 0.12);
+}
+
+canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: #0b1220;
+  image-rendering: pixelated;
+}
+
+canvas.chart {
+  height: 160px;
+  image-rendering: auto;
+}
+
+details summary {
+  cursor: pointer;
+}
+
+.rowAuto {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.65rem;
+  align-items: end;
+}
+
+.progress {
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #0b1220;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.85), rgba(52, 211, 153, 0.85));
+  border-radius: 999px;
+  transition: width 120ms linear;
 }

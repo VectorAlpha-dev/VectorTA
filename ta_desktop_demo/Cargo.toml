@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "src-tauri",
+  "crates/app_core",
   "crates/strategies",
   "crates/optimizer",
 ]

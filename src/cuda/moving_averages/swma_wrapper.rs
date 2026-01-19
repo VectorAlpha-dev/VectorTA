@@ -175,6 +175,10 @@ impl CudaSwma {
         })
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaSwmaError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaSwmaPolicy,

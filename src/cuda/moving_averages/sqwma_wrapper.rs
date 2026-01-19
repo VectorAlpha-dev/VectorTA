@@ -98,6 +98,10 @@ impl CudaSqwma {
         })
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaSqwmaError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
     #[inline]
     pub fn context_arc(&self) -> Arc<Context> {
         self._context.clone()

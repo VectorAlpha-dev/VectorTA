@@ -198,6 +198,10 @@ impl CudaTema {
         })
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaTemaError> {
+        self.stream.synchronize().map_err(CudaTemaError::Cuda)
+    }
+
     pub fn new_with_policy(
         device_id: usize,
         policy: CudaTemaPolicy,

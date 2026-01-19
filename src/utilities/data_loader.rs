@@ -5,6 +5,15 @@ use csv::ReaderBuilder;
 use std::error::Error;
 use std::fs::File;
 
+#[derive(Debug, Clone, Copy)]
+pub struct CandleFieldFlags {
+    pub open: bool,
+    pub high: bool,
+    pub low: bool,
+    pub close: bool,
+    pub volume: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct Candles {
     pub timestamp: Vec<i64>,
@@ -13,6 +22,7 @@ pub struct Candles {
     pub low: Vec<f64>,
     pub close: Vec<f64>,
     pub volume: Vec<f64>,
+    pub fields: CandleFieldFlags,
     pub hl2: Vec<f64>,
     pub hlc3: Vec<f64>,
     pub ohlc4: Vec<f64>,
@@ -35,6 +45,41 @@ impl Candles {
             low,
             close,
             volume,
+            fields: CandleFieldFlags {
+                open: true,
+                high: true,
+                low: true,
+                close: true,
+                volume: true,
+            },
+            hl2: Vec::new(),
+            hlc3: Vec::new(),
+            ohlc4: Vec::new(),
+            hlcc4: Vec::new(),
+        };
+
+        candles.precompute_fields();
+
+        candles
+    }
+
+    pub fn new_with_fields(
+        timestamp: Vec<i64>,
+        open: Vec<f64>,
+        high: Vec<f64>,
+        low: Vec<f64>,
+        close: Vec<f64>,
+        volume: Vec<f64>,
+        fields: CandleFieldFlags,
+    ) -> Self {
+        let mut candles = Candles {
+            timestamp,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            fields,
             hl2: Vec::new(),
             hlc3: Vec::new(),
             ohlc4: Vec::new(),
@@ -134,8 +179,47 @@ impl Candles {
 }
 
 pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>> {
+    use std::io;
+
     let file = File::open(file_path)?;
     let mut rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
+
+    let header_len = rdr.headers().map(|h| h.len()).unwrap_or(0);
+    if header_len < 2 {
+        return Err("CSV must have at least 2 columns: timestamp, close".into());
+    }
+
+    let (fields, idx_open, idx_close, idx_high, idx_low, idx_volume) = if header_len >= 3 {
+        (
+            CandleFieldFlags {
+                open: true,
+                close: true,
+                high: header_len > 3,
+                low: header_len > 4,
+                volume: header_len > 5,
+            },
+            Some(1usize),
+            2usize,
+            if header_len > 3 { Some(3usize) } else { None },
+            if header_len > 4 { Some(4usize) } else { None },
+            if header_len > 5 { Some(5usize) } else { None },
+        )
+    } else {
+        (
+            CandleFieldFlags {
+                open: false,
+                close: true,
+                high: false,
+                low: false,
+                volume: false,
+            },
+            None,
+            1usize,
+            None,
+            None,
+            None,
+        )
+    };
 
     let mut timestamp = Vec::new();
     let mut open = Vec::new();
@@ -146,15 +230,64 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
 
     for result in rdr.records() {
         let record = result?;
-        timestamp.push(record[0].parse::<i64>()?);
-        open.push(record[1].parse::<f64>()?);
-        high.push(record[3].parse::<f64>()?);
-        low.push(record[4].parse::<f64>()?);
-        close.push(record[2].parse::<f64>()?);
-        volume.push(record[5].parse::<f64>()?);
+
+        let ts: i64 = record
+            .get(0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing timestamp column"))?
+            .parse()?;
+        let c: f64 = record
+            .get(idx_close)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing close column"))?
+            .parse()?;
+        timestamp.push(ts);
+        close.push(c);
+
+        let o: f64 = match idx_open {
+            Some(i) => record
+                .get(i)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing open column"))?
+                .parse()?,
+            None => f64::NAN,
+        };
+        open.push(o);
+
+        let h: f64 = match idx_high {
+            Some(i) => record
+                .get(i)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing high column"))?
+                .parse()?,
+            None => f64::NAN,
+        };
+        high.push(h);
+
+        let l: f64 = match idx_low {
+            Some(i) => record
+                .get(i)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing low column"))?
+                .parse()?,
+            None => f64::NAN,
+        };
+        low.push(l);
+
+        let v: f64 = match idx_volume {
+            Some(i) => record
+                .get(i)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing volume column"))?
+                .parse()?,
+            None => f64::NAN,
+        };
+        volume.push(v);
     }
 
-    Ok(Candles::new(timestamp, open, high, low, close, volume))
+    Ok(Candles::new_with_fields(
+        timestamp,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        fields,
+    ))
 }
 
 pub fn source_type<'a>(candles: &'a Candles, source: &str) -> &'a [f64] {

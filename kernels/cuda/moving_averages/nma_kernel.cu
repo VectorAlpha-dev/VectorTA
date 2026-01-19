@@ -36,6 +36,25 @@ extern "C" __global__ void nma_fill_nan_f32(float* __restrict__ out, int total_e
     if (idx < total_elems) out[idx] = NMA_NAN;
 }
 
+extern "C" __global__ void nma_abs_log_diffs_f32(const float* __restrict__ prices,
+                                                 int series_len,
+                                                 int first_valid,
+                                                 float* __restrict__ abs_diffs) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= series_len) return;
+
+    if (idx <= first_valid) {
+        abs_diffs[idx] = 0.0f;
+        return;
+    }
+
+    const float p0 = prices[idx - 1];
+    const float p1 = prices[idx];
+    const float ln0 = logf(fmaxf(p0, 1e-10f));
+    const float ln1 = logf(fmaxf(p1, 1e-10f));
+    abs_diffs[idx] = fabsf(ln1 - ln0);
+}
+
 extern "C" __global__ __launch_bounds__(256, 2)
 void nma_batch_f32(const float* __restrict__ prices,
                    const float* __restrict__ abs_diffs,

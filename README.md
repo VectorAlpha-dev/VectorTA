@@ -26,6 +26,14 @@ fn compute_adx(
 }
 ```
 
+## Demos
+
+- `ta_desktop_demo` (primary demo): Tauri desktop app for the double-MA optimizer.
+  - Run (CPU): `cd ta_desktop_demo; cargo run -p ta_desktop_demo_app --release`
+  - Run (GPU MA sweep): `cd ta_desktop_demo; cargo run -p ta_desktop_demo_app --release --features cuda`
+  - Run (GPU kernel backend): `cd ta_desktop_demo; cargo run -p ta_desktop_demo_app --release --features cuda,cuda-backtest-kernel`
+- `gpu_backtester_demo` (legacy CLI): kept mostly for reference.
+
 ## CUDA
 
 CUDA is optional and feature-gated. This crate ships prebuilt PTX for `compute_89` (RTX 4000 / Ada) so consumers do not need the CUDA Toolkit or `nvcc` installed.

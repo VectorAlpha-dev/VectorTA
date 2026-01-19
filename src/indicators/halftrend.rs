@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 use wasm_bindgen::prelude::*;
 
-use crate::utilities::data_loader::{source_type, Candles};
+use crate::utilities::data_loader::{source_type, CandleFieldFlags, Candles};
 use crate::utilities::enums::Kernel;
 use crate::utilities::helpers::{
     alloc_with_nan_prefix, detect_best_batch_kernel, detect_best_kernel, init_matrix_prefixes,
@@ -1437,6 +1437,13 @@ mod tests {
             close: vec![],
             open: vec![],
             volume: vec![],
+            fields: CandleFieldFlags {
+                open: true,
+                high: true,
+                low: true,
+                close: true,
+                volume: true,
+            },
             hl2: vec![],
             hlc3: vec![],
             ohlc4: vec![],
@@ -1464,6 +1471,13 @@ mod tests {
             close: vec![f64::NAN; 100],
             open: vec![f64::NAN; 100],
             volume: vec![f64::NAN; 100],
+            fields: CandleFieldFlags {
+                open: true,
+                high: true,
+                low: true,
+                close: true,
+                volume: true,
+            },
             hl2: vec![f64::NAN; 100],
             hlc3: vec![f64::NAN; 100],
             ohlc4: vec![f64::NAN; 100],
@@ -1497,6 +1511,13 @@ mod tests {
             close: close.clone(),
             open: vec![1.0; 10],
             volume: vec![1.0; 10],
+            fields: CandleFieldFlags {
+                open: true,
+                high: true,
+                low: true,
+                close: true,
+                volume: true,
+            },
             hl2: high
                 .iter()
                 .zip(low.iter())
@@ -1702,6 +1723,13 @@ mod tests {
             close: vec![f64::NAN; n],
             open: vec![f64::NAN; n],
             volume: vec![f64::NAN; n],
+            fields: CandleFieldFlags {
+                open: true,
+                high: true,
+                low: true,
+                close: true,
+                volume: true,
+            },
             hl2: vec![f64::NAN; n],
             hlc3: vec![f64::NAN; n],
             ohlc4: vec![f64::NAN; n],

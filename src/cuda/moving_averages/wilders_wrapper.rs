@@ -127,6 +127,10 @@ impl CudaWilders {
         })
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaWildersError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
     pub fn wilders_batch_dev(
         &self,
         data_f32: &[f32],

@@ -748,6 +748,78 @@ impl CudaVpwma {
         Ok((combos.len(), len, combos))
     }
 
+    pub fn vpwma_batch_device(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_win_lengths: &DeviceBuffer<i32>,
+        d_weights: &DeviceBuffer<f32>,
+        d_inv_norms: &DeviceBuffer<f32>,
+        series_len: usize,
+        stride: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaVpwmaError> {
+        if series_len == 0 || n_combos == 0 {
+            return Err(CudaVpwmaError::InvalidInput(
+                "series_len and n_combos must be > 0".into(),
+            ));
+        }
+        if d_prices.len() != series_len {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_prices length mismatch".into(),
+            ));
+        }
+        if d_periods.len() < n_combos {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_periods buffer too small".into(),
+            ));
+        }
+        if d_win_lengths.len() < n_combos {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_win_lengths buffer too small".into(),
+            ));
+        }
+        if d_inv_norms.len() < n_combos {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_inv_norms buffer too small".into(),
+            ));
+        }
+        if stride == 0 {
+            return Err(CudaVpwmaError::InvalidInput("stride must be > 0".into()));
+        }
+        let expected_weights = n_combos
+            .checked_mul(stride)
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("weights size overflow".into()))?;
+        if d_weights.len() < expected_weights {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_weights buffer too small".into(),
+            ));
+        }
+        let expected_out = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaVpwmaError::InvalidInput("output size overflow".into()))?;
+        if d_out.len() < expected_out {
+            return Err(CudaVpwmaError::InvalidInput(
+                "d_out buffer too small".into(),
+            ));
+        }
+
+        self.launch_batch_kernel(
+            d_prices,
+            d_periods,
+            d_win_lengths,
+            d_weights,
+            d_inv_norms,
+            series_len,
+            stride,
+            first_valid,
+            n_combos,
+            d_out,
+        )
+    }
+
     pub fn vpwma_multi_series_one_param_device(
         &self,
         d_prices_tm: &DeviceBuffer<f32>,

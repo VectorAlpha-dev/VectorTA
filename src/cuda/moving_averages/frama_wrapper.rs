@@ -639,6 +639,69 @@ impl CudaFrama {
         ))
     }
 
+    pub fn frama_batch_device(
+        &self,
+        d_high: &DeviceBuffer<f32>,
+        d_low: &DeviceBuffer<f32>,
+        d_close: &DeviceBuffer<f32>,
+        d_windows: &DeviceBuffer<i32>,
+        d_scs: &DeviceBuffer<i32>,
+        d_fcs: &DeviceBuffer<i32>,
+        series_len: usize,
+        first_valid: usize,
+        n_combos: usize,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaFramaError> {
+        if series_len == 0 || n_combos == 0 {
+            return Err(CudaFramaError::InvalidInput(
+                "series_len and n_combos must be > 0".into(),
+            ));
+        }
+        if series_len > i32::MAX as usize {
+            return Err(CudaFramaError::InvalidInput(
+                "series too long for kernel argument width".into(),
+            ));
+        }
+        if n_combos > i32::MAX as usize {
+            return Err(CudaFramaError::InvalidInput(
+                "too many parameter combinations".into(),
+            ));
+        }
+        if d_high.len() != series_len || d_low.len() != series_len || d_close.len() != series_len {
+            return Err(CudaFramaError::InvalidInput(
+                "device input length mismatch".into(),
+            ));
+        }
+        if d_windows.len() < n_combos || d_scs.len() < n_combos || d_fcs.len() < n_combos {
+            return Err(CudaFramaError::InvalidInput(
+                "device parameter buffer too small".into(),
+            ));
+        }
+        let expected_out = n_combos
+            .checked_mul(series_len)
+            .ok_or(CudaFramaError::ArithmeticOverflow {
+                context: "output elements",
+            })?;
+        if d_out.len() < expected_out {
+            return Err(CudaFramaError::InvalidInput(
+                "device output buffer too small".into(),
+            ));
+        }
+
+        self.launch_batch_kernel(
+            d_high,
+            d_low,
+            d_close,
+            d_windows,
+            d_scs,
+            d_fcs,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
+        )
+    }
+
     pub fn frama_batch_into_host_f32(
         &self,
         high: &[f32],

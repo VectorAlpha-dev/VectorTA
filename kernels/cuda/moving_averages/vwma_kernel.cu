@@ -26,6 +26,42 @@
 __device__ __forceinline__ float nan_f32() { return __int_as_float(0x7fffffff); }
 
 extern "C" __global__
+void vwma_prefix_pv_vol_f64_f32(const float* __restrict__ prices,
+                                const float* __restrict__ volumes,
+                                int series_len,
+                                int first_valid,
+                                double* __restrict__ pv_prefix,
+                                double* __restrict__ vol_prefix) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (series_len <= 0) return;
+
+    if (first_valid < 0) first_valid = 0;
+    if (first_valid > series_len) first_valid = series_len;
+
+    double acc_pv = 0.0;
+    double acc_vol = 0.0;
+
+    for (int i = 0; i < first_valid; ++i) {
+        pv_prefix[i] = 0.0;
+        vol_prefix[i] = 0.0;
+    }
+
+    for (int i = first_valid; i < series_len; ++i) {
+        const float p = prices[i];
+        const float v = volumes[i];
+        if (isnan(p) || isnan(v) || isnan(acc_pv) || isnan(acc_vol)) {
+            acc_pv = NAN;
+            acc_vol = NAN;
+        } else {
+            acc_pv += (double)p * (double)v;
+            acc_vol += (double)v;
+        }
+        pv_prefix[i] = acc_pv;
+        vol_prefix[i] = acc_vol;
+    }
+}
+
+extern "C" __global__
 void vwma_batch_f32(const double* __restrict__ pv_prefix,
                     const double* __restrict__ vol_prefix,
                     const int*    __restrict__ periods,

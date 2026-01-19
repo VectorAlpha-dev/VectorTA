@@ -150,6 +150,10 @@ impl CudaSmma {
         })
     }
 
+    pub fn synchronize(&self) -> Result<(), CudaSmmaError> {
+        self.stream.synchronize().map_err(Into::into)
+    }
+
     #[inline]
     fn will_fit(required: usize, headroom: usize) -> Result<(), CudaSmmaError> {
         if let Ok((free, _total)) = mem_get_info() {

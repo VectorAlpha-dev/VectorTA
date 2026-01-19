@@ -72,6 +72,7 @@ pub fn grid_search<E: BacktestEngine>(
         best_metrics,
         top,
         all,
+        heatmap: None,
         num_combos: combos.len(),
         num_candles,
     })

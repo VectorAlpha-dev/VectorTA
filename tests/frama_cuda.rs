@@ -8,7 +8,9 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::moving_averages::CudaFrama;
+use vector_ta::cuda::moving_averages::{CudaFrama, CudaMaData, CudaMaSelector};
+#[cfg(feature = "cuda")]
+use vector_ta::utilities::data_loader::Candles;
 
 fn approx_eq(a: f64, b: f64, atol: f64, rtol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -186,6 +188,63 @@ fn frama_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::err
             gpu_v
         );
     }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn frama_cuda_ma_selector_accepts_slice_and_candles() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[frama_cuda_ma_selector_accepts_slice_and_candles] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let len = 4096usize;
+    let mut ts = Vec::with_capacity(len);
+    let mut open = Vec::with_capacity(len);
+    let mut high = Vec::with_capacity(len);
+    let mut low = Vec::with_capacity(len);
+    let mut close = Vec::with_capacity(len);
+    let mut volume = Vec::with_capacity(len);
+
+    for i in 0..len {
+        let t = i as f64 * 0.01;
+        let base = (t * 0.4).sin() + 0.05 * (t * 0.7).cos();
+        let c = if i < 12 { f64::NAN } else { base };
+
+        ts.push(i as i64);
+        open.push(c);
+        close.push(c);
+        high.push(if i < 12 { f64::NAN } else { c + 0.6 + 0.03 * t.sin() });
+        low.push(if i < 12 { f64::NAN } else { c - 0.6 - 0.02 * t.cos() });
+        volume.push(1.0);
+    }
+
+    let candles = Candles::new(ts, open, high, low, close, volume);
+    let close_f32: Vec<f32> = candles.close.iter().map(|&v| v as f32).collect();
+
+    let selector = CudaMaSelector::new(0);
+    let period = 16usize;
+
+    let out_candles = selector
+        .ma_to_host_f32(
+            "frama",
+            CudaMaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            period,
+        )
+        .map_err(|e| e.to_string())?;
+    assert_eq!(out_candles.len(), len);
+    assert!(!out_candles[len - 1].is_nan());
+
+    let out_slice = selector
+        .ma_to_host_f32("frama", CudaMaData::SliceF32(&close_f32), period)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(out_slice.len(), len);
+    assert!(!out_slice[len - 1].is_nan());
 
     Ok(())
 }

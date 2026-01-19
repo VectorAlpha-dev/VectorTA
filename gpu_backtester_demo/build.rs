@@ -28,6 +28,11 @@ fn main() {
     if cfg!(target_os = "windows") {
         cmd.arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH");
         cmd.arg("-allow-unsupported-compiler");
+        if which::which("cl.exe").is_err() {
+            if let Ok(vs_path) = find_vs_installation() {
+                cmd.arg("-ccbin").arg(vs_path);
+            }
+        }
     }
 
     if let Ok(extra) = env::var("NVCC_ARGS") {
@@ -41,6 +46,15 @@ fn main() {
     if !out.status.success() {
         eprintln!("stdout: {}", String::from_utf8_lossy(&out.stdout));
         eprintln!("stderr: {}", String::from_utf8_lossy(&out.stderr));
+        if cfg!(target_os = "windows")
+            && String::from_utf8_lossy(&out.stdout).contains("Cannot find compiler 'cl.exe'")
+        {
+            eprintln!("\n=== CUDA Build Error: Missing Visual Studio C++ Compiler ===");
+            eprintln!("nvcc requires Microsoft Visual C++ (cl.exe).");
+            eprintln!("Run from a 'Developer PowerShell for VS' / 'x64 Native Tools Command Prompt'");
+            eprintln!("or install VS Build Tools 2022 with the Desktop C++ workload.");
+            eprintln!("===========================================================\n");
+        }
         panic!("nvcc failed");
     }
 }
@@ -69,5 +83,42 @@ fn find_nvcc() -> PathBuf {
         if cand.exists() { return cand; }
     }
     which::which("nvcc").unwrap_or_else(|_| if cfg!(target_os = "windows") { PathBuf::from("nvcc.exe") } else { PathBuf::from("nvcc") })
+}
+
+#[cfg(target_os = "windows")]
+fn find_vs_installation() -> Result<String, ()> {
+    let vs_paths = [
+        "C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC",
+        "C:/Program Files/Microsoft Visual Studio/2022/Professional/VC/Tools/MSVC",
+        "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC",
+        "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC",
+        "C:/Program Files/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC",
+        "C:/Program Files/Microsoft Visual Studio/2019/Professional/VC/Tools/MSVC",
+        "C:/Program Files/Microsoft Visual Studio/2019/Enterprise/VC/Tools/MSVC",
+    ];
+
+    for vs_base in &vs_paths {
+        if let Ok(entries) = std::fs::read_dir(vs_base) {
+            if let Some(msvc_version) = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|name| name.starts_with("14."))
+                .max()
+            {
+                let cl_path = format!("{}/{}/bin/Hostx64/x64", vs_base, msvc_version);
+                if std::path::Path::new(&format!("{}/cl.exe", cl_path)).exists() {
+                    eprintln!("Found cl.exe at: {}", cl_path);
+                    return Ok(cl_path);
+                }
+            }
+        }
+    }
+
+    Err(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_vs_installation() -> Result<String, ()> {
+    Err(())
 }
 

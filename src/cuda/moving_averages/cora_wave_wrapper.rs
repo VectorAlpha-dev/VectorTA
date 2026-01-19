@@ -559,6 +559,171 @@ impl CudaCoraWave {
         })
     }
 
+    pub fn cora_wave_batch_device_into(
+        &self,
+        d_prices: &DeviceBuffer<f32>,
+        d_weights: &DeviceBuffer<f32>,
+        d_periods: &DeviceBuffer<i32>,
+        d_inv: &DeviceBuffer<f32>,
+        max_period: usize,
+        series_len: usize,
+        n_combos: usize,
+        first_valid: usize,
+        smooth: bool,
+        d_smooth_periods: Option<&DeviceBuffer<i32>>,
+        d_warm0s: Option<&DeviceBuffer<i32>>,
+        d_tmp: Option<&mut DeviceBuffer<f32>>,
+        d_out: &mut DeviceBuffer<f32>,
+    ) -> Result<(), CudaCoraWaveError> {
+        if n_combos == 0 || series_len == 0 {
+            return Err(CudaCoraWaveError::InvalidInput(
+                "empty n_combos or series_len".into(),
+            ));
+        }
+        if max_period == 0 {
+            return Err(CudaCoraWaveError::InvalidInput("max_period is 0".into()));
+        }
+        let out_len = n_combos
+            .checked_mul(series_len)
+            .ok_or_else(|| CudaCoraWaveError::InvalidInput("n_combos*series_len overflow".into()))?;
+        if d_out.len() < out_len {
+            return Err(CudaCoraWaveError::InvalidInput(
+                "output buffer too small".into(),
+            ));
+        }
+        if smooth {
+            let tmp = d_tmp.as_ref().ok_or_else(|| {
+                CudaCoraWaveError::InvalidInput("smooth=true requires tmp buffer".into())
+            })?;
+            if tmp.len() < out_len {
+                return Err(CudaCoraWaveError::InvalidInput(
+                    "tmp buffer too small".into(),
+                ));
+            }
+            if d_smooth_periods
+                .ok_or_else(|| {
+                    CudaCoraWaveError::InvalidInput(
+                        "smooth=true requires smooth_periods buffer".into(),
+                    )
+                })?
+                .len()
+                < n_combos
+            {
+                return Err(CudaCoraWaveError::InvalidInput(
+                    "smooth_periods buffer too small".into(),
+                ));
+            }
+            if d_warm0s
+                .ok_or_else(|| {
+                    CudaCoraWaveError::InvalidInput("smooth=true requires warm0s buffer".into())
+                })?
+                .len()
+                < n_combos
+            {
+                return Err(CudaCoraWaveError::InvalidInput(
+                    "warm0s buffer too small".into(),
+                ));
+            }
+        }
+
+        let mut func = self
+            .module
+            .get_function("cora_wave_batch_f32")
+            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol {
+                name: "cora_wave_batch_f32",
+            })?;
+        let shared_bytes = max_period * std::mem::size_of::<f32>();
+        let block_x = self.pick_block_x(&func, shared_bytes, 256);
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let block: BlockSize = (block_x, 1, 1).into();
+
+        for (start, len) in Self::grid_y_chunks(n_combos) {
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut weights_ptr = d_weights.as_device_ptr().add(start * max_period).as_raw();
+                let mut periods_ptr = d_periods.as_device_ptr().add(start).as_raw();
+                let mut inv_ptr = d_inv.as_device_ptr().add(start).as_raw();
+                let mut max_p_i = max_period as i32;
+                let mut series_i = series_len as i32;
+                let mut n_i = len as i32;
+                let mut first_i = first_valid as i32;
+                let mut out_ptr = if smooth {
+                    d_tmp
+                        .as_ref()
+                        .unwrap()
+                        .as_device_ptr()
+                        .add(start * series_len)
+                        .as_raw()
+                } else {
+                    d_out.as_device_ptr().add(start * series_len).as_raw()
+                };
+                let grid: GridSize = (grid_x, len as u32, 1).into();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut weights_ptr as *mut _ as *mut c_void,
+                    &mut periods_ptr as *mut _ as *mut c_void,
+                    &mut inv_ptr as *mut _ as *mut c_void,
+                    &mut max_p_i as *mut _ as *mut c_void,
+                    &mut series_i as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut first_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
+            }
+        }
+        unsafe {
+            (*(self as *const _ as *mut CudaCoraWave)).last_batch =
+                Some(BatchKernelSelected::Plain { block_x });
+        }
+        self.maybe_log_batch_debug();
+
+        if !smooth {
+            return Ok(());
+        }
+
+        let mut func_wma = self
+            .module
+            .get_function("cora_wave_batch_wma_from_y_f32")
+            .map_err(|_| CudaCoraWaveError::MissingKernelSymbol {
+                name: "cora_wave_batch_wma_from_y_f32",
+            })?;
+        let block_x2 = self.pick_block_x(&func_wma, 0, 256);
+        let grid_x2 = ((series_len as u32) + block_x2 - 1) / block_x2;
+        let block2: BlockSize = (block_x2, 1, 1).into();
+        for (start, len) in Self::grid_y_chunks(n_combos) {
+            unsafe {
+                let mut y_ptr = d_tmp
+                    .as_ref()
+                    .unwrap()
+                    .as_device_ptr()
+                    .add(start * series_len)
+                    .as_raw();
+                let mut sm_ptr = d_smooth_periods
+                    .as_ref()
+                    .unwrap()
+                    .as_device_ptr()
+                    .add(start)
+                    .as_raw();
+                let mut w0_ptr = d_warm0s.as_ref().unwrap().as_device_ptr().add(start).as_raw();
+                let mut series_i = series_len as i32;
+                let mut n_i = len as i32;
+                let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();
+                let grid: GridSize = (grid_x2, len as u32, 1).into();
+                let args: &mut [*mut c_void] = &mut [
+                    &mut y_ptr as *mut _ as *mut c_void,
+                    &mut sm_ptr as *mut _ as *mut c_void,
+                    &mut w0_ptr as *mut _ as *mut c_void,
+                    &mut series_i as *mut _ as *mut c_void,
+                    &mut n_i as *mut _ as *mut c_void,
+                    &mut out_ptr as *mut _ as *mut c_void,
+                ];
+                self.stream.launch(&func_wma, grid, block2, 0, args)?;
+            }
+        }
+        Ok(())
+    }
+
     fn prepare_many_series_inputs(
         data_tm_f32: &[f32],
         cols: usize,

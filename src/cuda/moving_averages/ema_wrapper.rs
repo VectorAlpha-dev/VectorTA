@@ -279,7 +279,7 @@ impl CudaEma {
                 "n_combos must be positive".into(),
             ));
         }
-        if d_periods.len() != n_combos || d_alphas.len() != n_combos {
+        if d_periods.len() < n_combos || d_alphas.len() < n_combos {
             return Err(CudaEmaError::InvalidInput(
                 "period/alpha buffer length mismatch".into(),
             ));
@@ -289,7 +289,7 @@ impl CudaEma {
                 "prices length must match series_len".into(),
             ));
         }
-        if d_out.len() != n_combos * series_len {
+        if d_out.len() < n_combos * series_len {
             return Err(CudaEmaError::InvalidInput(
                 "output buffer length mismatch".into(),
             ));

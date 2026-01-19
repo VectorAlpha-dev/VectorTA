@@ -133,6 +133,12 @@ impl CudaPwma {
         })
     }
 
+    #[inline]
+    pub fn synchronize(&self) -> Result<(), CudaPwmaError> {
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     fn pascal_weights_f32(period: usize) -> Result<Vec<f32>, CudaPwmaError> {
         if period == 0 {
             return Err(CudaPwmaError::InvalidInput(
