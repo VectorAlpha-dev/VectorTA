@@ -8,6 +8,7 @@ readme = "README.md"
 autobins = false
 homepage = "https://vectoralpha.dev/projects/ta"
 documentation = "https://vectoralpha.dev/projects/ta"
+repository = "https://github.com/VectorAlpha-dev/VectorTA"
 
 
 
