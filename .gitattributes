@@ -3,6 +3,11 @@
 *.py text eol=lf
 *.js text eol=lf
 
+# Keep CUDA/PTX sources LF to avoid CRLF churn and huge diffs
+*.cu text eol=lf
+*.cuh text eol=lf
+*.ptx text eol=lf
+
 # Ensure Windows batch files use CRLF
 *.bat text eol=crlf
 *.cmd text eol=crlf

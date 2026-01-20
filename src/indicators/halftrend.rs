@@ -3474,6 +3474,13 @@ pub fn halftrend_wasm(
         close: close.to_vec(),
         open: vec![f64::NAN; len],
         volume: vec![f64::NAN; len],
+        fields: CandleFieldFlags {
+            open: false,
+            high: true,
+            low: true,
+            close: true,
+            volume: false,
+        },
         hl2: high
             .iter()
             .zip(low.iter())

@@ -265,9 +265,10 @@ class TestHighPass:
         result = ta_indicators.highpass(close, 48)
         assert len(result) == len(close)
 
-
-
-        assert all(np.isnan(result)), "IIR filter should propagate NaN through entire output"
+        # Leading NaNs should remain NaN, but once valid data begins the filter should
+        # produce finite outputs (it should not permanently poison the IIR state).
+        assert np.all(np.isnan(result[:5])), "Expected leading NaNs to be preserved"
+        assert not np.any(np.isnan(result[5:])), "Unexpected NaN after first valid input"
 
     def test_highpass_batch_multiple_params(self, test_data):
         """Test HighPass batch with multiple parameter combinations"""

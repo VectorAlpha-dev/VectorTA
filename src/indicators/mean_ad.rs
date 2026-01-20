@@ -586,6 +586,10 @@ fn mean_ad_batch_inner_into(
 
     let do_row = |row: usize, out_row: &mut [f64]| {
         let period = combos[row].period.unwrap();
+        let warmup_end = first + 2 * period - 2;
+        for i in 0..warmup_end.min(out_row.len()) {
+            out_row[i] = f64::NAN;
+        }
         match chosen {
             Kernel::Scalar => mean_ad_row_scalar(data, first, period, out_row),
             #[cfg(all(feature = "nightly-avx", target_arch = "x86_64"))]

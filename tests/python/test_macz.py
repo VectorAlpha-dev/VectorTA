@@ -190,13 +190,14 @@ class TestMacz:
 
         assert len(result) == len(close)
 
-
-        warmup = expected['warmup_period']
-        if len(result) > warmup:
-            assert not np.any(np.isnan(result[warmup:])), "Found unexpected NaN after warmup period"
-
-
-        assert np.all(np.isnan(result[:warmup])), "Expected NaN in warmup period"
+        # Warmup for MAC-Z is data-dependent; mirror the Rust tests by finding the first
+        # non-NaN and asserting it is within a reasonable range for the default params.
+        first_valid = next((i for i, v in enumerate(result) if not np.isnan(v)), None)
+        assert first_valid is not None, "No valid MAC-Z output produced"
+        assert first_valid >= expected['default_params']['slow_length']
+        assert first_valid < 50
+        assert np.all(np.isnan(result[:first_valid])), "Expected NaN before warmup completes"
+        assert not np.any(np.isnan(result[first_valid:])), "Found unexpected NaN after warmup"
 
     def test_macz_streaming(self, test_data):
         """Test MAC-Z streaming matches batch calculation - mirrors check_macz_streaming"""

@@ -23,7 +23,23 @@ Cargo.lock
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# Editor settings
+.vscode/
+
+# Local demos/apps (not part of the published crate)
+ta_desktop_demo/
+gpu_backtester_demo/
+optimizer_demo/
+benchmarks/
+experimental/
+scripts/
+third_party/
+tools/
+
 src/data/backup/
+src/data/Backup/
+src/data/1MillionCandles.csv
 profiling.ps1
 file_structure.py
 profile.ps1
@@ -47,6 +63,7 @@ __pycache__/
 pkg/
 pkg_bak/
 tests/wasm/node_modules/
+tests/wasm/*.cjs
 
 # proptest regression artifacts
 proptest-regressions/
@@ -80,6 +97,9 @@ target-cuda-tests*/
 
 # Temporary archive directories
 .tmp*.temp-archive/
+
+# Local scratch/temp directories
+.tmp/
 
 # Stray worktree/merge leftovers
 .git.bak

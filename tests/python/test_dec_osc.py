@@ -105,19 +105,22 @@ class TestDecOsc:
 
     def test_dec_osc_invalid_k(self):
         """Test DEC_OSC fails with invalid k value"""
-        data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        # Ensure the dataset is long enough that parameter validation hits `k`
+        # (otherwise the indicator may fail earlier due to insufficient data
+        # for the selected hp_period).
+        data = np.arange(1.0, 256.0, dtype=np.float64)
 
 
         with pytest.raises(ValueError, match="Invalid K"):
-            ta_indicators.dec_osc(data, hp_period=2, k=0.0)
+            ta_indicators.dec_osc(data, hp_period=10, k=0.0)
 
 
         with pytest.raises(ValueError, match="Invalid K"):
-            ta_indicators.dec_osc(data, hp_period=2, k=-1.0)
+            ta_indicators.dec_osc(data, hp_period=10, k=-1.0)
 
 
         with pytest.raises(ValueError, match="Invalid K"):
-            ta_indicators.dec_osc(data, hp_period=2, k=float('nan'))
+            ta_indicators.dec_osc(data, hp_period=10, k=float('nan'))
 
     def test_dec_osc_reinput(self, test_data):
         """Test DEC_OSC using output as input - mirrors check_dec_osc_reinput"""

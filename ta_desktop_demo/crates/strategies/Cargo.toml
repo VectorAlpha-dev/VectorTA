@@ -1,9 +1,0 @@
-[package]
-name = "ta_strategies"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-rayon = "1.10.0"
-my_project = { path = "../../..", package = "vector-ta" }
