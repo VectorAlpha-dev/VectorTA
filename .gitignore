@@ -83,6 +83,7 @@ history-backups/
 *.out
 *.pid
 *.tmp
+.env
 
 # Local build byproducts sometimes written outside `target/`
 *.o
