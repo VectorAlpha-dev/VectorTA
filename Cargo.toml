@@ -1,6 +1,6 @@
 [package]
 name = "vector-ta"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "High-performance technical analysis indicators with optional SIMD/CUDA and language bindings."
 license = "Apache-2.0"

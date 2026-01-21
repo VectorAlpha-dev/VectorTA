@@ -4,15 +4,6 @@ VectorTA is a Rust crate of technical analysis indicators focused on speed and p
 
 Full documentation (indicator list, API reference, and guides): https://vectoralpha.dev/projects/ta
 
-## Install
-
-Once published on crates.io:
-
-```toml
-[dependencies]
-vector-ta = "0.1.1"
-```
-
 ## Rust usage
 
 Example: ADX over HLC slices
