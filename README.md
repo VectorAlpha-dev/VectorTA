@@ -2,8 +2,6 @@
 
 VectorTA is a Rust crate of technical analysis indicators focused on speed and predictable allocations, with optional SIMD/CUDA acceleration and optional Python/WASM bindings.
 
-This repository contains the core crate and its optional bindings; demo apps are developed separately.
-
 Full documentation (indicator list, API reference, and guides): https://vectoralpha.dev/projects/ta
 
 ## Install
@@ -12,7 +10,7 @@ Once published on crates.io:
 
 ```toml
 [dependencies]
-vector-ta = "0.1"
+vector-ta = "0.1.1"
 ```
 
 ## Rust usage
@@ -66,7 +64,7 @@ Enable:
 
 ```toml
 [dependencies]
-vector-ta = { version = "0.1", features = ["cuda"] }
+vector-ta = { version = "0.1.1", features = ["cuda"] }
 ```
 
 Notes:
