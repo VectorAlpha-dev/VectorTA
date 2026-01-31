@@ -1,0 +1,6 @@
+[patch.crates-io]
+# Local dev override for this monorepo: allow apps (e.g. `ta_desktop_demo`) to depend on the
+# published `vector-ta` crate name while resolving it from the workspace checkout.
+#
+# When splitting apps into separate repos, do not copy this file.
+vector-ta = { path = "." }

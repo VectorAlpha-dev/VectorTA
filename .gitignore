@@ -36,6 +36,7 @@ experimental/
 scripts/
 third_party/
 tools/
+experimental/
 
 src/data/backup/
 src/data/Backup/

@@ -1095,21 +1095,6 @@ unsafe fn uma_weighted_accumulate_avx512(
     (xws_acc, wsum_acc)
 }
 
-#[cfg(all(
-    feature = "nightly-avx",
-    target_arch = "x86_64",
-    not(target_feature = "avx512f")
-))]
-#[inline(always)]
-unsafe fn uma_weighted_accumulate_avx512(
-    _data: *const f64,
-    _ln_lut: *const f64,
-    _len_r: usize,
-    _p: f64,
-) -> (f64, f64) {
-    unreachable!("uma_weighted_accumulate_avx512 should not be called without AVX512F")
-}
-
 #[inline]
 pub fn uma(input: &UmaInput) -> Result<UmaOutput, UmaError> {
     uma_with_kernel(input, Kernel::Auto)
