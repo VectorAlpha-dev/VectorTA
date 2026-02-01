@@ -8,13 +8,21 @@ on:
 
 jobs:
   wheels:
-    name: Wheels (${{ matrix.os }} / py${{ matrix.python-version }})
+    name: Wheels (${{ matrix.os }} / py${{ matrix.python.version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python:
+          - version: "3.10"
+            manylinux: "cp310-cp310"
+          - version: "3.11"
+            manylinux: "cp311-cp311"
+          - version: "3.12"
+            manylinux: "cp312-cp312"
+          - version: "3.13"
+            manylinux: "cp313-cp313"
 
     steps:
       - uses: actions/checkout@v4
@@ -22,7 +30,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python.version }}
 
       - name: Install build dependencies
         if: runner.os != 'Linux'
@@ -32,14 +40,14 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist --interpreter ${{ runner.os == 'Linux' && format('/opt/python/cp{0}-cp{0}/bin/python', replace(matrix.python-version, '.', '')) || 'python' }}
+          args: --release --out dist --interpreter ${{ runner.os == 'Linux' && format('/opt/python/{0}/bin/python', matrix.python.manylinux) || 'python' }}
           manylinux: 2014
-          before-script-linux: ${{ format('/opt/python/cp{0}-cp{0}/bin/python -m pip install -U pip numpy', replace(matrix.python-version, '.', '')) }}
+          before-script-linux: ${{ format('/opt/python/{0}/bin/python -m pip install -U pip numpy', matrix.python.manylinux) }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: wheels-${{ matrix.os }}-py${{ matrix.python.version }}
           path: dist
 
   sdist:
