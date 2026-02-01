@@ -25,14 +25,16 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install build dependencies
+        if: runner.os != 'Linux'
         run: python -m pip install -U pip numpy
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           command: build
-          args: --release --out dist --interpreter python
+          args: --release --out dist --interpreter ${{ runner.os == 'Linux' && format('/opt/python/cp{0}-cp{0}/bin/python', replace(matrix.python-version, '.', '')) || 'python' }}
           manylinux: 2014
+          before-script-linux: ${{ format('/opt/python/cp{0}-cp{0}/bin/python -m pip install -U pip numpy', replace(matrix.python-version, '.', '')) }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
