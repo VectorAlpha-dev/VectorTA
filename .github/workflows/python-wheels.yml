@@ -96,7 +96,7 @@ jobs:
           import sys
 
           cargo = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
-          match = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"\\s*$', cargo)
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo)
           if not match:
               print("Could not find `version = \"...\"` in Cargo.toml", file=sys.stderr)
               raise SystemExit(1)
