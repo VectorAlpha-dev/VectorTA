@@ -54,6 +54,7 @@ website
 # Local Python virtualenvs (Linux/WSL)
 .venv-linux/
 venv/
+dist/
 __pycache__/
 *.pyc
 *.pyo

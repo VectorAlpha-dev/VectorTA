@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0", "numpy>=1.20.0"]
+build-backend = "maturin"
+
+[project]
+name = "vector-ta"
+dynamic = ["version"]
+description = "High-performance technical analysis indicators with optional SIMD/CUDA and language bindings."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.9"
+keywords = ["technical-analysis", "trading", "indicators", "finance"]
+dependencies = ["numpy>=1.20.0"]
+
+[project.urls]
+Homepage = "https://vectoralpha.dev/projects/ta"
+Documentation = "https://vectoralpha.dev/projects/ta"
+Repository = "https://github.com/VectorAlpha-dev/VectorTA"
+
+[tool.maturin]
+bindings = "pyo3"
+features = ["python"]
+module-name = "vector_ta"

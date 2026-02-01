@@ -46,6 +46,14 @@ python -m pip install -U pip maturin numpy
 maturin develop --release --features python
 ```
 
+### Publishing (PyPI)
+
+Python wheels are published by GitHub Actions on version tags:
+
+- Add a repo secret `PYPI_API_TOKEN` (PyPI API token with upload permissions).
+- Bump `Cargo.toml` to the desired version.
+- Push a matching tag like `v0.1.2` (tags containing `-` are treated as pre-releases and won't publish).
+
 ## WASM (optional)
 
 Build with `wasm-pack`:

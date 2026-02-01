@@ -1,0 +1,128 @@
+name: Python wheels
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  wheels:
+    name: Wheels (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install build dependencies
+        run: python -m pip install -U pip numpy
+
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --interpreter python
+          manylinux: 2014
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-py${{ matrix.python-version }}
+          path: dist
+
+  sdist:
+    name: Source distribution (sdist)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        run: python -m pip install -U pip numpy
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+  publish:
+    name: Publish to PyPI
+    needs: [wheels, sdist]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag matches Cargo.toml version
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          cargo = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version\\s*=\\s*"([^"]+)"\\s*$', cargo)
+          if not match:
+              print("Could not find `version = \"...\"` in Cargo.toml", file=sys.stderr)
+              raise SystemExit(1)
+
+          cargo_version = match.group(1)
+          tag = os.environ["GITHUB_REF_NAME"]
+          tag_version = tag[1:] if tag.startswith("v") else tag
+          if tag_version != cargo_version:
+              print(
+                  f"Refusing to publish: tag version {tag_version} != Cargo.toml version {cargo_version}",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          print(f"OK: publishing version {cargo_version} from tag {tag}")
+          PY
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Ensure PYPI_API_TOKEN secret is set
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -z "${PYPI_API_TOKEN}" ]; then
+            echo "Missing required secret: PYPI_API_TOKEN" >&2
+            exit 1
+          fi
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist
+          skip-existing: true
