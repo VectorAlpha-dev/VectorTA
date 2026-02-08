@@ -4,7 +4,7 @@ VectorTA is a Rust crate of technical analysis indicators focused on speed and p
 
 Full documentation (indicator list, API reference, and guides): https://vectoralpha.dev/projects/ta
 
-The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, I can achieve a benchmark timing of 6.08 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively.
+The CUDA bindings are predominantly only worth using if used in a VRAM-resident workflow. For example, It is possible to achieve a benchmark timing of 6.08 ms for 250 million calculated ALMA indicator data points on an RTX 4090, whereas the CPU (AMD 9950X) AVX-512, AVX2, and scalar timings are approximately 140.61 ms, 188.64 ms, and 386.20 ms, respectively.
 
 The Tauri backtest optimization demo application using this library can achieve 58300 backtests for a double ALMA crossover strategy over 200k data points in only 158.71 milliseconds on the same hardware (RTX 4090 + AMD 9950X). 
 
@@ -45,14 +45,6 @@ source .venv/bin/activate
 python -m pip install -U pip maturin numpy
 maturin develop --release --features python
 ```
-
-### Publishing (PyPI)
-
-Python wheels are published by GitHub Actions on version tags:
-
-- Add a repo secret `PYPI_API_TOKEN` (PyPI API token with upload permissions).
-- Bump `Cargo.toml` to the desired version.
-- Push a matching tag like `v0.1.2` (tags containing `-` are treated as pre-releases and won't publish).
 
 ## WASM (optional)
 

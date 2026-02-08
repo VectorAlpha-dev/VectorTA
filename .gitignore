@@ -37,6 +37,7 @@ scripts/
 third_party/
 tools/
 experimental/
+graduate_research/
 
 src/data/backup/
 src/data/Backup/
