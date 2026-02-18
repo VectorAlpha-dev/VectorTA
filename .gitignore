@@ -34,6 +34,9 @@ optimizer_demo/
 benchmarks/
 experimental/
 scripts/
+!scripts/
+scripts/*
+!scripts/profile_cuda_indicator_ncu.ps1
 third_party/
 tools/
 experimental/

@@ -21,6 +21,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
+fn ott_batch_var_block_x() -> u32 {
+    env::var("OTT_BATCH_VAR_BLOCK_X")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.clamp(1, 1024))
+        .unwrap_or(1)
+}
+
+const OTT_VCMO_SHARED_MIN_COMBOS: usize = 96;
+
 #[derive(Debug, Error)]
 pub enum CudaOttError {
     #[error("CUDA error: {0}")]
@@ -245,7 +255,16 @@ impl CudaOtt {
         }
         let cols = prices_f32.len();
 
-        if prices_f32.iter().all(|v| !v.is_finite()) {
+        let mut any_finite = false;
+        let mut all_finite = true;
+        for &v in prices_f32 {
+            if v.is_finite() {
+                any_finite = true;
+            } else {
+                all_finite = false;
+            }
+        }
+        if !any_finite {
             return Err(CudaOttError::InvalidInput("all values are NaN".into()));
         }
 
@@ -275,6 +294,11 @@ impl CudaOtt {
                 "series length exceeds kernel limits".into(),
             ));
         }
+        if rows > u32::MAX as usize {
+            return Err(CudaOttError::InvalidInput(
+                "combo count exceeds kernel launch limits".into(),
+            ));
+        }
 
         let mut d_prices = unsafe { DeviceBuffer::<f32>::uninitialized(cols) }?;
         unsafe { d_prices.async_copy_from(prices_f32, &self.stream) }?;
@@ -283,6 +307,18 @@ impl CudaOtt {
         self.memset_nan32_async(d_out.as_device_ptr().as_raw() as u64, out_elems)?;
 
         let mut f_var: Option<Function> = self.module.get_function("ott_from_var_batch_f32").ok();
+        let mut f_var_all_finite: Option<Function> = self
+            .module
+            .get_function("ott_from_var_batch_f32_all_finite")
+            .ok();
+        let mut f_var_vcmo_all_finite: Option<Function> = self
+            .module
+            .get_function("ott_from_vcmo_batch_f32_all_finite")
+            .ok();
+        let mut f_cmo_all_finite: Option<Function> = self
+            .module
+            .get_function("cmo9_from_prices_f32_all_finite")
+            .ok();
         let mut f_apply = self
             .module
             .get_function("ott_apply_single_f32")
@@ -297,34 +333,95 @@ impl CudaOtt {
                 .eq_ignore_ascii_case("VAR")
         });
         if all_var {
-            if let Some(ref mut func) = f_var {
-                let mut periods_host: Vec<i32> = Vec::with_capacity(rows);
-                let mut percents_host: Vec<f32> = Vec::with_capacity(rows);
-                for p in &combos {
-                    let period = p.period.unwrap_or(2);
-                    let percent = p.percent.unwrap_or(1.4) as f32;
-                    if period == 0 {
-                        return Err(CudaOttError::InvalidInput("period must be positive".into()));
-                    }
-                    if !percent.is_finite() {
-                        return Err(CudaOttError::InvalidInput("percent must be finite".into()));
-                    }
-                    if period > i32::MAX as usize {
-                        return Err(CudaOttError::InvalidInput(
-                            "period exceeds CUDA i32 range".into(),
-                        ));
-                    }
-                    periods_host.push(period as i32);
-                    percents_host.push(percent);
+            let mut periods_host: Vec<i32> = Vec::with_capacity(rows);
+            let mut percents_host: Vec<f32> = Vec::with_capacity(rows);
+            for p in &combos {
+                let period = p.period.unwrap_or(2);
+                let percent = p.percent.unwrap_or(1.4) as f32;
+                if period == 0 {
+                    return Err(CudaOttError::InvalidInput("period must be positive".into()));
                 }
+                if !percent.is_finite() {
+                    return Err(CudaOttError::InvalidInput("percent must be finite".into()));
+                }
+                if period > i32::MAX as usize {
+                    return Err(CudaOttError::InvalidInput(
+                        "period exceeds CUDA i32 range".into(),
+                    ));
+                }
+                periods_host.push(period as i32);
+                percents_host.push(percent);
+            }
 
-                let mut d_periods: DeviceBuffer<i32> =
-                    unsafe { DeviceBuffer::uninitialized(rows) }?;
-                let mut d_percents: DeviceBuffer<f32> =
-                    unsafe { DeviceBuffer::uninitialized(rows) }?;
-                unsafe { d_periods.async_copy_from(&periods_host, &self.stream) }?;
-                unsafe { d_percents.async_copy_from(&percents_host, &self.stream) }?;
+            let mut d_periods: DeviceBuffer<i32> = unsafe { DeviceBuffer::uninitialized(rows) }?;
+            let mut d_percents: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(rows) }?;
+            unsafe { d_periods.async_copy_from(&periods_host, &self.stream) }?;
+            unsafe { d_percents.async_copy_from(&percents_host, &self.stream) }?;
 
+            if all_finite && rows >= OTT_VCMO_SHARED_MIN_COMBOS {
+                if let (Some(cmo_func), Some(var_vcmo_func)) =
+                    (f_cmo_all_finite.as_mut(), f_var_vcmo_all_finite.as_mut())
+                {
+                    let mut d_vcmo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols) }?;
+                    unsafe {
+                        let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                        let mut series_len_i = cols as i32;
+                        let mut vcmo_ptr = d_vcmo.as_device_ptr().as_raw();
+                        let cmo_args: &mut [*mut c_void] = &mut [
+                            &mut prices_ptr as *mut _ as *mut c_void,
+                            &mut series_len_i as *mut _ as *mut c_void,
+                            &mut vcmo_ptr as *mut _ as *mut c_void,
+                        ];
+                        let cmo_grid: GridSize = (1, 1, 1).into();
+                        let cmo_block: BlockSize = (1, 1, 1).into();
+                        self.stream
+                            .launch(cmo_func, cmo_grid, cmo_block, 0, cmo_args)
+                            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+
+                        let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                        let mut vcmo_ptr = d_vcmo.as_device_ptr().as_raw();
+                        let mut periods_ptr = d_periods.as_device_ptr().as_raw();
+                        let mut percents_ptr = d_percents.as_device_ptr().as_raw();
+                        let mut series_len_i = cols as i32;
+                        let mut n_combos_i = rows as i32;
+                        let mut out_ptr = d_out.as_device_ptr().as_raw();
+                        let args: &mut [*mut c_void] = &mut [
+                            &mut prices_ptr as *mut _ as *mut c_void,
+                            &mut vcmo_ptr as *mut _ as *mut c_void,
+                            &mut periods_ptr as *mut _ as *mut c_void,
+                            &mut percents_ptr as *mut _ as *mut c_void,
+                            &mut series_len_i as *mut _ as *mut c_void,
+                            &mut n_combos_i as *mut _ as *mut c_void,
+                            &mut out_ptr as *mut _ as *mut c_void,
+                        ];
+                        let block_x = ott_batch_var_block_x();
+                        let grid_x = ((rows as u32).saturating_add(block_x - 1)) / block_x;
+                        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                        let block: BlockSize = (block_x, 1, 1).into();
+                        self.stream
+                            .launch(var_vcmo_func, grid, block, 0, args)
+                            .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
+                    }
+
+                    self.stream.synchronize()?;
+                    return Ok(DeviceArrayF32 {
+                        buf: d_out,
+                        rows,
+                        cols,
+                    });
+                }
+            }
+
+            let var_func = if all_finite {
+                if f_var_all_finite.is_some() {
+                    f_var_all_finite.as_mut()
+                } else {
+                    f_var.as_mut()
+                }
+            } else {
+                f_var.as_mut()
+            };
+            if let Some(func) = var_func {
                 unsafe {
                     let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                     let mut periods_ptr = d_periods.as_device_ptr().as_raw();
@@ -340,8 +437,10 @@ impl CudaOtt {
                         &mut n_combos_i as *mut _ as *mut c_void,
                         &mut out_ptr as *mut _ as *mut c_void,
                     ];
-                    let grid: GridSize = ((rows as u32).max(1), 1, 1).into();
-                    let block: BlockSize = (1, 1, 1).into();
+                    let block_x = ott_batch_var_block_x();
+                    let grid_x = ((rows as u32).saturating_add(block_x - 1)) / block_x;
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (block_x, 1, 1).into();
                     self.stream
                         .launch(func, grid, block, 0, args)
                         .map_err(|e| CudaOttError::Cuda(e.to_string()))?;
@@ -515,7 +614,7 @@ impl CudaOtt {
                     &mut pct as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                let grid: GridSize = ((rows as u32).max(1), 1, 1).into();
+                let grid: GridSize = ((cols as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
                 self.stream.launch(&mut func, grid, block, 0, args)?;
             }
@@ -629,7 +728,7 @@ impl CudaOtt {
                     &mut pct as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                let grid: GridSize = ((rows as u32).max(1), 1, 1).into();
+                let grid: GridSize = ((cols as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
                 self.stream.launch(&mut func, grid, block, 0, args)?;
             }
@@ -672,6 +771,7 @@ pub mod benches {
     struct OttBatchVarDevState {
         cuda: CudaOtt,
         d_prices: DeviceBuffer<f32>,
+        d_vcmo: Option<DeviceBuffer<f32>>,
         d_periods: DeviceBuffer<i32>,
         d_percents: DeviceBuffer<f32>,
         series_len: usize,
@@ -685,32 +785,69 @@ pub mod benches {
                 .memset_nan32_async(self.d_out.as_device_ptr().as_raw() as u64, out_elems)
                 .expect("ott memset nan");
 
-            let mut func = self
-                .cuda
-                .module
-                .get_function("ott_from_var_batch_f32")
-                .expect("ott_from_var_batch_f32");
-            unsafe {
-                let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
-                let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
-                let mut percents_ptr = self.d_percents.as_device_ptr().as_raw();
-                let mut series_len_i = self.series_len as i32;
-                let mut n_combos_i = self.n_combos as i32;
-                let mut out_ptr = self.d_out.as_device_ptr().as_raw();
-                let args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut periods_ptr as *mut _ as *mut c_void,
-                    &mut percents_ptr as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut n_combos_i as *mut _ as *mut c_void,
-                    &mut out_ptr as *mut _ as *mut c_void,
-                ];
-                let grid: GridSize = ((self.n_combos as u32).max(1), 1, 1).into();
-                let block: BlockSize = (1, 1, 1).into();
+            if let (Some(d_vcmo), Ok(mut func)) = (
+                self.d_vcmo.as_ref(),
                 self.cuda
-                    .stream
-                    .launch(&mut func, grid, block, 0, args)
-                    .expect("ott_from_var_batch_f32 launch");
+                    .module
+                    .get_function("ott_from_vcmo_batch_f32_all_finite"),
+            ) {
+                unsafe {
+                    let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                    let mut vcmo_ptr = d_vcmo.as_device_ptr().as_raw();
+                    let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                    let mut percents_ptr = self.d_percents.as_device_ptr().as_raw();
+                    let mut series_len_i = self.series_len as i32;
+                    let mut n_combos_i = self.n_combos as i32;
+                    let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut vcmo_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percents_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    let block_x = ott_batch_var_block_x();
+                    let grid_x = ((self.n_combos as u32).saturating_add(block_x - 1)) / block_x;
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (block_x, 1, 1).into();
+                    self.cuda
+                        .stream
+                        .launch(&mut func, grid, block, 0, args)
+                        .expect("ott_from_vcmo_batch_f32_all_finite launch");
+                }
+            } else {
+                let mut func = self
+                    .cuda
+                    .module
+                    .get_function("ott_from_var_batch_f32_all_finite")
+                    .or_else(|_| self.cuda.module.get_function("ott_from_var_batch_f32"))
+                    .expect("ott_from_var_batch_f32(_all_finite)");
+                unsafe {
+                    let mut prices_ptr = self.d_prices.as_device_ptr().as_raw();
+                    let mut periods_ptr = self.d_periods.as_device_ptr().as_raw();
+                    let mut percents_ptr = self.d_percents.as_device_ptr().as_raw();
+                    let mut series_len_i = self.series_len as i32;
+                    let mut n_combos_i = self.n_combos as i32;
+                    let mut out_ptr = self.d_out.as_device_ptr().as_raw();
+                    let args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut periods_ptr as *mut _ as *mut c_void,
+                        &mut percents_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut n_combos_i as *mut _ as *mut c_void,
+                        &mut out_ptr as *mut _ as *mut c_void,
+                    ];
+                    let block_x = ott_batch_var_block_x();
+                    let grid_x = ((self.n_combos as u32).saturating_add(block_x - 1)) / block_x;
+                    let grid: GridSize = (grid_x.max(1), 1, 1).into();
+                    let block: BlockSize = (block_x, 1, 1).into();
+                    self.cuda
+                        .stream
+                        .launch(&mut func, grid, block, 0, args)
+                        .expect("ott_from_var_batch_f32 launch");
+                }
             }
             self.cuda.stream.synchronize().expect("ott sync");
         }
@@ -736,6 +873,31 @@ pub mod benches {
             .collect();
 
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
+        let d_vcmo: Option<DeviceBuffer<f32>> = if let Ok(mut cmo_func) = cuda
+            .module
+            .get_function("cmo9_from_prices_f32_all_finite")
+        {
+            let mut tmp: DeviceBuffer<f32> =
+                unsafe { DeviceBuffer::uninitialized(prices.len()) }.expect("d_vcmo");
+            unsafe {
+                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                let mut series_len_i = prices.len() as i32;
+                let mut vcmo_ptr = tmp.as_device_ptr().as_raw();
+                let cmo_args: &mut [*mut c_void] = &mut [
+                    &mut prices_ptr as *mut _ as *mut c_void,
+                    &mut series_len_i as *mut _ as *mut c_void,
+                    &mut vcmo_ptr as *mut _ as *mut c_void,
+                ];
+                let cmo_grid: GridSize = (1, 1, 1).into();
+                let cmo_block: BlockSize = (1, 1, 1).into();
+                cuda.stream
+                    .launch(&mut cmo_func, cmo_grid, cmo_block, 0, cmo_args)
+                    .expect("cmo9_from_prices_f32_all_finite launch");
+            }
+            Some(tmp)
+        } else {
+            None
+        };
         let d_periods = DeviceBuffer::from_slice(&periods_host).expect("d_periods");
         let d_percents = DeviceBuffer::from_slice(&percents_host).expect("d_percents");
         let d_out: DeviceBuffer<f32> = unsafe {
@@ -747,6 +909,7 @@ pub mod benches {
         Box::new(OttBatchVarDevState {
             cuda,
             d_prices,
+            d_vcmo,
             d_periods,
             d_percents,
             series_len: prices.len(),
@@ -791,7 +954,7 @@ pub mod benches {
                     &mut pct as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                let grid: GridSize = ((self.rows as u32).max(1), 1, 1).into();
+                let grid: GridSize = ((self.cols as u32).max(1), 1, 1).into();
                 let block: BlockSize = (1, 1, 1).into();
                 self.cuda
                     .stream

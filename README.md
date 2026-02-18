@@ -68,6 +68,21 @@ Notes:
 - To force-disable CUDA probing/usage (tests/CI): set `CUDA_FORCE_SKIP=1`.
 - To override where prebuilt PTX is sourced from, set `VECTOR_TA_PREBUILT_PTX_DIR` (see docs link above).
 
+## Nsight Compute profiling (CUDA)
+
+Profile one indicator benchmark with Nsight Compute and export report + summary artifacts:
+
+```powershell
+pwsh -NoProfile -File scripts/profile_cuda_indicator_ncu.ps1 -Indicator rsi -Scenario batch -NcuSet full
+```
+
+Useful flags:
+- `-ListOnly`: list available benchmark IDs for a given indicator.
+- `-BenchId <id>`: profile an exact Criterion benchmark ID instead of auto-picking one.
+- `-KernelRegex <regex>`: override kernel filter (default: `.*<indicator>.*`).
+
+If you see `ERR_NVGPUCTRPERM`, enable GPU performance counters in NVIDIA Control Panel (`Developer -> Manage GPU Performance Counters`) or run with sufficient privileges, then rerun.
+
 ## License
 
 Apache-2.0 (see `LICENSE`).

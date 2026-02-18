@@ -41,6 +41,7 @@ void ott_apply_single_f32(const float* __restrict__ ma,
 
     const float fark = percent * 0.01f;
     const float scale_minus = 1.0f - percent * 0.005f;
+    const float scale_plus = scale_minus + fark;
 
 
     int i = find_first_finite(ma, 0, series_len);
@@ -53,7 +54,7 @@ void ott_apply_single_f32(const float* __restrict__ ma,
 
 
     float mt0 = long_stop;
-    float scale0 = (m > mt0) ? (scale_minus + fark) : (scale_minus);
+    float scale0 = (m > mt0) ? scale_plus : scale_minus;
     out[i] = mt0 * scale0;
     ++i;
 
@@ -89,7 +90,7 @@ void ott_apply_single_f32(const float* __restrict__ ma,
 
 
         float mt = (dir == 1) ? long_stop : short_stop;
-        float scale = (mavg > mt) ? (scale_minus + fark) : (scale_minus);
+        float scale = (mavg > mt) ? scale_plus : scale_minus;
         out[i] = mt * scale;
     }
 }
@@ -107,8 +108,8 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
                              int series_len,
                              int n_combos,
                              float* __restrict__ out) {
-    const int combo = blockIdx.x;
-    if (combo >= n_combos || threadIdx.x != 0) return;
+    const int combo = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (combo >= n_combos) return;
 
     const int period = periods[combo];
     const float percent = percents[combo];
@@ -125,6 +126,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
 
     const float fark = percent * 0.01f;
     const float scale_minus = 1.0f - percent * 0.005f;
+    const float scale_plus = scale_minus + fark;
     const float valpha_base = vidya_alpha_base(period);
 
 
@@ -145,7 +147,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
 
 
     float mt0 = long_stop;
-    float scale0 = (var > mt0) ? (scale_minus + fark) : (scale_minus);
+    float scale0 = (var > mt0) ? scale_plus : scale_minus;
     out_row[first] = mt0 * scale0;
 
 
@@ -158,7 +160,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
         float dn = a - b; if (dn < 0.0f) dn = 0.0f;
         ring_u[ridx] = up;  u_sum += up;
         ring_d[ridx] = dn;  d_sum += dn;
-        ridx = (ridx + 1) % 9;
+        if (++ridx == 9) ridx = 0;
 
 
         float cand_long = fmaf(-fark, var, var);
@@ -168,7 +170,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
         if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
         if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
         float mt = (dir == 1) ? long_stop : short_stop;
-        float scale = (var > mt) ? (scale_minus + fark) : (scale_minus);
+        float scale = (var > mt) ? scale_plus : scale_minus;
         out_row[i] = mt * scale;
     }
 
@@ -182,7 +184,7 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
         float old_u = ring_u[ridx];
         float old_d = ring_d[ridx];
         ring_u[ridx] = up; ring_d[ridx] = dn;
-        ridx = (ridx + 1) % 9;
+        if (++ridx == 9) ridx = 0;
         u_sum += up - old_u;
         d_sum += dn - old_d;
         float denom = u_sum + d_sum;
@@ -198,7 +200,187 @@ void ott_from_var_batch_f32(const float* __restrict__ prices,
         if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
         if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
         float mt = (dir == 1) ? long_stop : short_stop;
-        float scale = (var > mt) ? (scale_minus + fark) : (scale_minus);
+        float scale = (var > mt) ? scale_plus : scale_minus;
+        out_row[i] = mt * scale;
+    }
+}
+
+extern "C" __global__
+void ott_from_var_batch_f32_all_finite(const float* __restrict__ prices,
+                                       const int*   __restrict__ periods,
+                                       const float* __restrict__ percents,
+                                       int series_len,
+                                       int n_combos,
+                                       float* __restrict__ out) {
+    const int combo = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    const float percent = percents[combo];
+    if (period <= 0 || series_len <= 0 || !isfinite(percent)) return;
+
+    float* __restrict__ out_row = out + combo * series_len;
+
+    const float fark = percent * 0.01f;
+    const float scale_minus = 1.0f - percent * 0.005f;
+    const float scale_plus = scale_minus + fark;
+    const float valpha_base = vidya_alpha_base(period);
+
+    float ring_u[9];
+    float ring_d[9];
+    #pragma unroll
+    for (int k = 0; k < 9; ++k) { ring_u[k] = 0.0f; ring_d[k] = 0.0f; }
+    float u_sum = 0.0f, d_sum = 0.0f;
+    int ridx = 0;
+
+    float var = 0.0f;
+    float long_stop = fmaf(-fark, var, var);
+    float short_stop = fmaf( fark, var, var);
+    int dir = 1;
+    float mt0 = long_stop;
+    float scale0 = (var > mt0) ? scale_plus : scale_minus;
+    out_row[0] = mt0 * scale0;
+
+    int pre_end = (8 < series_len ? 8 : series_len - 1);
+    for (int i = 1; i <= pre_end; ++i) {
+        float a = prices[i - 1];
+        float b = prices[i];
+        float up = b - a; if (up < 0.0f) up = 0.0f;
+        float dn = a - b; if (dn < 0.0f) dn = 0.0f;
+        ring_u[ridx] = up;  u_sum += up;
+        ring_d[ridx] = dn;  d_sum += dn;
+        if (++ridx == 9) ridx = 0;
+
+        float cand_long = fmaf(-fark, var, var);
+        float cand_short = fmaf( fark, var, var);
+        float lprev = long_stop, sprev = short_stop;
+        if (var > lprev) long_stop = (cand_long > lprev) ? cand_long : lprev; else long_stop = cand_long;
+        if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
+        if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
+        float mt = (dir == 1) ? long_stop : short_stop;
+        float scale = (var > mt) ? scale_plus : scale_minus;
+        out_row[i] = mt * scale;
+    }
+
+    for (int i = 9; i < series_len; ++i) {
+        float a = prices[i - 1];
+        float b = prices[i];
+        float up = b - a; if (up < 0.0f) up = 0.0f;
+        float dn = a - b; if (dn < 0.0f) dn = 0.0f;
+        float old_u = ring_u[ridx];
+        float old_d = ring_d[ridx];
+        ring_u[ridx] = up; ring_d[ridx] = dn;
+        if (++ridx == 9) ridx = 0;
+        u_sum += up - old_u;
+        d_sum += dn - old_d;
+        float denom = u_sum + d_sum;
+        float vcmo = (denom != 0.0f) ? ((u_sum - d_sum) / denom) : 0.0f;
+        float avalpha = valpha_base * fabsf(vcmo);
+        var = fmaf(avalpha, b, (1.0f - avalpha) * var);
+
+        float cand_long = fmaf(-fark, var, var);
+        float cand_short = fmaf( fark, var, var);
+        float lprev = long_stop, sprev = short_stop;
+        if (var > lprev) long_stop = (cand_long > lprev) ? cand_long : lprev; else long_stop = cand_long;
+        if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
+        if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
+        float mt = (dir == 1) ? long_stop : short_stop;
+        float scale = (var > mt) ? scale_plus : scale_minus;
+        out_row[i] = mt * scale;
+    }
+}
+
+extern "C" __global__
+void cmo9_from_prices_f32_all_finite(const float* __restrict__ prices,
+                                     int series_len,
+                                     float* __restrict__ vcmo_out) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    if (series_len <= 0) return;
+
+    vcmo_out[0] = 0.0f;
+    if (series_len == 1) return;
+
+    float ring_u[9];
+    float ring_d[9];
+    #pragma unroll
+    for (int k = 0; k < 9; ++k) { ring_u[k] = 0.0f; ring_d[k] = 0.0f; }
+    float u_sum = 0.0f, d_sum = 0.0f;
+    int ridx = 0;
+
+    int pre_end = (8 < series_len ? 8 : series_len - 1);
+    for (int i = 1; i <= pre_end; ++i) {
+        float a = prices[i - 1];
+        float b = prices[i];
+        float up = b - a; if (up < 0.0f) up = 0.0f;
+        float dn = a - b; if (dn < 0.0f) dn = 0.0f;
+        ring_u[ridx] = up;  u_sum += up;
+        ring_d[ridx] = dn;  d_sum += dn;
+        if (++ridx == 9) ridx = 0;
+        vcmo_out[i] = 0.0f;
+    }
+
+    for (int i = 9; i < series_len; ++i) {
+        float a = prices[i - 1];
+        float b = prices[i];
+        float up = b - a; if (up < 0.0f) up = 0.0f;
+        float dn = a - b; if (dn < 0.0f) dn = 0.0f;
+        float old_u = ring_u[ridx];
+        float old_d = ring_d[ridx];
+        ring_u[ridx] = up; ring_d[ridx] = dn;
+        if (++ridx == 9) ridx = 0;
+        u_sum += up - old_u;
+        d_sum += dn - old_d;
+        float denom = u_sum + d_sum;
+        vcmo_out[i] = (denom != 0.0f) ? ((u_sum - d_sum) / denom) : 0.0f;
+    }
+}
+
+extern "C" __global__
+void ott_from_vcmo_batch_f32_all_finite(const float* __restrict__ prices,
+                                        const float* __restrict__ vcmo,
+                                        const int*   __restrict__ periods,
+                                        const float* __restrict__ percents,
+                                        int series_len,
+                                        int n_combos,
+                                        float* __restrict__ out) {
+    const int combo = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+    if (combo >= n_combos) return;
+
+    const int period = periods[combo];
+    const float percent = percents[combo];
+    if (period <= 0 || series_len <= 0 || !isfinite(percent)) return;
+
+    float* __restrict__ out_row = out + combo * series_len;
+
+    const float fark = percent * 0.01f;
+    const float scale_minus = 1.0f - percent * 0.005f;
+    const float scale_plus = scale_minus + fark;
+    const float valpha_base = vidya_alpha_base(period);
+
+    float var = 0.0f;
+    float long_stop = fmaf(-fark, var, var);
+    float short_stop = fmaf( fark, var, var);
+    int dir = 1;
+    out_row[0] = 0.0f;
+
+    int pre_end = (8 < series_len ? 8 : series_len - 1);
+    for (int i = 1; i <= pre_end; ++i) {
+        out_row[i] = 0.0f;
+    }
+
+    for (int i = 9; i < series_len; ++i) {
+        float b = prices[i];
+        float avalpha = valpha_base * fabsf(vcmo[i]);
+        var = fmaf(avalpha, b, (1.0f - avalpha) * var);
+
+        float cand_long = fmaf(-fark, var, var);
+        float cand_short = fmaf( fark, var, var);
+        float lprev = long_stop, sprev = short_stop;
+        if (var > lprev) long_stop = (cand_long > lprev) ? cand_long : lprev; else long_stop = cand_long;
+        if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
+        if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
+        float mt = (dir == 1) ? long_stop : short_stop;
+        float scale = (var > mt) ? scale_plus : scale_minus;
         out_row[i] = mt * scale;
     }
 }
@@ -217,6 +399,7 @@ void ott_many_series_one_param_f32(const float* __restrict__ ma_tm,
 
     const float fark = percent * 0.01f;
     const float scale_minus = 1.0f - percent * 0.005f;
+    const float scale_plus = scale_minus + fark;
 
 
     int t = 0;
@@ -228,7 +411,7 @@ void ott_many_series_one_param_f32(const float* __restrict__ ma_tm,
     float short_stop = fmaf( fark, m, m);
     int dir = 1;
     float mt0 = long_stop;
-    float scale0 = (m > mt0) ? (scale_minus + fark) : (scale_minus);
+    float scale0 = (m > mt0) ? scale_plus : scale_minus;
     out_tm[(size_t)t * (size_t)cols + s] = mt0 * scale0;
     ++t;
     for (; t < rows; ++t) {
@@ -242,7 +425,7 @@ void ott_many_series_one_param_f32(const float* __restrict__ ma_tm,
         if (mavg < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
         if (dir == -1 && mavg > sprev) dir = 1; else if (dir == 1 && mavg < lprev) dir = -1;
         float mt = (dir == 1) ? long_stop : short_stop;
-        float scale = (mavg > mt) ? (scale_minus + fark) : (scale_minus);
+        float scale = (mavg > mt) ? scale_plus : scale_minus;
         out_tm[(size_t)t * (size_t)cols + s] = mt * scale;
     }
 }
@@ -260,6 +443,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
 
     const float fark = percent * 0.01f;
     const float scale_minus = 1.0f - percent * 0.005f;
+    const float scale_plus = scale_minus + fark;
     const float valpha_base = vidya_alpha_base(period);
 
 
@@ -279,7 +463,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
     float long_stop = fmaf(-fark, var, var);
     float short_stop = fmaf( fark, var, var);
     int dir = 1;
-    float mt0 = long_stop; float scale0 = (var > mt0) ? (scale_minus + fark) : (scale_minus);
+    float mt0 = long_stop; float scale0 = (var > mt0) ? scale_plus : scale_minus;
     out_tm[(size_t)first * (size_t)cols + s] = mt0 * scale0;
 
     int pre_end = (first + 8 < rows ? first + 8 : rows - 1);
@@ -289,7 +473,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (!isfinite(a) || !isfinite(b)) continue;
         float up = b - a; if (up < 0.0f) up = 0.0f;
         float dn = a - b; if (dn < 0.0f) dn = 0.0f;
-        ring_u[ridx] = up; u_sum += up; ring_d[ridx] = dn; d_sum += dn; ridx = (ridx + 1) % 9;
+        ring_u[ridx] = up; u_sum += up; ring_d[ridx] = dn; d_sum += dn; if (++ridx == 9) ridx = 0;
         float cand_long = fmaf(-fark, var, var);
         float cand_short = fmaf( fark, var, var);
         float lprev = long_stop, sprev = short_stop;
@@ -297,7 +481,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
         if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
         float mt = (dir == 1) ? long_stop : short_stop;
-        float scale = (var > mt) ? (scale_minus + fark) : (scale_minus);
+        float scale = (var > mt) ? scale_plus : scale_minus;
         out_tm[(size_t)t * (size_t)cols + s] = mt * scale;
     }
     for (int t = first + 9; t < rows; ++t) {
@@ -305,7 +489,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
         float b = prices_tm[(size_t)t * (size_t)cols + s];
         if (!isfinite(a) || !isfinite(b)) continue;
         float up = b - a; if (up < 0.0f) up = 0.0f; float dn = a - b; if (dn < 0.0f) dn = 0.0f;
-        float old_u = ring_u[ridx]; float old_d = ring_d[ridx]; ring_u[ridx] = up; ring_d[ridx] = dn; ridx = (ridx + 1) % 9;
+        float old_u = ring_u[ridx]; float old_d = ring_d[ridx]; ring_u[ridx] = up; ring_d[ridx] = dn; if (++ridx == 9) ridx = 0;
         u_sum += up - old_u; d_sum += dn - old_d; float denom = u_sum + d_sum; float vcmo = (denom != 0.0f) ? ((u_sum - d_sum) / denom) : 0.0f;
         float avalpha = valpha_base * fabsf(vcmo); var = fmaf(avalpha, b, (1.0f - avalpha) * var);
         float cand_long = fmaf(-fark, var, var); float cand_short = fmaf( fark, var, var);
@@ -313,7 +497,7 @@ void ott_from_var_many_series_one_param_f32(const float* __restrict__ prices_tm,
         if (var > lprev) long_stop = (cand_long > lprev) ? cand_long : lprev; else long_stop = cand_long;
         if (var < sprev) short_stop = (cand_short < sprev) ? cand_short : sprev; else short_stop = cand_short;
         if (dir == -1 && var > sprev) dir = 1; else if (dir == 1 && var < lprev) dir = -1;
-        float mt = (dir == 1) ? long_stop : short_stop; float scale = (var > mt) ? (scale_minus + fark) : (scale_minus);
+        float mt = (dir == 1) ? long_stop : short_stop; float scale = (var > mt) ? scale_plus : scale_minus;
         out_tm[(size_t)t * (size_t)cols + s] = mt * scale;
     }
 }
