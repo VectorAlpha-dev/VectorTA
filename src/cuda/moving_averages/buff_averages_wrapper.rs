@@ -64,10 +64,11 @@ pub mod benches {
                 "buff_averages",
                 "batch_dev",
                 "buff_averages_cuda_batch_dev",
-                "60k_x_49combos",
+                "1m_x_250",
                 prep_buff_averages_batch_box,
             )
-            .with_inner_iters(8),
+            .with_inner_iters(1)
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "buff_averages",
                 "many_series_one_param",
@@ -120,7 +121,7 @@ pub mod benches {
             many_series: ManySeriesKernelPolicy::Auto,
         });
 
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut price = vec![f32::NAN; len];
         let mut volume = vec![f32::NAN; len];
         for i in 3..len {
@@ -129,8 +130,8 @@ pub mod benches {
             volume[i] = (x * 0.0007).cos().abs() + 0.6;
         }
         let sweep = BuffAveragesBatchRange {
-            fast_period: (4, 28, 4),
-            slow_period: (32, 128, 16),
+            fast_period: (4, 53, 1),
+            slow_period: (100, 180, 20),
         };
 
         let combos = CudaBuffAverages::expand_grid(&sweep);

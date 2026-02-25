@@ -405,9 +405,10 @@ impl CudaEmv {
         let d_high = self.copy_to_device_adaptive_f32(high)?;
         let d_low = self.copy_to_device_adaptive_f32(low)?;
         let d_vol = self.copy_to_device_adaptive_f32(volume)?;
+        let d_first = DeviceBuffer::from_slice(&[first as i32])?;
         let mut d_out = unsafe { DeviceBuffer::<f32>::uninitialized_async(len, &self.stream) }?;
 
-        self.launch_batch_kernel(&d_high, &d_low, &d_vol, len, 1, first, &mut d_out)?;
+        self.launch_many_series_kernel(&d_high, &d_low, &d_vol, &d_first, 1, len, &mut d_out)?;
 
         self.stream.synchronize()?;
 
@@ -636,6 +637,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_SERIES_COLS: usize = 256;
     const MANY_SERIES_LEN: usize = 1_000_000;
+    const REPEATS_1M_X_250: usize = 250;
 
     fn bytes_one_series() -> usize {
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -681,23 +683,26 @@ pub mod benches {
         d_high: DeviceBuffer<f32>,
         d_low: DeviceBuffer<f32>,
         d_vol: DeviceBuffer<f32>,
+        d_first: DeviceBuffer<i32>,
         d_out: DeviceBuffer<f32>,
         len: usize,
-        first_valid: usize,
+        repeats: usize,
     }
     impl CudaBenchState for BatchDeviceState {
         fn launch(&mut self) {
-            self.cuda
-                .launch_batch_kernel(
-                    &self.d_high,
-                    &self.d_low,
-                    &self.d_vol,
-                    self.len,
-                    1,
-                    self.first_valid,
-                    &mut self.d_out,
-                )
-                .expect("emv launch_batch_kernel");
+            for _ in 0..self.repeats {
+                self.cuda
+                    .launch_many_series_kernel(
+                        &self.d_high,
+                        &self.d_low,
+                        &self.d_vol,
+                        &self.d_first,
+                        1,
+                        self.len,
+                        &mut self.d_out,
+                    )
+                    .expect("emv launch_many_series_kernel");
+            }
             self.cuda.synchronize().expect("emv sync");
         }
     }
@@ -713,6 +718,7 @@ pub mod benches {
             unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high");
         let d_low = unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low");
         let d_vol = unsafe { DeviceBuffer::from_slice_async(&vol, &cuda.stream) }.expect("d_vol");
+        let d_first = DeviceBuffer::from_slice(&[first_valid as i32]).expect("d_first");
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }.expect("d_out");
         cuda.synchronize().expect("sync after prep");
@@ -721,9 +727,10 @@ pub mod benches {
             d_high,
             d_low,
             d_vol,
+            d_first,
             d_out,
             len,
-            first_valid,
+            repeats: REPEATS_1M_X_250,
         })
     }
 
@@ -791,7 +798,7 @@ pub mod benches {
                 "emv",
                 "one_series",
                 "emv_cuda_batch_dev",
-                "1m",
+                "1m_x_250",
                 prep_one_series,
             )
             .with_sample_size(10)

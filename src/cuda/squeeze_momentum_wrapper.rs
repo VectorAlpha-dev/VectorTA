@@ -500,7 +500,7 @@ impl CudaSqueezeMomentum {
         let _ = func.set_cache_config(CacheConfig::PreferL1);
 
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => 64,
             BatchKernelPolicy::OneD { block_x } => block_x.max(32),
         };
         let grid: GridSize = (n_combos as u32, 1, 1).into();
@@ -857,8 +857,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 1_000_00;
-    const PARAM_SWEEP: usize = 128;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let n = ONE_SERIES_LEN;
@@ -1033,7 +1033,7 @@ pub mod benches {
             "squeeze_momentum",
             "one_series_many_params",
             "squeeze_momentum_cuda_batch_dev",
-            "100k_x_128",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

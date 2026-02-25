@@ -391,7 +391,7 @@ impl CudaHwma {
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|&v| matches!(v, 64 | 128 | 256 | 512))
-                .unwrap_or(128),
+                .unwrap_or(64),
         };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();

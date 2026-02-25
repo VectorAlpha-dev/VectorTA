@@ -4,8 +4,8 @@ use super::alma_wrapper::DeviceArrayF32;
 use crate::cuda::moving_averages::*;
 use crate::utilities::data_loader::{source_type, Candles};
 
-use cust::device::Device;
 use cust::context::Context;
+use cust::device::Device;
 use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, LockedBuffer};
 use cust::prelude::CudaFlags;
 use cust::stream::{Stream, StreamFlags};
@@ -203,8 +203,8 @@ impl CudaMaSelector {
         cust::init(CudaFlags::empty()).expect("failed to init CUDA");
         let device = Device::get_device(device_id as u32).expect("failed to get CUDA device");
         let context = Arc::new(Context::new(device).expect("failed to create CUDA context"));
-        let stream = Stream::new(StreamFlags::NON_BLOCKING, None)
-            .expect("failed to create CUDA stream");
+        let stream =
+            Stream::new(StreamFlags::NON_BLOCKING, None).expect("failed to create CUDA stream");
         Self {
             device_id,
             stream,
@@ -883,8 +883,7 @@ impl CudaMaSelector {
                     CudaMaData::Candles { candles, .. } => {
                         let high_f32: Vec<f32> = candles.high.iter().map(|&v| v as f32).collect();
                         let low_f32: Vec<f32> = candles.low.iter().map(|&v| v as f32).collect();
-                        let close_f32: Vec<f32> =
-                            candles.close.iter().map(|&v| v as f32).collect();
+                        let close_f32: Vec<f32> = candles.close.iter().map(|&v| v as f32).collect();
                         let (dev, _combos) = cuda
                             .frama_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
                             .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
@@ -1667,8 +1666,7 @@ impl CudaMaSelector {
                     CudaMaData::Candles { candles, .. } => {
                         let high_f32: Vec<f32> = candles.high.iter().map(|&v| v as f32).collect();
                         let low_f32: Vec<f32> = candles.low.iter().map(|&v| v as f32).collect();
-                        let close_f32: Vec<f32> =
-                            candles.close.iter().map(|&v| v as f32).collect();
+                        let close_f32: Vec<f32> = candles.close.iter().map(|&v| v as f32).collect();
                         let (dev, _combos) = cuda
                             .frama_batch_dev(&high_f32, &low_f32, &close_f32, &sweep)
                             .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;

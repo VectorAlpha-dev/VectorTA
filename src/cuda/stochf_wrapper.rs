@@ -367,7 +367,7 @@ impl CudaStochf {
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 256,
+            _ => 1024,
         };
         let combos_per_launch = 65_535usize;
         let mut row0 = 0usize;
@@ -623,7 +623,7 @@ pub mod benches {
     use crate::indicators::stochf::StochfBatchRange;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 256;
+    const PARAM_SWEEP: usize = 250;
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -780,7 +780,7 @@ pub mod benches {
         let _ = func.set_cache_config(CacheConfig::PreferL1);
         let block_x = match cuda.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 256,
+            _ => 1024,
         };
         cuda.stream.synchronize().expect("sync after prep");
         Box::new(StochfBatchDeviceState {
@@ -810,7 +810,7 @@ pub mod benches {
             "stochf",
             "one_series_many_params",
             "stochf_cuda_batch_dev",
-            "1m_x_256",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_mem_required(bytes_one_series_many_params())

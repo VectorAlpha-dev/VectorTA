@@ -112,7 +112,7 @@ __device__ __forceinline__
 float alma_dot_uncomp(const float* __restrict__ x,
                       const float* __restrict__ w, int n) {
   float s = 0.f;
-  #pragma unroll 4
+  #pragma unroll 8
   for (int i = 0; i < n; ++i) s = __fmaf_rn(x[i], w[i], s);
   return s;
 }
@@ -130,7 +130,7 @@ void alma_dot2_shared(const float* __restrict__ buf, int b,
                       const float* __restrict__ w, int n,
                       float& s0_out, float& s1_out) {
   float s0 = 0.f, s1 = 0.f;
-  #pragma unroll 4
+  #pragma unroll 8
   for (int i = 0; i < n; ++i) {
     float wi = w[i];
     s0 = __fmaf_rn(buf[b + i],     wi, s0);
@@ -145,7 +145,7 @@ float alma_dot_stride(const float* __restrict__ x,
                       int stride,
                       const float* __restrict__ w, int n) {
   float s = 0.f;
-  #pragma unroll 4
+  #pragma unroll 8
   for (int i = 0; i < n; ++i) {
     s = __fmaf_rn(x[i * stride], w[i], s);
   }

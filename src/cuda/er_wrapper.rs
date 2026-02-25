@@ -574,7 +574,7 @@ pub mod benches {
                 "er",
                 "batch_dev",
                 "er_cuda_batch_dev",
-                "60k_x_49",
+                "1m_x_250",
                 prep_er_batch_box,
             ),
             CudaBenchScenario::new(
@@ -636,13 +636,15 @@ pub mod benches {
 
     fn prep_er_batch() -> ErBatchState {
         let cuda = CudaEr::new(0).expect("cuda er");
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut price = vec![f32::NAN; len];
         for i in 5..len {
             let x = i as f32;
             price[i] = (x * 0.001).sin() + 0.0002 * x;
         }
-        let sweep = ErBatchRange { period: (5, 49, 1) };
+        let sweep = ErBatchRange {
+            period: (5, 254, 1),
+        };
         let combos: Vec<i32> = (sweep.period.0..=sweep.period.1)
             .step_by(sweep.period.2.max(1))
             .map(|p| p as i32)

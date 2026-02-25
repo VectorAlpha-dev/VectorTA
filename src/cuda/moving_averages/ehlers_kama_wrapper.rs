@@ -384,9 +384,14 @@ impl CudaEhlersKama {
                 name: "ehlers_kama_batch_f32",
             })?;
 
+        let block_x_env = env::var("EHLERS_KAMA_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| v.min(1024));
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+            BatchKernelPolicy::Auto => block_x_env.unwrap_or(2).max(1),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1).min(1024),
         };
         let grid_x: u32 = ((n_combos as u32 + block_x - 1) / block_x).max(1);
         let grid: GridSize = (grid_x, 1, 1).into();

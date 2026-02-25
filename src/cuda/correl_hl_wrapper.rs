@@ -455,7 +455,7 @@ impl CudaCorrelHl {
             })?;
 
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 768,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;
@@ -556,7 +556,7 @@ impl CudaCorrelHl {
             })?;
 
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 768,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
         let grid_x: u32 = ((len as u32) + block_x - 1) / block_x;

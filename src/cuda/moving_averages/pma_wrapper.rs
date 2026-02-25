@@ -769,6 +769,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_SERIES_COLS: usize = 256;
     const MANY_SERIES_LEN: usize = 1_000_000;
+    const REPEATS_1M_X_250: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * core::mem::size_of::<f32>();
@@ -791,19 +792,22 @@ pub mod benches {
         first_valid: usize,
         d_predict: DeviceBuffer<f32>,
         d_trigger: DeviceBuffer<f32>,
+        repeats: usize,
     }
     impl CudaBenchState for PmaBatchDevState {
         fn launch(&mut self) {
-            self.cuda
-                .launch_batch_kernel_select(
-                    &self.d_prices,
-                    self.series_len,
-                    self.n_combos,
-                    self.first_valid,
-                    &mut self.d_predict,
-                    &mut self.d_trigger,
-                )
-                .expect("pma batch kernel");
+            for _ in 0..self.repeats {
+                self.cuda
+                    .launch_batch_kernel_select(
+                        &self.d_prices,
+                        self.series_len,
+                        self.n_combos,
+                        self.first_valid,
+                        &mut self.d_predict,
+                        &mut self.d_trigger,
+                    )
+                    .expect("pma batch kernel");
+            }
             self.cuda.stream.synchronize().expect("pma sync");
         }
     }
@@ -831,6 +835,7 @@ pub mod benches {
             first_valid: inputs.first_valid,
             d_predict,
             d_trigger,
+            repeats: REPEATS_1M_X_250,
         })
     }
 
@@ -894,10 +899,10 @@ pub mod benches {
                 "pma",
                 "one_series_many_params",
                 "pma_cuda_batch_dev",
-                "1m_x1",
+                "1m_x_250",
                 prep_one_series_many_params,
             )
-            .with_sample_size(10)
+            .with_sample_size(2)
             .with_mem_required(bytes_one_series_many_params()),
             CudaBenchScenario::new(
                 "pma",

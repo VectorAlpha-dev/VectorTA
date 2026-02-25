@@ -623,7 +623,7 @@ pub mod benches {
 
     const ONE_SERIES_LEN: usize = 1_000_000;
     const BATCH_PERIOD: usize = 20;
-    const MULT_SWEEP: usize = 200;
+    const MULT_SWEEP: usize = 250;
 
     fn synth_hl_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -873,7 +873,7 @@ pub mod benches {
                 "devstop",
                 "batch_dev",
                 "devstop_cuda_batch_dev_inplace",
-                "1m_p20_x_200",
+                "1m_x_250",
                 prep_batch_dev_inplace,
             )
             .with_sample_size(10),

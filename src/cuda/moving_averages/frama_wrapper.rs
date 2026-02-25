@@ -411,16 +411,12 @@ impl CudaFrama {
             }
         })?;
 
-        let auto_block_x: u32 = match func.suggested_launch_configuration(0, (1024, 1, 1).into()) {
-            Ok((_min_grid, suggested_block)) => suggested_block,
-            Err(_) => 256,
-        };
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
             BatchKernelPolicy::Auto => std::env::var("FRAMA_BLOCK_X")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(auto_block_x),
+                .unwrap_or(2),
         };
 
         unsafe {
@@ -677,11 +673,12 @@ impl CudaFrama {
                 "device parameter buffer too small".into(),
             ));
         }
-        let expected_out = n_combos
-            .checked_mul(series_len)
-            .ok_or(CudaFramaError::ArithmeticOverflow {
-                context: "output elements",
-            })?;
+        let expected_out =
+            n_combos
+                .checked_mul(series_len)
+                .ok_or(CudaFramaError::ArithmeticOverflow {
+                    context: "output elements",
+                })?;
         if d_out.len() < expected_out {
             return Err(CudaFramaError::InvalidInput(
                 "device output buffer too small".into(),

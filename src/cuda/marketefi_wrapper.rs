@@ -493,6 +493,62 @@ pub mod benches {
     use super::*;
     use crate::cuda::{CudaBenchScenario, CudaBenchState};
 
+    fn prep_one_series(n: usize, repeats: usize) -> Box<dyn CudaBenchState> {
+        struct State {
+            cuda: CudaMarketefi,
+            d_h: DeviceBuffer<f32>,
+            d_l: DeviceBuffer<f32>,
+            d_v: DeviceBuffer<f32>,
+            len: usize,
+            first_valid: usize,
+            d_out: DeviceBuffer<f32>,
+            repeats: usize,
+        }
+        impl CudaBenchState for State {
+            fn launch(&mut self) {
+                for _ in 0..self.repeats {
+                    let _ = self.cuda.marketefi_device(
+                        &self.d_h,
+                        &self.d_l,
+                        &self.d_v,
+                        self.len,
+                        self.first_valid,
+                        &mut self.d_out,
+                    );
+                }
+                let _ = self.cuda.synchronize();
+            }
+        }
+
+        let mut h = vec![f32::NAN; n];
+        let mut l = vec![f32::NAN; n];
+        let mut vv = vec![f32::NAN; n];
+        for i in 0..n {
+            let x = i as f32;
+            h[i] = (x * 0.001).sin() + 1.0;
+            l[i] = h[i] - 0.5f32.abs();
+            vv[i] = (x * 0.002).cos().abs() + 0.1;
+        }
+        let cuda = CudaMarketefi::new(0).unwrap();
+        let first = (0..n)
+            .find(|&i| h[i].is_finite() && l[i].is_finite() && vv[i].is_finite())
+            .unwrap_or(0);
+        let d_h = DeviceBuffer::from_slice(&h).unwrap();
+        let d_l = DeviceBuffer::from_slice(&l).unwrap();
+        let d_v = DeviceBuffer::from_slice(&vv).unwrap();
+        let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.unwrap();
+        Box::new(State {
+            cuda,
+            d_h,
+            d_l,
+            d_v,
+            len: n,
+            first_valid: first,
+            d_out,
+            repeats,
+        })
+    }
+
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let mut v = Vec::new();
 
@@ -501,58 +557,19 @@ pub mod benches {
             "one_series",
             "marketefi_cuda_batch_dev",
             "100k",
-            || {
-                struct State {
-                    cuda: CudaMarketefi,
-                    d_h: DeviceBuffer<f32>,
-                    d_l: DeviceBuffer<f32>,
-                    d_v: DeviceBuffer<f32>,
-                    len: usize,
-                    first_valid: usize,
-                    d_out: DeviceBuffer<f32>,
-                }
-                impl CudaBenchState for State {
-                    fn launch(&mut self) {
-                        let _ = self.cuda.marketefi_device(
-                            &self.d_h,
-                            &self.d_l,
-                            &self.d_v,
-                            self.len,
-                            self.first_valid,
-                            &mut self.d_out,
-                        );
-                        let _ = self.cuda.synchronize();
-                    }
-                }
-                let n = 100_000usize;
-                let mut h = vec![f32::NAN; n];
-                let mut l = vec![f32::NAN; n];
-                let mut vv = vec![f32::NAN; n];
-                for i in 0..n {
-                    let x = i as f32;
-                    h[i] = (x * 0.001).sin() + 1.0;
-                    l[i] = h[i] - 0.5f32.abs();
-                    vv[i] = (x * 0.002).cos().abs() + 0.1;
-                }
-                let cuda = CudaMarketefi::new(0).unwrap();
-                let first = (0..n)
-                    .find(|&i| h[i].is_finite() && l[i].is_finite() && vv[i].is_finite())
-                    .unwrap_or(0);
-                let d_h = DeviceBuffer::from_slice(&h).unwrap();
-                let d_l = DeviceBuffer::from_slice(&l).unwrap();
-                let d_v = DeviceBuffer::from_slice(&vv).unwrap();
-                let d_out = unsafe { DeviceBuffer::<f32>::uninitialized(n) }.unwrap();
-                Box::new(State {
-                    cuda,
-                    d_h,
-                    d_l,
-                    d_v,
-                    len: n,
-                    first_valid: first,
-                    d_out,
-                })
-            },
+            || prep_one_series(100_000, 1),
         ));
+
+        v.push(
+            CudaBenchScenario::new(
+                "marketefi",
+                "one_series_many_params",
+                "marketefi_cuda_batch_dev",
+                "1m_x_250",
+                || prep_one_series(1_000_000, 250),
+            )
+            .with_sample_size(3),
+        );
 
         v.push(CudaBenchScenario::new(
             "marketefi",

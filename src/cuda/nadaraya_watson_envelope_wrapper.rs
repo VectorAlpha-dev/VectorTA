@@ -517,10 +517,10 @@ impl CudaNwe {
                 name: "nadaraya_watson_envelope_batch_f32",
             })?;
 
-        const NWE_THREADS: u32 = 128;
+        let nwe_threads: u32 = 256;
         const NWE_TILE_T: usize = 64;
         let grid = GridSize::xy(1, n_combos as u32);
-        let block = BlockSize::xyz(NWE_THREADS, 1, 1);
+        let block = BlockSize::xyz(nwe_threads, 1, 1);
         self.validate_launch(grid.x, grid.y, grid.z, block.x, block.y, block.z)?;
 
         let smem_elems = max_lb + 2 * (max_lb + NWE_TILE_T - 1);
@@ -780,9 +780,10 @@ pub mod benches {
             let cuda = CudaNwe::new(0).expect("cuda");
             let price = gen_series(ONE_SERIES_LEN);
             let sweep = NweBatchRange {
-                bandwidth: (6.0, 12.0, 2.0),
-                multiplier: (2.0, 3.0, 0.5),
-                lookback: (128, 512, 64),
+                bandwidth: (8.0, 8.0, 0.0),
+                multiplier: (3.0, 3.0, 0.0),
+                // 250 combos
+                lookback: (500, 749, 1),
             };
             let (_combos, first_valid, len, lookbacks, multipliers, weights_flat, max_lb) =
                 CudaNwe::prepare_batch_inputs(&price, &sweep).expect("prep");
@@ -917,7 +918,7 @@ pub mod benches {
             }) as Box<dyn CudaBenchState>
         };
         let bytes_batch = ONE_SERIES_LEN * std::mem::size_of::<f32>()
-            + (ONE_SERIES_LEN * 256) * std::mem::size_of::<f32>()
+            + (ONE_SERIES_LEN * 250) * std::mem::size_of::<f32>()
             + 64 * 1024 * 1024;
         let bytes_many = MANY_SERIES_COLS * MANY_SERIES_LEN * 3 * std::mem::size_of::<f32>()
             + 256usize * std::mem::size_of::<f32>()
@@ -928,7 +929,7 @@ pub mod benches {
                 "nwe",
                 "one_series_many_params",
                 "nwe_cuda_batch_dev",
-                "1m_x_grid",
+                "1m_x_250",
                 prep_batch,
             )
             .with_sample_size(10)

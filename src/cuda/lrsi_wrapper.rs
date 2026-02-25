@@ -578,7 +578,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const LEN: usize = 1_000_000;
-    const ROWS: usize = 256;
+    const ROWS: usize = 250;
 
     struct LrsiBatchState {
         cuda: CudaLrsi,
@@ -651,7 +651,7 @@ pub mod benches {
             "lrsi",
             "batch_dev",
             "lrsi_cuda_batch_dev",
-            "1m_x_256",
+            "1m_x_250",
             prep_batch,
         )
         .with_inner_iters(4)]

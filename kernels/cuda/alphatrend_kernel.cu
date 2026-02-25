@@ -362,12 +362,16 @@ extern "C" __global__ void alphatrend_batch_from_precomputed_f32(
             continue;
         }
         const float* __restrict__ arow = atr_table + (size_t)pr * len;
-        const unsigned* __restrict__ mask_row = mask_bits + (size_t)mrow * ((len + 31) >> 5);
+        const int n_words = (len + 31) >> 5;
+        const unsigned* __restrict__ mask_row = mask_bits + (size_t)mrow * n_words;
         const float coeff = coeffs[row];
 
         for (int i=0;i<warm;++i){ k1_row[i]=CUDART_NAN_F; k2_row[i]=CUDART_NAN_F; }
 
         float prev_alpha = CUDART_NAN_F, prev1 = CUDART_NAN_F, prev2 = CUDART_NAN_F;
+        int word_idx = warm >> 5;
+        unsigned mask_word = mask_row[word_idx];
+        unsigned bit = 1u << (warm & 31);
 
         #pragma unroll 1
         for (int i = warm; i < len; ++i){
@@ -375,10 +379,8 @@ extern "C" __global__ void alphatrend_batch_from_precomputed_f32(
             const float up = fmaf(-coeff, a, low[i]);
             const float dn = fmaf( coeff, a, high[i]);
 
-            const bool m_ge_50 = mask_test(mask_row, i);
-            const float up_clamped = fmaxf(up, prev_alpha);
-            const float dn_clamped = fminf(dn, prev_alpha);
-            const float cur = m_ge_50 ? up_clamped : dn_clamped;
+            const bool m_ge_50 = (mask_word & bit) != 0u;
+            const float cur = m_ge_50 ? fmaxf(up, prev_alpha) : fminf(dn, prev_alpha);
 
             k1_row[i] = cur;
             k2_row[i] = prev2;
@@ -386,6 +388,13 @@ extern "C" __global__ void alphatrend_batch_from_precomputed_f32(
             prev2 = prev1;
             prev1 = cur;
             prev_alpha = cur;
+
+            bit <<= 1;
+            if (bit == 0u && (i + 1) < len) {
+                ++word_idx;
+                mask_word = mask_row[word_idx];
+                bit = 1u;
+            }
         }
     }
 }

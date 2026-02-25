@@ -493,16 +493,16 @@ pub fn cuda_available() -> bool {
                 }
             };
 
-            let ctx0 = CUDA_PROBE_CONTEXT_0.get_or_init(|| match cust::context::Context::new(device)
-            {
-                Ok(c) => Some(c),
-                Err(err) => {
-                    if debug {
-                        eprintln!("cuda_available: Context::new failed: {err:?}");
+            let ctx0 =
+                CUDA_PROBE_CONTEXT_0.get_or_init(|| match cust::context::Context::new(device) {
+                    Ok(c) => Some(c),
+                    Err(err) => {
+                        if debug {
+                            eprintln!("cuda_available: Context::new failed: {err:?}");
+                        }
+                        None
                     }
-                    None
-                }
-            });
+                });
             if ctx0.is_none() {
                 return false;
             }

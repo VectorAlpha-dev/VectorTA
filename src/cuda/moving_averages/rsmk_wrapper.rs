@@ -489,15 +489,15 @@ pub mod benches {
     use std::collections::{BTreeSet, HashMap};
     use std::ffi::c_void;
 
-    const BATCH_LEN: usize = 45_000;
+    const BATCH_LEN: usize = 1_000_000;
     const MANY_COLS: usize = 64;
     const MANY_ROWS: usize = 500_000;
 
     fn bytes_batch() -> usize {
-        let rows = 27usize;
+        let rows = 250usize;
         let in_bytes = 2 * BATCH_LEN * std::mem::size_of::<f32>();
         let out_bytes = 2 * rows * BATCH_LEN * std::mem::size_of::<f32>();
-        let mom_bytes = 3 * BATCH_LEN * std::mem::size_of::<f32>();
+        let mom_bytes = 50 * BATCH_LEN * std::mem::size_of::<f32>();
         in_bytes + out_bytes + mom_bytes + 32 * 1024 * 1024
     }
     fn bytes_many() -> usize {
@@ -514,10 +514,11 @@ pub mod benches {
                 "rsmk",
                 "batch_dev",
                 "rsmk_cuda_batch_dev",
-                "45k_x_27combos",
+                "1m_x_250",
                 prep_rsmk_batch_box,
             )
-            .with_inner_iters(4)
+            .with_inner_iters(1)
+            .with_sample_size(1)
             .with_mem_required(bytes_batch()),
             CudaBenchScenario::new(
                 "rsmk",
@@ -645,9 +646,9 @@ pub mod benches {
             comp[i] = (x * 0.0009).cos().abs() + 0.5;
         }
         let sweep = RsmkBatchRange {
-            lookback: (30, 42, 6),
-            period: (3, 9, 3),
-            signal_period: (10, 22, 6),
+            lookback: (30, 79, 1),
+            period: (6, 6, 1),
+            signal_period: (10, 14, 1),
         };
         let first_valid = CudaRsmk::first_valid(&main, &comp).expect("first_valid");
 

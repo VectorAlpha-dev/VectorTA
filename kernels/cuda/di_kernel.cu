@@ -112,6 +112,61 @@ void di_batch_from_precomputed_f32(const float* __restrict__ up,
                                    float* __restrict__ plus_out,
                                    float* __restrict__ minus_out)
 {
+    if (blockDim.x == 1) {
+        for (int combo = blockIdx.x; combo < n_combos; combo += gridDim.x) {
+            const int period = periods[combo];
+            const int warm   = warm_indices[combo];
+            if (period <= 0 || warm < 0 || warm >= series_len) continue;
+
+            const float invp = 1.0f / (float)period;
+            const float keep = 1.0f - invp;
+            const int base = combo * series_len;
+
+            const int start = first_valid + 1;
+            const int stop  = first_valid + period;
+            if (stop > series_len) {
+                for (int i = 0; i < series_len; ++i) {
+                    plus_out[base + i] = NAN;
+                    minus_out[base + i] = NAN;
+                }
+                continue;
+            }
+
+            for (int i = 0; i < warm; ++i) {
+                plus_out[base + i] = NAN;
+                minus_out[base + i] = NAN;
+            }
+
+            float sp = 0.0f, sm = 0.0f, st = 0.0f;
+            for (int t = start; t < stop; ++t) {
+                sp += up[t];
+                sm += dn[t];
+                st += tr[t];
+            }
+
+            ds cur_p = ds_make(sp);
+            ds cur_m = ds_make(sm);
+            ds cur_t = ds_make(st);
+
+            float denom = ds_value(cur_t);
+            float scale = (denom == 0.0f) ? 0.0f : 100.0f / denom;
+            plus_out[base + warm] = ds_value(cur_p) * scale;
+            minus_out[base + warm] = ds_value(cur_m) * scale;
+
+            for (int t = warm + 1; t < series_len; ++t) {
+                ds_rma_update(cur_p, keep, up[t]);
+                ds_rma_update(cur_m, keep, dn[t]);
+                ds_rma_update(cur_t, keep, tr[t]);
+
+                denom = ds_value(cur_t);
+                scale = (denom == 0.0f) ? 0.0f : 100.0f / denom;
+                plus_out[base + t] = ds_value(cur_p) * scale;
+                minus_out[base + t] = ds_value(cur_m) * scale;
+            }
+        }
+        return;
+    }
+
     for (int combo = blockIdx.x; combo < n_combos; combo += gridDim.x) {
         const int period = periods[combo];
         const int warm   = warm_indices[combo];

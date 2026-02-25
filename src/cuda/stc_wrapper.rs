@@ -549,9 +549,9 @@ pub mod benches {
                 "stc",
                 "one_series_many_params",
                 "stc_cuda_batch_dev",
-                "100k_x_64",
+                "1m_x_250",
                 || {
-                    const N: usize = 100_000;
+                    const N: usize = 1_000_000;
                     let mut data = vec![f32::NAN; N];
                     for i in 200..N {
                         let x = i as f32;
@@ -559,9 +559,9 @@ pub mod benches {
                     }
 
                     let sweep = StcBatchRange {
-                        fast_period: (10, 25, 5),
-                        slow_period: (30, 60, 10),
-                        k_period: (5, 20, 5),
+                        fast_period: (10, 59, 1),
+                        slow_period: (60, 60, 0),
+                        k_period: (5, 9, 1),
                         d_period: (3, 3, 0),
                     };
                     let combos = CudaStc::expand_grid(&sweep).expect("expand_grid");

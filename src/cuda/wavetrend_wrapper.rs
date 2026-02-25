@@ -509,13 +509,9 @@ impl CudaWavetrend {
                 name: "wavetrend_batch_f32",
             })?;
 
-        let auto_block_x = {
-            let (bs, _mg) = func.suggested_launch_configuration(0, (0, 0, 0).into())?;
-            bs.clamp(32, 1024)
-        };
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
-            BatchKernelPolicy::Auto => auto_block_x,
+            BatchKernelPolicy::Auto => 32,
         };
 
         let dev = Device::get_device(self.device_id)?;

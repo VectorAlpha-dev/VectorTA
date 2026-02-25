@@ -470,7 +470,11 @@ impl CudaDeviation {
 
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 256,
+            _ => std::env::var("DEVIATION_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(512)
+                .clamp(1, 1024),
         };
         let grid_x = ((len as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), n_combos as u32, 1).into();

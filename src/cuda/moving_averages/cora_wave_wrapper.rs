@@ -388,7 +388,7 @@ impl CudaCoraWave {
                 .map(|(_, bx)| bx)
                 .unwrap_or(default)
                 .max(64)
-                .min(1024),
+                .min(512),
         }
     }
 
@@ -583,9 +583,9 @@ impl CudaCoraWave {
         if max_period == 0 {
             return Err(CudaCoraWaveError::InvalidInput("max_period is 0".into()));
         }
-        let out_len = n_combos
-            .checked_mul(series_len)
-            .ok_or_else(|| CudaCoraWaveError::InvalidInput("n_combos*series_len overflow".into()))?;
+        let out_len = n_combos.checked_mul(series_len).ok_or_else(|| {
+            CudaCoraWaveError::InvalidInput("n_combos*series_len overflow".into())
+        })?;
         if d_out.len() < out_len {
             return Err(CudaCoraWaveError::InvalidInput(
                 "output buffer too small".into(),
@@ -669,7 +669,8 @@ impl CudaCoraWave {
                     &mut first_i as *mut _ as *mut c_void,
                     &mut out_ptr as *mut _ as *mut c_void,
                 ];
-                self.stream.launch(&func, grid, block, shared_bytes as u32, args)?;
+                self.stream
+                    .launch(&func, grid, block, shared_bytes as u32, args)?;
             }
         }
         unsafe {
@@ -705,7 +706,12 @@ impl CudaCoraWave {
                     .as_device_ptr()
                     .add(start)
                     .as_raw();
-                let mut w0_ptr = d_warm0s.as_ref().unwrap().as_device_ptr().add(start).as_raw();
+                let mut w0_ptr = d_warm0s
+                    .as_ref()
+                    .unwrap()
+                    .as_device_ptr()
+                    .add(start)
+                    .as_raw();
                 let mut series_i = series_len as i32;
                 let mut n_i = len as i32;
                 let mut out_ptr = d_out.as_device_ptr().add(start * series_len).as_raw();

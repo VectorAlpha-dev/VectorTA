@@ -215,11 +215,10 @@ impl CudaCciCycle {
                 name: "cci_cycle_batch_f32",
             })?;
 
-        let block: BlockSize = (256, 1, 1).into();
-        let needed_blocks = ((n_combos + 255) / 256) as u32;
-        let min_blocks = (self.sm_count as u32).saturating_mul(16);
+        let block: BlockSize = (32, 1, 1).into();
+        let needed_blocks = ((n_combos + 31) / 32) as u32;
         let max_grid_x = self.max_grid_x as u32;
-        let grid_x = needed_blocks.max(min_blocks).min(max_grid_x);
+        let grid_x = needed_blocks.max(1).min(max_grid_x);
         if grid_x == 0 || block.x == 0 || block.x > 1024 {
             return Err(CudaCciCycleError::LaunchConfigTooLarge {
                 gx: grid_x,
@@ -488,7 +487,7 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 100_000;
+    const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 250;
 
     fn mem_bytes() -> usize {
@@ -565,7 +564,7 @@ pub mod benches {
             "cci_cycle",
             "one_series_many_params",
             "cci_cycle_cuda_batch_dev",
-            "100k_x_250",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

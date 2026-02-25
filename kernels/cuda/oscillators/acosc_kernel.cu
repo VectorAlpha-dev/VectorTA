@@ -101,9 +101,66 @@ static __device__ __forceinline__ float acosc_ao_at(const float* __restrict__ hi
     return sum5 * (1.0f / 5.0f) - sum34 * (1.0f / 34.0f);
 }
 
+static __device__ __forceinline__ void acosc_ao_chain_fast(const float* __restrict__ high,
+                                                            const float* __restrict__ low,
+                                                            int idx,
+                                                            float& ao0,
+                                                            float& ao1,
+                                                            float& ao2,
+                                                            float& ao3,
+                                                            float& ao4,
+                                                            float& ao5) {
+    constexpr float INV5 = 1.0f / 5.0f;
+    constexpr float INV34 = 1.0f / 34.0f;
+
+    int t = idx - 5;
+    float sum34 = 0.0f;
+    float sum5 = 0.0f;
+
+#pragma unroll
+    for (int k = 0; k < 34; ++k) {
+        const float med = acosc_median(high, low, t - k);
+        sum34 += med;
+        if (k < 5) {
+            sum5 += med;
+        }
+    }
+    ao5 = sum5 * INV5 - sum34 * INV34;
+
+    t = idx - 4;
+    float med = acosc_median(high, low, t);
+    sum34 += med - acosc_median(high, low, t - 34);
+    sum5 += med - acosc_median(high, low, t - 5);
+    ao4 = sum5 * INV5 - sum34 * INV34;
+
+    t = idx - 3;
+    med = acosc_median(high, low, t);
+    sum34 += med - acosc_median(high, low, t - 34);
+    sum5 += med - acosc_median(high, low, t - 5);
+    ao3 = sum5 * INV5 - sum34 * INV34;
+
+    t = idx - 2;
+    med = acosc_median(high, low, t);
+    sum34 += med - acosc_median(high, low, t - 34);
+    sum5 += med - acosc_median(high, low, t - 5);
+    ao2 = sum5 * INV5 - sum34 * INV34;
+
+    t = idx - 1;
+    med = acosc_median(high, low, t);
+    sum34 += med - acosc_median(high, low, t - 34);
+    sum5 += med - acosc_median(high, low, t - 5);
+    ao1 = sum5 * INV5 - sum34 * INV34;
+
+    t = idx;
+    med = acosc_median(high, low, t);
+    sum34 += med - acosc_median(high, low, t - 34);
+    sum5 += med - acosc_median(high, low, t - 5);
+    ao0 = sum5 * INV5 - sum34 * INV34;
+}
 
 
-extern "C" __global__
+
+extern "C" __global__ __launch_bounds__(256, 4)
 void acosc_batch_f32(const float* __restrict__ high,
                      const float* __restrict__ low,
                      int series_len,
@@ -126,18 +183,26 @@ void acosc_batch_f32(const float* __restrict__ high,
         }
 
 
-        const float ao0 = acosc_ao_at(high, low, i, fv);
-        const float ao1 = acosc_ao_at(high, low, i - 1, fv);
-        const float ao2 = acosc_ao_at(high, low, i - 2, fv);
-        const float ao3 = acosc_ao_at(high, low, i - 3, fv);
-        const float ao4 = acosc_ao_at(high, low, i - 4, fv);
+        float ao0, ao1, ao2, ao3, ao4, ao5 = 0.0f;
+        const int rel = i - fv;
+        if (rel > 43) {
+            acosc_ao_chain_fast(high, low, i, ao0, ao1, ao2, ao3, ao4, ao5);
+        } else {
+            ao0 = acosc_ao_at(high, low, i, fv);
+            ao1 = acosc_ao_at(high, low, i - 1, fv);
+            ao2 = acosc_ao_at(high, low, i - 2, fv);
+            ao3 = acosc_ao_at(high, low, i - 3, fv);
+            ao4 = acosc_ao_at(high, low, i - 4, fv);
+            if (i != warm) {
+                ao5 = acosc_ao_at(high, low, i - 5, fv);
+            }
+        }
 
         const float sma5_ao = (ao0 + ao1 + ao2 + ao3 + ao4) * (1.0f / 5.0f);
         const float res = ao0 - sma5_ao;
 
         float prev_res = 0.0f;
         if (i != warm) {
-            const float ao5 = acosc_ao_at(high, low, i - 5, fv);
             const float sma5_ao_prev = (ao1 + ao2 + ao3 + ao4 + ao5) * (1.0f / 5.0f);
             prev_res = ao1 - sma5_ao_prev;
         }

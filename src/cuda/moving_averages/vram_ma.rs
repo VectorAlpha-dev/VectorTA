@@ -1,12 +1,13 @@
 #![cfg(feature = "cuda")]
 
-use cust::memory::{CopyDestination, DeviceBuffer};
 use crate::cuda::moving_averages::{
-    CudaAlma, CudaCwma, CudaDema, CudaEma, CudaEpma, CudaFwma, CudaHighpass, CudaJsa, CudaMaaq,
-    CudaMwdx, CudaNma, CudaPwma, CudaSinwma, CudaSma, CudaSmma, CudaSrwma, CudaSqwma, CudaSuperSmoother,
-    CudaSupersmoother3Pole, CudaSwma, CudaTema, CudaTrima, CudaWilders, CudaWma, CudaZlema,
-    CudaEdcf, CudaEhlersITrend, CudaHma, CudaJma, CudaCoraWave, CudaFrama, CudaVpwma, CudaVwma,
+    CudaAlma, CudaCoraWave, CudaCwma, CudaDema, CudaEdcf, CudaEhlersITrend, CudaEma, CudaEpma,
+    CudaFrama, CudaFwma, CudaHighpass, CudaHma, CudaJma, CudaJsa, CudaMaaq, CudaMwdx, CudaNma,
+    CudaPwma, CudaSinwma, CudaSma, CudaSmma, CudaSqwma, CudaSrwma, CudaSuperSmoother,
+    CudaSupersmoother3Pole, CudaSwma, CudaTema, CudaTrima, CudaVpwma, CudaVwma, CudaWilders,
+    CudaWma, CudaZlema,
 };
+use cust::memory::{CopyDestination, DeviceBuffer};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,11 +68,39 @@ struct VpwmaDeviceConsts {
 
 pub fn supports_vram_kernel_ma(ma_type: &str) -> bool {
     match ma_type.trim().to_ascii_lowercase().as_str() {
-        "sma" | "ema" | "wma" | "alma" | "dema" | "tema" | "jsa" | "smma" | "sqwma" | "highpass"
-        | "swma" | "trima" | "sinwma" | "epma" | "wilders" | "maaq" | "mwdx" | "cwma" | "fwma"
-        | "pwma" | "srwma" | "supersmoother" | "supersmoother_3_pole" | "zlema"
-        | "nma" | "hma" | "jma" | "edcf" | "ehlers_itrend" | "cora_wave"
-        | "vwma" | "vpwma" | "frama" => true,
+        "sma"
+        | "ema"
+        | "wma"
+        | "alma"
+        | "dema"
+        | "tema"
+        | "jsa"
+        | "smma"
+        | "sqwma"
+        | "highpass"
+        | "swma"
+        | "trima"
+        | "sinwma"
+        | "epma"
+        | "wilders"
+        | "maaq"
+        | "mwdx"
+        | "cwma"
+        | "fwma"
+        | "pwma"
+        | "srwma"
+        | "supersmoother"
+        | "supersmoother_3_pole"
+        | "zlema"
+        | "nma"
+        | "hma"
+        | "jma"
+        | "edcf"
+        | "ehlers_itrend"
+        | "cora_wave"
+        | "vwma"
+        | "vpwma"
+        | "frama" => true,
         _ => false,
     }
 }
@@ -301,16 +330,14 @@ impl VramMaComputer {
 
     fn ensure_smma(&mut self) -> Result<(), String> {
         if self.smma.is_none() {
-            self.smma =
-                Some(CudaSmma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.smma = Some(CudaSmma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_sqwma(&mut self) -> Result<(), String> {
         if self.sqwma.is_none() {
-            self.sqwma =
-                Some(CudaSqwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.sqwma = Some(CudaSqwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -325,16 +352,14 @@ impl VramMaComputer {
 
     fn ensure_swma(&mut self) -> Result<(), String> {
         if self.swma.is_none() {
-            self.swma =
-                Some(CudaSwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.swma = Some(CudaSwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_trima(&mut self) -> Result<(), String> {
         if self.trima.is_none() {
-            self.trima =
-                Some(CudaTrima::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.trima = Some(CudaTrima::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -349,8 +374,7 @@ impl VramMaComputer {
 
     fn ensure_epma(&mut self) -> Result<(), String> {
         if self.epma.is_none() {
-            self.epma =
-                Some(CudaEpma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.epma = Some(CudaEpma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -365,48 +389,42 @@ impl VramMaComputer {
 
     fn ensure_maaq(&mut self) -> Result<(), String> {
         if self.maaq.is_none() {
-            self.maaq =
-                Some(CudaMaaq::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.maaq = Some(CudaMaaq::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_mwdx(&mut self) -> Result<(), String> {
         if self.mwdx.is_none() {
-            self.mwdx =
-                Some(CudaMwdx::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.mwdx = Some(CudaMwdx::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_cwma(&mut self) -> Result<(), String> {
         if self.cwma.is_none() {
-            self.cwma =
-                Some(CudaCwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.cwma = Some(CudaCwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_fwma(&mut self) -> Result<(), String> {
         if self.fwma.is_none() {
-            self.fwma =
-                Some(CudaFwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.fwma = Some(CudaFwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_pwma(&mut self) -> Result<(), String> {
         if self.pwma.is_none() {
-            self.pwma =
-                Some(CudaPwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.pwma = Some(CudaPwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_srwma(&mut self) -> Result<(), String> {
         if self.srwma.is_none() {
-            self.srwma =
-                Some(CudaSrwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.srwma = Some(CudaSrwma::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -422,26 +440,23 @@ impl VramMaComputer {
 
     fn ensure_supersmoother(&mut self) -> Result<(), String> {
         if self.supersmoother.is_none() {
-            self.supersmoother = Some(
-                CudaSuperSmoother::new(self.device_id as usize).map_err(|e| e.to_string())?,
-            );
+            self.supersmoother =
+                Some(CudaSuperSmoother::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_zlema(&mut self) -> Result<(), String> {
         if self.zlema.is_none() {
-            self.zlema =
-                Some(CudaZlema::new(self.device_id as usize).map_err(|e| e.to_string())?);
+            self.zlema = Some(CudaZlema::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
 
     fn ensure_cora_wave(&mut self) -> Result<(), String> {
         if self.cora_wave.is_none() {
-            self.cora_wave = Some(
-                CudaCoraWave::new(self.device_id as usize).map_err(|e| e.to_string())?,
-            );
+            self.cora_wave =
+                Some(CudaCoraWave::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -476,9 +491,8 @@ impl VramMaComputer {
 
     fn ensure_ehlers_itrend(&mut self) -> Result<(), String> {
         if self.ehlers_itrend.is_none() {
-            self.ehlers_itrend = Some(
-                CudaEhlersITrend::new(self.device_id as usize).map_err(|e| e.to_string())?,
-            );
+            self.ehlers_itrend =
+                Some(CudaEhlersITrend::new(self.device_id as usize).map_err(|e| e.to_string())?);
         }
         Ok(())
     }
@@ -499,27 +513,35 @@ impl VramMaComputer {
 
     fn ensure_len_i32(buf: &mut Option<DeviceBuffer<i32>>, len: usize) -> Result<(), String> {
         if buf.as_ref().map(|b| b.len()) != Some(len) {
-            *buf = Some(unsafe { DeviceBuffer::<i32>::uninitialized(len) }.map_err(|e| e.to_string())?);
+            *buf = Some(
+                unsafe { DeviceBuffer::<i32>::uninitialized(len) }.map_err(|e| e.to_string())?,
+            );
         }
         Ok(())
     }
 
     fn ensure_len_f32(buf: &mut Option<DeviceBuffer<f32>>, len: usize) -> Result<(), String> {
         if buf.as_ref().map(|b| b.len()) != Some(len) {
-            *buf = Some(unsafe { DeviceBuffer::<f32>::uninitialized(len) }.map_err(|e| e.to_string())?);
+            *buf = Some(
+                unsafe { DeviceBuffer::<f32>::uninitialized(len) }.map_err(|e| e.to_string())?,
+            );
         }
         Ok(())
     }
 
     fn ensure_len_f64(buf: &mut Option<DeviceBuffer<f64>>, len: usize) -> Result<(), String> {
         if buf.as_ref().map(|b| b.len()) != Some(len) {
-            *buf = Some(unsafe { DeviceBuffer::<f64>::uninitialized(len) }.map_err(|e| e.to_string())?);
+            *buf = Some(
+                unsafe { DeviceBuffer::<f64>::uninitialized(len) }.map_err(|e| e.to_string())?,
+            );
         }
         Ok(())
     }
 
     fn get_param_f64(params: Option<&HashMap<String, f64>>, key: &str) -> Option<f64> {
-        params.and_then(|m| m.get(key).copied()).filter(|v| v.is_finite())
+        params
+            .and_then(|m| m.get(key).copied())
+            .filter(|v| v.is_finite())
     }
 
     pub fn ensure_sma_prefix_f64(
@@ -531,7 +553,8 @@ impl VramMaComputer {
         self.ensure_sma()?;
         if self.sma_prefix_f64.as_ref().map(|b| b.len()) != Some(series_len + 1) {
             self.sma_prefix_f64 = Some(
-                unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1) }.map_err(|e| e.to_string())?,
+                unsafe { DeviceBuffer::<f64>::uninitialized(series_len + 1) }
+                    .map_err(|e| e.to_string())?,
             );
         }
         let sma = self.sma.as_ref().unwrap();
@@ -604,10 +627,9 @@ impl VramMaComputer {
         match ma.as_str() {
             "sma" => {
                 self.ensure_sma()?;
-                let prefix = self
-                    .sma_prefix_f64
-                    .as_ref()
-                    .ok_or_else(|| "sma prefix missing (call ensure_sma_prefix_f64 first)".to_string())?;
+                let prefix = self.sma_prefix_f64.as_ref().ok_or_else(|| {
+                    "sma prefix missing (call ensure_sma_prefix_f64 first)".to_string()
+                })?;
                 let sma = self.sma.as_ref().unwrap();
                 sma.sma_batch_from_prefix_f64_device_into(
                     prefix,
@@ -651,7 +673,12 @@ impl VramMaComputer {
 
             "wma" => {
                 self.ensure_wma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 let wma = self.wma.as_ref().unwrap();
                 wma.wma_batch_device(
                     d_prices,
@@ -675,11 +702,7 @@ impl VramMaComputer {
                     offset_bits: offset.to_bits(),
                     sigma_bits: sigma.to_bits(),
                 };
-                if let Some(cached) = self
-                    .alma_cache
-                    .get(&key)
-                    .and_then(|m| m.get(periods))
-                {
+                if let Some(cached) = self.alma_cache.get(&key).and_then(|m| m.get(periods)) {
                     let alma = self.alma.as_ref().unwrap();
                     alma.alma_batch_device(
                         d_prices,
@@ -697,7 +720,12 @@ impl VramMaComputer {
                     return Ok(());
                 }
 
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period == 0 {
                     return Err("alma max_period is 0".to_string());
                 }
@@ -719,8 +747,10 @@ impl VramMaComputer {
                     self.host_f32[base..base + period].copy_from_slice(&w);
                 }
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
-                let d_inv_norms = DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_inv_norms =
+                    DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
 
                 let alma = self.alma.as_ref().unwrap();
                 alma.alma_batch_device(
@@ -770,8 +800,15 @@ impl VramMaComputer {
             "tema" => {
                 self.ensure_tema()?;
                 let tema = self.tema.as_ref().unwrap();
-                tema.tema_batch_device(d_prices, d_periods, series_len, n_combos, first_valid, d_out)
-                    .map_err(|e| e.to_string())?;
+                tema.tema_batch_device(
+                    d_prices,
+                    d_periods,
+                    series_len,
+                    n_combos,
+                    first_valid,
+                    d_out,
+                )
+                .map_err(|e| e.to_string())?;
                 tema.synchronize().map_err(|e| e.to_string())?;
                 Ok(())
             }
@@ -832,9 +869,23 @@ impl VramMaComputer {
 
             "sqwma" => {
                 self.ensure_sqwma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 let sqwma = self.sqwma.as_ref().unwrap();
-                sqwma.sqwma_batch_device(d_prices, d_periods, series_len, n_combos, first_valid, max_period, d_out)
+                sqwma
+                    .sqwma_batch_device(
+                        d_prices,
+                        d_periods,
+                        series_len,
+                        n_combos,
+                        first_valid,
+                        max_period,
+                        d_out,
+                    )
                     .map_err(|e| e.to_string())?;
                 sqwma.synchronize().map_err(|e| e.to_string())?;
                 Ok(())
@@ -859,7 +910,12 @@ impl VramMaComputer {
 
             "swma" => {
                 self.ensure_swma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 self.host_i32.clear();
                 self.host_i32
                     .extend(periods.iter().map(|&p| first_valid as i32 + p - 1));
@@ -887,7 +943,12 @@ impl VramMaComputer {
 
             "trima" => {
                 self.ensure_trima()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 self.host_i32.clear();
                 self.host_i32
                     .extend(periods.iter().map(|&p| first_valid as i32 + p - 1));
@@ -899,23 +960,29 @@ impl VramMaComputer {
                     .map_err(|e| e.to_string())?;
 
                 let trima = self.trima.as_ref().unwrap();
-                trima.trima_batch_device(
-                    d_prices,
-                    d_periods,
-                    self.d_i32.as_ref().unwrap(),
-                    series_len,
-                    n_combos,
-                    max_period,
-                    d_out,
-                )
-                .map_err(|e| e.to_string())?;
+                trima
+                    .trima_batch_device(
+                        d_prices,
+                        d_periods,
+                        self.d_i32.as_ref().unwrap(),
+                        series_len,
+                        n_combos,
+                        max_period,
+                        d_out,
+                    )
+                    .map_err(|e| e.to_string())?;
                 trima.synchronize().map_err(|e| e.to_string())?;
                 Ok(())
             }
 
             "sinwma" => {
                 self.ensure_sinwma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 let sinwma = self.sinwma.as_ref().unwrap();
                 sinwma
                     .sinwma_batch_device(
@@ -935,8 +1002,17 @@ impl VramMaComputer {
             "epma" => {
                 self.ensure_epma()?;
                 let offset_f = Self::get_param_f64(params, "offset").unwrap_or(0.0).round();
-                let offset_u = if offset_f < 0.0 { 0usize } else { offset_f as usize };
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let offset_u = if offset_f < 0.0 {
+                    0usize
+                } else {
+                    offset_f as usize
+                };
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
 
                 self.host_i32.clear();
                 self.host_i32
@@ -1005,9 +1081,18 @@ impl VramMaComputer {
 
             "maaq" => {
                 self.ensure_maaq()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
-                let fast_p = Self::get_param_f64(params, "fast_period").unwrap_or(2.0).round();
-                let slow_p = Self::get_param_f64(params, "slow_period").unwrap_or(30.0).round();
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
+                let fast_p = Self::get_param_f64(params, "fast_period")
+                    .unwrap_or(2.0)
+                    .round();
+                let slow_p = Self::get_param_f64(params, "slow_period")
+                    .unwrap_or(30.0)
+                    .round();
                 let fast_u = fast_p.max(1.0) as usize;
                 let slow_u = slow_p.max(1.0) as usize;
                 let fast_sc = 2.0f32 / (fast_u as f32 + 1.0f32);
@@ -1077,7 +1162,12 @@ impl VramMaComputer {
 
             "cwma" => {
                 self.ensure_cwma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period < 2 {
                     return Err("cwma max_period must be >= 2".to_string());
                 }
@@ -1120,8 +1210,10 @@ impl VramMaComputer {
                     }
                 }
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
-                let d_ones = DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_ones =
+                    DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
 
                 let cwma = self.cwma.as_ref().unwrap();
                 cwma.cwma_batch_device(
@@ -1175,11 +1267,7 @@ impl VramMaComputer {
                 let key = CoraWaveParamKey {
                     r_multi_bits: r_multi.to_bits(),
                 };
-                if let Some(cached) = self
-                    .cora_wave_cache
-                    .get(&key)
-                    .and_then(|m| m.get(periods))
-                {
+                if let Some(cached) = self.cora_wave_cache.get(&key).and_then(|m| m.get(periods)) {
                     self.host_i32.clear();
                     self.host_i32.resize(n_combos, 1);
                     self.host_i32_b.clear();
@@ -1253,7 +1341,12 @@ impl VramMaComputer {
                     return Ok(());
                 }
 
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period == 0 {
                     return Err("cora_wave max_period is 0".to_string());
                 }
@@ -1300,8 +1393,10 @@ impl VramMaComputer {
                     self.host_i32[idx] = sp;
                 }
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
-                let d_inv_norms = DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_inv_norms =
+                    DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
 
                 let cora = self.cora_wave.as_ref().unwrap();
                 if smooth {
@@ -1371,7 +1466,12 @@ impl VramMaComputer {
 
             "fwma" => {
                 self.ensure_fwma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period == 0 {
                     return Err("fwma max_period is 0".to_string());
                 }
@@ -1426,7 +1526,8 @@ impl VramMaComputer {
                     .copy_from(&self.host_i32)
                     .map_err(|e| e.to_string())?;
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
 
                 let fwma = self.fwma.as_ref().unwrap();
                 fwma.fwma_batch_device(
@@ -1444,14 +1545,22 @@ impl VramMaComputer {
 
                 self.fwma_cache.insert(
                     periods.to_vec().into_boxed_slice(),
-                    FwmaDeviceConsts { d_weights, max_period },
+                    FwmaDeviceConsts {
+                        d_weights,
+                        max_period,
+                    },
                 );
                 Ok(())
             }
 
             "pwma" => {
                 self.ensure_pwma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period == 0 {
                     return Err("pwma max_period is 0".to_string());
                 }
@@ -1506,7 +1615,8 @@ impl VramMaComputer {
                     .copy_from(&self.host_i32)
                     .map_err(|e| e.to_string())?;
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
 
                 let pwma = self.pwma.as_ref().unwrap();
                 pwma.pwma_batch_device(
@@ -1524,14 +1634,22 @@ impl VramMaComputer {
 
                 self.pwma_cache.insert(
                     periods.to_vec().into_boxed_slice(),
-                    PwmaDeviceConsts { d_weights, max_period },
+                    PwmaDeviceConsts {
+                        d_weights,
+                        max_period,
+                    },
                 );
                 Ok(())
             }
 
             "srwma" => {
                 self.ensure_srwma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period < 2 {
                     return Err("srwma max_period must be >= 2".to_string());
                 }
@@ -1553,19 +1671,20 @@ impl VramMaComputer {
                         .map_err(|e| e.to_string())?;
 
                     let srwma = self.srwma.as_ref().unwrap();
-                    srwma.srwma_batch_device(
-                        d_prices,
-                        &cached.d_weights,
-                        d_periods,
-                        self.d_i32.as_ref().unwrap(),
-                        &cached.d_inv_norms,
-                        series_len,
-                        first_valid,
-                        cached.max_wlen,
-                        n_combos,
-                        d_out,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    srwma
+                        .srwma_batch_device(
+                            d_prices,
+                            &cached.d_weights,
+                            d_periods,
+                            self.d_i32.as_ref().unwrap(),
+                            &cached.d_inv_norms,
+                            series_len,
+                            first_valid,
+                            cached.max_wlen,
+                            n_combos,
+                            d_out,
+                        )
+                        .map_err(|e| e.to_string())?;
                     srwma.synchronize().map_err(|e| e.to_string())?;
                     return Ok(());
                 }
@@ -1598,23 +1717,26 @@ impl VramMaComputer {
                     .copy_from(&self.host_i32)
                     .map_err(|e| e.to_string())?;
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
-                let d_inv_norms = DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_inv_norms =
+                    DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
 
                 let srwma = self.srwma.as_ref().unwrap();
-                srwma.srwma_batch_device(
-                    d_prices,
-                    &d_weights,
-                    d_periods,
-                    self.d_i32.as_ref().unwrap(),
-                    &d_inv_norms,
-                    series_len,
-                    first_valid,
-                    max_wlen,
-                    n_combos,
-                    d_out,
-                )
-                .map_err(|e| e.to_string())?;
+                srwma
+                    .srwma_batch_device(
+                        d_prices,
+                        &d_weights,
+                        d_periods,
+                        self.d_i32.as_ref().unwrap(),
+                        &d_inv_norms,
+                        series_len,
+                        first_valid,
+                        max_wlen,
+                        n_combos,
+                        d_out,
+                    )
+                    .map_err(|e| e.to_string())?;
                 srwma.synchronize().map_err(|e| e.to_string())?;
 
                 self.srwma_cache.insert(
@@ -1690,25 +1812,31 @@ impl VramMaComputer {
                     .map_err(|e| e.to_string())?;
 
                 let zlema = self.zlema.as_ref().unwrap();
-                zlema.zlema_batch_device(
-                    d_prices,
-                    d_periods,
-                    self.d_i32.as_ref().unwrap(),
-                    self.d_f32.as_ref().unwrap(),
-                    series_len,
-                    first_valid,
-                    n_combos,
-                    max_lag,
-                    d_out,
-                )
-                .map_err(|e| e.to_string())?;
+                zlema
+                    .zlema_batch_device(
+                        d_prices,
+                        d_periods,
+                        self.d_i32.as_ref().unwrap(),
+                        self.d_f32.as_ref().unwrap(),
+                        series_len,
+                        first_valid,
+                        n_combos,
+                        max_lag,
+                        d_out,
+                    )
+                    .map_err(|e| e.to_string())?;
                 zlema.synchronize().map_err(|e| e.to_string())?;
                 Ok(())
             }
 
             "nma" => {
                 self.ensure_nma()?;
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period == 0 {
                     return Err("nma max_period is 0".to_string());
                 }
@@ -1873,7 +2001,12 @@ impl VramMaComputer {
                     .unwrap_or(20.0)
                     .round();
                 let warmup_u: usize = if warmup_f < 1.0 { 1 } else { warmup_f as usize };
-                let max_dc = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_dc = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_dc == 0 {
                     return Err("ehlers_itrend max_dc is 0".to_string());
                 }
@@ -1905,20 +2038,12 @@ impl VramMaComputer {
 
             "vwma" => {
                 self.ensure_vwma()?;
-                let pv_prefix = self
-                    .vwma_pv_prefix_f64
-                    .as_ref()
-                    .ok_or_else(|| {
-                        "vwma prefixes missing (call ensure_vwma_prefix_pv_vol_f64 first)"
-                            .to_string()
-                    })?;
-                let vol_prefix = self
-                    .vwma_vol_prefix_f64
-                    .as_ref()
-                    .ok_or_else(|| {
-                        "vwma prefixes missing (call ensure_vwma_prefix_pv_vol_f64 first)"
-                            .to_string()
-                    })?;
+                let pv_prefix = self.vwma_pv_prefix_f64.as_ref().ok_or_else(|| {
+                    "vwma prefixes missing (call ensure_vwma_prefix_pv_vol_f64 first)".to_string()
+                })?;
+                let vol_prefix = self.vwma_vol_prefix_f64.as_ref().ok_or_else(|| {
+                    "vwma prefixes missing (call ensure_vwma_prefix_pv_vol_f64 first)".to_string()
+                })?;
                 let vwma = self.vwma.as_ref().unwrap();
                 vwma.vwma_batch_device(
                     pv_prefix,
@@ -1944,11 +2069,7 @@ impl VramMaComputer {
                 let key = VpwmaParamKey {
                     power_bits: power.to_bits(),
                 };
-                if let Some(cached) = self
-                    .vpwma_cache
-                    .get(&key)
-                    .and_then(|m| m.get(periods))
-                {
+                if let Some(cached) = self.vpwma_cache.get(&key).and_then(|m| m.get(periods)) {
                     self.host_i32.clear();
                     self.host_i32.resize(n_combos, 0);
                     for (ci, &p_i) in periods.iter().enumerate() {
@@ -1967,19 +2088,20 @@ impl VramMaComputer {
                         .map_err(|e| e.to_string())?;
 
                     let vpwma = self.vpwma.as_ref().unwrap();
-                    vpwma.vpwma_batch_device(
-                        d_prices,
-                        d_periods,
-                        self.d_i32.as_ref().unwrap(),
-                        &cached.d_weights,
-                        &cached.d_inv_norms,
-                        series_len,
-                        cached.stride,
-                        first_valid,
-                        n_combos,
-                        d_out,
-                    )
-                    .map_err(|e| e.to_string())?;
+                    vpwma
+                        .vpwma_batch_device(
+                            d_prices,
+                            d_periods,
+                            self.d_i32.as_ref().unwrap(),
+                            &cached.d_weights,
+                            &cached.d_inv_norms,
+                            series_len,
+                            cached.stride,
+                            first_valid,
+                            n_combos,
+                            d_out,
+                        )
+                        .map_err(|e| e.to_string())?;
                     vpwma.synchronize().map_err(|e| e.to_string())?;
                     return Ok(());
                 }
@@ -2043,23 +2165,26 @@ impl VramMaComputer {
                     .copy_from(&self.host_i32)
                     .map_err(|e| e.to_string())?;
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
-                let d_inv_norms = DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_inv_norms =
+                    DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
 
                 let vpwma = self.vpwma.as_ref().unwrap();
-                vpwma.vpwma_batch_device(
-                    d_prices,
-                    d_periods,
-                    self.d_i32.as_ref().unwrap(),
-                    &d_weights,
-                    &d_inv_norms,
-                    series_len,
-                    stride,
-                    first_valid,
-                    n_combos,
-                    d_out,
-                )
-                .map_err(|e| e.to_string())?;
+                vpwma
+                    .vpwma_batch_device(
+                        d_prices,
+                        d_periods,
+                        self.d_i32.as_ref().unwrap(),
+                        &d_weights,
+                        &d_inv_norms,
+                        series_len,
+                        stride,
+                        first_valid,
+                        n_combos,
+                        d_out,
+                    )
+                    .map_err(|e| e.to_string())?;
                 vpwma.synchronize().map_err(|e| e.to_string())?;
 
                 self.vpwma_cache
@@ -2089,12 +2214,8 @@ impl VramMaComputer {
                     return Err("frama device input length mismatch".to_string());
                 }
 
-                let sc = Self::get_param_f64(params, "sc")
-                    .unwrap_or(300.0)
-                    .round() as i32;
-                let fc = Self::get_param_f64(params, "fc")
-                    .unwrap_or(1.0)
-                    .round() as i32;
+                let sc = Self::get_param_f64(params, "sc").unwrap_or(300.0).round() as i32;
+                let fc = Self::get_param_f64(params, "fc").unwrap_or(1.0).round() as i32;
                 if sc <= 0 || fc <= 0 {
                     return Err("frama sc/fc must be positive".to_string());
                 }
@@ -2183,10 +2304,9 @@ impl VramMaComputer {
         match ma.as_str() {
             "sma" => {
                 self.ensure_sma()?;
-                let prefix = self
-                    .sma_prefix_f64
-                    .as_ref()
-                    .ok_or_else(|| "sma prefix missing (call ensure_sma_prefix_f64 first)".to_string())?;
+                let prefix = self.sma_prefix_f64.as_ref().ok_or_else(|| {
+                    "sma prefix missing (call ensure_sma_prefix_f64 first)".to_string()
+                })?;
                 let sma = self.sma.as_ref().unwrap();
                 sma.sma_batch_from_prefix_f64_device_into_tm(
                     prefix,
@@ -2209,11 +2329,7 @@ impl VramMaComputer {
                     offset_bits: offset.to_bits(),
                     sigma_bits: sigma.to_bits(),
                 };
-                if let Some(cached) = self
-                    .alma_cache
-                    .get(&key)
-                    .and_then(|m| m.get(periods))
-                {
+                if let Some(cached) = self.alma_cache.get(&key).and_then(|m| m.get(periods)) {
                     let alma = self.alma.as_ref().unwrap();
                     alma.alma_batch_device_tm(
                         d_prices,
@@ -2231,7 +2347,12 @@ impl VramMaComputer {
                     return Ok(());
                 }
 
-                let max_period = periods.iter().copied().map(|p| p as usize).max().unwrap_or(0);
+                let max_period = periods
+                    .iter()
+                    .copied()
+                    .map(|p| p as usize)
+                    .max()
+                    .unwrap_or(0);
                 if max_period == 0 {
                     return Err("alma max_period is 0".to_string());
                 }
@@ -2253,8 +2374,10 @@ impl VramMaComputer {
                     self.host_f32[base..base + period].copy_from_slice(&w);
                 }
 
-                let d_weights = DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
-                let d_inv_norms = DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
+                let d_weights =
+                    DeviceBuffer::from_slice(&self.host_f32).map_err(|e| e.to_string())?;
+                let d_inv_norms =
+                    DeviceBuffer::from_slice(&self.host_f32_b).map_err(|e| e.to_string())?;
 
                 let alma = self.alma.as_ref().unwrap();
                 alma.alma_batch_device_tm(
@@ -2322,7 +2445,9 @@ fn compute_pascal_weights_f32(period: usize) -> Result<Vec<f32>, String> {
         sum += val;
     }
     if sum == 0.0 {
-        return Err(format!("pwma Pascal weights sum to zero for period {period}"));
+        return Err(format!(
+            "pwma Pascal weights sum to zero for period {period}"
+        ));
     }
     let inv = 1.0 / sum;
     Ok(row.into_iter().map(|v| (v * inv) as f32).collect())
@@ -2341,7 +2466,9 @@ fn compute_fibonacci_weights_f32(period: usize) -> Result<Vec<f32>, String> {
     }
     let sum: f64 = fib.iter().sum();
     if sum == 0.0 {
-        return Err(format!("fwma Fibonacci weights sum to zero for period {period}"));
+        return Err(format!(
+            "fwma Fibonacci weights sum to zero for period {period}"
+        ));
     }
     let inv = 1.0 / sum;
     Ok(fib.into_iter().map(|v| (v * inv) as f32).collect())

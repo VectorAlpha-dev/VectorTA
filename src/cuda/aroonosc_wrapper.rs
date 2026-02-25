@@ -308,9 +308,9 @@ impl CudaAroonOsc {
             }
         }
         if avg_len >= 256.0 {
-            256
+            1024
         } else if avg_len >= 64.0 {
-            256
+            1024
         } else if avg_len >= 32.0 {
             128
         } else {
@@ -708,9 +708,9 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 128;
 
-    fn bytes_one_series_many_params() -> usize {
+    fn bytes_one_series_many_params(param_sweep: usize) -> usize {
         let in_bytes = 2 * ONE_SERIES_LEN * 4;
-        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * 4;
+        let out_bytes = ONE_SERIES_LEN * param_sweep * 4;
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
@@ -758,12 +758,12 @@ pub mod benches {
             self.cuda.stream.synchronize().expect("aroonosc sync");
         }
     }
-    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_many_params_with(param_sweep: usize) -> Box<dyn CudaBenchState> {
         let cuda = CudaAroonOsc::new(0).expect("cuda aroonosc");
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hl_from_close(&close);
         let sweep = AroonOscBatchRange {
-            length: (10, 10 + PARAM_SWEEP - 1, 1),
+            length: (10, 10 + param_sweep - 1, 1),
         };
 
         let (combos, first_valid, series_len) =
@@ -794,16 +794,33 @@ pub mod benches {
             avg_len,
         })
     }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(PARAM_SWEEP)
+    }
+    fn prep_one_series_many_params_1m_x_250() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(250)
+    }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![CudaBenchScenario::new(
-            "aroonosc",
-            "one_series_many_params",
-            "aroonosc_cuda_batch_dev",
-            "1m_x_128",
-            prep_one_series_many_params,
-        )
-        .with_sample_size(10)
-        .with_mem_required(bytes_one_series_many_params())]
+        vec![
+            CudaBenchScenario::new(
+                "aroonosc",
+                "one_series_many_params",
+                "aroonosc_cuda_batch_dev",
+                "1m_x_128",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params(PARAM_SWEEP)),
+            CudaBenchScenario::new(
+                "aroonosc",
+                "one_series_many_params",
+                "aroonosc_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params_1m_x_250,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params(250)),
+        ]
     }
 }

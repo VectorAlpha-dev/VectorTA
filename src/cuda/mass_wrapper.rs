@@ -716,14 +716,17 @@ pub mod benches {
     }
 
     fn prep_mass_batch() -> Box<dyn CudaBenchState> {
-        let mut high = vec![f32::NAN; 120_000];
-        let mut low = vec![f32::NAN; 120_000];
+        let len = 1_000_000usize;
+        let mut high = vec![f32::NAN; len];
+        let mut low = vec![f32::NAN; len];
         for i in 20..high.len() {
             let x = i as f32;
             high[i] = (x * 0.0023).sin().abs() + 1.0;
             low[i] = high[i] - (0.5 + (x * 0.0017).cos().abs());
         }
-        let sweep = MassBatchRange { period: (2, 32, 2) };
+        let sweep = MassBatchRange {
+            period: (2, 251, 1),
+        };
         let combos = expand_mass_combos(&sweep).expect("expand_mass_combos");
         let n_combos = combos.len();
         let len = high.len();
@@ -761,7 +764,7 @@ pub mod benches {
             "mass",
             "batch_dev",
             "mass_cuda_batch_dev",
-            "120k_x_16combos",
+            "1m_x_250",
             prep_mass_batch,
         )
         .with_inner_iters(4)]

@@ -886,17 +886,17 @@ pub mod benches {
                 "rvi",
                 "one_series_many_params",
                 "rvi_cuda_batch_dev",
-                "100k_x_128",
+                "1m_x_250",
                 || {
-                    const N: usize = 100_000;
+                    const N: usize = 1_000_000;
                     let mut data = vec![f32::NAN; N];
                     for i in 500..N {
                         let x = i as f32;
                         data[i] = (x * 0.00123).sin() + 0.0002 * x;
                     }
                     let sweep = RviBatchRange {
-                        period: (10, 25, 1),
-                        ma_len: (14, 21, 1),
+                        period: (10, 59, 1),
+                        ma_len: (14, 18, 1),
                         matype: (1, 1, 0),
                         devtype: (0, 0, 0),
                     };

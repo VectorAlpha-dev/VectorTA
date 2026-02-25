@@ -399,11 +399,7 @@ impl CudaDti {
 
         let block_x: u32 = match std::env::var("DTI_BLOCK_X").ok().as_deref() {
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
-            None => {
-                let (_min_grid, suggested) =
-                    func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
-                suggested
-            }
+            None => 1,
         };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -764,7 +760,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 180;
+    const PARAM_SWEEP: usize = 250;
     const MANY_SERIES_COLS: usize = 192;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
@@ -825,9 +821,10 @@ pub mod benches {
         }
 
         let sweep = DtiBatchRange {
-            r: (8, 18, 2),
+            // 10 * 5 * 5 = 250 combos
+            r: (8, 26, 2),
             s: (6, 14, 2),
-            u: (3, 13, 2),
+            u: (3, 11, 2),
         };
         let combos = CudaDti::expand_grid(&sweep);
         let rows = combos.len();
@@ -958,7 +955,7 @@ pub mod benches {
                 "dti",
                 "one_series_many_params",
                 "dti_cuda_batch_dev",
-                "1m_x_180",
+                "1m_x_250",
                 prep_one_series_many_params,
             )
             .with_sample_size(10)

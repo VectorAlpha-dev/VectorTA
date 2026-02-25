@@ -507,7 +507,7 @@ impl CudaWillr {
 
     #[inline]
     fn block_for_time_parallel(series_len: usize) -> u32 {
-        if series_len >= (1 << 20) {
+        if series_len >= 1_000_000 {
             512
         } else if series_len >= (1 << 14) {
             256

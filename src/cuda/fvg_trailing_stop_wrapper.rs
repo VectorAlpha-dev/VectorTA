@@ -395,7 +395,11 @@ impl CudaFvgTs {
 
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
-            _ => 128,
+            _ => env::var("FVG_TS_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(16),
         };
 
         let max_w: usize = h_sw
@@ -690,9 +694,9 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use cust::memory::DeviceBuffer;
 
-    const BATCH_DEV_LEN: usize = 200_000;
-    const BATCH_LOOKBACK: (usize, usize, usize) = (3, 10, 1);
-    const BATCH_SMOOTHING_DEV: (usize, usize, usize) = (5, 20, 1);
+    const BATCH_DEV_LEN: usize = 1_000_000;
+    const BATCH_LOOKBACK: (usize, usize, usize) = (3, 12, 1);
+    const BATCH_SMOOTHING_DEV: (usize, usize, usize) = (5, 29, 1);
 
     struct FvgTsBatchDevInplaceState {
         cuda: CudaFvgTs,
@@ -847,7 +851,11 @@ pub mod benches {
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
             .unwrap_or(0);
 
-        let mut block_x: u32 = 128;
+        let mut block_x: u32 = env::var("FVG_TS_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(16);
         let mut kernel: &'static str = "fvg_trailing_stop_batch_f32";
         let mut use_shmem_rings: i32 = 0;
         let mut smem_stride: i32 = 0;
@@ -1032,10 +1040,10 @@ pub mod benches {
                 "fvg_trailing_stop",
                 "batch_dev_inplace",
                 "fvg_trailing_stop_cuda_batch_dev_inplace",
-                "200k_x_256",
+                "1m_x_250",
                 prep_batch_dev_inplace,
             )
-            .with_sample_size(10),
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "fvg_trailing_stop",
                 "many_series_one_param",

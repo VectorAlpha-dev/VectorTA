@@ -362,7 +362,8 @@ impl CudaOtt {
                 if let (Some(cmo_func), Some(var_vcmo_func)) =
                     (f_cmo_all_finite.as_mut(), f_var_vcmo_all_finite.as_mut())
                 {
-                    let mut d_vcmo: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(cols) }?;
+                    let mut d_vcmo: DeviceBuffer<f32> =
+                        unsafe { DeviceBuffer::uninitialized(cols) }?;
                     unsafe {
                         let mut prices_ptr = d_prices.as_device_ptr().as_raw();
                         let mut series_len_i = cols as i32;
@@ -873,31 +874,29 @@ pub mod benches {
             .collect();
 
         let d_prices = DeviceBuffer::from_slice(&prices).expect("d_prices");
-        let d_vcmo: Option<DeviceBuffer<f32>> = if let Ok(mut cmo_func) = cuda
-            .module
-            .get_function("cmo9_from_prices_f32_all_finite")
-        {
-            let mut tmp: DeviceBuffer<f32> =
-                unsafe { DeviceBuffer::uninitialized(prices.len()) }.expect("d_vcmo");
-            unsafe {
-                let mut prices_ptr = d_prices.as_device_ptr().as_raw();
-                let mut series_len_i = prices.len() as i32;
-                let mut vcmo_ptr = tmp.as_device_ptr().as_raw();
-                let cmo_args: &mut [*mut c_void] = &mut [
-                    &mut prices_ptr as *mut _ as *mut c_void,
-                    &mut series_len_i as *mut _ as *mut c_void,
-                    &mut vcmo_ptr as *mut _ as *mut c_void,
-                ];
-                let cmo_grid: GridSize = (1, 1, 1).into();
-                let cmo_block: BlockSize = (1, 1, 1).into();
-                cuda.stream
-                    .launch(&mut cmo_func, cmo_grid, cmo_block, 0, cmo_args)
-                    .expect("cmo9_from_prices_f32_all_finite launch");
-            }
-            Some(tmp)
-        } else {
-            None
-        };
+        let d_vcmo: Option<DeviceBuffer<f32>> =
+            if let Ok(mut cmo_func) = cuda.module.get_function("cmo9_from_prices_f32_all_finite") {
+                let mut tmp: DeviceBuffer<f32> =
+                    unsafe { DeviceBuffer::uninitialized(prices.len()) }.expect("d_vcmo");
+                unsafe {
+                    let mut prices_ptr = d_prices.as_device_ptr().as_raw();
+                    let mut series_len_i = prices.len() as i32;
+                    let mut vcmo_ptr = tmp.as_device_ptr().as_raw();
+                    let cmo_args: &mut [*mut c_void] = &mut [
+                        &mut prices_ptr as *mut _ as *mut c_void,
+                        &mut series_len_i as *mut _ as *mut c_void,
+                        &mut vcmo_ptr as *mut _ as *mut c_void,
+                    ];
+                    let cmo_grid: GridSize = (1, 1, 1).into();
+                    let cmo_block: BlockSize = (1, 1, 1).into();
+                    cuda.stream
+                        .launch(&mut cmo_func, cmo_grid, cmo_block, 0, cmo_args)
+                        .expect("cmo9_from_prices_f32_all_finite launch");
+                }
+                Some(tmp)
+            } else {
+                None
+            };
         let d_periods = DeviceBuffer::from_slice(&periods_host).expect("d_periods");
         let d_percents = DeviceBuffer::from_slice(&percents_host).expect("d_percents");
         let d_out: DeviceBuffer<f32> = unsafe {

@@ -632,8 +632,8 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::indicators::ift_rsi::IftRsiBatchRange;
 
-    const ONE_SERIES_LEN: usize = 200_000;
-    const PARAM_SWEEP: usize = 64;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * core::mem::size_of::<f32>();
@@ -754,7 +754,7 @@ pub mod benches {
             "ift_rsi",
             "one_series_many_params",
             "ift_rsi_cuda_batch_dev",
-            "200k_x_64",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

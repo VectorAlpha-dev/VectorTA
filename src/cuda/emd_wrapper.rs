@@ -198,14 +198,14 @@ fn query_optin_smem_limit(device: Device) -> usize {
 #[inline]
 fn clamp_block_x_for_smem(device: Device, requested: u32) -> u32 {
     let limit = query_optin_smem_limit(device);
-    let mut bx = requested.max(64).min(1024);
-    while smem_for(bx) > limit && bx > 32 {
-        bx -= 32;
+    let mut bx = requested.max(1).min(1024);
+    while smem_for(bx) > limit && bx > 1 {
+        bx -= 1;
     }
     let max_tpb = device
         .get_attribute(DeviceAttribute::MaxThreadsPerBlock)
         .unwrap_or(1024) as u32;
-    bx.min(max_tpb).max(32)
+    bx.min(max_tpb).max(1)
 }
 
 impl CudaEmd {
@@ -507,7 +507,10 @@ impl CudaEmd {
             unsafe { DeviceBuffer::uninitialized(elems) }.map_err(CudaEmdError::Cuda)?;
 
         let req_block = match self.policy.batch {
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => env::var("EMD_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1),
             BatchKernelPolicy::Plain { block_x } => block_x,
         } as u32;
         let device = Device::get_device(self.device_id).map_err(CudaEmdError::Cuda)?;
@@ -735,10 +738,11 @@ pub mod benches {
                 "emd",
                 "batch_dev",
                 "emd_cuda_batch_dev",
-                "60k_x_27combos",
+                "1m_x_250",
                 prep_emd_batch_box,
             )
-            .with_inner_iters(8),
+            .with_inner_iters(1)
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "emd",
                 "many_series_one_param",
@@ -824,7 +828,7 @@ pub mod benches {
     fn prep_emd_batch_box() -> Box<dyn CudaBenchState> {
         let cuda = CudaEmd::new(0).expect("cuda emd");
 
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let first_valid = 2usize;
         let mut prices = vec![f32::NAN; len];
         for i in first_valid..len {
@@ -832,9 +836,9 @@ pub mod benches {
             prices[i] = (x * 0.001).sin() + 0.0002 * x;
         }
         let sweep = EmdBatchRange {
-            period: (8, 20, 4),
-            delta: (0.3, 0.7, 0.2),
-            fraction: (0.05, 0.15, 0.05),
+            period: (8, 57, 1),
+            delta: (0.3, 0.7, 0.1),
+            fraction: (0.1, 0.1, 0.0),
         };
         let combos = CudaEmd::expand_combos(&sweep).expect("expand_combos");
         let n = combos.len();
@@ -857,7 +861,10 @@ pub mod benches {
         let d_lb: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems) }.expect("d_lb");
 
         let req_block = match cuda.policy.batch {
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => env::var("EMD_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(1),
             BatchKernelPolicy::Plain { block_x } => block_x,
         } as u32;
         let device = Device::get_device(cuda.device_id).expect("device");

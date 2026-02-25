@@ -593,7 +593,7 @@ impl CudaMacz {
                 name: "macz_batch_hist_from_macz_f32",
             })?;
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 512,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
         if cfg!(debug_assertions) || std::env::var("BENCH_DEBUG").ok().as_deref() == Some("1") {
@@ -768,7 +768,7 @@ impl CudaMacz {
             })?;
 
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 512,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
 
@@ -1085,9 +1085,9 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 100_000;
+    const ONE_SERIES_LEN: usize = 1_000_000;
     const FIRST_VALID: usize = 50;
-    const PARAM_COMBOS: usize = 256;
+    const PARAM_COMBOS: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1167,13 +1167,13 @@ pub mod benches {
         let first_valid = FIRST_VALID;
 
         let sweep = MaczBatchRange {
-            fast_length: (8, 14, 2),
-            slow_length: (20, 35, 5),
+            fast_length: (8, 16, 2),
+            slow_length: (20, 40, 5),
             signal_length: (9, 9, 0),
             lengthz: (20, 20, 0),
             length_stdev: (25, 25, 0),
-            a: (0.8, 1.1, 0.1),
-            b: (0.8, 1.1, 0.1),
+            a: (0.8, 1.2, 0.1),
+            b: (0.8, 0.9, 0.1),
         };
         let combos = CudaMacz::expand_grid(&sweep).expect("expand_grid");
         assert_eq!(combos.len(), PARAM_COMBOS, "unexpected MACZ combo count");
@@ -1258,7 +1258,7 @@ pub mod benches {
             "macz",
             "one_series_many_params",
             "macz_cuda_batch_dev",
-            "100k_x_256",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_mem_required(bytes_one_series_many_params())]

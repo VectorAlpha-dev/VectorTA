@@ -406,7 +406,7 @@ impl CudaChop {
         while launched < rows {
             let n_this = (rows - launched).min(65_535);
             let grid: GridSize = (n_this as u32, 1u32, 1u32).into();
-            let block: BlockSize = (256u32, 1u32, 1u32).into();
+            let block: BlockSize = (32u32, 1u32, 1u32).into();
             let stream = &self.stream;
             unsafe {
                 launch!(
@@ -678,8 +678,8 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use std::ffi::c_void;
 
-    const ONE_SERIES_LEN: usize = 50_000;
-    const PARAM_SWEEP: usize = 128;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
     const MANY_COLS: usize = 128;
     const MANY_ROWS: usize = 8192;
 
@@ -915,7 +915,7 @@ pub mod benches {
             max_period,
             rows,
             shared_bytes,
-            block_x: 256,
+            block_x: 32,
         })
     }
 
@@ -1098,7 +1098,7 @@ pub mod benches {
                 "chop",
                 "one_series_many_params",
                 "chop_cuda_batch_dev",
-                "50k_x_128",
+                "1m_x_250",
                 prep_one_series_many_params,
             )
             .with_mem_required(bytes_one_series_many_params())

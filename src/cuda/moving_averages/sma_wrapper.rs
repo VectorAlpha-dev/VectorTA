@@ -926,7 +926,14 @@ impl CudaSma {
             )));
         }
 
-        self.launch_batch_from_prefix_kernel(d_prefix, d_periods, len, n_periods, first_valid, d_out)?;
+        self.launch_batch_from_prefix_kernel(
+            d_prefix,
+            d_periods,
+            len,
+            n_periods,
+            first_valid,
+            d_out,
+        )?;
         Ok(())
     }
 

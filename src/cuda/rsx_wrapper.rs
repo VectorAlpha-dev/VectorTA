@@ -273,7 +273,7 @@ impl CudaRsx {
             }
         })?;
 
-        let block_x = self.policy.batch_block_x.unwrap_or(256);
+        let block_x = self.policy.batch_block_x.unwrap_or(32);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -319,7 +319,7 @@ impl CudaRsx {
             }
         })?;
 
-        let block_x = self.policy.batch_block_x.unwrap_or(256);
+        let block_x = self.policy.batch_block_x.unwrap_or(32);
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
@@ -578,9 +578,9 @@ pub mod benches {
     const MANY_ROWS: usize = 8192;
     const PARAM_SWEEP: usize = 200;
 
-    fn bytes_one_series_many_params() -> usize {
+    fn bytes_one_series_many_params(param_sweep: usize) -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * param_sweep * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series() -> usize {
@@ -614,7 +614,7 @@ pub mod benches {
             self.cuda.synchronize().expect("rsx sync");
         }
     }
-    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_many_params_with(param_sweep: usize) -> Box<dyn CudaBenchState> {
         let cuda = CudaRsx::new(0).expect("cuda rsx");
         let mut prices = gen_series(ONE_SERIES_LEN);
 
@@ -626,7 +626,7 @@ pub mod benches {
             prices[i] += 0.0005 * x.sin();
         }
         let sweep = RsxBatchRange {
-            period: (2, 1 + PARAM_SWEEP, 1),
+            period: (2, 1 + param_sweep, 1),
         };
 
         let (combos, first_valid, len) =
@@ -653,6 +653,12 @@ pub mod benches {
             first_valid,
             n_combos,
         })
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(PARAM_SWEEP)
+    }
+    fn prep_one_series_many_params_1m_x_250() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(250)
     }
 
     struct RsxManySeriesDeviceState {
@@ -721,7 +727,16 @@ pub mod benches {
                 prep_one_series_many_params,
             )
             .with_sample_size(10)
-            .with_mem_required(bytes_one_series_many_params()),
+            .with_mem_required(bytes_one_series_many_params(PARAM_SWEEP)),
+            CudaBenchScenario::new(
+                "rsx",
+                "one_series_many_params",
+                "rsx_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params_1m_x_250,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params(250)),
             CudaBenchScenario::new(
                 "rsx",
                 "many_series_one_param",

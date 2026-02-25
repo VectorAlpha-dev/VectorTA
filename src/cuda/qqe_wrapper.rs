@@ -600,7 +600,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 192;
+    const PARAM_SWEEP: usize = 250;
     const MANY_COLS: usize = 256;
     const MANY_ROWS: usize = 16 * 1024;
 
@@ -846,7 +846,7 @@ pub mod benches {
                 "qqe",
                 "one_series_many_params",
                 "qqe_cuda_batch_dev",
-                "1m_x_192",
+                "1m_x_250",
                 prep_batch,
             )
             .with_sample_size(12)

@@ -436,7 +436,7 @@ impl CudaStddev {
 
         #[inline(always)]
         fn pick_block_x(len: usize) -> u32 {
-            if len >= (1usize << 20) {
+            if len >= 1_000_000 {
                 512
             } else if len >= (1usize << 14) {
                 256

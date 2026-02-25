@@ -670,7 +670,7 @@ impl CudaTilson {
                 (func, grid, block, BatchKernelSelected::WarpScan { block_x })
             }
             BatchKernelPolicy::Auto => {
-                let block_x = 256u32;
+                let block_x = 32u32;
                 if let Ok(func) = self.module.get_function("tilson_batch_warp_scan_f32") {
                     let warps_per_block = (block_x / 32).max(1);
                     let blocks_x = ((n_combos as u32) + warps_per_block - 1) / warps_per_block;

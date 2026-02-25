@@ -964,7 +964,8 @@ pub mod benches {
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = KeltnerBatchRange {
-            period: (10, 73, 1),
+            // 50 * 5 = 250 combos
+            period: (10, 59, 1),
             multiplier: (1.0, 2.0, 0.25),
         };
 
@@ -1168,7 +1169,7 @@ pub mod benches {
             "keltner",
             "one_series_many_params",
             "keltner_cuda_batch_dev",
-            "1m_len",
+            "1m_x_250",
             prep_batch,
         )
         .with_mem_required(

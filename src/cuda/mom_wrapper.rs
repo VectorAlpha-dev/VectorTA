@@ -256,7 +256,7 @@ impl CudaMom {
             }
         })?;
 
-        let block_x = self.policy.batch_block_x.unwrap_or(256);
+        let block_x = self.policy.batch_block_x.unwrap_or(1024);
 
         let max_blocks: u32 = self.max_grid_x.max(1);
         let mut launched = 0usize;

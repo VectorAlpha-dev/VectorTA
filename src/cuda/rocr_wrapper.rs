@@ -673,7 +673,7 @@ pub mod benches {
                 "rocr",
                 "batch_dev",
                 "rocr_60k_x_49combos",
-                "rocr_cuda_batch_dev",
+                "1m_x_250",
                 prep_rocr_batch,
             )
             .with_inner_iters(8),
@@ -717,7 +717,7 @@ pub mod benches {
 
     fn prep_rocr_batch() -> Box<dyn CudaBenchState> {
         let cuda = CudaRocr::new(0).expect("cuda rocr");
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut prices = vec![f32::NAN; len];
         for i in 16..len {
             let x = i as f32;
@@ -725,7 +725,7 @@ pub mod benches {
         }
         let first = prices.iter().position(|v| !v.is_nan()).unwrap_or(0);
         let sweep = RocrBatchRange {
-            period: (5, 245, 5),
+            period: (5, 254, 1),
         };
         let combos = super::CudaRocr::expand_grid(&sweep).expect("valid sweep");
         let n_combos = combos.len();

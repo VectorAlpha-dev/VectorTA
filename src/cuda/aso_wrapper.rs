@@ -689,7 +689,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const N: usize = 1_000_000;
-    const PARAMS: usize = 200;
+    const PARAMS: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = 4 * N * 4;
@@ -815,7 +815,7 @@ pub mod benches {
             "aso",
             "one_series_many_params",
             "aso_cuda_batch_dev",
-            "1m_x_200",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

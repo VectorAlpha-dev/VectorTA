@@ -311,7 +311,7 @@ impl CudaAroon {
         })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        let shmem_bytes_usize: usize = 2 * (max_len + 1) * std::mem::size_of::<i32>();
+        let shmem_bytes_usize: usize = 4 * (max_len + 1) * std::mem::size_of::<i32>();
         let shmem_bytes: u32 = shmem_bytes_usize as u32;
 
         let selected_block_x = if block_x > 0 { block_x } else { 1 };
@@ -410,7 +410,7 @@ impl CudaAroon {
             })?;
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
-        let shmem_bytes_usize: usize = 2 * (length + 1) * std::mem::size_of::<i32>();
+        let shmem_bytes_usize: usize = 4 * (length + 1) * std::mem::size_of::<i32>();
         let (suggested_block, _min_grid) = func
             .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
             .unwrap_or((128, 0));
@@ -569,9 +569,9 @@ pub mod benches {
         }
     }
     fn prep_batch_dev() -> Box<dyn CudaBenchState> {
-        let (h, l) = gen_series(200_000);
+        let (h, l) = gen_series(1_000_000);
         let sweep = AroonBatchRange {
-            length: (10, 500, 1),
+            length: (10, 259, 1),
         };
         let cuda = CudaAroon::new(0).expect("cuda aroon");
 
@@ -679,7 +679,7 @@ pub mod benches {
             .get_function("aroon_many_series_one_param_f32")
             .expect("aroon_many_series_one_param_f32");
         let _ = func.set_cache_config(CacheConfig::PreferShared);
-        let shmem_bytes_usize: usize = 2 * (25 + 1) * std::mem::size_of::<i32>();
+        let shmem_bytes_usize: usize = 4 * (25 + 1) * std::mem::size_of::<i32>();
         let (suggested_block, _min_grid) = func
             .suggested_launch_configuration(shmem_bytes_usize, BlockSize::xyz(0, 0, 0))
             .unwrap_or((128, 0));
@@ -710,14 +710,14 @@ pub mod benches {
     }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        let bytes_batch = (200_000usize * 2 + (500 - 10 + 1) * 200_000usize * 2) * 4;
+        let bytes_batch = (1_000_000usize * 2 + 250usize * 1_000_000usize * 2) * 4;
         let bytes_many = 256usize * 16_384usize * 2 * 4 * 3;
         vec![
             CudaBenchScenario::new(
                 "aroon",
                 "one_series_many_params",
                 "aroon_cuda_batch_dev",
-                "200k_x_491",
+                "1m_x_250",
                 prep_batch_dev,
             )
             .with_mem_required(bytes_batch),

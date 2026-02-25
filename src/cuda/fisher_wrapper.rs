@@ -432,12 +432,14 @@ impl CudaFisher {
             };
         }
 
-        let (auto_block, _) = func
-            .suggested_launch_configuration(shmem_bytes, BlockSize::x(256))
-            .unwrap_or((128, 0));
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => auto_block.clamp(64, 256),
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            BatchKernelPolicy::Auto => env::var("FISHER_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1)
+                .clamp(1, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
         let grid_x: u32 = combos.len() as u32;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -636,8 +638,8 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::indicators::fisher::FisherBatchRange;
 
-    const ONE_SERIES_LEN: usize = 200_000;
-    const PARAM_SWEEP: usize = 64;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -750,12 +752,14 @@ pub mod benches {
                 )
             };
         }
-        let (auto_block, _) = func
-            .suggested_launch_configuration(shmem_bytes, BlockSize::x(256))
-            .unwrap_or((128, 0));
         let block_x: u32 = match cuda.policy.batch {
-            BatchKernelPolicy::Auto => auto_block.clamp(64, 256),
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
+            BatchKernelPolicy::Auto => env::var("FISHER_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1)
+                .clamp(1, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
         };
         cuda.stream.synchronize().expect("sync after prep");
 
@@ -779,7 +783,7 @@ pub mod benches {
             "fisher",
             "one_series_many_params",
             "fisher_cuda_batch_dev",
-            "200k_x_64",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

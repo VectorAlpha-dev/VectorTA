@@ -459,7 +459,7 @@ impl CudaVwmacd {
         })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 256,
+            _ => 64,
         };
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, 1, 1).into();
@@ -724,13 +724,12 @@ pub mod benches {
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices, gen_time_major_volumes};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 1_000_00;
-    const SWEEP: (usize, usize, usize) = (8, 8 + 128 - 1, 1);
+    const ONE_SERIES_LEN: usize = 1_000_000;
     const MANY_SERIES_COLS: usize = 128;
     const MANY_SERIES_LEN: usize = 100_000;
 
     fn bytes_one_series_many_params() -> usize {
-        let rows = (SWEEP.1 - SWEEP.0 + 1) as usize * (SWEEP.1 - SWEEP.0 + 1) as usize;
+        let rows = 250usize;
         let in_b = 2 * ONE_SERIES_LEN * 4;
         let out_b = 3 * rows * ONE_SERIES_LEN * 4;
         in_b + out_b + 64 * 1024 * 1024
@@ -781,7 +780,7 @@ pub mod benches {
                 "vwmacd",
                 "one_series_many_params",
                 "vwmacd_cuda_batch_dev",
-                "100k_sweep",
+                "1m_x_250",
                 || {
                     let cuda = CudaVwmacd::new(0).unwrap();
                     let price = gen_series(ONE_SERIES_LEN);
@@ -792,8 +791,9 @@ pub mod benches {
                         }
                     }
                     let sweep = VwmacdBatchRange {
-                        fast: (8, 64, 8),
-                        slow: (16, 128, 8),
+                        // 50 * 5 = 250 combos
+                        fast: (8, 57, 1),
+                        slow: (16, 20, 1),
                         signal: (9, 9, 0),
                         fast_ma_type: "sma".into(),
                         slow_ma_type: "sma".into(),

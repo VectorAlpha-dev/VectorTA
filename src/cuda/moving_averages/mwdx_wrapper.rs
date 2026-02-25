@@ -469,7 +469,7 @@ impl CudaMwdx {
         }
 
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 1024,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
             BatchKernelPolicy::Tiled { .. } => 256,
         };

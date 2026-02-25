@@ -628,7 +628,14 @@ impl CudaSuperSmoother {
             ));
         }
 
-        self.launch_batch_kernel(d_prices, d_periods, series_len, n_combos, first_valid, d_out)
+        self.launch_batch_kernel(
+            d_prices,
+            d_periods,
+            series_len,
+            n_combos,
+            first_valid,
+            d_out,
+        )
     }
 
     pub fn supersmoother_batch_into_pinned_host_f32(

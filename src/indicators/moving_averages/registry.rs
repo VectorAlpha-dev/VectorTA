@@ -570,7 +570,9 @@ pub fn list_moving_averages() -> &'static [MovingAverageInfo] {
             supports_cpu_batch: false,
             supports_cuda_single: false,
             supports_cuda_sweep: false,
-            notes: Some("Dual-output (fast/slow) with volume; not supported by generic MA selectors."),
+            notes: Some(
+                "Dual-output (fast/slow) with volume; not supported by generic MA selectors.",
+            ),
         },
         MovingAverageInfo {
             id: "frama",

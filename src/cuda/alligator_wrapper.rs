@@ -302,7 +302,7 @@ impl CudaAlligator {
             })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 128,
+            _ => 64,
         };
         let grid_x = ((n as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1, 1).into();
@@ -719,19 +719,19 @@ pub mod benches {
             batch: BatchKernelPolicy::Auto,
             many_series: ManySeriesKernelPolicy::Auto,
         });
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut data = vec![f32::NAN; len];
         for i in 12..len {
             let x = i as f32;
             data[i] = (x * 0.0013).sin() + 0.0002 * x;
         }
         let sweep = AlligatorBatchRange {
-            jaw_period: (10, 34, 8),
-            jaw_offset: (3, 8, 1),
-            teeth_period: (6, 21, 5),
-            teeth_offset: (2, 6, 1),
-            lips_period: (3, 13, 5),
-            lips_offset: (1, 4, 1),
+            jaw_period: (50, 99, 1),
+            jaw_offset: (8, 8, 0),
+            teeth_period: (10, 14, 1),
+            teeth_offset: (5, 5, 0),
+            lips_period: (5, 5, 0),
+            lips_offset: (3, 3, 0),
         };
         let (combos, first_valid, len) =
             CudaAlligator::prepare_batch_inputs(&data, &sweep).expect("prepare_batch_inputs");
@@ -891,10 +891,11 @@ pub mod benches {
                 "alligator",
                 "batch_dev",
                 "alligator_cuda_batch_dev",
-                "60k_x_many",
+                "1m_x_250",
                 prep_alligator_batch,
             )
-            .with_inner_iters(6),
+            .with_inner_iters(1)
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "alligator",
                 "many_series_one_param",

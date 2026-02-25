@@ -371,7 +371,7 @@ impl CudaCvi {
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 4,
         };
         let chunk = {
             let max_blocks: usize = 16_384;
@@ -496,7 +496,7 @@ impl CudaCvi {
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 4,
         };
         let chunk = {
             let max_blocks: usize = 16_384;
@@ -681,8 +681,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const DEV_BATCH_LEN: usize = 65_536;
-    const DEV_BATCH_PERIOD_SWEEP: (usize, usize, usize) = (2, 8192, 2);
+    const DEV_BATCH_LEN: usize = 1_000_000;
+    const DEV_BATCH_PERIOD_SWEEP: (usize, usize, usize) = (2, 500, 2);
 
     fn synth_hl_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -909,7 +909,7 @@ pub mod benches {
             "cvi",
             "one_series_many_params",
             "cvi_cuda_batch_dev_inplace",
-            "64k_x_4096",
+            "1m_x_250",
             prep_one_series_many_params_dev,
         )
         .with_sample_size(10)

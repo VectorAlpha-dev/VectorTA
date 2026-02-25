@@ -761,10 +761,11 @@ pub mod benches {
                 "safezonestop",
                 "batch_dev",
                 "safezonestop_cuda_batch_dev",
-                "60k_x_27combos",
+                "1m_x_250",
                 prep_batch_box,
             )
-            .with_inner_iters(4),
+            .with_inner_iters(1)
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "safezonestop",
                 "many_series_one_param",
@@ -832,7 +833,7 @@ pub mod benches {
     }
     fn prep_batch() -> BatchDeviceState {
         let cuda = CudaSafeZoneStop::new(0).expect("cuda szz");
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut high = vec![f32::NAN; len];
         let mut low = vec![f32::NAN; len];
         for i in 3..len {
@@ -842,9 +843,9 @@ pub mod benches {
             low[i] = base - 0.5;
         }
         let sweep = SafeZoneStopBatchRange {
-            period: (10, 22, 6),
-            mult: (1.5, 3.0, 0.75),
-            max_lookback: (3, 5, 1),
+            period: (10, 59, 1),
+            mult: (2.0, 2.0, 0.0),
+            max_lookback: (3, 7, 1),
         };
         let dir_long = true;
         let dir_i32 = 1i32;

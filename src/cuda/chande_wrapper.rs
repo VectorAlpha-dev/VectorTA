@@ -812,7 +812,7 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 512_000;
+    const ONE_SERIES_LEN: usize = 1_000_000;
 
     fn synth_hlc_from_close(close: &[f32]) -> (Vec<f32>, Vec<f32>) {
         let mut high = close.to_vec();
@@ -907,8 +907,9 @@ pub mod benches {
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = ChandeBatchRange {
-            period: (10, 40, 5),
-            mult: (2.0, 4.0, 1.0),
+            // 50 * 5 = 250 combos
+            period: (10, 59, 1),
+            mult: (2.0, 4.0, 0.5),
         };
 
         let mut cuda = CudaChande::new(0).expect("cuda chande");
@@ -1102,7 +1103,7 @@ pub mod benches {
             "chande",
             "one_series_many_params",
             "chande_cuda_batch_dev",
-            "512k_x_params",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10);

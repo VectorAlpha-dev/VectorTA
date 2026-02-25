@@ -438,8 +438,9 @@ impl CudaMinmax {
                     self.stream.launch(&f_rmq, grid, block, 0, args)?;
                 }
 
+                let ff_block_x = 1024u32;
                 let ff_grid: GridSize = (count as u32, 1, 1).into();
-                let ff_block: BlockSize = (256u32, 1, 1).into();
+                let ff_block: BlockSize = (ff_block_x, 1, 1).into();
                 unsafe {
                     let mut is_min_ptr = d_is_min.as_device_ptr().add(start * len).as_raw();
                     let mut is_max_ptr = d_is_max.as_device_ptr().add(start * len).as_raw();
@@ -799,8 +800,9 @@ pub mod benches {
                     .expect("minmax rmq launch");
             }
 
+            let ff_block_x = 1024u32;
             let ff_grid: GridSize = (self.rows as u32, 1, 1).into();
-            let ff_block: BlockSize = (256u32, 1, 1).into();
+            let ff_block: BlockSize = (ff_block_x, 1, 1).into();
             unsafe {
                 let mut is_min_ptr = self.d_is_min.as_device_ptr().as_raw();
                 let mut is_max_ptr = self.d_is_max.as_device_ptr().as_raw();
@@ -825,7 +827,7 @@ pub mod benches {
     }
 
     fn prep_minmax_batch() -> Box<dyn CudaBenchState> {
-        let len = 60_000usize;
+        let len = 1_000_000usize;
 
         let mut h = vec![f32::NAN; len];
         let mut l = vec![f32::NAN; len];
@@ -836,7 +838,7 @@ pub mod benches {
             l[i] = b;
             h[i] = b * (1.0 + s);
         }
-        let sweep = MinmaxBatchRange { order: (3, 51, 4) };
+        let sweep = MinmaxBatchRange { order: (3, 252, 1) };
         let combos = expand_grid(&sweep).expect("minmax combos");
         let orders_i32: Vec<i32> = combos.iter().map(|c| c.order.unwrap_or(3) as i32).collect();
         let rows = orders_i32.len();
@@ -956,7 +958,7 @@ pub mod benches {
             "minmax",
             "batch_dev",
             "minmax_cuda_batch_dev",
-            "60k_x_13orders",
+            "1m_x_250",
             prep_minmax_batch,
         )
         .with_inner_iters(4)]

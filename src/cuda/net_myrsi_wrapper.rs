@@ -407,7 +407,7 @@ impl CudaNetMyrsi {
 
         let desired_block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } => block_x,
-            BatchKernelPolicy::Auto => 32,
+            BatchKernelPolicy::Auto => 64,
         };
         let desired_block_x = if desired_block_x == 0 {
             32
@@ -650,7 +650,8 @@ pub mod benches {
         let cuda = CudaNetMyrsi::new(0).expect("cuda");
         let data = gen_prices(LEN_1M);
         let sweep = NetMyrsiBatchRange {
-            period: (8, 128, 8),
+            // 250 combos: 8..=2000 step 8
+            period: (8, 2000, 8),
         };
         let (combos, first_valid, series_len, max_p) =
             CudaNetMyrsi::prepare_batch_inputs(&data, &sweep).expect("prep");
@@ -662,12 +663,21 @@ pub mod benches {
         let d_out: DeviceBuffer<f32> =
             unsafe { DeviceBuffer::uninitialized(rows * series_len) }.expect("d_out");
 
+        let desired_block_x = 64;
+        let desired_block_x = if desired_block_x == 0 {
+            32
+        } else {
+            desired_block_x
+        };
+        let desired_block_x = CudaNetMyrsi::round_up_32(desired_block_x).min(1024).max(32);
+
         let max_dyn_default: usize = 48 * 1024;
         let per_warp_bytes = max_p
             .checked_mul(2 * core::mem::size_of::<f64>())
             .expect("per_warp_bytes overflow");
         let max_warps_by_smem = (max_dyn_default / per_warp_bytes).max(1) as u32;
-        let warps_per_block = 1u32.min(max_warps_by_smem).min(rows.max(1) as u32);
+        let desired_warps = (desired_block_x / 32).max(1);
+        let warps_per_block = desired_warps.min(max_warps_by_smem).min(rows.max(1) as u32);
         let block_x = warps_per_block * 32;
         let shmem_bytes = (warps_per_block as usize).saturating_mul(per_warp_bytes);
         let gx = CudaNetMyrsi::div_up_u32(rows as u32, warps_per_block).max(1);
@@ -697,7 +707,7 @@ pub mod benches {
             "net_myrsi",
             "one_series_many_params",
             "net_myrsi_cuda_batch_dev",
-            "1m_x_128",
+            "1m_x_250",
             prep_batch,
         )]
     }

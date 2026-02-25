@@ -492,6 +492,7 @@ pub mod benches {
     const ONE_SERIES_LEN: usize = 1_000_000;
     const NUM_SERIES: usize = 512;
     const SERIES_LEN: usize = 4096;
+    const REPEATS_1M_X_250: usize = 250;
 
     fn bytes_one_series() -> usize {
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -533,19 +534,23 @@ pub mod benches {
         d_change: DeviceBuffer<f32>,
         len: usize,
         first_valid: usize,
+        repeats: usize,
     }
     impl CudaBenchState for OneSeriesDeviceState {
         fn launch(&mut self) {
-            self.cuda
-                .launch_batch_kernel(
-                    &self.d_high,
-                    &self.d_low,
-                    self.len as i32,
-                    self.first_valid as i32,
-                    &mut self.d_osc,
-                    &mut self.d_change,
-                )
-                .expect("acosc launch");
+            for _ in 0..self.repeats {
+                self.cuda
+                    .launch_batch_kernel(
+                        &self.d_high,
+                        &self.d_low,
+                        self.len as i32,
+                        self.first_valid as i32,
+                        &mut self.d_osc,
+                        &mut self.d_change,
+                    )
+                    .expect("acosc launch");
+            }
+            self.cuda.stream.synchronize().expect("acosc sync");
         }
     }
     fn prep_one_series() -> Box<dyn CudaBenchState> {
@@ -572,6 +577,7 @@ pub mod benches {
             d_change,
             len,
             first_valid,
+            repeats: REPEATS_1M_X_250,
         })
     }
 
@@ -650,7 +656,7 @@ pub mod benches {
                 "acosc",
                 "one_series",
                 "acosc_cuda_batch_dev",
-                "1m",
+                "1m_x_250",
                 prep_one_series,
             )
             .with_sample_size(10)

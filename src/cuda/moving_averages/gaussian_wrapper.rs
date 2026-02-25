@@ -482,12 +482,13 @@ impl CudaGaussian {
 
         func.set_cache_config(CacheConfig::PreferL1)?;
 
-        let (_min_grid, suggested_block) =
-            func.suggested_launch_configuration(0, BlockSize::xy(1024, 1))?;
-
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
-            BatchKernelPolicy::Auto => suggested_block.max(128),
+            BatchKernelPolicy::Auto => std::env::var("GAUSSIAN_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(4),
         };
         let block: BlockSize = BlockSize::xyz(block_x, 1, 1);
 

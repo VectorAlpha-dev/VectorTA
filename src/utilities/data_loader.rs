@@ -280,13 +280,7 @@ pub fn read_candles_from_csv(file_path: &str) -> Result<Candles, Box<dyn Error>>
     }
 
     Ok(Candles::new_with_fields(
-        timestamp,
-        open,
-        high,
-        low,
-        close,
-        volume,
-        fields,
+        timestamp, open, high, low, close, volume, fields,
     ))
 }
 

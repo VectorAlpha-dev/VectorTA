@@ -147,7 +147,7 @@ impl CudaSwma {
             }
         };
 
-        let outs_per_thread = Self::parse_env_u32("SWMA_OUTS_PER_THREAD", 2);
+        let outs_per_thread = Self::parse_env_u32("SWMA_OUTS_PER_THREAD", 8);
         let series_per_block = Self::parse_env_u32("SWMA_SERIES_PER_BLOCK", 8);
         let max_period_const_env = Self::parse_env_usize(
             "SWMA_MAX_PERIOD",

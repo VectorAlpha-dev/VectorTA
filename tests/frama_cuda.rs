@@ -216,8 +216,16 @@ fn frama_cuda_ma_selector_accepts_slice_and_candles() -> Result<(), Box<dyn std:
         ts.push(i as i64);
         open.push(c);
         close.push(c);
-        high.push(if i < 12 { f64::NAN } else { c + 0.6 + 0.03 * t.sin() });
-        low.push(if i < 12 { f64::NAN } else { c - 0.6 - 0.02 * t.cos() });
+        high.push(if i < 12 {
+            f64::NAN
+        } else {
+            c + 0.6 + 0.03 * t.sin()
+        });
+        low.push(if i < 12 {
+            f64::NAN
+        } else {
+            c - 0.6 - 0.02 * t.cos()
+        });
         volume.push(1.0);
     }
 

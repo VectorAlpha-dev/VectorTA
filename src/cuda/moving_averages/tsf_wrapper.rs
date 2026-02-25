@@ -379,7 +379,7 @@ impl CudaTsf {
             }
         })?;
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 64,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(256),
             BatchKernelPolicy::Prefix { .. } => {
                 return Err(CudaTsfError::InvalidPolicy(

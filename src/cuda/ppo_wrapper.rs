@@ -560,7 +560,7 @@ impl CudaPpo {
 
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => 256u32,
+            _ => 128u32,
         };
         if block_x == 0 {
             return Err(CudaPpoError::InvalidPolicy("block_x must be > 0"));
@@ -912,7 +912,7 @@ impl CudaPpo {
 
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x >= 32 => block_x,
-            _ => 256u32,
+            _ => 128u32,
         };
         block_x -= block_x % 32;
         if block_x == 0 {

@@ -656,7 +656,7 @@ pub mod benches {
     use crate::indicators::vlma::VlmaBatchRange;
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP: usize = 200;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_b = ONE_SERIES_LEN * 4;
@@ -752,7 +752,7 @@ pub mod benches {
             "vlma",
             "one_series_many_params",
             "vlma_cuda_batch_dev",
-            "1m_x_200",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

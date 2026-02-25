@@ -29,8 +29,8 @@ use crate::indicators::moving_averages::ehlers_ecema::{
 use crate::indicators::moving_averages::ehlers_kama::{
     ehlers_kama, EhlersKamaData, EhlersKamaInput, EhlersKamaParams,
 };
-use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use crate::indicators::moving_averages::ehma::{ehma, EhmaData, EhmaInput, EhmaParams};
+use crate::indicators::moving_averages::frama::{frama, FramaInput, FramaParams};
 use crate::indicators::moving_averages::nama::{nama, NamaData, NamaInput, NamaParams};
 use crate::indicators::moving_averages::sama::{sama, SamaData, SamaInput, SamaParams};
 use crate::indicators::moving_averages::volatility_adjusted_ma::{

@@ -840,8 +840,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 200_000;
-    const PARAM_ROWS: usize = 128;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_ROWS: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -988,7 +988,7 @@ pub mod benches {
             "cksp",
             "one_series_many_params",
             "cksp_cuda_batch_dev",
-            "200k_x_128",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

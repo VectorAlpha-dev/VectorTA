@@ -225,7 +225,7 @@ impl CudaRsi {
                 name: "rsi_batch_f32",
             }
         })?;
-        let mut block_x: u32 = self.policy.batch_block_x.unwrap_or(256);
+        let mut block_x: u32 = self.policy.batch_block_x.unwrap_or(64);
         block_x = block_x.max(32);
         block_x -= block_x % 32;
         let warps_per_block = (block_x / 32).max(1);
@@ -451,9 +451,9 @@ pub mod benches {
     const MANY_ROWS: usize = 8192;
     const PARAM_SWEEP: usize = 200;
 
-    fn bytes_one_series_many_params() -> usize {
+    fn bytes_one_series_many_params(param_sweep: usize) -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        let out_bytes = ONE_SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        let out_bytes = ONE_SERIES_LEN * param_sweep * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series() -> usize {
@@ -487,7 +487,7 @@ pub mod benches {
             self.cuda.stream.synchronize().expect("rsi sync");
         }
     }
-    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_many_params_with(param_sweep: usize) -> Box<dyn CudaBenchState> {
         let cuda = CudaRsi::new(0).expect("cuda rsi");
         let mut prices = gen_series(ONE_SERIES_LEN);
 
@@ -499,7 +499,7 @@ pub mod benches {
             prices[i] += 0.0005 * x.sin();
         }
         let sweep = RsiBatchRange {
-            period: (2, 1 + PARAM_SWEEP, 1),
+            period: (2, 1 + param_sweep, 1),
         };
 
         let (combos, first_valid, len) =
@@ -528,6 +528,12 @@ pub mod benches {
             n_combos,
             d_out,
         })
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(PARAM_SWEEP)
+    }
+    fn prep_one_series_many_params_1m_x_250() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(250)
     }
 
     struct RsiManyDeviceState {
@@ -603,7 +609,16 @@ pub mod benches {
                 prep_one_series_many_params,
             )
             .with_sample_size(10)
-            .with_mem_required(bytes_one_series_many_params()),
+            .with_mem_required(bytes_one_series_many_params(PARAM_SWEEP)),
+            CudaBenchScenario::new(
+                "rsi",
+                "one_series_many_params",
+                "rsi_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params_1m_x_250,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params(250)),
             CudaBenchScenario::new(
                 "rsi",
                 "many_series_one_param",

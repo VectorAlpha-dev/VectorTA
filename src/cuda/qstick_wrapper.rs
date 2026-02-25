@@ -725,7 +725,7 @@ pub mod benches {
                 "qstick",
                 "batch_dev",
                 "qstick_cuda_batch_dev",
-                "60k_x_40periods",
+                "1m_x_250",
                 prep_qstick_batch_box,
             )
             .with_inner_iters(8),
@@ -772,7 +772,7 @@ pub mod benches {
             many_series: ManySeriesKernelPolicy::Auto,
         });
 
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut open = vec![f32::NAN; len];
         let mut close = vec![f32::NAN; len];
         for i in 3..len {
@@ -781,7 +781,7 @@ pub mod benches {
             close[i] = open[i] + 0.05 * (x * 0.0017).sin();
         }
         let (prefix, first_valid, _len) = CudaQstick::build_diff_prefix_f32(&open, &close);
-        let periods: Vec<i32> = (5..=200).step_by(5).map(|p| p as i32).collect();
+        let periods: Vec<i32> = (5..=254).map(|p| p as i32).collect();
         let d_prefix = DeviceBuffer::from_slice(&prefix).expect("d_prefix");
         let d_periods = DeviceBuffer::from_slice(&periods).expect("d_periods");
         let n_combos = periods.len();

@@ -753,10 +753,11 @@ pub mod benches {
                 "otto",
                 "batch_dev",
                 "otto_cuda_batch_dev",
-                "60k_x_64combos",
+                "1m_x_250",
                 prep_otto_batch_box,
             )
-            .with_inner_iters(6),
+            .with_inner_iters(1)
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "otto",
                 "many_series_one_param",
@@ -811,7 +812,7 @@ pub mod benches {
             many_series: ManySeriesKernelPolicy::Auto,
         });
 
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut price = vec![f32::NAN; len];
         for i in 1..len {
             let x = i as f32;
@@ -819,7 +820,7 @@ pub mod benches {
         }
 
         let sweep = OttoBatchRange {
-            ott_period: (2, 33, 5),
+            ott_period: (2, 251, 1),
             ott_percent: (0.6, 0.6, 0.0),
             fast_vidya: (10, 10, 0),
             slow_vidya: (25, 25, 0),

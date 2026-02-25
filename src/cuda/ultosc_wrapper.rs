@@ -382,7 +382,7 @@ impl CudaUltosc {
         })?;
 
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 128,
             BatchKernelPolicy::Plain { block_x } => block_x.max(64),
         };
         let grid_x = ((len as u32) + block_x - 1) / block_x;
@@ -928,8 +928,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 60_000;
-    const PARAM_SWEEP: usize = 125;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
     const MS_COLS: usize = 128;
     const MS_ROWS: usize = 1_000_000;
 
@@ -1111,7 +1111,7 @@ pub mod benches {
                 "ultosc",
                 "one_series_many_params",
                 "ultosc_cuda_batch_dev",
-                "60k_x_125",
+                "1m_x_250",
                 || prep_ultosc_batch(),
             )
             .with_mem_required(bytes_one_series_many_params())

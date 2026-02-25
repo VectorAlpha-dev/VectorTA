@@ -23,7 +23,7 @@ fn env_warps_per_block() -> u32 {
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
         .filter(|&v| (1..=32).contains(&v))
-        .unwrap_or(4)
+        .unwrap_or(1)
 }
 
 #[derive(Clone, Copy, Debug)]

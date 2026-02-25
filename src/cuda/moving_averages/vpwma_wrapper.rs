@@ -416,7 +416,7 @@ impl CudaVpwma {
         let _ = func.set_cache_config(CacheConfig::PreferShared);
 
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 128,
+            BatchKernelPolicy::Auto => 512,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
         };
         let grid: GridSize = (n_combos as u32, 1, 1).into();

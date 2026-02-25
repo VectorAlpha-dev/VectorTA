@@ -273,7 +273,7 @@ impl CudaMab {
                 name: "mab_batch_from_prefix_sma_f32",
             })?;
 
-        let block_x: u32 = 128;
+        let block_x: u32 = 8;
         let grid_x = ((rows as u32) + block_x - 1) / block_x;
         let grid = GridSize::xyz(grid_x.max(1), 1, 1);
         let block = BlockSize::xyz(block_x, 1, 1);
@@ -771,10 +771,11 @@ pub mod benches {
                 "mab",
                 "batch_dev",
                 "mab_cuda_batch_dev",
-                "60k_x_49combos",
+                "1m_x_250",
                 prep_mab_batch_box,
             )
-            .with_inner_iters(4),
+            .with_inner_iters(1)
+            .with_sample_size(3),
             CudaBenchScenario::new(
                 "mab",
                 "many_series_one_param",
@@ -826,7 +827,7 @@ pub mod benches {
 
     fn prep_mab_batch() -> MabBatchState {
         let cuda = CudaMab::new(0).expect("cuda mab");
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut price = vec![f32::NAN; len];
         for i in 10..len {
             let x = i as f32;
@@ -836,8 +837,8 @@ pub mod benches {
         let (pcs, pcn) = CudaMab::build_prefixes_single(&price);
 
         let sweep = MabBatchRange {
-            fast_period: (10, 22, 2),
-            slow_period: (50, 74, 4),
+            fast_period: (10, 59, 1),
+            slow_period: (100, 180, 20),
             devup: (1.0, 1.0, 0.0),
             devdn: (1.0, 1.0, 0.0),
             fast_ma_type: ("sma".into(), "sma".into(), "".into()),
@@ -845,7 +846,7 @@ pub mod benches {
         };
         let combos = crate::indicators::mab::expand_grid(&sweep).expect("expand mab grid");
         let rows = combos.len();
-        assert_eq!(rows, 49, "unexpected MAB combo count");
+        assert_eq!(rows, 250, "unexpected MAB combo count");
 
         let fast_periods: Vec<i32> = combos
             .iter()

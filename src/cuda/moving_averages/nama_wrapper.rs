@@ -470,7 +470,7 @@ impl CudaNama {
         Self::try_enable_large_dynamic_smem(&func, shared_bytes);
 
         let user_block = match self.policy.batch {
-            BatchKernelPolicy::Auto => None,
+            BatchKernelPolicy::Auto => Some(128),
             BatchKernelPolicy::Plain { block_x }
             | BatchKernelPolicy::Tiled { tile: block_x, .. } => Some(block_x.max(32)),
         };

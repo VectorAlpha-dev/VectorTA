@@ -137,6 +137,15 @@ impl CudaEfi {
     }
 
     #[inline]
+    fn batch_block_override() -> Option<u32> {
+        env::var("EFI_BLOCK_X")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+            .map(|v| v.min(1024))
+    }
+
+    #[inline]
     pub fn synchronize(&self) -> Result<(), CudaEfiError> {
         self.stream.synchronize().map_err(Into::into)
     }
@@ -393,9 +402,13 @@ impl CudaEfi {
             }
         })?;
 
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            BatchKernelPolicy::Auto => 128,
+        let block_x = if let Some(ov) = Self::batch_block_override() {
+            ov
+        } else {
+            match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+                BatchKernelPolicy::Auto => 128,
+            }
         };
         let grid = GridSize::x(n_combos as u32);
         let block = BlockSize::x(block_x);
@@ -541,9 +554,13 @@ impl CudaEfi {
                 name: "efi_batch_from_diff_f32",
             })?;
 
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            BatchKernelPolicy::Auto => 256,
+        let block_x = if let Some(ov) = Self::batch_block_override() {
+            ov
+        } else {
+            match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+                BatchKernelPolicy::Auto => 2,
+            }
         };
         let grid_x = ((n_combos + block_x as usize - 1) / block_x as usize) as u32;
         let grid = GridSize::x(grid_x);
@@ -590,9 +607,13 @@ impl CudaEfi {
                 name: "efi_batch_from_diff_f32",
             })?;
 
-        let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
-            BatchKernelPolicy::Auto => 256,
+        let block_x = if let Some(ov) = Self::batch_block_override() {
+            ov
+        } else {
+            match self.policy.batch {
+                BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(1024),
+                BatchKernelPolicy::Auto => 2,
+            }
         };
         let grid_x = ((n_combos + block_x as usize - 1) / block_x as usize) as u32;
         let grid = GridSize::x(grid_x);
@@ -905,8 +926,8 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const BATCH_LEN: usize = 100_000;
-    const BATCH_SWEEP: usize = 64;
+    const BATCH_LEN: usize = 1_000_000;
+    const BATCH_SWEEP: usize = 250;
     const MANY_COLS: usize = 64;
     const MANY_ROWS: usize = 4_096;
 
@@ -1074,7 +1095,7 @@ pub mod benches {
                 "efi",
                 "one_series_many_params",
                 "efi_cuda_batch_dev",
-                "100k_x_64",
+                "1m_x_250",
                 prep_efi_batch,
             )
             .with_sample_size(10)
@@ -1106,7 +1127,7 @@ pub mod benches {
                 "efi",
                 "one_series_many_params",
                 "efi_cuda_batch_dev",
-                "100k_x_64",
+                "1m_x_250",
                 || {
                     struct State {
                         cuda: CudaEfi,

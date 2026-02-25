@@ -497,7 +497,7 @@ impl CudaEhlersEcema {
         let block_x: u32 = match self.policy.batch {
             BatchKernelPolicy::Tiled { tile, .. } => tile.max(1),
             BatchKernelPolicy::Plain { block_x } => block_x.max(1),
-            BatchKernelPolicy::Auto => block_x_env.unwrap_or(128).max(1),
+            BatchKernelPolicy::Auto => block_x_env.unwrap_or(16).max(1),
         };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x, 1, 1).into();

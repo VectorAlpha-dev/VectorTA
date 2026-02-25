@@ -558,11 +558,12 @@ impl CudaHma {
             ));
         }
 
-        let ring_elems = n_combos
-            .checked_mul(max_sqrt_len)
-            .ok_or(CudaHmaError::ArithmeticOverflow {
-                what: "n_combos * max_sqrt_len",
-            })?;
+        let ring_elems =
+            n_combos
+                .checked_mul(max_sqrt_len)
+                .ok_or(CudaHmaError::ArithmeticOverflow {
+                    what: "n_combos * max_sqrt_len",
+                })?;
         if d_ring.len() < ring_elems {
             return Err(CudaHmaError::InvalidInput(format!(
                 "ring buffer too small: got {}, need {}",

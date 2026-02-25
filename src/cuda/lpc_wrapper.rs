@@ -851,7 +851,7 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 100_000;
+    const ONE_SERIES_LEN: usize = 1_000_000;
 
     struct LpcBatchState {
         cuda: CudaLpc,
@@ -916,7 +916,7 @@ pub mod benches {
             }
         }
         let range = LpcBatchRange {
-            fixed_period: (20, 60, 10),
+            fixed_period: (20, 269, 1),
             cycle_mult: (1.0, 1.0, 0.0),
             tr_mult: (1.0, 1.0, 0.0),
             cutoff_type: "fixed".to_string(),
@@ -998,7 +998,7 @@ pub mod benches {
             "lpc",
             "one_series_many_params",
             "lpc_cuda_batch_dev",
-            "100k_fixed",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(15)]

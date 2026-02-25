@@ -35,18 +35,14 @@ extern "C" __global__ void bop_batch_f32(const float* __restrict__ open,
                                          int first_valid,
                                          float* __restrict__ out)
 {
-
     const int combo = blockIdx.y;
     if (UNLIKELY(combo > 0)) return;
 
-
-
-    constexpr int ILP = 4;
+    constexpr int ILP = 8;
 
     const int tid   = threadIdx.x;
     const int bdim  = blockDim.x;
     const int gdim  = gridDim.x;
-
 
     int base = blockIdx.x * bdim * ILP;
     const int step = gdim * bdim * ILP;

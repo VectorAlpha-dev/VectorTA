@@ -15,6 +15,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 function Parse-Magnitude([string]$digits, [string]$suffix) {
     $v = [int64]$digits
@@ -217,8 +220,11 @@ $ncuArgs = @(
 )
 
 Write-Host "Running ncu..."
+$oldErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
 $ncuOutput = & $ncu.Source @ncuArgs 2>&1
 $exitCode = $LASTEXITCODE
+$ErrorActionPreference = $oldErrorActionPreference
 $ncuOutput | Out-File -FilePath $ncuLog -Encoding utf8
 $combined = (($ncuOutput | ForEach-Object { [string]$_ }) -join "`n")
 

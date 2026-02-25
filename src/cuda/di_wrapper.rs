@@ -382,7 +382,11 @@ impl CudaDi {
             })?;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } => block_x,
-            _ => 256,
+            _ => std::env::var("DI_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(256)
+                .clamp(1, 1024),
         };
 
         let target_blocks = self.sm_count.saturating_mul(8).max(1);
@@ -690,7 +694,7 @@ pub mod benches {
                 "di",
                 "batch_dev",
                 "di_cuda_batch_dev",
-                "60k_x_50",
+                "1m_x_250",
                 prep_di_batch_box,
             )
             .with_inner_iters(6),
@@ -749,7 +753,7 @@ pub mod benches {
             many_series: ManySeriesKernelPolicy::Auto,
         });
 
-        let len = 60_000usize;
+        let len = 1_000_000usize;
 
         let mut close = vec![f32::NAN; len];
         for i in 5..len {
@@ -773,7 +777,7 @@ pub mod benches {
         let d_up = DeviceBuffer::from_slice(&up).expect("up");
         let d_dn = DeviceBuffer::from_slice(&dn).expect("dn");
         let d_tr = DeviceBuffer::from_slice(&tr).expect("tr");
-        let periods: Vec<i32> = (5..=254).step_by(5).take(50).map(|p| p as i32).collect();
+        let periods: Vec<i32> = (5..=254).map(|p| p as i32).collect();
         let warms: Vec<i32> = periods.iter().map(|&p| first as i32 + p - 1).collect();
         let d_periods = DeviceBuffer::from_slice(&periods).expect("per");
         let d_warms = DeviceBuffer::from_slice(&warms).expect("warm");

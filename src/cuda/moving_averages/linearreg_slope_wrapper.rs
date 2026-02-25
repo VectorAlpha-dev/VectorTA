@@ -397,7 +397,7 @@ impl CudaLinearregSlope {
                 name: "linearreg_slope_batch_f32",
             })?;
         let block_x: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
+            BatchKernelPolicy::Auto => 32,
             BatchKernelPolicy::Plain { block_x } => block_x.max(32).min(256),
             BatchKernelPolicy::Prefix { .. } => {
                 return Err(CudaLinearregSlopeError::InvalidPolicy(

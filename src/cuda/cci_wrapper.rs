@@ -317,11 +317,7 @@ impl CudaCci {
         }
 
         let block_x: u32 = match env::var("CCI_BLOCK_X").ok().as_deref() {
-            Some("auto") | None => {
-                let (_mg, suggest) =
-                    func.suggested_launch_configuration(dyn_smem, BlockSize::xyz(0, 0, 0))?;
-                suggest
-            }
+            Some("auto") | None => 64,
             Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(128),
         };
 
@@ -674,9 +670,9 @@ pub mod benches {
     const SERIES_LEN: usize = 1_000_000;
     const PARAM_SWEEP: usize = 200;
 
-    fn bytes_required() -> usize {
+    fn bytes_required(param_sweep: usize) -> usize {
         let in_bytes = SERIES_LEN * std::mem::size_of::<f32>();
-        let out_bytes = SERIES_LEN * PARAM_SWEEP * std::mem::size_of::<f32>();
+        let out_bytes = SERIES_LEN * param_sweep * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
 
@@ -720,11 +716,11 @@ pub mod benches {
             let _ = self.cuda.stream.synchronize();
         }
     }
-    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_many_params_with(param_sweep: usize) -> Box<dyn CudaBenchState> {
         let cuda = CudaCci::new(0).expect("cuda cci");
         let data = gen_series(SERIES_LEN);
         let sweep = CciBatchRange {
-            period: (10, 10 + PARAM_SWEEP - 1, 1),
+            period: (10, 10 + param_sweep - 1, 1),
         };
         let (combos, first_valid, len) =
             CudaCci::prepare_batch_inputs(&data, &sweep).expect("prepare_batch_inputs");
@@ -746,16 +742,33 @@ pub mod benches {
             rows,
         })
     }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(PARAM_SWEEP)
+    }
+    fn prep_one_series_many_params_1m_x_250() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(250)
+    }
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
-        vec![CudaBenchScenario::new(
-            "cci",
-            "one_series_many_params",
-            "cci_cuda_batch_dev",
-            "1m_x_200",
-            prep_one_series_many_params,
-        )
-        .with_sample_size(8)
-        .with_mem_required(bytes_required())]
+        vec![
+            CudaBenchScenario::new(
+                "cci",
+                "one_series_many_params",
+                "cci_cuda_batch_dev",
+                "1m_x_200",
+                prep_one_series_many_params,
+            )
+            .with_sample_size(8)
+            .with_mem_required(bytes_required(PARAM_SWEEP)),
+            CudaBenchScenario::new(
+                "cci",
+                "one_series_many_params",
+                "cci_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params_1m_x_250,
+            )
+            .with_sample_size(8)
+            .with_mem_required(bytes_required(250)),
+        ]
     }
 }

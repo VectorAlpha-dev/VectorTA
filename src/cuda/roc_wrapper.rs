@@ -221,7 +221,7 @@ impl CudaRoc {
         let block_x = self
             .policy
             .batch_block_x
-            .unwrap_or(256)
+            .unwrap_or(1024)
             .min(self.max_threads_per_block);
 
         let mut launched = 0usize;

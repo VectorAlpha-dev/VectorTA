@@ -437,8 +437,12 @@ impl CudaDonchian {
 
         let build_bx: u32 = 256;
         let query_bx: u32 = match self.policy.batch {
-            BatchKernelPolicy::Auto => 256,
-            BatchKernelPolicy::Plain { block_x } => block_x.max(64),
+            BatchKernelPolicy::Auto => std::env::var("DONCHIAN_QUERY_BX")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(32)
+                .clamp(32, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
         };
         let build_grid_x: u32 = ((len as u32) + build_bx - 1) / build_bx;
         let build_grid: GridSize = (build_grid_x.max(1), 1, 1).into();
@@ -785,8 +789,8 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
     use crate::indicators::donchian::DonchianBatchRange;
 
-    const ONE_SERIES_LEN: usize = 200_000;
-    const PARAM_SWEEP: usize = 64;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1011,7 +1015,11 @@ pub mod benches {
             unsafe { DeviceBuffer::uninitialized_async(combos.len() * len, &cuda.stream) }
                 .expect("d_lower");
 
-        let query_bx: u32 = 256;
+        let query_bx: u32 = std::env::var("DONCHIAN_QUERY_BX")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(32)
+            .clamp(32, 1024);
         let query_grid_x: u32 = ((combos.len() as u32) + query_bx - 1) / query_bx;
         let query_grid: GridSize = (query_grid_x.max(1), 1, 1).into();
         let query_block: BlockSize = (query_bx, 1, 1).into();
@@ -1040,7 +1048,7 @@ pub mod benches {
             "donchian",
             "one_series_many_params",
             "donchian_cuda_batch_dev",
-            "200k_x_64",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

@@ -276,7 +276,11 @@ impl CudaFosc {
 
         let block_x = match self.policy.batch {
             BatchKernelPolicy::OneD { block_x } if block_x > 0 => block_x,
-            _ => 256,
+            _ => env::var("FOSC_BLOCK_X")
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(2),
         };
         let grid_x = ((n_combos as u32) + block_x - 1) / block_x;
         let grid: GridSize = (grid_x.max(1), 1u32, 1u32).into();

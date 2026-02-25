@@ -610,7 +610,14 @@ impl CudaZlema {
         let use_warp_scan = has_warp_scan && Self::env_flag("ZLEMA_BATCH_WARP_SCAN", true);
 
         if use_warp_scan {
-            self.launch_batch_kernel_warp_scan(d_prices, d_periods, len, first_valid, n_combos, d_out)?;
+            self.launch_batch_kernel_warp_scan(
+                d_prices,
+                d_periods,
+                len,
+                first_valid,
+                n_combos,
+                d_out,
+            )?;
             return Ok(());
         }
 

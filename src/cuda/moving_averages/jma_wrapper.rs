@@ -201,21 +201,15 @@ impl CudaJma {
     #[inline]
     fn resolve_batch_block_x(&self, needed: usize) -> u32 {
         match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.clamp(32, 1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.clamp(1, 1024),
             _ => {
                 if let Some(v) = std::env::var("JMA_BLOCK_X")
                     .ok()
                     .and_then(|s| s.parse::<u32>().ok())
                 {
-                    return v.clamp(32, 1024);
+                    return v.clamp(1, 1024);
                 }
-
-                let bx = Self::choose_block_x_auto(needed);
-                if needed > 32 && (bx as usize) >= needed {
-                    32
-                } else {
-                    bx
-                }
+                1
             }
         }
     }

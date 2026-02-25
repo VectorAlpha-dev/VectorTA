@@ -220,6 +220,14 @@ impl CudaEdcf {
     }
 
     #[inline]
+    fn env_u32(name: &str) -> Option<u32> {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v > 0)
+    }
+
+    #[inline]
     fn dist_impl_override() -> Option<&'static str> {
         match std::env::var("EDCF_DIST_IMPL").ok().as_deref() {
             Some("rolling") => Some("rolling"),
@@ -292,13 +300,24 @@ impl CudaEdcf {
             return self.launch_compute_dist(&func, d_prices, len, period, first_valid, d_dist);
         }
 
-        let tile: u32 = if len >= (1 << 18) {
+        let heuristic_tile: u32 = if len >= (1 << 18) {
             512
         } else if len >= (1 << 16) {
             256
         } else {
             128
         };
+        let tile: u32 = Self::env_u32("EDCF_DIST_TILE")
+            .map(|t| {
+                if t <= 128 {
+                    128
+                } else if t <= 256 {
+                    256
+                } else {
+                    512
+                }
+            })
+            .unwrap_or(heuristic_tile);
         let fname = match tile {
             128 => "edcf_compute_dist_rolling_f32_tile128",
             256 => "edcf_compute_dist_rolling_f32_tile256",
@@ -314,7 +333,9 @@ impl CudaEdcf {
         if grid_x == 0 {
             grid_x = 1;
         }
-        let block_x = 128u32;
+        let block_x = Self::env_u32("EDCF_DIST_BLOCK_X")
+            .map(|b| b.min(1024))
+            .unwrap_or(32u32);
         let grid: GridSize = (grid_x, 1, 1).into();
         let block: BlockSize = (block_x, 1, 1).into();
         Self::validate_launch_dims(grid_x, 1, 1, block_x, 1, 1)?;
@@ -710,10 +731,21 @@ impl CudaEdcf {
             };
 
             if use_tiled {
-                let tile = match self.policy.batch {
+                let base_tile = match self.policy.batch {
                     BatchKernelPolicy::Tiled { tile } => tile,
                     _ => 256,
                 };
+                let tile = Self::env_u32("EDCF_APPLY_TILE")
+                    .map(|t| {
+                        if t <= 128 {
+                            128
+                        } else if t <= 256 {
+                            256
+                        } else {
+                            512
+                        }
+                    })
+                    .unwrap_or(base_tile);
                 let func_name = match tile {
                     128 => "edcf_apply_weights_tiled_f32_tile128",
                     256 => "edcf_apply_weights_tiled_f32_tile256",
@@ -733,7 +765,9 @@ impl CudaEdcf {
 
                 let outputs_per_block = tile;
                 let grid_x = ((series_len as u32) + outputs_per_block - 1) / outputs_per_block;
-                let block_x = 128u32;
+                let block_x = Self::env_u32("EDCF_APPLY_BLOCK_X")
+                    .map(|b| b.min(1024))
+                    .unwrap_or(128u32);
                 let grid: GridSize = (grid_x, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
                 Self::validate_launch_dims(grid_x, 1, 1, block_x, 1, 1)?;

@@ -58,9 +58,11 @@ void aroon_batch_f32(const float* __restrict__ high,
     __syncthreads();
 
 
-    extern __shared__ int s_deques[];
-    int* __restrict__ dq_max = s_deques;
-    int* __restrict__ dq_min = s_deques + W;
+    extern __shared__ unsigned char s_mem[];
+    int* __restrict__ dq_max_idx = reinterpret_cast<int*>(s_mem);
+    int* __restrict__ dq_min_idx = dq_max_idx + W;
+    float* __restrict__ dq_max_val = reinterpret_cast<float*>(dq_min_idx + W);
+    float* __restrict__ dq_min_val = dq_max_val + W;
 
 
     if (threadIdx.x != 0) return;
@@ -78,11 +80,11 @@ void aroon_batch_f32(const float* __restrict__ high,
     for (int t = 0; t < series_len; ++t) {
         const int start = t - length;
 
-        while (h_tail > h_head && dq_max[h_head_idx] < start) {
+        while (h_tail > h_head && dq_max_idx[h_head_idx] < start) {
             ++h_head;
             h_head_idx = (h_head_idx + 1 == W) ? 0 : (h_head_idx + 1);
         }
-        while (l_tail > l_head && dq_min[l_head_idx] < start) {
+        while (l_tail > l_head && dq_min_idx[l_head_idx] < start) {
             ++l_head;
             l_head_idx = (l_head_idx + 1 == W) ? 0 : (l_head_idx + 1);
         }
@@ -97,29 +99,29 @@ void aroon_batch_f32(const float* __restrict__ high,
 
             while (h_tail > h_head) {
                 const int last_slot = (h_tail_idx == 0) ? (W - 1) : (h_tail_idx - 1);
-                const int idx = dq_max[last_slot];
-                if (high[idx] < h) {
+                if (dq_max_val[last_slot] < h) {
                     --h_tail;
                     h_tail_idx = last_slot;
                 } else {
                     break;
                 }
             }
-            dq_max[h_tail_idx] = t;
+            dq_max_idx[h_tail_idx] = t;
+            dq_max_val[h_tail_idx] = h;
             ++h_tail;
             h_tail_idx = (h_tail_idx + 1 == W) ? 0 : (h_tail_idx + 1);
 
             while (l_tail > l_head) {
                 const int last_slot = (l_tail_idx == 0) ? (W - 1) : (l_tail_idx - 1);
-                const int idx = dq_min[last_slot];
-                if (low[idx] > l) {
+                if (dq_min_val[last_slot] > l) {
                     --l_tail;
                     l_tail_idx = last_slot;
                 } else {
                     break;
                 }
             }
-            dq_min[l_tail_idx] = t;
+            dq_min_idx[l_tail_idx] = t;
+            dq_min_val[l_tail_idx] = l;
             ++l_tail;
             l_tail_idx = (l_tail_idx + 1 == W) ? 0 : (l_tail_idx + 1);
         }
@@ -129,8 +131,8 @@ void aroon_batch_f32(const float* __restrict__ high,
                 out_up  [base + t] = NAN;
                 out_down[base + t] = NAN;
             } else {
-                const int idx_hi = (h_tail > h_head) ? dq_max[h_head_idx] : -1;
-                const int idx_lo = (l_tail > l_head) ? dq_min[l_head_idx] : -1;
+                const int idx_hi = (h_tail > h_head) ? dq_max_idx[h_head_idx] : -1;
+                const int idx_lo = (l_tail > l_head) ? dq_min_idx[l_head_idx] : -1;
                 if (idx_hi < 0 || idx_lo < 0) {
                     out_up  [base + t] = NAN;
                     out_down[base + t] = NAN;
@@ -189,9 +191,11 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,
     __syncthreads();
     if (threadIdx.x != 0) return;
 
-    extern __shared__ int s_deques[];
-    int* __restrict__ dq_max = s_deques;
-    int* __restrict__ dq_min = s_deques + W;
+    extern __shared__ unsigned char s_mem[];
+    int* __restrict__ dq_max_idx = reinterpret_cast<int*>(s_mem);
+    int* __restrict__ dq_min_idx = dq_max_idx + W;
+    float* __restrict__ dq_max_val = reinterpret_cast<float*>(dq_min_idx + W);
+    float* __restrict__ dq_min_val = dq_max_val + W;
 
     int h_head = 0, h_tail = 0;
     int h_head_idx = 0, h_tail_idx = 0;
@@ -202,11 +206,11 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,
 
     for (int t = 0; t < series_len; ++t) {
         const int start = t - length;
-        while (h_tail > h_head && dq_max[h_head_idx] < start) {
+        while (h_tail > h_head && dq_max_idx[h_head_idx] < start) {
             ++h_head;
             h_head_idx = (h_head_idx + 1 == W) ? 0 : (h_head_idx + 1);
         }
-        while (l_tail > l_head && dq_min[l_head_idx] < start) {
+        while (l_tail > l_head && dq_min_idx[l_head_idx] < start) {
             ++l_head;
             l_head_idx = (l_head_idx + 1 == W) ? 0 : (l_head_idx + 1);
         }
@@ -220,29 +224,29 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,
 
             while (h_tail > h_head) {
                 const int last_slot = (h_tail_idx == 0) ? (W - 1) : (h_tail_idx - 1);
-                const int idx = dq_max[last_slot];
-                if (high_tm[idx * stride + s] < h) {
+                if (dq_max_val[last_slot] < h) {
                     --h_tail;
                     h_tail_idx = last_slot;
                 } else {
                     break;
                 }
             }
-            dq_max[h_tail_idx] = t;
+            dq_max_idx[h_tail_idx] = t;
+            dq_max_val[h_tail_idx] = h;
             ++h_tail;
             h_tail_idx = (h_tail_idx + 1 == W) ? 0 : (h_tail_idx + 1);
 
             while (l_tail > l_head) {
                 const int last_slot = (l_tail_idx == 0) ? (W - 1) : (l_tail_idx - 1);
-                const int idx = dq_min[last_slot];
-                if (low_tm[idx * stride + s] > l) {
+                if (dq_min_val[last_slot] > l) {
                     --l_tail;
                     l_tail_idx = last_slot;
                 } else {
                     break;
                 }
             }
-            dq_min[l_tail_idx] = t;
+            dq_min_idx[l_tail_idx] = t;
+            dq_min_val[l_tail_idx] = l;
             ++l_tail;
             l_tail_idx = (l_tail_idx + 1 == W) ? 0 : (l_tail_idx + 1);
         }
@@ -252,8 +256,8 @@ void aroon_many_series_one_param_f32(const float* __restrict__ high_tm,
                 out_up_tm  [t * stride + s] = NAN;
                 out_down_tm[t * stride + s] = NAN;
             } else {
-                const int idx_hi = (h_tail > h_head) ? dq_max[h_head_idx] : -1;
-                const int idx_lo = (l_tail > l_head) ? dq_min[l_head_idx] : -1;
+                const int idx_hi = (h_tail > h_head) ? dq_max_idx[h_head_idx] : -1;
+                const int idx_lo = (l_tail > l_head) ? dq_min_idx[l_head_idx] : -1;
                 if (idx_hi < 0 || idx_lo < 0) {
                     out_up_tm  [t * stride + s] = NAN;
                     out_down_tm[t * stride + s] = NAN;

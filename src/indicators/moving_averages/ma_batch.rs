@@ -1,8 +1,8 @@
 use super::ma::MaData;
 use crate::utilities::data_loader::source_type;
 use crate::utilities::enums::Kernel;
-use std::error::Error;
 use std::collections::HashMap;
+use std::error::Error;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -328,7 +328,8 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                     }
                 };
             }
-            let out = crate::indicators::cora_wave::cora_wave_batch_with_kernel(prices, &sweep, kernel)?;
+            let out =
+                crate::indicators::cora_wave::cora_wave_batch_with_kernel(prices, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.period.unwrap_or(20)),
                 values: out.values,
@@ -827,13 +828,7 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 sc: (sc, sc, 0),
                 fc: (fc, fc, 0),
             };
-            let out = super::frama::frama_batch_with_kernel(
-                high,
-                low,
-                close,
-                &sweep,
-                kernel,
-            )?;
+            let out = super::frama::frama_batch_with_kernel(high, low, close, &sweep, kernel)?;
             Ok(MaBatchOutput {
                 periods: map_periods(&out.combos, |p| p.window.unwrap_or(10)),
                 values: out.values,

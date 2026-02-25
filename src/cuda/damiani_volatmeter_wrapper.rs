@@ -1028,8 +1028,9 @@ pub mod benches {
         let cuda = CudaDamianiVolatmeter::new(0).expect("cuda damiani");
         let close = synth_close(ONE_SERIES_LEN);
         let sweep = DamianiVolatmeterBatchRange {
-            vis_atr: (13, 40, 2),
-            vis_std: (20, 40, 2),
+            // 25 * 10 = 250 combos
+            vis_atr: (13, 37, 1),
+            vis_std: (20, 38, 2),
             sed_atr: (40, 40, 0),
             sed_std: (100, 100, 0),
             threshold: (1.4, 1.4, 0.0),
@@ -1156,7 +1157,7 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        let combos = 154usize;
+        let combos = 250usize;
         let param_bytes = combos * (4 * std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let prefix_bytes = ONE_SERIES_LEN * (2 * std::mem::size_of::<Float2>());
         let tr_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1177,7 +1178,7 @@ pub mod benches {
                 "damiani_volatmeter",
                 "batch",
                 "damiani_cuda_batch_dev",
-                "1m_x_154",
+                "1m_x_250",
                 prep_batch_dev,
             )
             .with_sample_size(10)

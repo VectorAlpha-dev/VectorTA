@@ -1116,8 +1116,8 @@ pub mod benches {
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
         let len = ONE_SERIES_LEN;
         let pstart = 5usize;
-        let pend = 64usize;
-        let pstep = 5usize;
+        let pend = 254usize;
+        let pstep = 1usize;
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
         let cuda = CudaAtr::new(0).unwrap();
@@ -1211,14 +1211,14 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let pstart = 5usize;
-        let pend = 64usize;
-        let pstep = 5usize;
+        let pend = 254usize;
+        let pstep = 1usize;
         let n_combos = ((pend - pstart) / pstep + 1).max(1);
         let scen_batch = CudaBenchScenario::new(
             "atr",
             "one_series_many_params",
             "atr_cuda_batch_dev",
-            "1m_x_params",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_mem_required(bytes_one_series(n_combos));

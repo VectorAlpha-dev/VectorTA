@@ -895,8 +895,9 @@ pub mod benches {
         let close = gen_series(ONE_SERIES_LEN);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = CeBatchRange {
-            period: (10, 50, 10),
-            mult: (2.0, 3.0, 0.5),
+            // 50 * 5 = 250 combos
+            period: (10, 59, 1),
+            mult: (2.0, 4.0, 0.5),
             use_close: (true, true, false),
         };
         let combos = CudaChandelierExit::expand_grid(&sweep).expect("ce expand grid");
@@ -996,7 +997,7 @@ pub mod benches {
     }
 
     fn bytes_batch() -> usize {
-        let combos = 15usize;
+        let combos = 250usize;
         let in_bytes = 3 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
         let param_bytes = combos * (std::mem::size_of::<i32>() + std::mem::size_of::<f32>());
         let out_bytes = 2 * combos * ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -1013,7 +1014,7 @@ pub mod benches {
                 "chandelier_exit",
                 "batch",
                 "ce_cuda_batch_dev",
-                "1m",
+                "1m_x_250",
                 prep_batch_dev,
             )
             .with_sample_size(10)

@@ -1227,8 +1227,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 100_000;
-    const PARAM_SWEEP: usize = 128;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let rows = PARAM_SWEEP;
@@ -1497,7 +1497,7 @@ pub mod benches {
             "stoch",
             "one_series_many_params",
             "stoch_cuda_batch_dev",
-            "100k_x_128",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

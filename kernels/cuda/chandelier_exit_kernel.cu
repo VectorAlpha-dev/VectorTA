@@ -26,6 +26,10 @@ struct KahanF32 {
     __device__ __forceinline__ float value() const { return s + c; }
 };
 
+#ifndef CE_DQ_MAX
+#define CE_DQ_MAX 256
+#endif
+
 extern "C" __global__ void chandelier_exit_batch_f32(
     const float* __restrict__ high,
     const float* __restrict__ low,
@@ -78,6 +82,12 @@ extern "C" __global__ void chandelier_exit_batch_f32(
         int   hi_idx = -1, lo_idx = -1;
         float hi_val = f32_nan(), lo_val = f32_nan();
 
+        const bool use_dq_fast = (period <= CE_DQ_MAX);
+        int max_head = 0, max_tail = 0, max_count = 0;
+        int min_head = 0, min_tail = 0, min_count = 0;
+        int max_idx_q[CE_DQ_MAX], min_idx_q[CE_DQ_MAX];
+        float max_val_q[CE_DQ_MAX], min_val_q[CE_DQ_MAX];
+
         for (int i = 0; i < len; ++i) {
             const float h = high[i];
             const float l = low[i];
@@ -117,25 +127,81 @@ extern "C" __global__ void chandelier_exit_batch_f32(
             const float x_max = use_close_flag ? c : h;
             const float x_min = use_close_flag ? c : l;
 
-
-            if (!isnan(x_max) && (isnan(hi_val) || x_max >= hi_val)) { hi_val = x_max; hi_idx = i; }
-            if (!isnan(x_min) && (isnan(lo_val) || x_min <= lo_val)) { lo_val = x_min; lo_idx = i; }
-
             const int start = (i - period + 1 > 0) ? (i - period + 1) : 0;
 
-
-            if (hi_idx < start) {
-                hi_val = f32_nan(); hi_idx = -1;
-                for (int j = start; j <= i; ++j) {
-                    const float v = use_close_flag ? close[j] : high[j];
-                    if (!isnan(v) && (isnan(hi_val) || v > hi_val)) { hi_val = v; hi_idx = j; }
+            if (use_dq_fast) {
+                while (max_count > 0 && max_idx_q[max_head] < start) {
+                    max_head = (max_head + 1) % CE_DQ_MAX;
+                    --max_count;
                 }
-            }
-            if (lo_idx < start) {
-                lo_val = f32_nan(); lo_idx = -1;
-                for (int j = start; j <= i; ++j) {
-                    const float v = use_close_flag ? close[j] : low[j];
-                    if (!isnan(v) && (isnan(lo_val) || v < lo_val)) { lo_val = v; lo_idx = j; }
+                while (min_count > 0 && min_idx_q[min_head] < start) {
+                    min_head = (min_head + 1) % CE_DQ_MAX;
+                    --min_count;
+                }
+
+                if (!isnan(x_max)) {
+                    while (max_count > 0) {
+                        const int back = (max_tail + CE_DQ_MAX - 1) % CE_DQ_MAX;
+                        if (max_val_q[back] <= x_max) {
+                            max_tail = back;
+                            --max_count;
+                        } else {
+                            break;
+                        }
+                    }
+                    max_idx_q[max_tail] = i;
+                    max_val_q[max_tail] = x_max;
+                    max_tail = (max_tail + 1) % CE_DQ_MAX;
+                    ++max_count;
+                }
+
+                if (!isnan(x_min)) {
+                    while (min_count > 0) {
+                        const int back = (min_tail + CE_DQ_MAX - 1) % CE_DQ_MAX;
+                        if (min_val_q[back] >= x_min) {
+                            min_tail = back;
+                            --min_count;
+                        } else {
+                            break;
+                        }
+                    }
+                    min_idx_q[min_tail] = i;
+                    min_val_q[min_tail] = x_min;
+                    min_tail = (min_tail + 1) % CE_DQ_MAX;
+                    ++min_count;
+                }
+
+                if (max_count > 0) {
+                    hi_idx = max_idx_q[max_head];
+                    hi_val = max_val_q[max_head];
+                } else {
+                    hi_idx = -1;
+                    hi_val = f32_nan();
+                }
+                if (min_count > 0) {
+                    lo_idx = min_idx_q[min_head];
+                    lo_val = min_val_q[min_head];
+                } else {
+                    lo_idx = -1;
+                    lo_val = f32_nan();
+                }
+            } else {
+                if (!isnan(x_max) && (isnan(hi_val) || x_max >= hi_val)) { hi_val = x_max; hi_idx = i; }
+                if (!isnan(x_min) && (isnan(lo_val) || x_min <= lo_val)) { lo_val = x_min; lo_idx = i; }
+
+                if (hi_idx < start) {
+                    hi_val = f32_nan(); hi_idx = -1;
+                    for (int j = start; j <= i; ++j) {
+                        const float v = use_close_flag ? close[j] : high[j];
+                        if (!isnan(v) && (isnan(hi_val) || v > hi_val)) { hi_val = v; hi_idx = j; }
+                    }
+                }
+                if (lo_idx < start) {
+                    lo_val = f32_nan(); lo_idx = -1;
+                    for (int j = start; j <= i; ++j) {
+                        const float v = use_close_flag ? close[j] : low[j];
+                        if (!isnan(v) && (isnan(lo_val) || v < lo_val)) { lo_val = v; lo_idx = j; }
+                    }
                 }
             }
 

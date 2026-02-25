@@ -41,6 +41,7 @@ third_party/
 tools/
 experimental/
 graduate_research/
+docs/
 
 src/data/backup/
 src/data/Backup/

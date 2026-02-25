@@ -731,12 +731,18 @@ impl CudaJsa {
                 name: "jsa_batch_f32",
             }
         })?;
-        let (suggested_block_x, _min_grid) = func
+        let (_min_grid, suggested_block_x) = func
             .suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))
             .map_err(CudaJsaError::from)?;
         let block_x = match self.policy.batch {
-            BatchKernelPolicy::Plain { block_x } => block_x.max(32),
-            _ => suggested_block_x.max(128).min(1024),
+            BatchKernelPolicy::Plain { block_x } => block_x.max(1),
+            _ => std::env::var("JSA_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(suggested_block_x)
+                .max(32)
+                .min(1024),
         };
         let block: BlockSize = (block_x, 1, 1).into();
 

@@ -256,12 +256,12 @@ impl CudaBop {
             }
         })?;
 
-        let block_x = self.policy.batch_block_x.unwrap_or(256);
+        let block_x = self.policy.batch_block_x.unwrap_or(1024);
 
         const ILP: u32 = 4;
         let work = ((len as u32) + block_x * ILP - 1) / (block_x * ILP);
 
-        let max_grid = (self.sm_count.max(1)) * 32;
+        let max_grid = (self.sm_count.max(1)) * 64;
         let grid_x = work.min(max_grid).max(1);
         let max_threads_per_block = Device::get_device(self.device_id)?
             .get_attribute(DeviceAttribute::MaxThreadsPerBlock)?
@@ -552,12 +552,14 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
+    const LARGE_ONE_SERIES_LEN: usize = 250_000_000;
     const MANY_COLS: usize = 1024;
     const MANY_ROWS: usize = 8192;
+    const REPEATS_1M_X_250: usize = 250;
 
-    fn bytes_one_series() -> usize {
-        let in_bytes = 4 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
-        let out_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
+    fn bytes_one_series(len: usize) -> usize {
+        let in_bytes = 4 * len * std::mem::size_of::<f32>();
+        let out_bytes = len * std::mem::size_of::<f32>();
         in_bytes + out_bytes + 64 * 1024 * 1024
     }
     fn bytes_many_series() -> usize {
@@ -576,23 +578,26 @@ pub mod benches {
         len: usize,
         first_valid: usize,
         d_out: DeviceBuffer<f32>,
+        repeats: usize,
     }
     impl CudaBenchState for BopBatchDeviceState {
         fn launch(&mut self) {
-            self.cuda
-                .launch_batch(
-                    &self.d_open,
-                    &self.d_high,
-                    &self.d_low,
-                    &self.d_close,
-                    self.len,
-                    self.first_valid,
-                    &mut self.d_out,
-                )
-                .expect("bop launch");
+            for _ in 0..self.repeats {
+                self.cuda
+                    .launch_batch(
+                        &self.d_open,
+                        &self.d_high,
+                        &self.d_low,
+                        &self.d_close,
+                        self.len,
+                        self.first_valid,
+                        &mut self.d_out,
+                    )
+                    .expect("bop launch");
+            }
         }
     }
-    fn prep_one_series_batch() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_batch_with_repeats(repeats: usize) -> Box<dyn CudaBenchState> {
         let cuda = CudaBop::new(0).expect("cuda bop");
         let mut open = gen_series(ONE_SERIES_LEN);
         let mut high = open.clone();
@@ -629,6 +634,58 @@ pub mod benches {
             len,
             first_valid,
             d_out,
+            repeats,
+        })
+    }
+    fn prep_one_series_batch() -> Box<dyn CudaBenchState> {
+        prep_one_series_batch_with_repeats(1)
+    }
+    fn prep_one_series_batch_1m_x_250_synth() -> Box<dyn CudaBenchState> {
+        prep_one_series_batch_with_repeats(REPEATS_1M_X_250)
+    }
+
+    fn prep_one_series_batch_large() -> Box<dyn CudaBenchState> {
+        let cuda = CudaBop::new(0).expect("cuda bop");
+        let len = LARGE_ONE_SERIES_LEN;
+
+        let mut open = vec![f32::NAN; len];
+        let mut high = vec![f32::NAN; len];
+        let mut low = vec![f32::NAN; len];
+        let mut close = vec![f32::NAN; len];
+
+        for i in 3..len {
+            let base = (i as f32) * 0.0001;
+            let spread = 0.25 + ((i & 31) as f32) * 0.001;
+            open[i] = base;
+            high[i] = base + spread;
+            low[i] = base - spread;
+            close[i] = base + (((i % 7) as f32) - 3.0) * 0.0003;
+        }
+
+        let (first_valid, len) =
+            CudaBop::validate_ohlc_slices(&open, &high, &low, &close).expect("validate");
+        let d_open =
+            unsafe { DeviceBuffer::from_slice_async(&open, &cuda.stream) }.expect("d_open H2D");
+        let d_high =
+            unsafe { DeviceBuffer::from_slice_async(&high, &cuda.stream) }.expect("d_high H2D");
+        let d_low =
+            unsafe { DeviceBuffer::from_slice_async(&low, &cuda.stream) }.expect("d_low H2D");
+        let d_close =
+            unsafe { DeviceBuffer::from_slice_async(&close, &cuda.stream) }.expect("d_close H2D");
+        let d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(len, &cuda.stream) }.expect("d_out alloc");
+        cuda.stream.synchronize().expect("bop prep sync");
+
+        Box::new(BopBatchDeviceState {
+            cuda,
+            d_open,
+            d_high,
+            d_low,
+            d_close,
+            len,
+            first_valid,
+            d_out,
+            repeats: 1,
         })
     }
 
@@ -725,11 +782,29 @@ pub mod benches {
                 "bop",
                 "one_series_many_params",
                 "bop_cuda_batch_dev",
+                "250m_x_1",
+                prep_one_series_batch_large,
+            )
+            .with_sample_size(3)
+            .with_mem_required(bytes_one_series(LARGE_ONE_SERIES_LEN)),
+            CudaBenchScenario::new(
+                "bop",
+                "one_series_many_params",
+                "bop_cuda_batch_dev",
                 "1m_x_1",
                 prep_one_series_batch,
             )
             .with_sample_size(10)
-            .with_mem_required(bytes_one_series()),
+            .with_mem_required(bytes_one_series(ONE_SERIES_LEN)),
+            CudaBenchScenario::new(
+                "bop",
+                "one_series_many_params",
+                "bop_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_batch_1m_x_250_synth,
+            )
+            .with_sample_size(3)
+            .with_mem_required(bytes_one_series(ONE_SERIES_LEN)),
             CudaBenchScenario::new(
                 "bop",
                 "many_series_one_param",

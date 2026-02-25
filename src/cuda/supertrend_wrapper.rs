@@ -157,6 +157,15 @@ impl CudaSupertrend {
         }
     }
 
+    #[inline]
+    fn pick_batch_block_x(rows: usize) -> u32 {
+        if rows >= 128 {
+            256
+        } else {
+            128
+        }
+    }
+
     fn first_valid_hlc(
         high: &[f32],
         low: &[f32],
@@ -293,7 +302,7 @@ impl CudaSupertrend {
                 let bx = if let BatchKernelPolicy::OneD { block_x } = self.policy.batch {
                     block_x
                 } else {
-                    Self::pick_block_x(combos_len)
+                    Self::pick_batch_block_x(combos_len)
                 };
                 let gx = ((combos_len as u32) + bx - 1) / bx;
                 let grid: GridSize = (gx.max(1), 1, 1).into();
@@ -687,7 +696,8 @@ pub mod benches {
         let close = gen_series(len);
         let (high, low) = synth_hlc_from_close(&close);
         let sweep = SuperTrendBatchRange {
-            period: (10, 64, 2),
+            // 50 * 5 = 250 combos
+            period: (10, 59, 1),
             factor: (2.0, 4.0, 0.5),
         };
 
@@ -748,7 +758,7 @@ pub mod benches {
                 let bx = if let BatchKernelPolicy::OneD { block_x } = cuda.policy.batch {
                     block_x.max(1)
                 } else {
-                    CudaSupertrend::pick_block_x(rows).max(1)
+                    CudaSupertrend::pick_batch_block_x(rows).max(1)
                 };
                 let gx = ((rows as u32) + bx - 1) / bx;
                 let grid: GridSize = (gx.max(1), 1, 1).into();
@@ -859,19 +869,19 @@ pub mod benches {
             "supertrend",
             "one_series_many_params",
             "supertrend_cuda_batch_dev",
-            "1m_len",
+            "1m_x_250",
             prep_batch,
         )
         .with_mem_required({
             let combos = expand_grid_local(&SuperTrendBatchRange {
-                period: (10, 64, 2),
+                period: (10, 59, 1),
                 factor: (2.0, 4.0, 0.5),
             })
             .unwrap_or_default()
             .len()
             .max(1);
             let min_p = 10usize;
-            let max_p = 64usize;
+            let max_p = 59usize;
             let atr_rows = (max_p - min_p + 1).max(1);
             let in_bytes = 2 * ONE_SERIES_LEN * std::mem::size_of::<f32>();
             let atr_bytes = atr_rows * ONE_SERIES_LEN * std::mem::size_of::<f32>();

@@ -1115,8 +1115,8 @@ pub mod benches {
     use super::*;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 200_000;
-    const PARAM_SWEEP: usize = 64;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let len = ONE_SERIES_LEN;
@@ -1158,7 +1158,7 @@ pub mod benches {
                 .get_function("alphatrend_batch_from_precomputed_f32")
                 .expect("alphatrend kernel");
 
-            let block_x = 64u32;
+            let block_x = 128u32;
             let grid_x = ((self.n_combos as u32) + block_x - 1) / block_x;
             let grid: GridSize = (grid_x.max(1), 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -1336,10 +1336,10 @@ pub mod benches {
             "alphatrend",
             "one_series_many_params",
             "alphatrend_cuda_batch_dev",
-            "200k_x_64",
+            "1m_x_250",
             prep_one_series_many_params,
         )
-        .with_sample_size(10)
+        .with_sample_size(1)
         .with_mem_required(bytes_one_series_many_params())]
     }
 }

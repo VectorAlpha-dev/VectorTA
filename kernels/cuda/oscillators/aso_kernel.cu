@@ -154,8 +154,8 @@ extern "C" __global__ void aso_batch_f32(
     ModHelper mh(period);
     int   head   = 0;
     int   filled = 0;
-    float sum_b  = 0.0f, cb = 0.0f;
-    float sum_e  = 0.0f, ce = 0.0f;
+    float sum_b  = 0.0f;
+    float sum_e  = 0.0f;
 
 
     int start     = warm - period + 1;
@@ -193,8 +193,8 @@ extern "C" __global__ void aso_batch_f32(
         const float old_e = (filled == period) ? ring_e[head] : 0.0f;
 
 
-        kahan_add(b - old_b, sum_b, cb);
-        kahan_add(e - old_e, sum_e, ce);
+        sum_b += (b - old_b);
+        sum_e += (e - old_e);
 
         ring_b[head] = b;
         ring_e[head] = e;

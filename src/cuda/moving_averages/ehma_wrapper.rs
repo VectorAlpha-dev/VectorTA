@@ -432,6 +432,15 @@ impl CudaEhma {
                 return 128;
             }
         }
+
+        if series_len >= 262_144
+            && self
+                .module
+                .get_function("ehma_batch_tiled_f32_2x_tile512")
+                .is_ok()
+        {
+            return 512;
+        }
         256
     }
 

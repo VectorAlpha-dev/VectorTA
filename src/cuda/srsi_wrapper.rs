@@ -610,7 +610,7 @@ pub mod benches {
             self.cuda.synchronize().expect("srsi sync");
         }
     }
-    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+    fn prep_one_series_many_params_with(stoch_sweep: usize) -> Box<dyn CudaBenchState> {
         let mut cuda = CudaSrsi::new(0).expect("cuda srsi");
         let mut prices = gen_series(ONE_SERIES_LEN);
 
@@ -624,7 +624,7 @@ pub mod benches {
 
         let sweep = SrsiBatchRange {
             rsi_period: (14, 14, 0),
-            stoch_period: (14, 14 + 127, 1),
+            stoch_period: (14, 14 + stoch_sweep.saturating_sub(1), 1),
             k: (3, 3, 0),
             d: (3, 3, 0),
         };
@@ -699,6 +699,12 @@ pub mod benches {
             grid_x,
             block_x,
         })
+    }
+    fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(128)
+    }
+    fn prep_one_series_many_params_1m_x_250() -> Box<dyn CudaBenchState> {
+        prep_one_series_many_params_with(250)
     }
 
     struct SrsiManySeriesDeviceState {
@@ -831,6 +837,15 @@ pub mod benches {
             )
             .with_sample_size(10)
             .with_mem_required(bytes_one_series_many_params(128)),
+            CudaBenchScenario::new(
+                "srsi",
+                "one_series_many_params",
+                "srsi_cuda_batch_dev",
+                "1m_x_250",
+                prep_one_series_many_params_1m_x_250,
+            )
+            .with_sample_size(10)
+            .with_mem_required(bytes_one_series_many_params(250)),
             CudaBenchScenario::new(
                 "srsi",
                 "many_series_one_param",

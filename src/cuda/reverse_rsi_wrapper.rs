@@ -713,8 +713,9 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const ONE_SERIES_LEN: usize = 1_000_000;
-    const PARAM_SWEEP_L: usize = 100;
-    const PARAM_SWEEP_V: usize = 50;
+    // 250 x 1 grid for standardized 1m_x_250 benchmark shape
+    const PARAM_SWEEP_L: usize = 250;
+    const PARAM_SWEEP_V: usize = 1;
     const MANY_SERIES_COLS: usize = 256;
     const MANY_SERIES_LEN: usize = 1_000_000;
 
@@ -863,7 +864,7 @@ pub mod benches {
                 "reverse_rsi",
                 "one_series_many_params",
                 "reverse_rsi_cuda_batch_dev",
-                "1m_x_5000",
+                "1m_x_250",
                 prep_one_series_many_params,
             )
             .with_sample_size(10)

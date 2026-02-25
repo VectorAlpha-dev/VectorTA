@@ -291,7 +291,7 @@ impl CudaPfe {
                 .ok_or_else(|| CudaPfeError::InvalidInput("rows*cols overflow".into()))?;
             let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }?;
 
-            let block_x: u32 = 256;
+            let block_x: u32 = 32;
             let grid_x: u32 = (((combos.len() as u32) + block_x - 1) / block_x).max(1);
             let grid_np: GridSize = (grid_x, 1, 1).into();
             let block_np: BlockSize = (block_x, 1, 1).into();
@@ -348,7 +348,7 @@ impl CudaPfe {
         let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(total_out) }?;
 
         if let Ok(func) = self.module.get_function("pfe_batch_prefix_f32") {
-            let block_x: u32 = 256;
+            let block_x: u32 = 32;
             let grid_x: u32 = (((combos.len() as u32) + block_x - 1) / block_x).max(1);
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -383,7 +383,7 @@ impl CudaPfe {
             let mut launched = 0usize;
             while launched < combos.len() {
                 let cur = (combos.len() - launched).min(chunk);
-                let block_x: u32 = 256;
+                let block_x: u32 = 32;
                 let grid_x: u32 = (((cur as u32) + block_x - 1) / block_x).max(1);
                 let grid: GridSize = (grid_x, 1, 1).into();
                 let block: BlockSize = (block_x, 1, 1).into();
@@ -538,7 +538,7 @@ pub mod benches {
                 "pfe",
                 "batch_dev",
                 "pfe_cuda_batch_dev",
-                "60k_x_grid",
+                "1m_x_250",
                 prep_pfe_batch_box,
             ),
             CudaBenchScenario::new(
@@ -570,7 +570,7 @@ pub mod benches {
                 .module
                 .get_function("pfe_many_params_prefix_f32")
                 .expect("func");
-            let block_x: u32 = 256;
+            let block_x: u32 = 32;
             let grid_x: u32 = (((self.n_combos as u32) + block_x - 1) / block_x).max(1);
             let grid: GridSize = (grid_x, 1, 1).into();
             let block: BlockSize = (block_x, 1, 1).into();
@@ -606,7 +606,7 @@ pub mod benches {
 
     fn prep_pfe_batch() -> PfeBatchState {
         let cuda = CudaPfe::new(0).expect("cuda pfe");
-        let len = 60_000usize;
+        let len = 1_000_000usize;
         let mut price = vec![f32::NAN; len];
         for i in 10..len {
             let x = i as f32;
@@ -614,8 +614,8 @@ pub mod benches {
         }
         let mut periods = Vec::new();
         let mut smooths = Vec::new();
-        for p in 5..=49 {
-            for s in [3, 5, 7, 9] {
+        for p in 5..=54 {
+            for s in [3, 5, 7, 9, 11] {
                 periods.push(p as i32);
                 smooths.push(s as i32);
             }

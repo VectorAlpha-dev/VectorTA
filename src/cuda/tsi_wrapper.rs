@@ -285,7 +285,7 @@ impl CudaTsi {
         let prefer_fast = combos.len() >= 32 && len >= 4_096 && free_ok_fast;
         let block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x > 0 => block_x,
-            _ => 256,
+            _ => 64,
         };
 
         if prefer_fast {
@@ -785,7 +785,7 @@ pub mod benches {
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
     const LEN: usize = 1_000_000;
-    const ROWS: usize = 128;
+    const ROWS: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = LEN * std::mem::size_of::<f32>();
@@ -894,7 +894,7 @@ pub mod benches {
             len: LEN,
             first_valid,
             n_combos,
-            block_x: 256,
+            block_x: 64,
         })
     }
 
@@ -903,7 +903,7 @@ pub mod benches {
             "tsi",
             "batch_dev",
             "tsi_cuda_batch_dev",
-            "1m_x_128",
+            "1m_x_250",
             prep_batch,
         )
         .with_inner_iters(4)

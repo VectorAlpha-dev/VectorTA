@@ -248,7 +248,7 @@ impl CudaMediumAd {
             })?;
 
         let _ = func.set_cache_config(CacheConfig::PreferL1);
-        let block_x: u32 = Self::pick_block_x_from_occupancy(&func);
+        let block_x: u32 = 32;
         let grid_x = ((len as u32) + block_x - 1) / block_x;
 
         const max_y: usize = 65_535;
@@ -518,8 +518,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::gen_series;
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 200_000;
-    const PARAM_SWEEP: usize = 64;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
 
     fn bytes_one_series_many_params() -> usize {
         let in_bytes = ONE_SERIES_LEN * std::mem::size_of::<f32>();
@@ -584,7 +584,7 @@ pub mod benches {
             "medium_ad",
             "one_series_many_params",
             "medium_ad_cuda_batch_dev",
-            "200k_x_64",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10)

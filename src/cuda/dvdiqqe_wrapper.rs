@@ -878,13 +878,14 @@ pub mod benches {
     }
 
     fn prep_one_series_many_params() -> Box<dyn CudaBenchState> {
-        let len = 512_000usize;
+        let len = 1_000_000usize;
         let (open, close, volume) = synth_ohlcv(len);
         let sweep = DvdiqqeBatchRange {
-            period: (10, 28, 3),
-            smoothing_period: (3, 9, 3),
-            fast_multiplier: (1.5, 3.0, 0.5),
-            slow_multiplier: (3.0, 6.0, 1.0),
+            // 50 * 5 = 250 combos
+            period: (10, 59, 1),
+            smoothing_period: (3, 7, 1),
+            fast_multiplier: (2.618, 2.618, 0.0),
+            slow_multiplier: (4.236, 4.236, 0.0),
         };
         let cuda = CudaDvdiqqe::new(0).unwrap();
         let first_valid = close.iter().position(|x| x.is_finite()).unwrap_or(0);
@@ -1078,7 +1079,7 @@ pub mod benches {
             "dvdiqqe",
             "one_series_many_params",
             "dvdiqqe_cuda_batch_dev",
-            "512k_x_params",
+            "1m_x_250",
             prep_one_series_many_params,
         )
         .with_sample_size(10);

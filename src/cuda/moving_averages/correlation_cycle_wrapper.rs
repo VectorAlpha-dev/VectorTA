@@ -835,8 +835,8 @@ pub mod benches {
     use crate::cuda::bench::helpers::{gen_series, gen_time_major_prices};
     use crate::cuda::bench::{CudaBenchScenario, CudaBenchState};
 
-    const ONE_SERIES_LEN: usize = 250_000;
-    const PARAM_SWEEP: usize = 64;
+    const ONE_SERIES_LEN: usize = 1_000_000;
+    const PARAM_SWEEP: usize = 250;
     const MANY_SERIES_COLS: usize = 128;
     const MANY_SERIES_LEN: usize = 500_000;
 
@@ -1094,7 +1094,7 @@ pub mod benches {
                 "correlation_cycle",
                 "one_series_many_params",
                 "correlation_cycle_cuda_batch_dev",
-                "250k_x_64",
+                "1m_x_250",
                 prep_batch,
             ),
             CudaBenchScenario::new(

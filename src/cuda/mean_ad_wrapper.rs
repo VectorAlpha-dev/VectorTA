@@ -408,7 +408,7 @@ impl CudaMeanAd {
 
         let mut block_x = match self.policy.batch {
             BatchKernelPolicy::Plain { block_x } if block_x >= 32 => (block_x / 32) * 32,
-            _ => 128u32,
+            _ => 32u32,
         }
         .max(32);
         let mut warps_per_block = (block_x / 32) as usize;

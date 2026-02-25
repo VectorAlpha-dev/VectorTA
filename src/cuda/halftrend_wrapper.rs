@@ -1659,7 +1659,7 @@ pub mod benches {
 
     pub fn bench_profiles() -> Vec<CudaBenchScenario> {
         let bytes_batch = || -> usize {
-            (3 * LEN_1M + 6 * 16 * LEN_1M) * std::mem::size_of::<f32>() + 64 * 1024 * 1024
+            (3 * LEN_1M + 6 * 250 * LEN_1M) * std::mem::size_of::<f32>() + 64 * 1024 * 1024
         }();
 
         let prep_batch_dev_inplace = || -> Box<dyn CudaBenchState> {
@@ -1667,7 +1667,7 @@ pub mod benches {
             let close = gen_series(LEN_1M);
             let (high, low) = synth_hlc_from_close(&close);
             let sweep = HalfTrendBatchRange {
-                amplitude: (2, 32, 2),
+                amplitude: (2, 251, 1),
                 channel_deviation: (2.0, 2.0, 0.0),
                 atr_period: (14, 14, 0),
             };
@@ -1870,7 +1870,7 @@ pub mod benches {
                 "halftrend",
                 "batch",
                 "halftrend_cuda_batch_dev_inplace",
-                "1m",
+                "1m_x_250",
                 prep_batch_dev_inplace,
             )
             .with_mem_required(bytes_batch)
