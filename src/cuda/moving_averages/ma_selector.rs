@@ -6,7 +6,7 @@ use crate::utilities::data_loader::{source_type, Candles};
 
 use cust::context::Context;
 use cust::device::Device;
-use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, LockedBuffer};
+use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::prelude::CudaFlags;
 use cust::stream::{Stream, StreamFlags};
 use std::collections::HashMap;
@@ -145,6 +145,30 @@ fn get_param_u32(
         )));
     }
     Ok(Some(v as u32))
+}
+
+#[inline]
+fn get_param_bool01(
+    params: Option<&HashMap<String, f64>>,
+    ma_type: &str,
+    key: &'static str,
+) -> Result<Option<bool>, CudaMaSelectorError> {
+    let Some(v) = get_param_f64(params, ma_type, key)? else {
+        return Ok(None);
+    };
+    let r = v.round();
+    if (v - r).abs() > 1e-9 {
+        return Err(CudaMaSelectorError::InvalidInput(format!(
+            "invalid param '{key}' for '{ma_type}': expected integer 0 or 1, got {v}"
+        )));
+    }
+    match r as i32 {
+        0 => Ok(Some(false)),
+        1 => Ok(Some(true)),
+        _ => Err(CudaMaSelectorError::InvalidInput(format!(
+            "invalid param '{key}' for '{ma_type}': expected 0 or 1, got {v}"
+        ))),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -827,6 +851,24 @@ impl CudaMaSelector {
                         rows: h.rows,
                         cols: h.cols,
                     })
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "cora_wave" => {
+                let r_multi = get_param_f64(params, ma_type, "r_multi")?.unwrap_or(2.0);
+                if r_multi < 0.0 {
+                    return Err(CudaMaSelectorError::InvalidInput(format!(
+                        "invalid param 'r_multi' for '{ma_type}': expected >= 0, got {r_multi}"
+                    )));
+                }
+                let smooth = get_param_bool01(params, ma_type, "smooth")?.unwrap_or(true);
+                let sweep = crate::indicators::cora_wave::CoraWaveBatchRange {
+                    period: (period, period, 0),
+                    r_multi: (r_multi, r_multi, 0.0),
+                    smooth,
+                };
+                let cuda = CudaCoraWave::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.cora_wave_batch_dev(ensure_prices!(), &sweep)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "reflex" => {
@@ -1608,6 +1650,48 @@ impl CudaMaSelector {
                 cuda.maaq_batch_dev(&prices, &sweep)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
+            "cora_wave" => {
+                let r_multi = get_param_f64(params, ma_type, "r_multi")?.unwrap_or(2.0);
+                if r_multi < 0.0 {
+                    return Err(CudaMaSelectorError::InvalidInput(format!(
+                        "invalid param 'r_multi' for '{ma_type}': expected >= 0, got {r_multi}"
+                    )));
+                }
+                let smooth = get_param_bool01(params, ma_type, "smooth")?.unwrap_or(true);
+                let sweep = crate::indicators::cora_wave::CoraWaveBatchRange {
+                    period: period_range,
+                    r_multi: (r_multi, r_multi, 0.0),
+                    smooth,
+                };
+                let cuda = CudaCoraWave::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.cora_wave_batch_dev(&prices, &sweep)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+            }
+            "mwdx" => {
+                let first_valid = prices
+                    .iter()
+                    .position(|x| !x.is_nan())
+                    .ok_or_else(|| CudaMaSelectorError::InvalidInput("all values are NaN".into()))?;
+                let factors: Vec<f32> = periods
+                    .iter()
+                    .map(|&p| 2.0f32 / (p as f32 + 1.0f32))
+                    .collect();
+                let d_prices = DeviceBuffer::from_slice(&prices)?;
+                let d_factors = DeviceBuffer::from_slice(&factors)?;
+                let mut d_out: DeviceBuffer<f32> = unsafe { DeviceBuffer::uninitialized(elems)? };
+                let cuda = CudaMwdx::new(self.device_id)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.mwdx_batch_device(&d_prices, &d_factors, cols, first_valid, rows, &mut d_out)
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                cuda.synchronize()
+                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                Ok(DeviceArrayF32 {
+                    buf: d_out,
+                    rows,
+                    cols,
+                })
+            }
             "reflex" => {
                 let sweep = crate::indicators::moving_averages::reflex::ReflexBatchRange {
                     period: period_range,
@@ -1648,7 +1732,7 @@ impl CudaMaSelector {
                 Ok(dev)
             }
 
-            "vwap" | "hwma" | "mwdx" | "mama" => Err(CudaMaSelectorError::Unsupported(format!(
+            "vwap" | "hwma" | "mama" => Err(CudaMaSelectorError::Unsupported(format!(
                 "{ma_type} does not support period-sweep batching"
             ))),
 

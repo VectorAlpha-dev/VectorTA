@@ -8,7 +8,9 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::moving_averages::CudaCoraWave;
+use vector_ta::cuda::moving_averages::{CudaCoraWave, CudaMaData, CudaMaSelector};
+#[cfg(feature = "cuda")]
+use std::collections::HashMap;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -136,5 +138,78 @@ fn cora_wave_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std:
             b
         );
     }
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cora_wave_cuda_selector_dispatch_single_and_sweep() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[cora_wave_cuda_selector_dispatch_single_and_sweep] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let series_len = 2048usize;
+    let mut data_f64 = vec![f64::NAN; series_len];
+    for i in 7..series_len {
+        let x = i as f64;
+        data_f64[i] = (x * 0.0014).sin() + 0.00029 * x;
+    }
+    let data_f32: Vec<f32> = data_f64.iter().map(|&v| v as f32).collect();
+
+    let mut params = HashMap::new();
+    params.insert("r_multi".to_string(), 2.0);
+    params.insert("smooth".to_string(), 1.0);
+
+    let selector = CudaMaSelector::new(0);
+    let single = selector
+        .ma_to_device_with_params("cora_wave", CudaMaData::SliceF32(&data_f32), 20, &params)
+        .map_err(|e| e.to_string())?;
+
+    assert_eq!(single.rows, 1);
+    assert_eq!(single.cols, series_len);
+
+    let sweep = selector
+        .ma_sweep_to_device_with_params(
+            "cora_wave",
+            CudaMaData::SliceF32(&data_f32),
+            10,
+            18,
+            4,
+            &params,
+        )
+        .map_err(|e| e.to_string())?;
+
+    assert_eq!(sweep.rows, 3);
+    assert_eq!(sweep.cols, series_len);
+
+    let cuda = CudaCoraWave::new(0)?;
+    let direct = cuda.cora_wave_batch_dev(
+        &data_f32,
+        &CoraWaveBatchRange {
+            period: (10, 18, 4),
+            r_multi: (2.0, 2.0, 0.0),
+            smooth: true,
+        },
+    )?;
+
+    assert_eq!(sweep.rows, direct.rows);
+    assert_eq!(sweep.cols, direct.cols);
+
+    let mut sweep_host = vec![0f32; sweep.len()];
+    let mut direct_host = vec![0f32; direct.len()];
+    sweep.buf.copy_to(&mut sweep_host)?;
+    direct.buf.copy_to(&mut direct_host)?;
+
+    for idx in 0..sweep_host.len() {
+        assert!(
+            approx_eq(sweep_host[idx] as f64, direct_host[idx] as f64, 1e-4),
+            "selector/direct mismatch at {}: selector={} direct={}",
+            idx,
+            sweep_host[idx],
+            direct_host[idx]
+        );
+    }
+
     Ok(())
 }

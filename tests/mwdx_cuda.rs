@@ -8,7 +8,7 @@ use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
-use vector_ta::cuda::moving_averages::CudaMwdx;
+use vector_ta::cuda::moving_averages::{CudaMaData, CudaMaSelector, CudaMwdx};
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {
@@ -139,6 +139,64 @@ fn mwdx_cuda_many_series_one_param_matches_cpu() -> Result<(), Box<dyn std::erro
             cpu_val,
             gpu_val
         );
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn mwdx_cuda_selector_sweep_dispatches_and_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    if !cuda_available() {
+        eprintln!("[mwdx_cuda_selector_sweep_dispatches_and_matches_cpu] skipped - no CUDA device");
+        return Ok(());
+    }
+
+    let series_len = 2048usize;
+    let mut data = vec![f64::NAN; series_len];
+    for i in 6..series_len {
+        let x = i as f64;
+        data[i] = (x * 0.0011).sin() + 0.00033 * x.cos();
+    }
+    let data_f32: Vec<f32> = data.iter().map(|&v| v as f32).collect();
+
+    let selector = CudaMaSelector::new(0);
+    let out = selector
+        .ma_sweep_to_device("mwdx", CudaMaData::SliceF32(&data_f32), 5, 9, 2)
+        .map_err(|e| e.to_string())?;
+
+    assert_eq!(out.rows, 3);
+    assert_eq!(out.cols, series_len);
+
+    let mut gpu = vec![0f32; out.len()];
+    out.buf.copy_to(&mut gpu)?;
+
+    let periods = [5usize, 7usize, 9usize];
+    let tol = 2e-4;
+
+    for (row, period) in periods.iter().enumerate() {
+        let factor = 2.0 / (*period as f64 + 1.0);
+        let input = MwdxInput::from_slice(
+            &data,
+            MwdxParams {
+                factor: Some(factor),
+            },
+        );
+        let cpu = mwdx_with_kernel(&input, Kernel::Scalar)?;
+
+        for col in 0..series_len {
+            let gpu_val = gpu[row * series_len + col] as f64;
+            let cpu_val = cpu.values[col];
+            assert!(
+                approx_eq(cpu_val, gpu_val, tol),
+                "selector sweep mismatch row={} period={} col={}: cpu={} gpu={}",
+                row,
+                period,
+                col,
+                cpu_val,
+                gpu_val
+            );
+        }
     }
 
     Ok(())
