@@ -22,6 +22,98 @@
 #define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #endif
 
+__device__ __forceinline__ double sma_warp_scan_inclusive_f64(double v) {
+    const unsigned mask = 0xffffffffu;
+#pragma unroll
+    for (int offs = 1; offs < 32; offs <<= 1) {
+        double up = __shfl_up_sync(mask, v, offs);
+        if ((threadIdx.x & 31) >= offs) v += up;
+    }
+    return v;
+}
+
+extern "C" __global__ void sma_prefix_stage1_scan_f64(
+    const float* __restrict__ prices,
+    int series_len,
+    int first_valid,
+    double* __restrict__ prefix,
+    double* __restrict__ block_totals
+) {
+    if (series_len <= 0) return;
+
+    const int gid0 = blockIdx.x * blockDim.x;
+    const int tid = threadIdx.x;
+    if (gid0 >= series_len) return;
+
+    const int n_in_tile = min((int)blockDim.x, series_len - gid0);
+    const int i = gid0 + tid;
+    const int lane = tid & 31;
+    const int warp = tid >> 5;
+
+    int fv = first_valid;
+    if (fv < 0) fv = 0;
+    if (fv > series_len) fv = series_len;
+
+    if (blockIdx.x == 0 && tid == 0) {
+        prefix[0] = 0.0;
+    }
+
+    double x = 0.0;
+    if (tid < n_in_tile) {
+        x = (i < fv) ? 0.0 : static_cast<double>(prices[i]);
+    }
+
+    double scan = sma_warp_scan_inclusive_f64(x);
+
+    __shared__ double warp_totals[32];
+    if (lane == 31) {
+        warp_totals[warp] = scan;
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        const int nwarps = (blockDim.x + 31) >> 5;
+        double w = (lane < nwarps) ? warp_totals[lane] : 0.0;
+        w = sma_warp_scan_inclusive_f64(w);
+        warp_totals[lane] = w;
+    }
+    __syncthreads();
+
+    if (warp > 0) {
+        scan += warp_totals[warp - 1];
+    }
+
+    if (tid < n_in_tile) {
+        prefix[i + 1] = scan;
+    }
+    if (tid == n_in_tile - 1) {
+        block_totals[blockIdx.x] = scan;
+    }
+}
+
+extern "C" __global__ void sma_prefix_stage2_block_offsets_f64(
+    const double* __restrict__ block_totals,
+    double* __restrict__ block_offsets,
+    int num_blocks
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    double run = 0.0;
+    for (int b = 0; b < num_blocks; ++b) {
+        block_offsets[b] = run;
+        run += block_totals[b];
+    }
+}
+
+extern "C" __global__ void sma_prefix_stage3_add_offsets_f64(
+    double* __restrict__ prefix,
+    const double* __restrict__ block_offsets,
+    int series_len
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= series_len) return;
+    prefix[i + 1] += block_offsets[blockIdx.x];
+}
+
 
 
 
@@ -97,7 +189,7 @@ extern "C" __global__ void sma_batch_from_prefix_f64(
     }
 
     const int warm = first_valid + period - 1;
-    const double inv_p = 1.0 / static_cast<double>(period);
+    const float inv_p = 1.0f / static_cast<float>(period);
 
     while (t < series_len) {
         if (t < warm) {
@@ -106,7 +198,7 @@ extern "C" __global__ void sma_batch_from_prefix_f64(
             const int t1 = t + 1;
             const int start = t1 - period;
             const double sum = prefix[t1] - prefix[start];
-            out[row_off + t] = static_cast<float>(sum * inv_p);
+            out[row_off + t] = static_cast<float>(sum) * inv_p;
         }
         t += stride;
     }
@@ -146,7 +238,7 @@ extern "C" __global__ void sma_batch_from_prefix_f64_tm(
     }
 
     const int warm = first_valid + period - 1;
-    const double inv_p = 1.0 / static_cast<double>(period);
+    const float inv_p = 1.0f / static_cast<float>(period);
 
     while (t < series_len) {
         float outv = SMA_NAN;
@@ -154,7 +246,7 @@ extern "C" __global__ void sma_batch_from_prefix_f64_tm(
             const int t1 = t + 1;
             const int start = t1 - period;
             const double sum = prefix[t1] - prefix[start];
-            outv = static_cast<float>(sum * inv_p);
+            outv = static_cast<float>(sum) * inv_p;
         }
         out_tm[(size_t)t * (size_t)n_combos + (size_t)combo] = outv;
         t += stride;

@@ -213,48 +213,133 @@ impl CudaSma {
         first_valid: usize,
         d_prefix: &mut DeviceBuffer<f64>,
     ) -> Result<(), CudaSmaError> {
-        let mut func: Function = self
+        let mut k1: Function = self
             .module
-            .get_function("sma_exclusive_prefix_f64")
+            .get_function("sma_prefix_stage1_scan_f64")
             .map_err(|_| CudaSmaError::MissingKernelSymbol {
-                name: "sma_exclusive_prefix_f64",
+                name: "sma_prefix_stage1_scan_f64",
+            })?;
+        let mut k2: Function = self
+            .module
+            .get_function("sma_prefix_stage2_block_offsets_f64")
+            .map_err(|_| CudaSmaError::MissingKernelSymbol {
+                name: "sma_prefix_stage2_block_offsets_f64",
+            })?;
+        let mut k3: Function = self
+            .module
+            .get_function("sma_prefix_stage3_add_offsets_f64")
+            .map_err(|_| CudaSmaError::MissingKernelSymbol {
+                name: "sma_prefix_stage3_add_offsets_f64",
             })?;
 
         if let Some(cfg) = Self::parse_cache_pref() {
-            let _ = func.set_cache_config(cfg);
+            let _ = k1.set_cache_config(cfg);
+            let _ = k2.set_cache_config(cfg);
+            let _ = k3.set_cache_config(cfg);
         }
 
-        let grid: GridSize = (1u32, 1u32, 1u32).into();
-        let block: BlockSize = (1u32, 1u32, 1u32).into();
+        let block_x: u32 = if let Ok(s) = env::var("SMA_PREFIX_SCAN_BLOCK_X") {
+            if s.eq_ignore_ascii_case("auto") {
+                let (_min_grid, suggested) =
+                    k1.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                suggested.max(32)
+            } else {
+                s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256)
+            }
+        } else {
+            match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
+                Some(s) if s.eq_ignore_ascii_case("auto") => {
+                    let (_min_grid, suggested) =
+                        k1.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                    suggested.max(32)
+                }
+                Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
+                None => 256,
+            }
+        };
+        let grid_x = ((series_len as u32) + block_x - 1) / block_x;
+        let grid: GridSize = (grid_x.max(1), 1, 1).into();
+        let block: BlockSize = (block_x, 1, 1).into();
 
         let dev = Device::get_device(self.device_id)?;
         let max_threads = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
-        if 1u32 > max_threads {
+        if block_x > max_threads {
             return Err(CudaSmaError::LaunchConfigTooLarge {
-                gx: 1,
+                gx: grid_x,
                 gy: 1,
                 gz: 1,
-                bx: 1,
+                bx: block_x,
                 by: 1,
                 bz: 1,
             });
         }
+        let max_grid_x = dev.get_attribute(DeviceAttribute::MaxGridDimX)? as u32;
+        if grid_x > max_grid_x {
+            return Err(CudaSmaError::LaunchConfigTooLarge {
+                gx: grid_x,
+                gy: 1,
+                gz: 1,
+                bx: block_x,
+                by: 1,
+                bz: 1,
+            });
+        }
+
+        let n_blocks = grid_x.max(1) as usize;
+        let d_blk_totals = if Self::use_async_transfers() {
+            unsafe { DeviceBuffer::<f64>::uninitialized_async(n_blocks, &self.stream) }?
+        } else {
+            unsafe { DeviceBuffer::<f64>::uninitialized(n_blocks) }?
+        };
+        let d_blk_offsets = if Self::use_async_transfers() {
+            unsafe { DeviceBuffer::<f64>::uninitialized_async(n_blocks, &self.stream) }?
+        } else {
+            unsafe { DeviceBuffer::<f64>::uninitialized(n_blocks) }?
+        };
 
         unsafe {
             let mut prices_ptr = d_prices.as_device_ptr().as_raw();
             let mut series_len_i = series_len as i32;
             let mut first_valid_i = first_valid as i32;
             let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+            let mut blk_tot_ptr = d_blk_totals.as_device_ptr().as_raw();
 
             let args: &mut [*mut c_void] = &mut [
                 &mut prices_ptr as *mut _ as *mut c_void,
                 &mut series_len_i as *mut _ as *mut c_void,
                 &mut first_valid_i as *mut _ as *mut c_void,
                 &mut prefix_ptr as *mut _ as *mut c_void,
+                &mut blk_tot_ptr as *mut _ as *mut c_void,
             ];
-
-            self.stream.launch(&func, grid, block, 0, args)?;
+            self.stream.launch(&k1, grid, block, 0, args)?;
         }
+
+        unsafe {
+            let mut blk_tot_ptr = d_blk_totals.as_device_ptr().as_raw();
+            let mut blk_off_ptr = d_blk_offsets.as_device_ptr().as_raw();
+            let mut n_blocks_i = n_blocks as i32;
+            let args: &mut [*mut c_void] = &mut [
+                &mut blk_tot_ptr as *mut _ as *mut c_void,
+                &mut blk_off_ptr as *mut _ as *mut c_void,
+                &mut n_blocks_i as *mut _ as *mut c_void,
+            ];
+            self.stream
+                .launch(&k2, GridSize::xyz(1, 1, 1), BlockSize::xyz(1, 1, 1), 0, args)?;
+        }
+
+        unsafe {
+            let mut prefix_ptr = d_prefix.as_device_ptr().as_raw();
+            let mut blk_off_ptr = d_blk_offsets.as_device_ptr().as_raw();
+            let mut series_len_i = series_len as i32;
+            let args: &mut [*mut c_void] = &mut [
+                &mut prefix_ptr as *mut _ as *mut c_void,
+                &mut blk_off_ptr as *mut _ as *mut c_void,
+                &mut series_len_i as *mut _ as *mut c_void,
+            ];
+            self.stream.launch(&k3, grid, block, 0, args)?;
+        }
+
+        self.stream.synchronize()?;
 
         Ok(())
     }
@@ -279,14 +364,24 @@ impl CudaSma {
             let _ = func.set_cache_config(cfg);
         }
 
-        let block_x: u32 = match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
-            Some(s) if s.eq_ignore_ascii_case("auto") => {
+        let block_x: u32 = if let Ok(s) = env::var("SMA_PREFIX_OUT_BLOCK_X") {
+            if s.eq_ignore_ascii_case("auto") {
                 let (_min_grid, suggested) =
                     func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested.max(32)
+            } else {
+                s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(512)
             }
-            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
-            None => 256,
+        } else {
+            match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
+                Some(s) if s.eq_ignore_ascii_case("auto") => {
+                    let (_min_grid, suggested) =
+                        func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                    suggested.max(32)
+                }
+                Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(512),
+                None => 512,
+            }
         };
 
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
@@ -372,14 +467,24 @@ impl CudaSma {
             let _ = func.set_cache_config(cfg);
         }
 
-        let block_x: u32 = match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
-            Some(s) if s.eq_ignore_ascii_case("auto") => {
+        let block_x: u32 = if let Ok(s) = env::var("SMA_PREFIX_OUT_BLOCK_X") {
+            if s.eq_ignore_ascii_case("auto") {
                 let (_min_grid, suggested) =
                     func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested.max(32)
+            } else {
+                s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(512)
             }
-            Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
-            None => 256,
+        } else {
+            match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
+                Some(s) if s.eq_ignore_ascii_case("auto") => {
+                    let (_min_grid, suggested) =
+                        func.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
+                    suggested.max(32)
+                }
+                Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(512),
+                None => 512,
+            }
         };
 
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
