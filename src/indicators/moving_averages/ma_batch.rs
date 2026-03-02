@@ -47,6 +47,20 @@ impl MaBatchOutput {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum MaBatchParamValue<'a> {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    EnumString(&'a str),
+}
+
+#[derive(Clone, Debug)]
+pub struct MaBatchParamKV<'a> {
+    pub key: &'a str,
+    pub value: MaBatchParamValue<'a>,
+}
+
 #[inline]
 fn to_batch_kernel(k: Kernel) -> Result<Kernel, MaBatchDispatchError> {
     let out = match k {
@@ -63,6 +77,47 @@ fn to_batch_kernel(k: Kernel) -> Result<Kernel, MaBatchDispatchError> {
 #[inline]
 fn map_periods<T>(combos: &[T], get_period: impl Fn(&T) -> usize) -> Vec<usize> {
     combos.iter().map(get_period).collect()
+}
+
+#[inline]
+fn expand_period_axis(
+    range: (usize, usize, usize),
+) -> Result<Vec<usize>, MaBatchDispatchError> {
+    let (start, end, step) = range;
+    let periods = if step == 0 || start == end {
+        vec![start]
+    } else if start < end {
+        let s = step.max(1);
+        (start..=end).step_by(s).collect()
+    } else {
+        let s = step.max(1);
+        let mut v = Vec::new();
+        let mut cur = start;
+        while cur >= end {
+            v.push(cur);
+            if cur == 0 {
+                break;
+            }
+            let next = cur.saturating_sub(s);
+            if next == cur {
+                break;
+            }
+            cur = next;
+            if cur < end {
+                break;
+            }
+        }
+        v
+    };
+    if periods.is_empty() {
+        return Err(MaBatchDispatchError::InvalidParam {
+            indicator: "period_range",
+            key: "step",
+            value: step as f64,
+            reason: "invalid period range",
+        });
+    }
+    Ok(periods)
 }
 
 #[inline]
@@ -91,6 +146,393 @@ pub fn ma_batch_with_params<'a>(
     params: &HashMap<String, f64>,
 ) -> Result<MaBatchOutput, Box<dyn Error>> {
     ma_batch_with_kernel_and_params(ma_type, data, period_range, Kernel::Auto, Some(params))
+}
+
+pub fn ma_batch_with_kernel_and_typed_params<'a>(
+    ma_type: &str,
+    data: MaData<'a>,
+    period_range: (usize, usize, usize),
+    kernel: Kernel,
+    params: &[MaBatchParamKV<'_>],
+) -> Result<MaBatchOutput, Box<dyn Error>> {
+    let mut numeric: HashMap<String, f64> = HashMap::with_capacity(params.len());
+    let mut text: HashMap<String, String> = HashMap::new();
+
+    for p in params {
+        match p.value {
+            MaBatchParamValue::Int(v) => {
+                numeric.insert(p.key.to_string(), v as f64);
+            }
+            MaBatchParamValue::Float(v) => {
+                if !v.is_finite() {
+                    return Err(MaBatchDispatchError::InvalidParam {
+                        indicator: "typed_params",
+                        key: "float",
+                        value: v,
+                        reason: "expected finite number",
+                    }
+                    .into());
+                }
+                numeric.insert(p.key.to_string(), v);
+            }
+            MaBatchParamValue::Bool(v) => {
+                numeric.insert(p.key.to_string(), if v { 1.0 } else { 0.0 });
+            }
+            MaBatchParamValue::EnumString(v) => {
+                text.insert(p.key.to_string(), v.to_string());
+            }
+        }
+    }
+
+    if ma_type.eq_ignore_ascii_case("dma") && text.contains_key("hull_ma_type") {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, _) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+
+        let get_u = |key: &'static str, default_v: usize| -> Result<usize, MaBatchDispatchError> {
+            let Some(v) = numeric.get(key).copied() else {
+                return Ok(default_v);
+            };
+            if v < 0.0 {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "dma",
+                    key,
+                    value: v,
+                    reason: "expected >= 0",
+                });
+            }
+            let r = v.round();
+            if (v - r).abs() > 1e-9 {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "dma",
+                    key,
+                    value: v,
+                    reason: "expected integer",
+                });
+            }
+            Ok(r as usize)
+        };
+
+        let ema_length = get_u("ema_length", 20)?;
+        let ema_gain_limit = get_u("ema_gain_limit", 50)?;
+        let hull_ma_type = text
+            .get("hull_ma_type")
+            .cloned()
+            .unwrap_or_else(|| "WMA".to_string());
+        let sweep = super::dma::DmaBatchRange {
+            hull_length: period_range,
+            ema_length: (ema_length, ema_length, 0),
+            ema_gain_limit: (ema_gain_limit, ema_gain_limit, 0),
+            hull_ma_type,
+        };
+        let out = super::dma::dma_batch_with_kernel(prices, &sweep, kernel)?;
+        return Ok(MaBatchOutput {
+            periods: map_periods(&out.combos, |p| p.hull_length.unwrap_or(7)),
+            values: out.values,
+            rows: out.rows,
+            cols: out.cols,
+        });
+    }
+
+    if ma_type.eq_ignore_ascii_case("vwap")
+        && (text.contains_key("anchor")
+            || text.contains_key("anchor_start")
+            || text.contains_key("anchor_end"))
+    {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, candles) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+        let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles { indicator: "vwap" })?;
+
+        let single_anchor = text.get("anchor").cloned();
+        let anchor_start = text
+            .get("anchor_start")
+            .cloned()
+            .or_else(|| single_anchor.clone())
+            .unwrap_or_else(|| "1d".to_string());
+        let anchor_end = text
+            .get("anchor_end")
+            .cloned()
+            .or_else(|| single_anchor.clone())
+            .unwrap_or_else(|| anchor_start.clone());
+        let anchor_step = numeric
+            .get("anchor_step")
+            .copied()
+            .map(|v| {
+                if v < 0.0 {
+                    return Err(MaBatchDispatchError::InvalidParam {
+                        indicator: "vwap",
+                        key: "anchor_step",
+                        value: v,
+                        reason: "expected >= 0",
+                    });
+                }
+                let r = v.round();
+                if (v - r).abs() > 1e-9 {
+                    return Err(MaBatchDispatchError::InvalidParam {
+                        indicator: "vwap",
+                        key: "anchor_step",
+                        value: v,
+                        reason: "expected integer",
+                    });
+                }
+                Ok(r as u32)
+            })
+            .transpose()?
+            .unwrap_or_else(|| if anchor_start == anchor_end { 0 } else { 1 });
+
+        let sweep = super::vwap::VwapBatchRange {
+            anchor: (anchor_start, anchor_end, anchor_step),
+        };
+        let out = super::vwap::vwap_batch_with_kernel(
+            &candles.timestamp,
+            &candles.volume,
+            prices,
+            &sweep,
+            kernel,
+        )?;
+        let periods = out
+            .combos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                p.anchor
+                    .as_deref()
+                    .and_then(|a| super::vwap::parse_anchor(a).ok().map(|(n, _)| n as usize))
+                    .unwrap_or(i + 1)
+            })
+            .collect();
+        return Ok(MaBatchOutput {
+            periods,
+            values: out.values,
+            rows: out.rows,
+            cols: out.cols,
+        });
+    }
+
+    if ma_type.eq_ignore_ascii_case("mama") {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, _) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+        let mut sweep = super::mama::MamaBatchRange::default();
+        if let Some(v) = numeric.get("fast_limit").copied() {
+            sweep.fast_limit = (v, v, 0.0);
+        } else {
+            if let Some(v) = numeric.get("fast_limit_start").copied() {
+                sweep.fast_limit.0 = v;
+            }
+            if let Some(v) = numeric.get("fast_limit_end").copied() {
+                sweep.fast_limit.1 = v;
+            }
+            if let Some(v) = numeric.get("fast_limit_step").copied() {
+                sweep.fast_limit.2 = v;
+            }
+        }
+        if let Some(v) = numeric.get("slow_limit").copied() {
+            sweep.slow_limit = (v, v, 0.0);
+        } else {
+            if let Some(v) = numeric.get("slow_limit_start").copied() {
+                sweep.slow_limit.0 = v;
+            }
+            if let Some(v) = numeric.get("slow_limit_end").copied() {
+                sweep.slow_limit.1 = v;
+            }
+            if let Some(v) = numeric.get("slow_limit_step").copied() {
+                sweep.slow_limit.2 = v;
+            }
+        }
+        let out = super::mama::mama_batch_with_kernel(prices, &sweep, kernel)?;
+        let output = text
+            .get("output")
+            .map(String::as_str)
+            .unwrap_or("mama")
+            .to_ascii_lowercase();
+        let values = match output.as_str() {
+            "mama" => out.mama_values,
+            "fama" => out.fama_values,
+            _ => {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "mama",
+                    key: "output",
+                    value: f64::NAN,
+                    reason: "expected 'mama' or 'fama'",
+                }
+                .into())
+            }
+        };
+        return Ok(MaBatchOutput {
+            periods: (1..=out.rows).collect(),
+            values,
+            rows: out.rows,
+            cols: out.cols,
+        });
+    }
+
+    if ma_type.eq_ignore_ascii_case("ehlers_pma") {
+        let kernel = to_batch_kernel(kernel)?;
+        let periods = expand_period_axis(period_range)?;
+        let rows = periods.len();
+        let (prices, _) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+        let input = super::ehlers_pma::EhlersPmaInput::from_slice(
+            prices,
+            super::ehlers_pma::EhlersPmaParams::default(),
+        );
+        let out = super::ehlers_pma::ehlers_pma_with_kernel(&input, kernel)?;
+        let output = text
+            .get("output")
+            .map(String::as_str)
+            .unwrap_or("predict")
+            .to_ascii_lowercase();
+        let series = match output.as_str() {
+            "predict" => &out.predict,
+            "trigger" => &out.trigger,
+            _ => {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "ehlers_pma",
+                    key: "output",
+                    value: f64::NAN,
+                    reason: "expected 'predict' or 'trigger'",
+                }
+                .into())
+            }
+        };
+        let cols = series.len();
+        let mut values = Vec::with_capacity(rows.saturating_mul(cols));
+        for _ in 0..rows {
+            values.extend_from_slice(series);
+        }
+        return Ok(MaBatchOutput {
+            periods,
+            values,
+            rows,
+            cols,
+        });
+    }
+
+    if ma_type.eq_ignore_ascii_case("buff_averages") {
+        let kernel = to_batch_kernel(kernel)?;
+        let (prices, candles) = match data {
+            MaData::Slice(s) => (s, None),
+            MaData::Candles { candles, source } => (source_type(candles, source), Some(candles)),
+        };
+        let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles {
+            indicator: "buff_averages",
+        })?;
+
+        let get_u = |key: &'static str| -> Result<Option<usize>, MaBatchDispatchError> {
+            let Some(v) = numeric.get(key).copied() else {
+                return Ok(None);
+            };
+            if v < 0.0 {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "buff_averages",
+                    key,
+                    value: v,
+                    reason: "expected >= 0",
+                });
+            }
+            let r = v.round();
+            if (v - r).abs() > 1e-9 {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "buff_averages",
+                    key,
+                    value: v,
+                    reason: "expected integer",
+                });
+            }
+            Ok(Some(r as usize))
+        };
+
+        let mut sweep = super::buff_averages::BuffAveragesBatchRange::default();
+        sweep.slow_period = period_range;
+
+        if let Some(v) = get_u("fast_period")? {
+            sweep.fast_period = (v, v, 0);
+        }
+        if let Some(v) = get_u("slow_period")? {
+            sweep.slow_period = (v, v, 0);
+        }
+        if let Some(v) = get_u("fast_period_start")? {
+            sweep.fast_period.0 = v;
+        }
+        if let Some(v) = get_u("fast_period_end")? {
+            sweep.fast_period.1 = v;
+        }
+        if let Some(v) = get_u("fast_period_step")? {
+            sweep.fast_period.2 = v;
+        }
+        if let Some(v) = get_u("slow_period_start")? {
+            sweep.slow_period.0 = v;
+        }
+        if let Some(v) = get_u("slow_period_end")? {
+            sweep.slow_period.1 = v;
+        }
+        if let Some(v) = get_u("slow_period_step")? {
+            sweep.slow_period.2 = v;
+        }
+
+        let out = super::buff_averages::buff_averages_batch_with_kernel(
+            prices,
+            &candles.volume,
+            &sweep,
+            kernel,
+        )?;
+
+        let output = text
+            .get("output")
+            .map(String::as_str)
+            .unwrap_or("fast")
+            .to_ascii_lowercase();
+        let values = match output.as_str() {
+            "fast" | "fast_buff" => out.fast,
+            "slow" | "slow_buff" => out.slow,
+            _ => {
+                return Err(MaBatchDispatchError::InvalidParam {
+                    indicator: "buff_averages",
+                    key: "output",
+                    value: f64::NAN,
+                    reason: "expected 'fast' or 'slow'",
+                }
+                .into())
+            }
+        };
+
+        let all_fast_same = out
+            .combos
+            .first()
+            .map(|c| out.combos.iter().all(|x| x.0 == c.0))
+            .unwrap_or(true);
+        let all_slow_same = out
+            .combos
+            .first()
+            .map(|c| out.combos.iter().all(|x| x.1 == c.1))
+            .unwrap_or(true);
+        let periods = if all_fast_same {
+            out.combos.iter().map(|c| c.1).collect()
+        } else if all_slow_same {
+            out.combos.iter().map(|c| c.0).collect()
+        } else {
+            (1..=out.rows).collect()
+        };
+
+        return Ok(MaBatchOutput {
+            periods,
+            values,
+            rows: out.rows,
+            cols: out.cols,
+        });
+    }
+
+    ma_batch_with_kernel_and_params(ma_type, data, period_range, kernel, Some(&numeric))
 }
 
 pub fn ma_batch_with_kernel_and_params<'a>(
@@ -723,19 +1165,231 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 cols: out.cols,
             })
         }
-        "tradjema" => Err(MaBatchDispatchError::NotPeriodBased {
-            indicator: "tradjema",
+        "tradjema" => {
+            let candles =
+                candles.ok_or(MaBatchDispatchError::RequiresCandles { indicator: "tradjema" })?;
+            let mut sweep = super::tradjema::TradjemaBatchRange::default();
+            sweep.length = period_range;
+            if let Some(v) = get_f64(params, "tradjema", "mult")? {
+                sweep.mult = (v, v, 0.0);
+            }
+            let out = super::tradjema::tradjema_batch_with_kernel(
+                &candles.high,
+                &candles.low,
+                &candles.close,
+                &sweep,
+                kernel,
+            )?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.length.unwrap_or(40)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
         }
-        .into()),
-        "uma" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "uma" }.into()),
-        "volume_adjusted_ma" => Err(MaBatchDispatchError::NotPeriodBased {
-            indicator: "volume_adjusted_ma",
+        "uma" => {
+            let mut sweep = super::uma::UmaBatchRange::default();
+            sweep.max_length = period_range;
+            if let Some(v) = get_f64(params, "uma", "accelerator")? {
+                sweep.accelerator = (v, v, 0.0);
+            }
+            if let Some(v) = get_usize(params, "uma", "min_length")? {
+                sweep.min_length = (v, v, 0);
+            }
+            if let Some(v) = get_usize(params, "uma", "max_length")? {
+                sweep.max_length = (v, v, 0);
+            }
+            if let Some(v) = get_usize(params, "uma", "smooth_length")? {
+                sweep.smooth_length = (v, v, 0);
+            }
+            let volumes = candles.map(|c| c.volume.as_slice());
+            let out = super::uma::uma_batch_with_kernel(prices, volumes, &sweep, kernel)?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.max_length.unwrap_or(50)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
         }
-        .into()),
-        "hwma" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "hwma" }.into()),
-        "mama" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "mama" }.into()),
-        "mwdx" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "mwdx" }.into()),
-        "vwap" => Err(MaBatchDispatchError::NotPeriodBased { indicator: "vwap" }.into()),
+        "volume_adjusted_ma" => {
+            let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles {
+                indicator: "volume_adjusted_ma",
+            })?;
+            let mut sweep = super::volume_adjusted_ma::VolumeAdjustedMaBatchRange::default();
+            sweep.length = period_range;
+            if let Some(v) = get_f64(params, "volume_adjusted_ma", "vi_factor")? {
+                sweep.vi_factor = (v, v, 0.0);
+            }
+            if let Some(v) = get_usize(params, "volume_adjusted_ma", "sample_period")? {
+                sweep.sample_period = (v, v, 0);
+            }
+            if let Some(v) = get_usize(params, "volume_adjusted_ma", "strict")? {
+                sweep.strict = Some(match v {
+                    0 => false,
+                    1 => true,
+                    other => {
+                        return Err(MaBatchDispatchError::InvalidParam {
+                            indicator: "volume_adjusted_ma",
+                            key: "strict",
+                            value: other as f64,
+                            reason: "expected 0 or 1",
+                        }
+                        .into());
+                    }
+                });
+            }
+            let out = super::volume_adjusted_ma::VolumeAdjustedMa_batch_with_kernel(
+                prices,
+                &candles.volume,
+                &sweep,
+                kernel,
+            )?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| p.length.unwrap_or(13)),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "hwma" => {
+            let mut sweep = super::hwma::HwmaBatchRange::default();
+            if let Some(v) = get_f64(params, "hwma", "na")? {
+                sweep.na = (v, v, 0.0);
+            }
+            if let Some(v) = get_f64(params, "hwma", "nb")? {
+                sweep.nb = (v, v, 0.0);
+            }
+            if let Some(v) = get_f64(params, "hwma", "nc")? {
+                sweep.nc = (v, v, 0.0);
+            }
+            let out = super::hwma::hwma_batch_with_kernel(prices, &sweep, kernel)?;
+            Ok(MaBatchOutput {
+                periods: (1..=out.rows).collect(),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "mama" => {
+            let mut sweep = super::mama::MamaBatchRange::default();
+            if let Some(v) = get_f64(params, "mama", "fast_limit")? {
+                sweep.fast_limit = (v, v, 0.0);
+            } else {
+                if let Some(v) = get_f64(params, "mama", "fast_limit_start")? {
+                    sweep.fast_limit.0 = v;
+                }
+                if let Some(v) = get_f64(params, "mama", "fast_limit_end")? {
+                    sweep.fast_limit.1 = v;
+                }
+                if let Some(v) = get_f64(params, "mama", "fast_limit_step")? {
+                    sweep.fast_limit.2 = v;
+                }
+            }
+            if let Some(v) = get_f64(params, "mama", "slow_limit")? {
+                sweep.slow_limit = (v, v, 0.0);
+            } else {
+                if let Some(v) = get_f64(params, "mama", "slow_limit_start")? {
+                    sweep.slow_limit.0 = v;
+                }
+                if let Some(v) = get_f64(params, "mama", "slow_limit_end")? {
+                    sweep.slow_limit.1 = v;
+                }
+                if let Some(v) = get_f64(params, "mama", "slow_limit_step")? {
+                    sweep.slow_limit.2 = v;
+                }
+            }
+            let out = super::mama::mama_batch_with_kernel(prices, &sweep, kernel)?;
+            Ok(MaBatchOutput {
+                periods: (1..=out.rows).collect(),
+                values: out.mama_values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "ehlers_pma" => {
+            let periods = expand_period_axis(period_range)?;
+            let rows = periods.len();
+            let input = super::ehlers_pma::EhlersPmaInput::from_slice(
+                prices,
+                super::ehlers_pma::EhlersPmaParams::default(),
+            );
+            let out = super::ehlers_pma::ehlers_pma_with_kernel(&input, kernel)?;
+            let cols = out.predict.len();
+            let mut values = Vec::with_capacity(rows.saturating_mul(cols));
+            for _ in 0..rows {
+                values.extend_from_slice(&out.predict);
+            }
+            Ok(MaBatchOutput {
+                periods,
+                values,
+                rows,
+                cols,
+            })
+        }
+        "mwdx" => {
+            let mut sweep = super::mwdx::MwdxBatchRange::default();
+            if let Some(v) = get_f64(params, "mwdx", "factor")? {
+                sweep.factor = (v, v, 0.0);
+            } else {
+                let fac_start = 2.0 / (period_range.0 as f64 + 1.0);
+                let fac_end = 2.0 / (period_range.1 as f64 + 1.0);
+                let next_period = if period_range.2 == 0 || period_range.0 == period_range.1 {
+                    period_range.0
+                } else if period_range.0 < period_range.1 {
+                    period_range.0.saturating_add(period_range.2)
+                } else {
+                    period_range.0.saturating_sub(period_range.2)
+                };
+                let fac_next = 2.0 / (next_period as f64 + 1.0);
+                let fac_step = (fac_next - fac_start).abs();
+                sweep.factor = (fac_start, fac_end, fac_step);
+            }
+            let out = super::mwdx::mwdx_batch_with_kernel(prices, &sweep, kernel)?;
+            Ok(MaBatchOutput {
+                periods: map_periods(&out.combos, |p| {
+                    let f = p.factor.unwrap_or(0.2);
+                    if f > 0.0 {
+                        ((2.0 / f) - 1.0).round().max(1.0) as usize
+                    } else {
+                        1
+                    }
+                }),
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
+        "vwap" => {
+            let candles =
+                candles.ok_or(MaBatchDispatchError::RequiresCandles { indicator: "vwap" })?;
+            let sweep = super::vwap::VwapBatchRange {
+                anchor: ("1d".to_string(), "1d".to_string(), 0),
+            };
+            let out = super::vwap::vwap_batch_with_kernel(
+                &candles.timestamp,
+                &candles.volume,
+                prices,
+                &sweep,
+                kernel,
+            )?;
+            let periods = out
+                .combos
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    p.anchor
+                        .as_deref()
+                        .and_then(|a| super::vwap::parse_anchor(a).ok().map(|(n, _)| n as usize))
+                        .unwrap_or(i + 1)
+                })
+                .collect();
+            Ok(MaBatchOutput {
+                periods,
+                values: out.values,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
         "dma" => {
             let ema_length = get_usize(params, "dma", "ema_length")?.unwrap_or(20);
             let ema_gain_limit = get_usize(params, "dma", "ema_gain_limit")?.unwrap_or(50);
@@ -836,9 +1490,1212 @@ pub fn ma_batch_with_kernel_and_params<'a>(
                 cols: out.cols,
             })
         }
+        "buff_averages" => {
+            let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles {
+                indicator: "buff_averages",
+            })?;
+            let mut sweep = super::buff_averages::BuffAveragesBatchRange::default();
+            sweep.slow_period = period_range;
+
+            if let Some(v) = get_usize(params, "buff_averages", "fast_period")? {
+                sweep.fast_period = (v, v, 0);
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "slow_period")? {
+                sweep.slow_period = (v, v, 0);
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "fast_period_start")? {
+                sweep.fast_period.0 = v;
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "fast_period_end")? {
+                sweep.fast_period.1 = v;
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "fast_period_step")? {
+                sweep.fast_period.2 = v;
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "slow_period_start")? {
+                sweep.slow_period.0 = v;
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "slow_period_end")? {
+                sweep.slow_period.1 = v;
+            }
+            if let Some(v) = get_usize(params, "buff_averages", "slow_period_step")? {
+                sweep.slow_period.2 = v;
+            }
+
+            let out = super::buff_averages::buff_averages_batch_with_kernel(
+                prices,
+                &candles.volume,
+                &sweep,
+                kernel,
+            )?;
+
+            let all_fast_same = out
+                .combos
+                .first()
+                .map(|c| out.combos.iter().all(|x| x.0 == c.0))
+                .unwrap_or(true);
+            let all_slow_same = out
+                .combos
+                .first()
+                .map(|c| out.combos.iter().all(|x| x.1 == c.1))
+                .unwrap_or(true);
+            let periods = if all_fast_same {
+                out.combos.iter().map(|c| c.1).collect()
+            } else if all_slow_same {
+                out.combos.iter().map(|c| c.0).collect()
+            } else {
+                (1..=out.rows).collect()
+            };
+
+            Ok(MaBatchOutput {
+                periods,
+                values: out.fast,
+                rows: out.rows,
+                cols: out.cols,
+            })
+        }
         other => Err(MaBatchDispatchError::UnknownType {
             ma_type: other.to_string(),
         }
         .into()),
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indicators::moving_averages::ma::ma_with_kernel;
+    use crate::utilities::enums::Kernel;
+    use crate::utilities::data_loader::Candles;
+
+    fn sample_prices(len: usize) -> Vec<f64> {
+        (0..len)
+            .map(|i| ((i as f64) * 0.1).sin() + (i as f64) * 0.001 + 100.0)
+            .collect()
+    }
+
+    fn sample_candles(len: usize) -> Candles {
+        let timestamp: Vec<i64> = (0..len)
+            .map(|i| 1_700_000_000_000_i64 + (i as i64) * 60_000)
+            .collect();
+        let close = sample_prices(len);
+        let open: Vec<f64> = close.iter().map(|v| v - 0.1).collect();
+        let high: Vec<f64> = close
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v + 0.35 + ((i as f64) * 0.01).sin().abs())
+            .collect();
+        let low: Vec<f64> = close
+            .iter()
+            .enumerate()
+            .map(|(i, v)| v - 0.35 - ((i as f64) * 0.01).sin().abs())
+            .collect();
+        let volume: Vec<f64> = (0..len)
+            .map(|i| 1000.0 + ((i % 31) as f64) * 7.0 + (i as f64) * 0.1)
+            .collect();
+        Candles::new(timestamp, open, high, low, close, volume)
+    }
+
+    fn assert_series_eq(a: &[f64], b: &[f64], tol: f64) {
+        assert_eq!(a.len(), b.len());
+        for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+            if av.is_nan() && bv.is_nan() {
+                continue;
+            }
+            let d = (av - bv).abs();
+            assert!(
+                d <= tol,
+                "series mismatch at index {i}: left={av}, right={bv}, abs_diff={d}"
+            );
+        }
+    }
+
+    fn assert_series_eq_ctx(a: &[f64], b: &[f64], tol: f64, ctx: &str) {
+        assert_eq!(a.len(), b.len(), "length mismatch for {ctx}");
+        for (i, (&av, &bv)) in a.iter().zip(b.iter()).enumerate() {
+            if av.is_nan() && bv.is_nan() {
+                continue;
+            }
+            let d = (av - bv).abs();
+            assert!(
+                d <= tol,
+                "series mismatch for {ctx} at index {i}: left={av}, right={bv}, abs_diff={d}"
+            );
+        }
+    }
+
+    #[test]
+    fn period_based_batch_matches_single_direct_for_many_ids() {
+        let prices = sample_prices(320);
+        let candles = sample_candles(320);
+        let period_range = (18, 22, 2);
+        let expected_periods = vec![18, 20, 22];
+
+        let slice_cases = [
+            "sma",
+            "ema",
+            "dema",
+            "tema",
+            "smma",
+            "zlema",
+            "wma",
+            "alma",
+            "cwma",
+            "cora_wave",
+            "edcf",
+            "fwma",
+            "gaussian",
+            "highpass",
+            "highpass_2_pole",
+            "hma",
+            "jma",
+            "jsa",
+            "linreg",
+            "kama",
+            "ehlers_kama",
+            "ehlers_ecema",
+            "ehma",
+            "nama",
+            "nma",
+            "pwma",
+            "reflex",
+            "sinwma",
+            "sqwma",
+            "srwma",
+            "swma",
+            "supersmoother",
+            "supersmoother_3_pole",
+            "tilson",
+            "trendflex",
+            "trima",
+            "wilders",
+            "epma",
+            "sama",
+        ];
+
+        for ma_type in slice_cases {
+            let batch = ma_batch_with_kernel(
+                ma_type,
+                MaData::Slice(&prices),
+                period_range,
+                Kernel::Auto,
+            )
+            .unwrap();
+
+            assert_eq!(batch.periods, expected_periods);
+            assert_eq!(batch.rows, expected_periods.len());
+            assert_eq!(batch.cols, prices.len());
+
+            for (row, period) in expected_periods.iter().copied().enumerate() {
+                let direct =
+                    ma_with_kernel(ma_type, MaData::Slice(&prices), period, Kernel::Auto).unwrap();
+                let start = row * batch.cols;
+                let end = start + batch.cols;
+                let ctx = format!("{ma_type} slice period={period}");
+                assert_series_eq_ctx(&batch.values[start..end], &direct, 1e-10, &ctx);
+            }
+        }
+
+        let candle_cases = ["vpwma", "vwma", "frama"];
+        for ma_type in candle_cases {
+            let batch = ma_batch_with_kernel(
+                ma_type,
+                MaData::Candles {
+                    candles: &candles,
+                    source: "close",
+                },
+                period_range,
+                Kernel::Auto,
+            )
+            .unwrap();
+
+            assert_eq!(batch.periods, expected_periods);
+            assert_eq!(batch.rows, expected_periods.len());
+            assert_eq!(batch.cols, candles.close.len());
+
+            for (row, period) in expected_periods.iter().copied().enumerate() {
+                let direct = ma_with_kernel(
+                    ma_type,
+                    MaData::Candles {
+                        candles: &candles,
+                        source: "close",
+                    },
+                    period,
+                    Kernel::Auto,
+                )
+                .unwrap();
+                let start = row * batch.cols;
+                let end = start + batch.cols;
+                let ctx = format!("{ma_type} candles period={period}");
+                assert_series_eq_ctx(&batch.values[start..end], &direct, 1e-10, &ctx);
+            }
+        }
+    }
+
+    #[test]
+    fn mama_typed_output_selection_matches_direct() {
+        let prices = sample_prices(256);
+        let data = MaData::Slice(&prices);
+        let params = [
+            MaBatchParamKV {
+                key: "fast_limit",
+                value: MaBatchParamValue::Float(0.35),
+            },
+            MaBatchParamKV {
+                key: "slow_limit",
+                value: MaBatchParamValue::Float(0.06),
+            },
+            MaBatchParamKV {
+                key: "output",
+                value: MaBatchParamValue::EnumString("fama"),
+            },
+        ];
+
+        let got = ma_batch_with_kernel_and_typed_params(
+            "mama",
+            data,
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+
+        let direct = crate::indicators::moving_averages::mama::mama_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::mama::MamaBatchRange {
+                fast_limit: (0.35, 0.35, 0.0),
+                slow_limit: (0.06, 0.06, 0.0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_eq!(got.periods, (1..=direct.rows).collect::<Vec<_>>());
+        assert_series_eq(&got.values, &direct.fama_values, 1e-12);
+    }
+
+    #[test]
+    fn ehlers_pma_typed_output_selection_matches_direct() {
+        let prices = sample_prices(300);
+        let data = MaData::Slice(&prices);
+        let params = [MaBatchParamKV {
+            key: "output",
+            value: MaBatchParamValue::EnumString("trigger"),
+        }];
+
+        let got = ma_batch_with_kernel_and_typed_params(
+            "ehlers_pma",
+            data,
+            (8, 10, 1),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+
+        let input = crate::indicators::moving_averages::ehlers_pma::EhlersPmaInput::from_slice(
+            &prices,
+            crate::indicators::moving_averages::ehlers_pma::EhlersPmaParams::default(),
+        );
+        let direct = crate::indicators::moving_averages::ehlers_pma::ehlers_pma_with_kernel(
+            &input,
+            Kernel::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(got.rows, 3);
+        assert_eq!(got.cols, prices.len());
+        assert_eq!(got.periods, vec![8, 9, 10]);
+        for row in 0..got.rows {
+            let start = row * got.cols;
+            let end = start + got.cols;
+            assert_series_eq(&got.values[start..end], &direct.trigger, 1e-12);
+        }
+    }
+
+    #[test]
+    fn invalid_output_selection_returns_error() {
+        let prices = sample_prices(256);
+        let data = MaData::Slice(&prices);
+        let params = [MaBatchParamKV {
+            key: "output",
+            value: MaBatchParamValue::EnumString("bad_line"),
+        }];
+
+        let err =
+            ma_batch_with_kernel_and_typed_params("mama", data, (10, 10, 0), Kernel::Auto, &params)
+                .unwrap_err()
+                .to_string();
+
+        assert!(err.contains("expected 'mama' or 'fama'"));
+    }
+
+    #[test]
+    fn mama_numeric_path_defaults_to_primary_output() {
+        let prices = sample_prices(256);
+        let mut params = HashMap::new();
+        params.insert("fast_limit".to_string(), 0.4);
+        params.insert("slow_limit".to_string(), 0.07);
+
+        let got = ma_batch_with_kernel_and_params(
+            "mama",
+            MaData::Slice(&prices),
+            (12, 12, 0),
+            Kernel::Auto,
+            Some(&params),
+        )
+        .unwrap();
+
+        let direct = crate::indicators::moving_averages::mama::mama_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::mama::MamaBatchRange {
+                fast_limit: (0.4, 0.4, 0.0),
+                slow_limit: (0.07, 0.07, 0.0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.mama_values, 1e-12);
+    }
+
+    #[test]
+    fn ehlers_pma_numeric_path_defaults_and_descending_periods() {
+        let prices = sample_prices(300);
+        let got = ma_batch_with_kernel_and_params(
+            "ehlers_pma",
+            MaData::Slice(&prices),
+            (10, 8, 1),
+            Kernel::Auto,
+            None,
+        )
+        .unwrap();
+
+        let input = crate::indicators::moving_averages::ehlers_pma::EhlersPmaInput::from_slice(
+            &prices,
+            crate::indicators::moving_averages::ehlers_pma::EhlersPmaParams::default(),
+        );
+        let direct = crate::indicators::moving_averages::ehlers_pma::ehlers_pma_with_kernel(
+            &input,
+            Kernel::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(got.periods, vec![10, 9, 8]);
+        assert_eq!(got.rows, 3);
+        assert_eq!(got.cols, prices.len());
+        for row in 0..got.rows {
+            let start = row * got.cols;
+            let end = start + got.cols;
+            assert_series_eq(&got.values[start..end], &direct.predict, 1e-12);
+        }
+    }
+
+    #[test]
+    fn hwma_typed_params_match_direct() {
+        let prices = sample_prices(256);
+        let params = [
+            MaBatchParamKV {
+                key: "na",
+                value: MaBatchParamValue::Float(0.23),
+            },
+            MaBatchParamKV {
+                key: "nb",
+                value: MaBatchParamValue::Float(0.11),
+            },
+            MaBatchParamKV {
+                key: "nc",
+                value: MaBatchParamValue::Float(0.17),
+            },
+        ];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "hwma",
+            MaData::Slice(&prices),
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::hwma::hwma_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::hwma::HwmaBatchRange {
+                na: (0.23, 0.23, 0.0),
+                nb: (0.11, 0.11, 0.0),
+                nc: (0.17, 0.17, 0.0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn mwdx_typed_factor_matches_direct() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "factor",
+            value: MaBatchParamValue::Float(2.0 / 11.0),
+        }];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "mwdx",
+            MaData::Slice(&prices),
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::mwdx::mwdx_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::mwdx::MwdxBatchRange {
+                factor: (2.0 / 11.0, 2.0 / 11.0, 0.0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn uma_typed_params_match_direct() {
+        let prices = sample_prices(256);
+        let params = [
+            MaBatchParamKV {
+                key: "accelerator",
+                value: MaBatchParamValue::Float(1.0),
+            },
+            MaBatchParamKV {
+                key: "min_length",
+                value: MaBatchParamValue::Int(5),
+            },
+            MaBatchParamKV {
+                key: "max_length",
+                value: MaBatchParamValue::Int(35),
+            },
+            MaBatchParamKV {
+                key: "smooth_length",
+                value: MaBatchParamValue::Int(4),
+            },
+        ];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "uma",
+            MaData::Slice(&prices),
+            (35, 35, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::uma::uma_batch_with_kernel(
+            &prices,
+            None,
+            &crate::indicators::moving_averages::uma::UmaBatchRange {
+                accelerator: (1.0, 1.0, 0.0),
+                min_length: (5, 5, 0),
+                max_length: (35, 35, 0),
+                smooth_length: (4, 4, 0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn tradjema_typed_params_match_direct() {
+        let candles = sample_candles(300);
+        let params = [MaBatchParamKV {
+            key: "mult",
+            value: MaBatchParamValue::Float(2.3),
+        }];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "tradjema",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (40, 40, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::tradjema::tradjema_batch_with_kernel(
+            &candles.high,
+            &candles.low,
+            &candles.close,
+            &crate::indicators::moving_averages::tradjema::TradjemaBatchRange {
+                length: (40, 40, 0),
+                mult: (2.3, 2.3, 0.0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn volume_adjusted_ma_typed_params_match_direct() {
+        let candles = sample_candles(300);
+        let params = [
+            MaBatchParamKV {
+                key: "vi_factor",
+                value: MaBatchParamValue::Float(2.0),
+            },
+            MaBatchParamKV {
+                key: "sample_period",
+                value: MaBatchParamValue::Int(30),
+            },
+            MaBatchParamKV {
+                key: "strict",
+                value: MaBatchParamValue::Bool(true),
+            },
+        ];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "volume_adjusted_ma",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 20, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::volume_adjusted_ma::VolumeAdjustedMa_batch_with_kernel(
+                &candles.close,
+                &candles.volume,
+                &crate::indicators::moving_averages::volume_adjusted_ma::VolumeAdjustedMaBatchRange {
+                    length: (20, 20, 0),
+                    vi_factor: (2.0, 2.0, 0.0),
+                    sample_period: (30, 30, 0),
+                    strict: Some(true),
+                },
+                Kernel::Auto,
+            )
+            .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn vwap_typed_anchor_matches_direct() {
+        let candles = sample_candles(300);
+        let params = [MaBatchParamKV {
+            key: "anchor",
+            value: MaBatchParamValue::EnumString("1d"),
+        }];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "vwap",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::vwap::vwap_batch_with_kernel(
+            &candles.timestamp,
+            &candles.volume,
+            &candles.close,
+            &crate::indicators::moving_averages::vwap::VwapBatchRange {
+                anchor: ("1d".to_string(), "1d".to_string(), 0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn dma_typed_hull_ma_type_matches_direct() {
+        let prices = sample_prices(256);
+        let params = [
+            MaBatchParamKV {
+                key: "ema_length",
+                value: MaBatchParamValue::Int(20),
+            },
+            MaBatchParamKV {
+                key: "ema_gain_limit",
+                value: MaBatchParamValue::Int(50),
+            },
+            MaBatchParamKV {
+                key: "hull_ma_type",
+                value: MaBatchParamValue::EnumString("EMA"),
+            },
+        ];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "dma",
+            MaData::Slice(&prices),
+            (14, 14, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::dma::dma_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::dma::DmaBatchRange {
+                hull_length: (14, 14, 0),
+                ema_length: (20, 20, 0),
+                ema_gain_limit: (50, 50, 0),
+                hull_ma_type: "EMA".to_string(),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn ehlers_itrend_typed_params_match_direct() {
+        let prices = sample_prices(320);
+        let params = [MaBatchParamKV {
+            key: "warmup_bars",
+            value: MaBatchParamValue::Int(30),
+        }];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "ehlers_itrend",
+            MaData::Slice(&prices),
+            (48, 48, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::ehlers_itrend::ehlers_itrend_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
+                warmup_bars: (30, 30, 0),
+                max_dc_period: (48, 48, 0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn vama_typed_params_match_direct() {
+        let prices = sample_prices(320);
+        let params = [MaBatchParamKV {
+            key: "vol_period",
+            value: MaBatchParamValue::Int(51),
+        }];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "vama",
+            MaData::Slice(&prices),
+            (18, 22, 2),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::volatility_adjusted_ma::vama_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
+                base_period: (18, 22, 2),
+                vol_period: (51, 51, 0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn maaq_typed_params_match_direct() {
+        let prices = sample_prices(320);
+        let params = [
+            MaBatchParamKV {
+                key: "fast_period",
+                value: MaBatchParamValue::Int(2),
+            },
+            MaBatchParamKV {
+                key: "slow_period",
+                value: MaBatchParamValue::Int(30),
+            },
+        ];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "maaq",
+            MaData::Slice(&prices),
+            (18, 22, 2),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::maaq::maaq_batch_with_kernel(
+            &prices,
+            &crate::indicators::moving_averages::maaq::MaaqBatchRange {
+                period: (18, 22, 2),
+                fast_period: (2, 2, 0),
+                slow_period: (30, 30, 0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.values, 1e-12);
+    }
+
+    #[test]
+    fn tradjema_requires_candles_error() {
+        let prices = sample_prices(256);
+        let err = ma_batch_with_kernel_and_typed_params(
+            "tradjema",
+            MaData::Slice(&prices),
+            (40, 40, 0),
+            Kernel::Auto,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires candles"));
+    }
+
+    #[test]
+    fn vwap_requires_candles_error() {
+        let prices = sample_prices(256);
+        let err = ma_batch_with_kernel_and_typed_params(
+            "vwap",
+            MaData::Slice(&prices),
+            (10, 10, 0),
+            Kernel::Auto,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires candles"));
+    }
+
+    #[test]
+    fn volume_adjusted_ma_requires_candles_error() {
+        let prices = sample_prices(256);
+        let err = ma_batch_with_kernel_and_typed_params(
+            "volume_adjusted_ma",
+            MaData::Slice(&prices),
+            (20, 20, 0),
+            Kernel::Auto,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires candles"));
+    }
+
+    #[test]
+    fn volume_adjusted_ma_invalid_strict_numeric_error() {
+        let candles = sample_candles(300);
+        let mut params = HashMap::new();
+        params.insert("strict".to_string(), 2.0);
+        let err = ma_batch_with_kernel_and_params(
+            "volume_adjusted_ma",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 20, 0),
+            Kernel::Auto,
+            Some(&params),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected 0 or 1"));
+    }
+
+    #[test]
+    fn vwap_invalid_anchor_step_error() {
+        let candles = sample_candles(300);
+        let params = [
+            MaBatchParamKV {
+                key: "anchor",
+                value: MaBatchParamValue::EnumString("1d"),
+            },
+            MaBatchParamKV {
+                key: "anchor_step",
+                value: MaBatchParamValue::Float(-1.0),
+            },
+        ];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "vwap",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected >= 0"));
+    }
+
+    #[test]
+    fn ehlers_pma_invalid_output_selection_returns_error() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "output",
+            value: MaBatchParamValue::EnumString("bad_line"),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "ehlers_pma",
+            MaData::Slice(&prices),
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected 'predict' or 'trigger'"));
+    }
+
+    #[test]
+    fn buff_averages_typed_output_selection_matches_direct() {
+        let candles = sample_candles(300);
+        let params = [
+            MaBatchParamKV {
+                key: "fast_period",
+                value: MaBatchParamValue::Int(5),
+            },
+            MaBatchParamKV {
+                key: "output",
+                value: MaBatchParamValue::EnumString("slow"),
+            },
+        ];
+        let got = ma_batch_with_kernel_and_typed_params(
+            "buff_averages",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 20, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap();
+        let direct = crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
+            &candles.close,
+            &candles.volume,
+            &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
+                fast_period: (5, 5, 0),
+                slow_period: (20, 20, 0),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.slow, 1e-12);
+    }
+
+    #[test]
+    fn buff_averages_requires_candles_error() {
+        let prices = sample_prices(256);
+        let err = ma_batch_with_kernel_and_typed_params(
+            "buff_averages",
+            MaData::Slice(&prices),
+            (20, 20, 0),
+            Kernel::Auto,
+            &[],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires candles"));
+    }
+
+    #[test]
+    fn buff_averages_invalid_output_selection_returns_error() {
+        let candles = sample_candles(300);
+        let params = [MaBatchParamKV {
+            key: "output",
+            value: MaBatchParamValue::EnumString("bad_line"),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "buff_averages",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 20, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected 'fast' or 'slow'"));
+    }
+
+    #[test]
+    fn buff_averages_numeric_params_match_direct_fast() {
+        let candles = sample_candles(300);
+        let mut params = HashMap::new();
+        params.insert("fast_period_start".to_string(), 5.0);
+        params.insert("fast_period_end".to_string(), 5.0);
+        params.insert("fast_period_step".to_string(), 0.0);
+        params.insert("slow_period_start".to_string(), 20.0);
+        params.insert("slow_period_end".to_string(), 22.0);
+        params.insert("slow_period_step".to_string(), 1.0);
+
+        let got = ma_batch_with_kernel_and_params(
+            "buff_averages",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 22, 1),
+            Kernel::Auto,
+            Some(&params),
+        )
+        .unwrap();
+
+        let direct = crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
+            &candles.close,
+            &candles.volume,
+            &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
+                fast_period: (5, 5, 0),
+                slow_period: (20, 22, 1),
+            },
+            Kernel::Auto,
+        )
+        .unwrap();
+
+        assert_eq!(got.periods, vec![20, 21, 22]);
+        assert_eq!(got.rows, direct.rows);
+        assert_eq!(got.cols, direct.cols);
+        assert_series_eq(&got.values, &direct.fast, 1e-12);
+    }
+
+    #[test]
+    fn typed_non_finite_float_rejected() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "offset",
+            value: MaBatchParamValue::Float(f64::NAN),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "alma",
+            MaData::Slice(&prices),
+            (20, 20, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected finite number"));
+    }
+
+    #[test]
+    fn uma_typed_integer_param_rejects_fractional_value() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "min_length",
+            value: MaBatchParamValue::Float(7.25),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "uma",
+            MaData::Slice(&prices),
+            (35, 35, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected integer"));
+    }
+
+    #[test]
+    fn buff_averages_typed_integer_param_rejects_fractional_value() {
+        let candles = sample_candles(300);
+        let params = [MaBatchParamKV {
+            key: "fast_period",
+            value: MaBatchParamValue::Float(5.5),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "buff_averages",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 20, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected integer"));
+    }
+
+    #[test]
+    fn vwap_typed_anchor_step_rejects_fractional_value() {
+        let candles = sample_candles(300);
+        let params = [
+            MaBatchParamKV {
+                key: "anchor",
+                value: MaBatchParamValue::EnumString("1d"),
+            },
+            MaBatchParamKV {
+                key: "anchor_step",
+                value: MaBatchParamValue::Float(1.5),
+            },
+        ];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "vwap",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected integer"));
+    }
+
+    #[test]
+    fn mwdx_typed_non_finite_factor_rejected() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "factor",
+            value: MaBatchParamValue::Float(f64::INFINITY),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "mwdx",
+            MaData::Slice(&prices),
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected finite number"));
+    }
+
+    #[test]
+    fn hwma_typed_non_finite_param_rejected() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "na",
+            value: MaBatchParamValue::Float(f64::NAN),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "hwma",
+            MaData::Slice(&prices),
+            (10, 10, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected finite number"));
+    }
+
+    #[test]
+    fn dma_typed_fractional_ema_length_rejected() {
+        let prices = sample_prices(256);
+        let params = [
+            MaBatchParamKV {
+                key: "ema_length",
+                value: MaBatchParamValue::Float(20.5),
+            },
+            MaBatchParamKV {
+                key: "hull_ma_type",
+                value: MaBatchParamValue::EnumString("EMA"),
+            },
+        ];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "dma",
+            MaData::Slice(&prices),
+            (14, 14, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected integer"));
+    }
+
+    #[test]
+    fn tradjema_typed_non_finite_mult_rejected() {
+        let candles = sample_candles(300);
+        let params = [MaBatchParamKV {
+            key: "mult",
+            value: MaBatchParamValue::Float(f64::NAN),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "tradjema",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (40, 40, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected finite number"));
+    }
+
+    #[test]
+    fn uma_typed_negative_min_length_rejected() {
+        let prices = sample_prices(256);
+        let params = [MaBatchParamKV {
+            key: "min_length",
+            value: MaBatchParamValue::Int(-1),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "uma",
+            MaData::Slice(&prices),
+            (35, 35, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected >= 0"));
+    }
+
+    #[test]
+    fn volume_adjusted_ma_typed_fractional_sample_period_rejected() {
+        let candles = sample_candles(300);
+        let params = [MaBatchParamKV {
+            key: "sample_period",
+            value: MaBatchParamValue::Float(30.5),
+        }];
+        let err = ma_batch_with_kernel_and_typed_params(
+            "volume_adjusted_ma",
+            MaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            (20, 20, 0),
+            Kernel::Auto,
+            &params,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expected integer"));
+    }
+
 }

@@ -21,6 +21,8 @@ include = [
   "/Cargo.toml",
   "/README.md",
   "/LICENSE",
+  "/NOTICE",
+  "/COPYRIGHT",
   "/build.rs",
   "/src/lib.rs",
   "/src/bin/generate_references.rs",
@@ -46,6 +48,10 @@ harness = false
 name = "cuda_bench"
 harness = false
 required-features = ["cuda"]
+
+[[bench]]
+name = "ma_dispatch_benchmark"
+harness = false
 
 [[bin]]
 name = "generate_references"

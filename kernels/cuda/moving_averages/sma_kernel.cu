@@ -96,11 +96,43 @@ extern "C" __global__ void sma_prefix_stage2_block_offsets_f64(
     double* __restrict__ block_offsets,
     int num_blocks
 ) {
-    if (blockIdx.x != 0 || threadIdx.x != 0) return;
-    double run = 0.0;
-    for (int b = 0; b < num_blocks; ++b) {
-        block_offsets[b] = run;
-        run += block_totals[b];
+    if (blockIdx.x != 0) return;
+    if (num_blocks <= 0) return;
+
+    extern __shared__ double s_scan[];
+    __shared__ double s_carry;
+
+    const int tid = threadIdx.x;
+    const int block_n = blockDim.x;
+
+    if (tid == 0) s_carry = 0.0;
+    __syncthreads();
+
+    for (int base = 0; base < num_blocks; base += block_n) {
+        const int idx = base + tid;
+        const int valid = min(block_n, num_blocks - base);
+
+        const double x = (tid < valid) ? block_totals[idx] : 0.0;
+        s_scan[tid] = x;
+        __syncthreads();
+
+        for (int offs = 1; offs < block_n; offs <<= 1) {
+            double add = 0.0;
+            if (tid >= offs) add = s_scan[tid - offs];
+            __syncthreads();
+            s_scan[tid] += add;
+            __syncthreads();
+        }
+
+        if (tid < valid) {
+            block_offsets[idx] = s_carry + (s_scan[tid] - x);
+        }
+        __syncthreads();
+
+        if (tid == 0) {
+            s_carry += s_scan[valid - 1];
+        }
+        __syncthreads();
     }
 }
 

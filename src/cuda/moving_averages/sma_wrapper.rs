@@ -244,7 +244,7 @@ impl CudaSma {
                     k1.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                 suggested.max(32)
             } else {
-                s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256)
+                s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(384)
             }
         } else {
             match env::var("SMA_PREFIX_BLOCK_X").ok().as_deref() {
@@ -253,8 +253,8 @@ impl CudaSma {
                         k1.suggested_launch_configuration(0, BlockSize::xyz(0, 0, 0))?;
                     suggested.max(32)
                 }
-                Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(256),
-                None => 256,
+                Some(s) => s.parse::<u32>().ok().filter(|&v| v > 0).unwrap_or(384),
+                None => 384,
             }
         };
         let grid_x = ((series_len as u32) + block_x - 1) / block_x;
@@ -318,13 +318,37 @@ impl CudaSma {
             let mut blk_tot_ptr = d_blk_totals.as_device_ptr().as_raw();
             let mut blk_off_ptr = d_blk_offsets.as_device_ptr().as_raw();
             let mut n_blocks_i = n_blocks as i32;
+            let stage2_block_x: u32 = env::var("SMA_PREFIX_STAGE2_BLOCK_X")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|&v| v > 0)
+                .unwrap_or(1);
+            let max_threads_k2 = dev.get_attribute(DeviceAttribute::MaxThreadsPerBlock)? as u32;
+            if stage2_block_x > max_threads_k2 {
+                return Err(CudaSmaError::LaunchConfigTooLarge {
+                    gx: 1,
+                    gy: 1,
+                    gz: 1,
+                    bx: stage2_block_x,
+                    by: 1,
+                    bz: 1,
+                });
+            }
+            let shmem_bytes = stage2_block_x
+                .checked_mul(std::mem::size_of::<f64>() as u32)
+                .ok_or(CudaSmaError::InvalidInput("stage2 shmem overflow".into()))?;
             let args: &mut [*mut c_void] = &mut [
                 &mut blk_tot_ptr as *mut _ as *mut c_void,
                 &mut blk_off_ptr as *mut _ as *mut c_void,
                 &mut n_blocks_i as *mut _ as *mut c_void,
             ];
-            self.stream
-                .launch(&k2, GridSize::xyz(1, 1, 1), BlockSize::xyz(1, 1, 1), 0, args)?;
+            self.stream.launch(
+                &k2,
+                GridSize::xyz(1, 1, 1),
+                BlockSize::xyz(stage2_block_x, 1, 1),
+                shmem_bytes,
+                args,
+            )?;
         }
 
         unsafe {
