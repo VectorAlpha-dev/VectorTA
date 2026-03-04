@@ -6,7 +6,9 @@ use crate::utilities::data_loader::{source_type, Candles};
 
 use cust::context::Context;
 use cust::device::Device;
-use cust::memory::{mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer};
+use cust::memory::{
+    mem_get_info, AsyncCopyDestination, CopyDestination, DeviceBuffer, LockedBuffer,
+};
 use cust::prelude::CudaFlags;
 use cust::stream::{Stream, StreamFlags};
 use std::cell::RefCell;
@@ -191,6 +193,24 @@ pub enum CudaMaData<'a> {
     Slice(&'a [f64]),
 
     SliceF32(&'a [f32]),
+
+    OhlcF32 {
+        open: &'a [f32],
+        high: &'a [f32],
+        low: &'a [f32],
+        close: &'a [f32],
+        source: Option<&'a [f32]>,
+    },
+
+    OhlcvF32 {
+        timestamp: Option<&'a [i64]>,
+        open: &'a [f32],
+        high: &'a [f32],
+        low: &'a [f32],
+        close: &'a [f32],
+        volume: &'a [f32],
+        source: Option<&'a [f32]>,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,7 +233,9 @@ impl<'a> CudaMaData<'a> {
         match self {
             CudaMaData::Slice(s) => s,
             CudaMaData::Candles { candles, source } => source_type(candles, source),
-            CudaMaData::SliceF32(_) => panic!("as_prices_f64 called for f32 slice"),
+            CudaMaData::SliceF32(_)
+            | CudaMaData::OhlcF32 { .. }
+            | CudaMaData::OhlcvF32 { .. } => panic!("as_prices_f64 called for f32 data"),
         }
     }
 
@@ -222,6 +244,8 @@ impl<'a> CudaMaData<'a> {
         match self {
             CudaMaData::Slice(s) => s.len(),
             CudaMaData::SliceF32(s) => s.len(),
+            CudaMaData::OhlcF32 { close, source, .. } => source.unwrap_or(close).len(),
+            CudaMaData::OhlcvF32 { close, source, .. } => source.unwrap_or(close).len(),
             CudaMaData::Candles { candles, source } => source_type(candles, source).len(),
         }
     }
@@ -231,6 +255,8 @@ impl<'a> CudaMaData<'a> {
         match self {
             CudaMaData::SliceF32(s) => s.to_vec(),
             CudaMaData::Slice(s) => s.iter().map(|&v| v as f32).collect(),
+            CudaMaData::OhlcF32 { close, source, .. } => source.unwrap_or(close).to_vec(),
+            CudaMaData::OhlcvF32 { close, source, .. } => source.unwrap_or(close).to_vec(),
             CudaMaData::Candles { candles, source } => {
                 let src = source_type(candles, source);
                 src.iter().map(|&v| v as f32).collect()
@@ -1054,6 +1080,22 @@ impl CudaMaSelector {
                             .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
                         Ok(dev)
                     }
+                    CudaMaData::OhlcF32 {
+                        high, low, close, ..
+                    } => {
+                        let (dev, _combos) = cuda
+                            .frama_batch_dev(high, low, close, &sweep)
+                            .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                        Ok(dev)
+                    }
+                    CudaMaData::OhlcvF32 {
+                        high, low, close, ..
+                    } => {
+                        let (dev, _combos) = cuda
+                            .frama_batch_dev(high, low, close, &sweep)
+                            .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                        Ok(dev)
+                    }
                 }
             }
 
@@ -1227,6 +1269,8 @@ impl CudaMaSelector {
                 prices_owned = Some(s.iter().map(|&v| v as f32).collect());
                 prices_owned.as_deref().unwrap()
             }
+            CudaMaData::OhlcF32 { close, source, .. } => source.unwrap_or(close),
+            CudaMaData::OhlcvF32 { close, source, .. } => source.unwrap_or(close),
             CudaMaData::Candles { candles, source } => {
                 let src = source_type(candles, source);
                 prices_owned = Some(src.iter().map(|&v| v as f32).collect());
@@ -1256,32 +1300,28 @@ impl CudaMaSelector {
 
         match ma_lc.as_str() {
             "vwma" => {
-                let candles = match data {
-                    CudaMaData::Candles { candles, .. } => candles,
+                let volumes = match data {
+                    CudaMaData::Candles { candles, .. } => candles
+                        .volume
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect::<Vec<f32>>(),
+                    CudaMaData::OhlcvF32 { volume, .. } => volume.to_vec(),
                     _ => {
                         return Err(CudaMaSelectorError::Unsupported(
-                            "vwma requires candles with volume; pass CudaMaData::Candles".into(),
+                            "vwma requires volume input".into(),
                         ));
                     }
                 };
-                let volumes_f32: Vec<f32> = candles.volume.iter().map(|&v| v as f32).collect();
                 let sweep = crate::indicators::moving_averages::vwma::VwmaBatchRange {
                     period: period_range,
                 };
                 let cuda = CudaVwma::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
-                cuda.vwma_batch_dev(&prices, &volumes_f32, &sweep)
+                cuda.vwma_batch_dev(&prices, &volumes, &sweep)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "vpwma" => {
-                match data {
-                    CudaMaData::Candles { .. } => {}
-                    _ => {
-                        return Err(CudaMaSelectorError::Unsupported(
-                            "vpwma requires candles; pass CudaMaData::Candles".into(),
-                        ));
-                    }
-                }
                 let sweep = crate::indicators::moving_averages::vpwma::VpwmaBatchRange {
                     period: period_range,
                     power: {
@@ -1797,12 +1837,10 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "mwdx" => {
-                let first_valid = prices
-                    .iter()
-                    .position(|x| !x.is_nan())
-                    .ok_or_else(|| CudaMaSelectorError::InvalidInput("all values are NaN".into()))?;
-                let factors: Vec<f32> = if let Some(f) = get_param_f64(params, ma_type, "factor")?
-                {
+                let first_valid = prices.iter().position(|x| !x.is_nan()).ok_or_else(|| {
+                    CudaMaSelectorError::InvalidInput("all values are NaN".into())
+                })?;
+                let factors: Vec<f32> = if let Some(f) = get_param_f64(params, ma_type, "factor")? {
                     vec![f as f32; periods.len()]
                 } else {
                     periods
@@ -1897,8 +1935,14 @@ impl CudaMaSelector {
                         cuda.tradjema_batch_dev(&high, &low, &close, &sweep)
                             .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
                     }
+                    CudaMaData::OhlcF32 { high, low, close, .. } => cuda
+                        .tradjema_batch_dev(high, low, close, &sweep)
+                        .map_err(|e| CudaMaSelectorError::Backend(e.to_string())),
+                    CudaMaData::OhlcvF32 { high, low, close, .. } => cuda
+                        .tradjema_batch_dev(high, low, close, &sweep)
+                        .map_err(|e| CudaMaSelectorError::Backend(e.to_string())),
                     _ => Err(CudaMaSelectorError::Unsupported(
-                        "tradjema requires candles with high/low/close".into(),
+                        "tradjema requires high/low/close input".into(),
                     )),
                 }
             }
@@ -1918,9 +1962,14 @@ impl CudaMaSelector {
                     sweep.smooth_length = (v, v, 0);
                 }
                 let volumes = match data {
-                    CudaMaData::Candles { candles, .. } => {
-                        Some(candles.volume.iter().map(|&v| v as f32).collect::<Vec<f32>>())
-                    }
+                    CudaMaData::Candles { candles, .. } => Some(
+                        candles
+                            .volume
+                            .iter()
+                            .map(|&v| v as f32)
+                            .collect::<Vec<f32>>(),
+                    ),
+                    CudaMaData::OhlcvF32 { volume, .. } => Some(volume.to_vec()),
                     _ => None,
                 };
                 let volumes_ref = volumes.as_deref();
@@ -1931,12 +1980,15 @@ impl CudaMaSelector {
             }
             "volume_adjusted_ma" => {
                 let volumes = match data {
-                    CudaMaData::Candles { candles, .. } => {
-                        candles.volume.iter().map(|&v| v as f32).collect::<Vec<f32>>()
-                    }
+                    CudaMaData::Candles { candles, .. } => candles
+                        .volume
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect::<Vec<f32>>(),
+                    CudaMaData::OhlcvF32 { volume, .. } => volume.to_vec(),
                     _ => {
                         return Err(CudaMaSelectorError::Unsupported(
-                            "volume_adjusted_ma requires candles with volume".into(),
+                            "volume_adjusted_ma requires volume input".into(),
                         ));
                     }
                 };
@@ -1958,14 +2010,6 @@ impl CudaMaSelector {
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
             }
             "vwap" => {
-                let candles = match data {
-                    CudaMaData::Candles { candles, .. } => candles,
-                    _ => {
-                        return Err(CudaMaSelectorError::Unsupported(
-                            "vwap requires candles with timestamp and volume".into(),
-                        ));
-                    }
-                };
                 let single_anchor = get_param_str(text_params, ma_type, "anchor");
                 let anchor_start = get_param_str(text_params, ma_type, "anchor_start")
                     .or(single_anchor)
@@ -1981,11 +2025,32 @@ impl CudaMaSelector {
                 let sweep = crate::indicators::moving_averages::vwap::VwapBatchRange {
                     anchor: (anchor_start, anchor_end, anchor_step),
                 };
-                let prices_f64: Vec<f64> = prices.iter().map(|&v| v as f64).collect();
                 let cuda = CudaVwap::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
-                cuda.vwap_batch_dev(&candles.timestamp, &candles.volume, &prices_f64, &sweep)
-                    .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+                match data {
+                    CudaMaData::Candles { candles, .. } => {
+                        let prices_f64: Vec<f64> = prices.iter().map(|&v| v as f64).collect();
+                        cuda.vwap_batch_dev(
+                            &candles.timestamp,
+                            &candles.volume,
+                            &prices_f64,
+                            &sweep,
+                        )
+                        .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
+                    }
+                    CudaMaData::OhlcvF32 {
+                        timestamp: Some(timestamp),
+                        volume,
+                        ..
+                    } => cuda
+                        .vwap_batch_dev_f32(timestamp, volume, prices, &sweep)
+                        .map_err(|e| CudaMaSelectorError::Backend(e.to_string())),
+                    _ => {
+                        return Err(CudaMaSelectorError::Unsupported(
+                            "vwap requires timestamp + volume + source input".into(),
+                        ));
+                    }
+                }
             }
             "mama" => {
                 let mut sweep = crate::indicators::moving_averages::mama::MamaBatchRange::default();
@@ -2089,14 +2154,35 @@ impl CudaMaSelector {
                             .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
                         Ok(dev)
                     }
+                    CudaMaData::OhlcF32 {
+                        high, low, close, ..
+                    } => {
+                        let (dev, _combos) = cuda
+                            .frama_batch_dev(high, low, close, &sweep)
+                            .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                        Ok(dev)
+                    }
+                    CudaMaData::OhlcvF32 {
+                        high, low, close, ..
+                    } => {
+                        let (dev, _combos) = cuda
+                            .frama_batch_dev(high, low, close, &sweep)
+                            .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
+                        Ok(dev)
+                    }
                 }
             }
             "buff_averages" => {
-                let candles = match data {
-                    CudaMaData::Candles { candles, .. } => candles,
+                let volumes = match data {
+                    CudaMaData::Candles { candles, .. } => candles
+                        .volume
+                        .iter()
+                        .map(|&v| v as f32)
+                        .collect::<Vec<f32>>(),
+                    CudaMaData::OhlcvF32 { volume, .. } => volume.to_vec(),
                     _ => {
                         return Err(CudaMaSelectorError::Unsupported(
-                            "buff_averages requires candles with volume".into(),
+                            "buff_averages requires volume input".into(),
                         ));
                     }
                 };
@@ -2131,7 +2217,6 @@ impl CudaMaSelector {
                 let output = get_param_str(text_params, ma_type, "output")
                     .unwrap_or("fast")
                     .to_ascii_lowercase();
-                let volumes: Vec<f32> = candles.volume.iter().map(|&v| v as f32).collect();
                 let cuda = CudaBuffAverages::new(self.device_id)
                     .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))?;
                 let pair = cuda
@@ -2552,8 +2637,8 @@ pub fn ma_selector_cuda_sweep_to_device_py(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cust::memory::CopyDestination;
     use crate::utilities::data_loader::Candles;
+    use cust::memory::CopyDestination;
 
     fn sample_prices(len: usize) -> Vec<f64> {
         (0..len)
@@ -2849,7 +2934,9 @@ mod tests {
         };
         let prices_f32: Vec<f32> = prices.iter().map(|&v| v as f32).collect();
         let cuda = CudaUma::new(0).unwrap();
-        let direct_dev = cuda.uma_batch_dev(&prices_f32, None, &direct_sweep).unwrap();
+        let direct_dev = cuda
+            .uma_batch_dev(&prices_f32, None, &direct_sweep)
+            .unwrap();
         let mut direct = vec![0f32; direct_dev.rows * direct_dev.cols];
         direct_dev.buf.copy_to(&mut direct).unwrap();
 
@@ -3109,7 +3196,14 @@ mod tests {
             value: CudaMaParamValue::Int(51),
         }];
         let dev = selector
-            .ma_sweep_to_device_with_typed_params("vama", CudaMaData::Slice(&prices), 18, 22, 2, &params)
+            .ma_sweep_to_device_with_typed_params(
+                "vama",
+                CudaMaData::Slice(&prices),
+                18,
+                22,
+                2,
+                &params,
+            )
             .unwrap();
         let mut got = vec![0f32; dev.rows * dev.cols];
         dev.buf.copy_to(&mut got).unwrap();
@@ -3148,7 +3242,14 @@ mod tests {
             },
         ];
         let dev = selector
-            .ma_sweep_to_device_with_typed_params("maaq", CudaMaData::Slice(&prices), 18, 22, 2, &params)
+            .ma_sweep_to_device_with_typed_params(
+                "maaq",
+                CudaMaData::Slice(&prices),
+                18,
+                22,
+                2,
+                &params,
+            )
             .unwrap();
         let mut got = vec![0f32; dev.rows * dev.cols];
         dev.buf.copy_to(&mut got).unwrap();
@@ -3177,13 +3278,13 @@ mod tests {
         let prices = sample_prices(128);
         let selector = CudaMaSelector::new(0);
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "tradjema",
-                CudaMaData::Slice(&prices),
-                40,
-                40,
-                0,
-                &[],
-            ));
+            "tradjema",
+            CudaMaData::Slice(&prices),
+            40,
+            40,
+            0,
+            &[],
+        ));
         assert!(err.contains("requires candles"));
     }
 
@@ -3195,13 +3296,13 @@ mod tests {
         let prices = sample_prices(128);
         let selector = CudaMaSelector::new(0);
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "vwap",
-                CudaMaData::Slice(&prices),
-                10,
-                10,
-                0,
-                &[],
-            ));
+            "vwap",
+            CudaMaData::Slice(&prices),
+            10,
+            10,
+            0,
+            &[],
+        ));
         assert!(err.contains("requires candles"));
     }
 
@@ -3213,13 +3314,13 @@ mod tests {
         let prices = sample_prices(128);
         let selector = CudaMaSelector::new(0);
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "volume_adjusted_ma",
-                CudaMaData::Slice(&prices),
-                20,
-                20,
-                0,
-                &[],
-            ));
+            "volume_adjusted_ma",
+            CudaMaData::Slice(&prices),
+            20,
+            20,
+            0,
+            &[],
+        ));
         assert!(err.contains("requires candles"));
     }
 
@@ -3235,13 +3336,13 @@ mod tests {
             value: CudaMaParamValue::EnumString("bad_line"),
         }];
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "mama",
-                CudaMaData::Slice(&prices),
-                10,
-                10,
-                0,
-                &params,
-            ));
+            "mama",
+            CudaMaData::Slice(&prices),
+            10,
+            10,
+            0,
+            &params,
+        ));
         assert!(err.contains("expected 'mama' or 'fama'"));
     }
 
@@ -3257,13 +3358,13 @@ mod tests {
             value: CudaMaParamValue::EnumString("bad_line"),
         }];
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "ehlers_pma",
-                CudaMaData::Slice(&prices),
-                10,
-                10,
-                0,
-                &params,
-            ));
+            "ehlers_pma",
+            CudaMaData::Slice(&prices),
+            10,
+            10,
+            0,
+            &params,
+        ));
         assert!(err.contains("expected 'predict' or 'trigger'"));
     }
 
@@ -3285,16 +3386,16 @@ mod tests {
             },
         ];
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "vwap",
-                CudaMaData::Candles {
-                    candles: &candles,
-                    source: "close",
-                },
-                10,
-                10,
-                0,
-                &params,
-            ));
+            "vwap",
+            CudaMaData::Candles {
+                candles: &candles,
+                source: "close",
+            },
+            10,
+            10,
+            0,
+            &params,
+        ));
         assert!(err.contains("expected >= 0"));
     }
 
@@ -3310,13 +3411,13 @@ mod tests {
             value: CudaMaParamValue::EnumString("BAD"),
         }];
         let err = err_string(selector.ma_sweep_to_device_with_typed_params(
-                "dma",
-                CudaMaData::Slice(&prices),
-                14,
-                14,
-                0,
-                &params,
-            ))
+            "dma",
+            CudaMaData::Slice(&prices),
+            14,
+            14,
+            0,
+            &params,
+        ))
         .to_ascii_lowercase();
         assert!(err.contains("hull"));
         assert!(err.contains("unsupported") || err.contains("invalid"));
@@ -3498,16 +3599,17 @@ mod tests {
         let mut got = vec![0f32; dev.rows * dev.cols];
         dev.buf.copy_to(&mut got).unwrap();
 
-        let direct = crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
-            &candles.close,
-            &candles.volume,
-            &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
-                fast_period: (5, 5, 0),
-                slow_period: (20, 24, 2),
-            },
-            crate::utilities::enums::Kernel::Auto,
-        )
-        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
+                &candles.close,
+                &candles.volume,
+                &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
+                    fast_period: (5, 5, 0),
+                    slow_period: (20, 24, 2),
+                },
+                crate::utilities::enums::Kernel::Auto,
+            )
+            .unwrap();
 
         assert_eq!(dev.rows, direct.rows);
         assert_eq!(dev.cols, direct.cols);
@@ -3539,15 +3641,16 @@ mod tests {
         let mut got = vec![0f32; dev.rows * dev.cols];
         dev.buf.copy_to(&mut got).unwrap();
 
-        let direct = crate::indicators::moving_averages::volatility_adjusted_ma::vama_batch_with_kernel(
-            &prices,
-            &crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
-                base_period: (18, 24, 2),
-                vol_period: (51, 51, 0),
-            },
-            crate::utilities::enums::Kernel::Auto,
-        )
-        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::volatility_adjusted_ma::vama_batch_with_kernel(
+                &prices,
+                &crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
+                    base_period: (18, 24, 2),
+                    vol_period: (51, 51, 0),
+                },
+                crate::utilities::enums::Kernel::Auto,
+            )
+            .unwrap();
 
         assert_eq!(dev.rows, direct.rows);
         assert_eq!(dev.cols, direct.cols);

@@ -443,7 +443,7 @@ impl CudaMab {
             return Ok((trip, combos));
         }
 
-        if all_same_ma {
+        if all_same_ma && rows > 1 {
             let fast_ma_host = Self::compute_ma_host(
                 p0.fast_ma_type.as_deref().unwrap_or("sma"),
                 prices_f32,

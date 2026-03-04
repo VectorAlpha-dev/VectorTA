@@ -5,6 +5,7 @@ pub mod adx;
 pub mod adxr;
 pub mod alligator;
 pub mod alphatrend;
+pub mod dispatch;
 pub use alphatrend::{alphatrend, AlphaTrendInput, AlphaTrendOutput, AlphaTrendParams};
 pub mod ao;
 pub mod apo;
@@ -147,6 +148,7 @@ pub use otto::{
 pub use otto::{otto_alloc, otto_batch_unified_js, otto_free, otto_into, otto_js};
 #[cfg(feature = "python")]
 pub use otto::{otto_batch_py, otto_py, OttoStreamPy};
+pub mod pattern_recognition;
 pub mod percentile_nearest_rank;
 pub mod pfe;
 pub use percentile_nearest_rank::{
@@ -171,6 +173,7 @@ pub mod pvi;
 pub mod qqe;
 pub mod qstick;
 pub mod range_filter;
+pub mod registry;
 pub use range_filter::{
     range_filter, range_filter_batch_par_slice, range_filter_batch_slice, range_filter_into_slice,
     range_filter_with_kernel, RangeFilterBatchBuilder, RangeFilterBatchOutput,

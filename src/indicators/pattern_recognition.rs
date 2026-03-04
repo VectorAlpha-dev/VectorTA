@@ -1,9 +1,19 @@
 use crate::utilities::data_loader::Candles;
+use crate::utilities::enums::Kernel;
+use std::mem::MaybeUninit;
 use thiserror::Error;
 
 #[derive(Debug, Clone)]
 pub enum PatternData<'a> {
-    Candles { candles: &'a Candles },
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    },
 }
 
 impl Default for PatternType {
@@ -18,7 +28,7 @@ pub struct PatternParams {
     pub penetration: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatternType {
     Cdl2Crows,
     Cdl3BlackCrows,
@@ -97,9 +107,48 @@ impl<'a> PatternInput<'a> {
         }
     }
 
+    pub fn from_slices(
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        params: PatternParams,
+    ) -> Self {
+        Self {
+            data: PatternData::Slices {
+                open,
+                high,
+                low,
+                close,
+            },
+            params,
+        }
+    }
+
     pub fn with_default_candles(candles: &'a Candles, pattern_type: PatternType) -> Self {
         Self {
             data: PatternData::Candles { candles },
+            params: PatternParams {
+                pattern_type,
+                ..Default::default()
+            },
+        }
+    }
+
+    pub fn with_default_slices(
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        pattern_type: PatternType,
+    ) -> Self {
+        Self {
+            data: PatternData::Slices {
+                open,
+                high,
+                low,
+                close,
+            },
             params: PatternParams {
                 pattern_type,
                 ..Default::default()
@@ -111,6 +160,1076 @@ impl<'a> PatternInput<'a> {
 #[derive(Debug, Clone)]
 pub struct PatternOutput {
     pub values: Vec<i8>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PatternRecognitionParams {}
+
+#[derive(Debug, Clone)]
+pub enum PatternRecognitionData<'a> {
+    Candles {
+        candles: &'a Candles,
+    },
+    Slices {
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct PatternRecognitionInput<'a> {
+    pub data: PatternRecognitionData<'a>,
+    pub params: PatternRecognitionParams,
+}
+
+impl<'a> PatternRecognitionInput<'a> {
+    pub fn from_candles(candles: &'a Candles, params: PatternRecognitionParams) -> Self {
+        Self {
+            data: PatternRecognitionData::Candles { candles },
+            params,
+        }
+    }
+
+    pub fn from_slices(
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+        params: PatternRecognitionParams,
+    ) -> Self {
+        Self {
+            data: PatternRecognitionData::Slices {
+                open,
+                high,
+                low,
+                close,
+            },
+            params,
+        }
+    }
+
+    pub fn with_default_candles(candles: &'a Candles) -> Self {
+        Self::from_candles(candles, PatternRecognitionParams::default())
+    }
+
+    pub fn with_default_slices(
+        open: &'a [f64],
+        high: &'a [f64],
+        low: &'a [f64],
+        close: &'a [f64],
+    ) -> Self {
+        Self::from_slices(open, high, low, close, PatternRecognitionParams::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PatternSpec {
+    pub id: &'static str,
+    pub row_index: usize,
+    pub category: &'static str,
+}
+
+#[derive(Debug, Clone)]
+pub struct PatternRecognitionOutput {
+    pub rows: usize,
+    pub cols: usize,
+    pub values_u8: Vec<u8>,
+    pub pattern_ids: Vec<&'static str>,
+    pub warmup: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedPatternRecognitionOutput {
+    pub rows: usize,
+    pub cols: usize,
+    pub words_per_row: usize,
+    pub words_u64: Vec<u64>,
+    pub pattern_ids: Vec<&'static str>,
+    pub warmup: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct SharedPatternPrimitives {
+    body: Vec<f64>,
+    range: Vec<f64>,
+    upper_shadow: Vec<f64>,
+    lower_shadow: Vec<f64>,
+    direction: Vec<i8>,
+    body_gap_up: Vec<u8>,
+    body_gap_down: Vec<u8>,
+}
+
+fn build_shared_primitives(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> SharedPatternPrimitives {
+    let len = close.len();
+    let mut body = Vec::with_capacity(len);
+    let mut range = Vec::with_capacity(len);
+    let mut upper_shadow = Vec::with_capacity(len);
+    let mut lower_shadow = Vec::with_capacity(len);
+    let mut direction = Vec::with_capacity(len);
+    let mut body_gap_up = Vec::with_capacity(len);
+    let mut body_gap_down = Vec::with_capacity(len);
+
+    for i in 0..len {
+        let o = open[i];
+        let h = high[i];
+        let l = low[i];
+        let c = close[i];
+
+        body.push((c - o).abs());
+        range.push(h - l);
+        upper_shadow.push(if c >= o { h - c } else { h - o });
+        lower_shadow.push(if c >= o { o - l } else { c - l });
+        direction.push(if c >= o { 1 } else { -1 });
+
+        if i == 0 {
+            body_gap_up.push(0);
+            body_gap_down.push(0);
+        } else {
+            let cur_min = o.min(c);
+            let cur_max = o.max(c);
+            let prev_min = open[i - 1].min(close[i - 1]);
+            let prev_max = open[i - 1].max(close[i - 1]);
+            body_gap_up.push((cur_min > prev_max) as u8);
+            body_gap_down.push((cur_max < prev_min) as u8);
+        }
+    }
+
+    SharedPatternPrimitives {
+        body,
+        range,
+        upper_shadow,
+        lower_shadow,
+        direction,
+        body_gap_up,
+        body_gap_down,
+    }
+}
+
+impl PatternRecognitionOutput {
+    pub fn to_bitmask_u64(&self) -> PackedPatternRecognitionOutput {
+        let words_per_row = self.cols.div_ceil(64);
+        let mut words_u64 = vec![0u64; self.rows.saturating_mul(words_per_row)];
+
+        for row in 0..self.rows {
+            let src_start = row * self.cols;
+            let src = &self.values_u8[src_start..src_start + self.cols];
+            let dst_start = row * words_per_row;
+            let dst = &mut words_u64[dst_start..dst_start + words_per_row];
+
+            for (idx, v) in src.iter().enumerate() {
+                if *v != 0 {
+                    let word = idx / 64;
+                    let bit = idx % 64;
+                    dst[word] |= 1u64 << bit;
+                }
+            }
+        }
+
+        PackedPatternRecognitionOutput {
+            rows: self.rows,
+            cols: self.cols,
+            words_per_row,
+            words_u64,
+            pattern_ids: self.pattern_ids.clone(),
+            warmup: self.warmup,
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum PatternRecognitionError {
+    #[error(
+        "pattern_recognition: data length mismatch: open={open}, high={high}, low={low}, close={close}"
+    )]
+    DataLengthMismatch {
+        open: usize,
+        high: usize,
+        low: usize,
+        close: usize,
+    },
+
+    #[error("pattern_recognition: output length mismatch for `{pattern_id}`: expected {expected}, got {got}")]
+    OutputLengthMismatch {
+        pattern_id: &'static str,
+        expected: usize,
+        got: usize,
+    },
+
+    #[error(transparent)]
+    Pattern(#[from] PatternError),
+}
+
+#[derive(Clone, Copy)]
+struct PatternRunner {
+    id: &'static str,
+    pattern_type: PatternType,
+    category: &'static str,
+    run: fn(&PatternInput<'_>) -> Result<PatternOutput, PatternError>,
+}
+
+const PATTERN_RUNNERS: [PatternRunner; 61] = [
+    PatternRunner {
+        id: "cdl2crows",
+        pattern_type: PatternType::Cdl2Crows,
+        category: "candlestick",
+        run: cdl2crows,
+    },
+    PatternRunner {
+        id: "cdl3blackcrows",
+        pattern_type: PatternType::Cdl3BlackCrows,
+        category: "candlestick",
+        run: cdl3blackcrows,
+    },
+    PatternRunner {
+        id: "cdl3inside",
+        pattern_type: PatternType::Cdl3Inside,
+        category: "candlestick",
+        run: cdl3inside,
+    },
+    PatternRunner {
+        id: "cdl3linestrike",
+        pattern_type: PatternType::Cdl3LineStrike,
+        category: "candlestick",
+        run: cdl3linestrike,
+    },
+    PatternRunner {
+        id: "cdl3outside",
+        pattern_type: PatternType::Cdl3Outside,
+        category: "candlestick",
+        run: cdl3outside,
+    },
+    PatternRunner {
+        id: "cdl3starsinsouth",
+        pattern_type: PatternType::Cdl3StarsInSouth,
+        category: "candlestick",
+        run: cdl3starsinsouth,
+    },
+    PatternRunner {
+        id: "cdl3whitesoldiers",
+        pattern_type: PatternType::Cdl3WhiteSoldiers,
+        category: "candlestick",
+        run: cdl3whitesoldiers,
+    },
+    PatternRunner {
+        id: "cdlabandonedbaby",
+        pattern_type: PatternType::CdlAbandonedBaby,
+        category: "candlestick",
+        run: cdlabandonedbaby,
+    },
+    PatternRunner {
+        id: "cdladvanceblock",
+        pattern_type: PatternType::CdlAdvanceBlock,
+        category: "candlestick",
+        run: cdladvanceblock,
+    },
+    PatternRunner {
+        id: "cdlbelthold",
+        pattern_type: PatternType::CdlBeltHold,
+        category: "candlestick",
+        run: cdlbelthold,
+    },
+    PatternRunner {
+        id: "cdlbreakaway",
+        pattern_type: PatternType::CdlBreakaway,
+        category: "candlestick",
+        run: cdlbreakaway,
+    },
+    PatternRunner {
+        id: "cdlclosingmarubozu",
+        pattern_type: PatternType::CdlClosingMarubozu,
+        category: "candlestick",
+        run: cdlclosingmarubozu,
+    },
+    PatternRunner {
+        id: "cdlconcealbabyswall",
+        pattern_type: PatternType::CdlConcealBabySwall,
+        category: "candlestick",
+        run: cdlconcealbabyswall,
+    },
+    PatternRunner {
+        id: "cdlcounterattack",
+        pattern_type: PatternType::CdlCounterAttack,
+        category: "candlestick",
+        run: cdlcounterattack,
+    },
+    PatternRunner {
+        id: "cdldarkcloudcover",
+        pattern_type: PatternType::CdlDarkCloudCover,
+        category: "candlestick",
+        run: cdldarkcloudcover,
+    },
+    PatternRunner {
+        id: "cdldoji",
+        pattern_type: PatternType::CdlDoji,
+        category: "candlestick",
+        run: cdldoji,
+    },
+    PatternRunner {
+        id: "cdldojistar",
+        pattern_type: PatternType::CdlDojiStar,
+        category: "candlestick",
+        run: cdldojistar,
+    },
+    PatternRunner {
+        id: "cdldragonflydoji",
+        pattern_type: PatternType::CdlDragonflyDoji,
+        category: "candlestick",
+        run: cdldragonflydoji,
+    },
+    PatternRunner {
+        id: "cdlengulfing",
+        pattern_type: PatternType::CdlEngulfing,
+        category: "candlestick",
+        run: cdlengulfing,
+    },
+    PatternRunner {
+        id: "cdleveningdojistar",
+        pattern_type: PatternType::CdlEveningDojiStar,
+        category: "candlestick",
+        run: cdleveningdojistar,
+    },
+    PatternRunner {
+        id: "cdleveningstar",
+        pattern_type: PatternType::CdlEveningStar,
+        category: "candlestick",
+        run: cdleveningstar,
+    },
+    PatternRunner {
+        id: "cdlmorningstar",
+        pattern_type: PatternType::CdlMorningStar,
+        category: "candlestick",
+        run: cdlmorningstar,
+    },
+    PatternRunner {
+        id: "cdlgravestonedoji",
+        pattern_type: PatternType::CdlGravestoneDoji,
+        category: "candlestick",
+        run: cdlgravestonedoji,
+    },
+    PatternRunner {
+        id: "cdlhammer",
+        pattern_type: PatternType::CdlHammer,
+        category: "candlestick",
+        run: cdlhammer,
+    },
+    PatternRunner {
+        id: "cdlhangingman",
+        pattern_type: PatternType::CdlHangingMan,
+        category: "candlestick",
+        run: cdlhangingman,
+    },
+    PatternRunner {
+        id: "cdlharami",
+        pattern_type: PatternType::CdlHarami,
+        category: "candlestick",
+        run: cdlharami,
+    },
+    PatternRunner {
+        id: "cdlharamicross",
+        pattern_type: PatternType::CdlHaramiCross,
+        category: "candlestick",
+        run: cdlharamicross,
+    },
+    PatternRunner {
+        id: "cdlhighwave",
+        pattern_type: PatternType::CdlHighWave,
+        category: "candlestick",
+        run: cdlhighwave,
+    },
+    PatternRunner {
+        id: "cdlinvertedhammer",
+        pattern_type: PatternType::CdlInvertedHammer,
+        category: "candlestick",
+        run: cdlinvertedhammer,
+    },
+    PatternRunner {
+        id: "cdllongleggeddoji",
+        pattern_type: PatternType::CdlLongLeggedDoji,
+        category: "candlestick",
+        run: cdllongleggeddoji,
+    },
+    PatternRunner {
+        id: "cdllongline",
+        pattern_type: PatternType::CdlLongLine,
+        category: "candlestick",
+        run: cdllongline,
+    },
+    PatternRunner {
+        id: "cdlmarubozu",
+        pattern_type: PatternType::CdlMarubozu,
+        category: "candlestick",
+        run: cdlmarubozu,
+    },
+    PatternRunner {
+        id: "cdlrickshawman",
+        pattern_type: PatternType::CdlRickshawMan,
+        category: "candlestick",
+        run: cdlrickshawman,
+    },
+    PatternRunner {
+        id: "cdlshootingstar",
+        pattern_type: PatternType::CdlShootingStar,
+        category: "candlestick",
+        run: cdlshootingstar,
+    },
+    PatternRunner {
+        id: "cdlshortline",
+        pattern_type: PatternType::CdlShortLine,
+        category: "candlestick",
+        run: cdlshortline,
+    },
+    PatternRunner {
+        id: "cdlspinningtop",
+        pattern_type: PatternType::CdlSpinningTop,
+        category: "candlestick",
+        run: cdlspinningtop,
+    },
+    PatternRunner {
+        id: "cdltakuri",
+        pattern_type: PatternType::CdlTakuri,
+        category: "candlestick",
+        run: cdltakuri,
+    },
+    PatternRunner {
+        id: "cdlhomingpigeon",
+        pattern_type: PatternType::CdlHomingPigeon,
+        category: "candlestick",
+        run: cdlhomingpigeon,
+    },
+    PatternRunner {
+        id: "cdlmatchinglow",
+        pattern_type: PatternType::CdlMatchingLow,
+        category: "candlestick",
+        run: cdlmatchinglow,
+    },
+    PatternRunner {
+        id: "cdlinneck",
+        pattern_type: PatternType::CdlInNeck,
+        category: "candlestick",
+        run: cdlinneck,
+    },
+    PatternRunner {
+        id: "cdlonneck",
+        pattern_type: PatternType::CdlOnNeck,
+        category: "candlestick",
+        run: cdlonneck,
+    },
+    PatternRunner {
+        id: "cdlpiercing",
+        pattern_type: PatternType::CdlPiercing,
+        category: "candlestick",
+        run: cdlpiercing,
+    },
+    PatternRunner {
+        id: "cdlthrusting",
+        pattern_type: PatternType::CdlThrusting,
+        category: "candlestick",
+        run: cdlthrusting,
+    },
+    PatternRunner {
+        id: "cdlmorningdojistar",
+        pattern_type: PatternType::CdlMorningDojiStar,
+        category: "candlestick",
+        run: cdlmorningdojistar,
+    },
+    PatternRunner {
+        id: "cdltristar",
+        pattern_type: PatternType::CdlTristar,
+        category: "candlestick",
+        run: cdltristar,
+    },
+    PatternRunner {
+        id: "cdlidentical3crows",
+        pattern_type: PatternType::CdlIdentical3Crows,
+        category: "candlestick",
+        run: cdlidentical3crows,
+    },
+    PatternRunner {
+        id: "cdlsticksandwich",
+        pattern_type: PatternType::CdlStickSandwich,
+        category: "candlestick",
+        run: cdlsticksandwich,
+    },
+    PatternRunner {
+        id: "cdlseparatinglines",
+        pattern_type: PatternType::CdlSeparatingLines,
+        category: "candlestick",
+        run: cdlseparatinglines,
+    },
+    PatternRunner {
+        id: "cdlgapsidesidewhite",
+        pattern_type: PatternType::CdlGapSideSideWhite,
+        category: "candlestick",
+        run: cdlgapsidesidewhite,
+    },
+    PatternRunner {
+        id: "cdlhikkake",
+        pattern_type: PatternType::CdlHikkake,
+        category: "candlestick",
+        run: cdlhikkake,
+    },
+    PatternRunner {
+        id: "cdlhikkakemod",
+        pattern_type: PatternType::CdlHikkakeMod,
+        category: "candlestick",
+        run: cdlhikkakemod,
+    },
+    PatternRunner {
+        id: "cdlkicking",
+        pattern_type: PatternType::CdlKicking,
+        category: "candlestick",
+        run: cdlkicking,
+    },
+    PatternRunner {
+        id: "cdlkickingbylength",
+        pattern_type: PatternType::CdlKickingByLength,
+        category: "candlestick",
+        run: cdlkickingbylength,
+    },
+    PatternRunner {
+        id: "cdlladderbottom",
+        pattern_type: PatternType::CdlLadderBottom,
+        category: "candlestick",
+        run: cdlladderbottom,
+    },
+    PatternRunner {
+        id: "cdlmathold",
+        pattern_type: PatternType::CdlMatHold,
+        category: "candlestick",
+        run: cdlmathold,
+    },
+    PatternRunner {
+        id: "cdlrisefall3methods",
+        pattern_type: PatternType::CdlRiseFall3Methods,
+        category: "candlestick",
+        run: cdlrisefall3methods,
+    },
+    PatternRunner {
+        id: "cdlstalledpattern",
+        pattern_type: PatternType::CdlStalledPattern,
+        category: "candlestick",
+        run: cdlstalledpattern,
+    },
+    PatternRunner {
+        id: "cdltasukigap",
+        pattern_type: PatternType::CdlTasukiGap,
+        category: "candlestick",
+        run: cdltasukigap,
+    },
+    PatternRunner {
+        id: "cdlunique3river",
+        pattern_type: PatternType::CdlUnique3River,
+        category: "candlestick",
+        run: cdlunique3river,
+    },
+    PatternRunner {
+        id: "cdlupsidegap2crows",
+        pattern_type: PatternType::CdlUpsideGap2Crows,
+        category: "candlestick",
+        run: cdlupsidegap2crows,
+    },
+    PatternRunner {
+        id: "cdlxsidegap3methods",
+        pattern_type: PatternType::CdlXSideGap3Methods,
+        category: "candlestick",
+        run: cdlxsidegap3methods,
+    },
+];
+
+const PATTERN_SPECS: [PatternSpec; 61] = [
+    PatternSpec {
+        id: "cdl2crows",
+        row_index: 0,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdl3blackcrows",
+        row_index: 1,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdl3inside",
+        row_index: 2,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdl3linestrike",
+        row_index: 3,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdl3outside",
+        row_index: 4,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdl3starsinsouth",
+        row_index: 5,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdl3whitesoldiers",
+        row_index: 6,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlabandonedbaby",
+        row_index: 7,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdladvanceblock",
+        row_index: 8,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlbelthold",
+        row_index: 9,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlbreakaway",
+        row_index: 10,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlclosingmarubozu",
+        row_index: 11,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlconcealbabyswall",
+        row_index: 12,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlcounterattack",
+        row_index: 13,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdldarkcloudcover",
+        row_index: 14,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdldoji",
+        row_index: 15,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdldojistar",
+        row_index: 16,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdldragonflydoji",
+        row_index: 17,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlengulfing",
+        row_index: 18,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdleveningdojistar",
+        row_index: 19,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdleveningstar",
+        row_index: 20,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlmorningstar",
+        row_index: 21,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlgravestonedoji",
+        row_index: 22,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlhammer",
+        row_index: 23,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlhangingman",
+        row_index: 24,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlharami",
+        row_index: 25,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlharamicross",
+        row_index: 26,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlhighwave",
+        row_index: 27,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlinvertedhammer",
+        row_index: 28,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdllongleggeddoji",
+        row_index: 29,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdllongline",
+        row_index: 30,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlmarubozu",
+        row_index: 31,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlrickshawman",
+        row_index: 32,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlshootingstar",
+        row_index: 33,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlshortline",
+        row_index: 34,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlspinningtop",
+        row_index: 35,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdltakuri",
+        row_index: 36,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlhomingpigeon",
+        row_index: 37,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlmatchinglow",
+        row_index: 38,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlinneck",
+        row_index: 39,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlonneck",
+        row_index: 40,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlpiercing",
+        row_index: 41,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlthrusting",
+        row_index: 42,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlmorningdojistar",
+        row_index: 43,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdltristar",
+        row_index: 44,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlidentical3crows",
+        row_index: 45,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlsticksandwich",
+        row_index: 46,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlseparatinglines",
+        row_index: 47,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlgapsidesidewhite",
+        row_index: 48,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlhikkake",
+        row_index: 49,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlhikkakemod",
+        row_index: 50,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlkicking",
+        row_index: 51,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlkickingbylength",
+        row_index: 52,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlladderbottom",
+        row_index: 53,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlmathold",
+        row_index: 54,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlrisefall3methods",
+        row_index: 55,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlstalledpattern",
+        row_index: 56,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdltasukigap",
+        row_index: 57,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlunique3river",
+        row_index: 58,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlupsidegap2crows",
+        row_index: 59,
+        category: "candlestick",
+    },
+    PatternSpec {
+        id: "cdlxsidegap3methods",
+        row_index: 60,
+        category: "candlestick",
+    },
+];
+
+pub fn list_patterns() -> &'static [PatternSpec] {
+    &PATTERN_SPECS
+}
+
+pub fn pattern_type_from_id(id: &str) -> Option<PatternType> {
+    PATTERN_RUNNERS
+        .iter()
+        .find(|runner| runner.id.eq_ignore_ascii_case(id))
+        .map(|runner| runner.pattern_type)
+}
+
+pub fn pattern(input: &PatternInput<'_>) -> Result<PatternOutput, PatternError> {
+    pattern_with_kernel(input, Kernel::Auto)
+}
+
+pub fn pattern_with_kernel(
+    input: &PatternInput<'_>,
+    kernel: Kernel,
+) -> Result<PatternOutput, PatternError> {
+    let _ = kernel;
+    PATTERN_RUNNERS
+        .iter()
+        .find(|runner| runner.pattern_type == input.params.pattern_type)
+        .map(|runner| (runner.run)(input))
+        .unwrap_or(Err(PatternError::Unknown))
+}
+
+pub fn pattern_recognition(
+    input: &PatternRecognitionInput<'_>,
+) -> Result<PatternRecognitionOutput, PatternRecognitionError> {
+    pattern_recognition_with_kernel(input, Kernel::Auto)
+}
+
+pub fn pattern_recognition_with_kernel(
+    input: &PatternRecognitionInput<'_>,
+    kernel: Kernel,
+) -> Result<PatternRecognitionOutput, PatternRecognitionError> {
+    let _ = kernel;
+    let (pattern_data, open, high, low, close, cols) = match &input.data {
+        PatternRecognitionData::Candles { candles } => {
+            (
+                PatternData::Candles { candles },
+                candles.open.as_slice(),
+                candles.high.as_slice(),
+                candles.low.as_slice(),
+                candles.close.as_slice(),
+                candles.close.len(),
+            )
+        }
+        PatternRecognitionData::Slices {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            if open.len() != high.len() || open.len() != low.len() || open.len() != close.len() {
+                return Err(PatternRecognitionError::DataLengthMismatch {
+                    open: open.len(),
+                    high: high.len(),
+                    low: low.len(),
+                    close: close.len(),
+                });
+            }
+            (
+                PatternData::Slices {
+                    open,
+                    high,
+                    low,
+                    close,
+                },
+                *open,
+                *high,
+                *low,
+                *close,
+                close.len(),
+            )
+        }
+    };
+
+    let primitives = build_shared_primitives(open, high, low, close);
+    debug_assert_eq!(primitives.body.len(), cols);
+    debug_assert_eq!(primitives.range.len(), cols);
+    debug_assert_eq!(primitives.upper_shadow.len(), cols);
+    debug_assert_eq!(primitives.lower_shadow.len(), cols);
+    debug_assert_eq!(primitives.direction.len(), cols);
+    debug_assert_eq!(primitives.body_gap_up.len(), cols);
+    debug_assert_eq!(primitives.body_gap_down.len(), cols);
+
+    let rows = PATTERN_RUNNERS.len();
+    let mut matrix = make_uninit_u8_matrix(rows, cols);
+
+    for (row, runner) in PATTERN_RUNNERS.iter().enumerate() {
+        let pattern_input = PatternInput {
+            data: pattern_data.clone(),
+            params: PatternParams {
+                pattern_type: runner.pattern_type,
+                penetration: 0.0,
+            },
+        };
+        let out = (runner.run)(&pattern_input)?;
+        if out.values.len() != cols {
+            return Err(PatternRecognitionError::OutputLengthMismatch {
+                pattern_id: runner.id,
+                expected: cols,
+                got: out.values.len(),
+            });
+        }
+        let offset = row * cols;
+        let dst = &mut matrix[offset..offset + cols];
+        for (cell, value) in dst.iter_mut().zip(out.values.into_iter()) {
+            cell.write(if value == 0 { 0 } else { 1 });
+        }
+    }
+
+    let pattern_ids = PATTERN_RUNNERS.iter().map(|x| x.id).collect();
+    let values_u8 = unsafe { assume_init_u8(matrix) };
+
+    Ok(PatternRecognitionOutput {
+        rows,
+        cols,
+        values_u8,
+        pattern_ids,
+        warmup: None,
+    })
+}
+
+pub fn extract_pattern_series<'a>(
+    output: &'a PatternRecognitionOutput,
+    pattern_id: &str,
+) -> Option<&'a [u8]> {
+    let row = output.pattern_ids.iter().position(|id| *id == pattern_id)?;
+    let start = row.checked_mul(output.cols)?;
+    let end = start.checked_add(output.cols)?;
+    output.values_u8.get(start..end)
+}
+
+pub fn pattern_hit(
+    output: &PatternRecognitionOutput,
+    pattern_id: &str,
+    bar: usize,
+) -> Option<bool> {
+    let row = output.pattern_ids.iter().position(|id| *id == pattern_id)?;
+    if bar >= output.cols {
+        return None;
+    }
+    let idx = row.checked_mul(output.cols)?.checked_add(bar)?;
+    output.values_u8.get(idx).map(|x| *x != 0)
+}
+
+fn make_uninit_u8_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<u8>> {
+    let total = rows
+        .checked_mul(cols)
+        .expect("rows * cols overflowed usize");
+
+    let mut v: Vec<MaybeUninit<u8>> = Vec::new();
+    v.try_reserve_exact(total)
+        .expect("OOM in make_uninit_u8_matrix");
+
+    #[cfg(not(debug_assertions))]
+    unsafe {
+        v.set_len(total);
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        for _ in 0..total {
+            v.push(MaybeUninit::new(0xCD));
+        }
+    }
+
+    v
+}
+
+unsafe fn assume_init_u8(mut v: Vec<MaybeUninit<u8>>) -> Vec<u8> {
+    let ptr = v.as_mut_ptr() as *mut u8;
+    let len = v.len();
+    let cap = v.capacity();
+    std::mem::forget(v);
+    Vec::from_raw_parts(ptr, len, cap)
 }
 
 #[derive(Debug, Error)]
@@ -144,11 +1263,29 @@ fn candle_range(open: f64, close: f64) -> f64 {
     real_body(open, close)
 }
 
-#[inline]
-pub fn cdl2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    const BODY_LONG_PERIOD: usize = 10;
+#[inline(always)]
+fn upper_shadow(open: f64, high: f64, close: f64) -> f64 {
+    if close >= open {
+        high - close
+    } else {
+        high - open
+    }
+}
 
-    let (open, high, low, close) = match &input.data {
+#[inline(always)]
+fn lower_shadow(open: f64, low: f64, close: f64) -> f64 {
+    if close >= open {
+        open - low
+    } else {
+        close - low
+    }
+}
+
+#[inline]
+fn input_ohlc<'a>(
+    data: &'a PatternData<'a>,
+) -> Result<(&'a [f64], &'a [f64], &'a [f64], &'a [f64]), PatternError> {
+    match data {
         PatternData::Candles { candles } => {
             let open = candles
                 .select_candle_field("open")
@@ -162,10 +1299,29 @@ pub fn cdl2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
             let close = candles
                 .select_candle_field("close")
                 .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
+            Ok((open, high, low, close))
         }
-    };
+        PatternData::Slices {
+            open,
+            high,
+            low,
+            close,
+        } => {
+            if open.len() != high.len() || open.len() != low.len() || open.len() != close.len() {
+                return Err(PatternError::CandleFieldError(
+                    "open/high/low/close length mismatch".to_string(),
+                ));
+            }
+            Ok((open, high, low, close))
+        }
+    }
+}
+
+#[inline]
+pub fn cdl2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    const BODY_LONG_PERIOD: usize = 10;
+
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let lookback_total = 2 + BODY_LONG_PERIOD;
@@ -228,24 +1384,7 @@ pub fn cdl2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
 pub fn cdl3blackcrows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
     const SHADOW_VERY_SHORT_PERIOD: usize = 10;
 
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let lookback_total = 3 + SHADOW_VERY_SHORT_PERIOD;
@@ -332,24 +1471,7 @@ pub fn cdl3inside(input: &PatternInput) -> Result<PatternOutput, PatternError> {
     const BODY_LONG_PERIOD: usize = 10;
     const BODY_SHORT_PERIOD: usize = 10;
 
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let lookback_total = 2 + BODY_LONG_PERIOD.max(BODY_SHORT_PERIOD);
@@ -440,24 +1562,7 @@ pub fn cdl3inside(input: &PatternInput) -> Result<PatternOutput, PatternError> {
 pub fn cdl3linestrike(input: &PatternInput) -> Result<PatternOutput, PatternError> {
     const NEAR_PERIOD: usize = 10;
 
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let lookback_total = 3 + NEAR_PERIOD;
@@ -548,24 +1653,7 @@ pub fn cdl3linestrike(input: &PatternInput) -> Result<PatternOutput, PatternErro
 
 #[inline]
 pub fn cdl3outside(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     fn candle_color(o: f64, c: f64) -> i8 {
         if c >= o {
@@ -620,23 +1708,7 @@ pub fn cdl3starsinsouth(input: &PatternInput) -> Result<PatternOutput, PatternEr
     const SHADOW_VERY_SHORT_PERIOD: usize = 10;
     const BODY_SHORT_PERIOD: usize = 10;
 
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     fn candle_color(o: f64, c: f64) -> i8 {
         if c >= o {
@@ -785,24 +1857,7 @@ pub fn cdl3whitesoldiers(input: &PatternInput) -> Result<PatternOutput, PatternE
     const FAR_PERIOD: usize = 10;
     const BODY_SHORT_PERIOD: usize = 10;
 
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     fn candle_color(o: f64, c: f64) -> i8 {
         if c >= o {
@@ -967,24 +2022,7 @@ pub fn cdlabandonedbaby(input: &PatternInput) -> Result<PatternOutput, PatternEr
     const BODY_DOJI_PERIOD: usize = 10;
     const BODY_SHORT_PERIOD: usize = 10;
 
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let penetration = input.params.penetration;
 
@@ -1084,24 +2122,7 @@ pub fn cdlabandonedbaby(input: &PatternInput) -> Result<PatternOutput, PatternEr
 
 #[inline]
 pub fn cdladvanceblock(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let shadow_short_period = 10;
@@ -1302,24 +2323,7 @@ pub fn cdladvanceblock(input: &PatternInput) -> Result<PatternOutput, PatternErr
 
 #[inline]
 pub fn cdlbelthold(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -1438,24 +2442,7 @@ pub fn cdlbelthold(input: &PatternInput) -> Result<PatternOutput, PatternError> 
 
 #[inline]
 pub fn cdlbreakaway(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -1553,24 +2540,7 @@ pub fn cdlbreakaway(input: &PatternInput) -> Result<PatternOutput, PatternError>
 
 #[inline]
 pub fn cdlclosingmarubozu(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -1690,24 +2660,7 @@ pub fn cdlclosingmarubozu(input: &PatternInput) -> Result<PatternOutput, Pattern
 
 #[inline]
 pub fn cdlconcealbabyswall(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let shadow_very_short_period = 10;
@@ -1869,24 +2822,7 @@ pub fn cdlconcealbabyswall(input: &PatternInput) -> Result<PatternOutput, Patter
 
 #[inline]
 pub fn cdlcounterattack(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -1984,23 +2920,7 @@ pub fn cdlcounterattack(input: &PatternInput) -> Result<PatternOutput, PatternEr
 
 #[inline]
 pub fn cdldarkcloudcover(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, _, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            (open, high, low, close)
-        }
-    };
+    let (open, high, _, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -2068,23 +2988,7 @@ pub fn cdldarkcloudcover(input: &PatternInput) -> Result<PatternOutput, PatternE
 
 #[inline]
 pub fn cdldoji(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, _, _, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            (open, high, low, close)
-        }
-    };
+    let (open, _, _, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_doji_period = 10;
@@ -2136,24 +3040,7 @@ pub fn cdldoji(input: &PatternInput) -> Result<PatternOutput, PatternError> {
 
 #[inline]
 pub fn cdldojistar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -2245,24 +3132,7 @@ pub fn cdldojistar(input: &PatternInput) -> Result<PatternOutput, PatternError> 
 
 #[inline]
 pub fn cdldragonflydoji(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, high, low, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-
-            (open, high, low, close)
-        }
-    };
+    let (open, high, low, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_doji_period = 10;
@@ -2368,23 +3238,7 @@ pub fn cdldragonflydoji(input: &PatternInput) -> Result<PatternOutput, PatternEr
 
 #[inline]
 pub fn cdlengulfing(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, _, _, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            (open, high, low, close)
-        }
-    };
+    let (open, _, _, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     if size < 2 {
@@ -2422,23 +3276,7 @@ pub fn cdlengulfing(input: &PatternInput) -> Result<PatternOutput, PatternError>
 
 #[inline]
 pub fn cdleveningdojistar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
-    let (open, _, _, close) = match &input.data {
-        PatternData::Candles { candles } => {
-            let open = candles
-                .select_candle_field("open")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let high = candles
-                .select_candle_field("high")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let low = candles
-                .select_candle_field("low")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            let close = candles
-                .select_candle_field("close")
-                .map_err(|e| PatternError::CandleFieldError(e.to_string()))?;
-            (open, high, low, close)
-        }
-    };
+    let (open, _, _, close) = input_ohlc(&input.data)?;
 
     let size = open.len();
     let body_long_period = 10;
@@ -2543,4 +3381,3614 @@ pub fn cdleveningdojistar(input: &PatternInput) -> Result<PatternOutput, Pattern
     }
 
     Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdleveningstar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _, _, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_short_period = 10;
+    let penetration = if input.params.penetration == 0.0 {
+        0.3
+    } else {
+        input.params.penetration
+    };
+    let lookback_total = 2 + body_long_period.max(body_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+    let mut body_short_period_total2 = 0.0;
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn gap_up(current_open: f64, current_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        current_open.min(current_close) > prev_open.max(prev_close)
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_long_trailing_idx = start_idx.saturating_sub(2 + body_long_period);
+    let mut body_short_trailing_idx = start_idx.saturating_sub(1 + body_short_period);
+
+    let mut i = body_long_trailing_idx;
+    while i < start_idx - 2 {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = body_short_trailing_idx;
+    while i < start_idx - 1 {
+        body_short_period_total += real_body(open[i], close[i]);
+        body_short_period_total2 += real_body(open[i + 1], close[i + 1]);
+        i += 1;
+    }
+
+    while start_idx < size {
+        if real_body(open[start_idx - 2], close[start_idx - 2])
+            > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[start_idx - 2], close[start_idx - 2]) == 1
+            && real_body(open[start_idx - 1], close[start_idx - 1])
+                <= candle_average(body_short_period_total, body_short_period)
+            && gap_up(
+                open[start_idx - 1],
+                close[start_idx - 1],
+                open[start_idx - 2],
+                close[start_idx - 2],
+            )
+            && real_body(open[start_idx], close[start_idx])
+                > candle_average(body_short_period_total2, body_short_period)
+            && candle_color(open[start_idx], close[start_idx]) == -1
+            && close[start_idx]
+                < close[start_idx - 2]
+                    - real_body(open[start_idx - 2], close[start_idx - 2]) * penetration
+        {
+            out[start_idx] = -100;
+        }
+
+        body_long_period_total += real_body(open[start_idx - 2], close[start_idx - 2])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_short_period_total += real_body(open[start_idx - 1], close[start_idx - 1])
+            - real_body(
+                open[body_short_trailing_idx],
+                close[body_short_trailing_idx],
+            );
+        body_short_period_total2 += real_body(open[start_idx], close[start_idx])
+            - real_body(
+                open[body_short_trailing_idx + 1],
+                close[body_short_trailing_idx + 1],
+            );
+
+        start_idx += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlmorningstar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _, _, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_short_period = 10;
+    let penetration = if input.params.penetration == 0.0 {
+        0.3
+    } else {
+        input.params.penetration
+    };
+    let lookback_total = 2 + body_long_period.max(body_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+    let mut body_short_period_total2 = 0.0;
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn gap_down(current_open: f64, current_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        current_open.max(current_close) < prev_open.min(prev_close)
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_long_trailing_idx = start_idx.saturating_sub(2 + body_long_period);
+    let mut body_short_trailing_idx = start_idx.saturating_sub(1 + body_short_period);
+
+    let mut i = body_long_trailing_idx;
+    while i < start_idx - 2 {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = body_short_trailing_idx;
+    while i < start_idx - 1 {
+        body_short_period_total += real_body(open[i], close[i]);
+        body_short_period_total2 += real_body(open[i + 1], close[i + 1]);
+        i += 1;
+    }
+
+    while start_idx < size {
+        if real_body(open[start_idx - 2], close[start_idx - 2])
+            > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[start_idx - 2], close[start_idx - 2]) == -1
+            && real_body(open[start_idx - 1], close[start_idx - 1])
+                <= candle_average(body_short_period_total, body_short_period)
+            && gap_down(
+                open[start_idx - 1],
+                close[start_idx - 1],
+                open[start_idx - 2],
+                close[start_idx - 2],
+            )
+            && real_body(open[start_idx], close[start_idx])
+                > candle_average(body_short_period_total2, body_short_period)
+            && candle_color(open[start_idx], close[start_idx]) == 1
+            && close[start_idx]
+                > close[start_idx - 2]
+                    + real_body(open[start_idx - 2], close[start_idx - 2]) * penetration
+        {
+            out[start_idx] = 100;
+        }
+
+        body_long_period_total += real_body(open[start_idx - 2], close[start_idx - 2])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_short_period_total += real_body(open[start_idx - 1], close[start_idx - 1])
+            - real_body(
+                open[body_short_trailing_idx],
+                close[body_short_trailing_idx],
+            );
+        body_short_period_total2 += real_body(open[start_idx], close[start_idx])
+            - real_body(
+                open[body_short_trailing_idx + 1],
+                close[body_short_trailing_idx + 1],
+            );
+
+        start_idx += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlgravestonedoji(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_doji_period = 10;
+    let shadow_very_short_period = 10;
+    let lookback_total = body_doji_period.max(shadow_very_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_doji_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_doji_trailing_idx = start_idx.saturating_sub(body_doji_period);
+    let mut shadow_very_short_trailing_idx = start_idx.saturating_sub(shadow_very_short_period);
+
+    let mut i = body_doji_trailing_idx;
+    while i < start_idx {
+        body_doji_period_total += candle_range(open[i], close[i]);
+        i += 1;
+    }
+
+    i = shadow_very_short_trailing_idx;
+    while i < start_idx {
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+
+    while start_idx < size {
+        let avg_body_doji = candle_average(body_doji_period_total, body_doji_period);
+        let avg_shadow_very_short =
+            candle_average(shadow_very_short_period_total, shadow_very_short_period);
+        let rb = real_body(open[start_idx], close[start_idx]);
+        let ls = lower_shadow(open[start_idx], low[start_idx], close[start_idx]);
+        let us = upper_shadow(open[start_idx], high[start_idx], close[start_idx]);
+
+        if rb <= avg_body_doji && ls < avg_shadow_very_short && us > avg_shadow_very_short {
+            out[start_idx] = 100;
+        }
+
+        body_doji_period_total += candle_range(open[start_idx], close[start_idx])
+            - candle_range(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+        shadow_very_short_period_total +=
+            upper_shadow(open[start_idx], high[start_idx], close[start_idx])
+                - upper_shadow(
+                    open[shadow_very_short_trailing_idx],
+                    high[shadow_very_short_trailing_idx],
+                    close[shadow_very_short_trailing_idx],
+                );
+
+        start_idx += 1;
+        body_doji_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlhammer(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let shadow_long_period = 10;
+    let shadow_very_short_period = 10;
+    let near_period = 10;
+    let lookback_total = body_short_period
+        .max(shadow_long_period)
+        .max(shadow_very_short_period)
+        .max(near_period)
+        + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_long_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+    let mut near_period_total = 0.0;
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_trailing_idx = start_idx.saturating_sub(body_short_period);
+    let mut shadow_long_trailing_idx = start_idx.saturating_sub(shadow_long_period);
+    let mut shadow_very_short_trailing_idx = start_idx.saturating_sub(shadow_very_short_period);
+    let mut near_trailing_idx = start_idx.saturating_sub(1 + near_period);
+
+    let mut i = body_trailing_idx;
+    while i < start_idx {
+        body_period_total += candle_range(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < start_idx {
+        shadow_long_period_total += lower_shadow(open[i], low[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_short_trailing_idx;
+    while i < start_idx {
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = near_trailing_idx;
+    while i < start_idx - 1 {
+        near_period_total += candle_range(open[i], close[i]);
+        i += 1;
+    }
+
+    while start_idx < size {
+        let rb = real_body(open[start_idx], close[start_idx]);
+        let ls = lower_shadow(open[start_idx], low[start_idx], close[start_idx]);
+        let us = upper_shadow(open[start_idx], high[start_idx], close[start_idx]);
+        let rb_low = open[start_idx].min(close[start_idx]);
+        if rb < candle_average(body_period_total, body_short_period)
+            && ls > candle_average(shadow_long_period_total, shadow_long_period)
+            && us < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+            && rb_low <= low[start_idx - 1] + candle_average(near_period_total, near_period)
+        {
+            out[start_idx] = 100;
+        }
+
+        body_period_total += candle_range(open[start_idx], close[start_idx])
+            - candle_range(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_long_period_total += lower_shadow(open[start_idx], low[start_idx], close[start_idx])
+            - lower_shadow(
+                open[shadow_long_trailing_idx],
+                low[shadow_long_trailing_idx],
+                close[shadow_long_trailing_idx],
+            );
+        shadow_very_short_period_total +=
+            upper_shadow(open[start_idx], high[start_idx], close[start_idx])
+                - upper_shadow(
+                    open[shadow_very_short_trailing_idx],
+                    high[shadow_very_short_trailing_idx],
+                    close[shadow_very_short_trailing_idx],
+                );
+        near_period_total += candle_range(open[start_idx - 1], close[start_idx - 1])
+            - candle_range(open[near_trailing_idx], close[near_trailing_idx]);
+
+        start_idx += 1;
+        body_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+        near_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlhangingman(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let shadow_long_period = 10;
+    let shadow_very_short_period = 10;
+    let near_period = 10;
+    let lookback_total = body_short_period
+        .max(shadow_long_period)
+        .max(shadow_very_short_period)
+        .max(near_period)
+        + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_long_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+    let mut near_period_total = 0.0;
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut start_idx = lookback_total;
+    let mut body_trailing_idx = start_idx.saturating_sub(body_short_period);
+    let mut shadow_long_trailing_idx = start_idx.saturating_sub(shadow_long_period);
+    let mut shadow_very_short_trailing_idx = start_idx.saturating_sub(shadow_very_short_period);
+    let mut near_trailing_idx = start_idx.saturating_sub(1 + near_period);
+
+    let mut i = body_trailing_idx;
+    while i < start_idx {
+        body_period_total += candle_range(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < start_idx {
+        shadow_long_period_total += lower_shadow(open[i], low[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_short_trailing_idx;
+    while i < start_idx {
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = near_trailing_idx;
+    while i < start_idx - 1 {
+        near_period_total += candle_range(open[i], close[i]);
+        i += 1;
+    }
+
+    while start_idx < size {
+        let rb = real_body(open[start_idx], close[start_idx]);
+        let ls = lower_shadow(open[start_idx], low[start_idx], close[start_idx]);
+        let us = upper_shadow(open[start_idx], high[start_idx], close[start_idx]);
+        let rb_low = open[start_idx].min(close[start_idx]);
+        if rb < candle_average(body_period_total, body_short_period)
+            && ls > candle_average(shadow_long_period_total, shadow_long_period)
+            && us < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+            && rb_low >= high[start_idx - 1] - candle_average(near_period_total, near_period)
+        {
+            out[start_idx] = -100;
+        }
+
+        body_period_total += candle_range(open[start_idx], close[start_idx])
+            - candle_range(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_long_period_total += lower_shadow(open[start_idx], low[start_idx], close[start_idx])
+            - lower_shadow(
+                open[shadow_long_trailing_idx],
+                low[shadow_long_trailing_idx],
+                close[shadow_long_trailing_idx],
+            );
+        shadow_very_short_period_total +=
+            upper_shadow(open[start_idx], high[start_idx], close[start_idx])
+                - upper_shadow(
+                    open[shadow_very_short_trailing_idx],
+                    high[shadow_very_short_trailing_idx],
+                    close[shadow_very_short_trailing_idx],
+                );
+        near_period_total += candle_range(open[start_idx - 1], close[start_idx - 1])
+            - candle_range(open[near_trailing_idx], close[near_trailing_idx]);
+
+        start_idx += 1;
+        body_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+        near_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlharami(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _, _, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_short_period = 10;
+    let lookback_total = body_long_period.max(body_short_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - 1 - body_long_period;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total - 1 {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_short_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i - 1], close[i - 1])
+            > candle_average(body_long_period_total, body_long_period)
+            && real_body(open[i], close[i])
+                <= candle_average(body_short_period_total, body_short_period)
+        {
+            let hi0 = open[i - 1].max(close[i - 1]);
+            let lo0 = open[i - 1].min(close[i - 1]);
+            let hi1 = open[i].max(close[i]);
+            let lo1 = open[i].min(close[i]);
+            let sign = -(candle_color(open[i - 1], close[i - 1]) as i8);
+            if hi1 < hi0 && lo1 > lo0 {
+                out[i] = sign * 100;
+            } else if hi1 <= hi0 && lo1 >= lo0 {
+                out[i] = sign * 80;
+            }
+        }
+
+        body_long_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_short_period_total += real_body(open[i], close[i])
+            - real_body(
+                open[body_short_trailing_idx],
+                close[body_short_trailing_idx],
+            );
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlharamicross(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _, _, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_doji_period = 10;
+    let lookback_total = body_long_period.max(body_doji_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_doji_period_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - 1 - body_long_period;
+    let mut body_doji_trailing_idx = lookback_total - body_doji_period;
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total - 1 {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = body_doji_trailing_idx;
+    while i < lookback_total {
+        body_doji_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i - 1], close[i - 1])
+            > candle_average(body_long_period_total, body_long_period)
+            && real_body(open[i], close[i])
+                <= candle_average(body_doji_period_total, body_doji_period)
+        {
+            let hi0 = open[i - 1].max(close[i - 1]);
+            let lo0 = open[i - 1].min(close[i - 1]);
+            let hi1 = open[i].max(close[i]);
+            let lo1 = open[i].min(close[i]);
+            let sign = -(candle_color(open[i - 1], close[i - 1]) as i8);
+            if hi1 < hi0 && lo1 > lo0 {
+                out[i] = sign * 100;
+            } else if hi1 <= hi0 && lo1 >= lo0 {
+                out[i] = sign * 80;
+            }
+        }
+
+        body_long_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_doji_period_total += real_body(open[i], close[i])
+            - real_body(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_doji_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlhighwave(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let shadow_very_long_period = 10;
+    let lookback_total = body_short_period.max(shadow_very_long_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - body_short_period;
+    let mut shadow_trailing_idx = lookback_total - shadow_very_long_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let rb = real_body(open[i], close[i]);
+        let us = upper_shadow(open[i], high[i], close[i]);
+        let ls = lower_shadow(open[i], low[i], close[i]);
+        if rb < candle_average(body_period_total, body_short_period)
+            && us > candle_average(shadow_period_total, shadow_very_long_period)
+            && ls > candle_average(shadow_period_total, shadow_very_long_period)
+        {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        body_period_total += real_body(open[i], close[i])
+            - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_trailing_idx],
+                high[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            );
+        i += 1;
+        body_trailing_idx += 1;
+        shadow_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlinvertedhammer(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let shadow_long_period = 10;
+    let shadow_very_short_period = 10;
+    let lookback_total = body_short_period
+        .max(shadow_long_period)
+        .max(shadow_very_short_period)
+        + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_long_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - 1 - body_short_period;
+    let mut shadow_long_trailing_idx = lookback_total - 1 - shadow_long_period;
+    let mut shadow_very_short_trailing_idx = lookback_total - 1 - shadow_very_short_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total - 1 {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < lookback_total - 1 {
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_short_trailing_idx;
+    while i < lookback_total - 1 {
+        shadow_very_short_period_total += lower_shadow(open[i], low[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i], close[i]) < candle_average(body_period_total, body_short_period)
+            && upper_shadow(open[i], high[i], close[i])
+                > candle_average(shadow_long_period_total, shadow_long_period)
+            && lower_shadow(open[i], low[i], close[i])
+                < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+            && real_body_gap_down(open[i], close[i], open[i - 1], close[i - 1])
+        {
+            out[i] = 100;
+        }
+
+        body_period_total +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_long_trailing_idx],
+                high[shadow_long_trailing_idx],
+                close[shadow_long_trailing_idx],
+            );
+        shadow_very_short_period_total += lower_shadow(open[i], low[i], close[i])
+            - lower_shadow(
+                open[shadow_very_short_trailing_idx],
+                low[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            );
+
+        i += 1;
+        body_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdllongleggeddoji(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_doji_period = 10;
+    let shadow_long_period = 10;
+    let lookback_total = body_doji_period.max(shadow_long_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_doji_period_total = 0.0;
+    let mut shadow_long_period_total = 0.0;
+    let mut body_doji_trailing_idx = lookback_total - body_doji_period;
+    let mut shadow_long_trailing_idx = lookback_total - shadow_long_period;
+
+    let mut i = body_doji_trailing_idx;
+    while i < lookback_total {
+        body_doji_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < lookback_total {
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let rb = real_body(open[i], close[i]);
+        let us = upper_shadow(open[i], high[i], close[i]);
+        let ls = lower_shadow(open[i], low[i], close[i]);
+        if rb <= candle_average(body_doji_period_total, body_doji_period)
+            && (ls > candle_average(shadow_long_period_total, shadow_long_period)
+                || us > candle_average(shadow_long_period_total, shadow_long_period))
+        {
+            out[i] = 100;
+        }
+
+        body_doji_period_total += real_body(open[i], close[i])
+            - real_body(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_long_trailing_idx],
+                high[shadow_long_trailing_idx],
+                close[shadow_long_trailing_idx],
+            );
+
+        i += 1;
+        body_doji_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdllongline(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let shadow_short_period = 10;
+    let lookback_total = body_long_period.max(shadow_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - body_long_period;
+    let mut shadow_trailing_idx = lookback_total - shadow_short_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i], close[i]) > candle_average(body_period_total, body_long_period)
+            && upper_shadow(open[i], high[i], close[i])
+                < candle_average(shadow_period_total, shadow_short_period)
+            && lower_shadow(open[i], low[i], close[i])
+                < candle_average(shadow_period_total, shadow_short_period)
+        {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        body_period_total +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_trailing_idx],
+                high[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            );
+
+        i += 1;
+        body_trailing_idx += 1;
+        shadow_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlmarubozu(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let shadow_very_short_period = 10;
+    let lookback_total = body_long_period.max(shadow_very_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+    let mut shadow_very_short_trailing_idx = lookback_total - shadow_very_short_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_short_trailing_idx;
+    while i < lookback_total {
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i], close[i]) > candle_average(body_long_period_total, body_long_period)
+            && upper_shadow(open[i], high[i], close[i])
+                < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+            && lower_shadow(open[i], low[i], close[i])
+                < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+        {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        body_long_period_total +=
+            real_body(open[i], close[i]) - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_very_short_trailing_idx],
+                high[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            );
+
+        i += 1;
+        body_long_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlrickshawman(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_doji_period = 10;
+    let shadow_long_period = 10;
+    let near_period = 5;
+    let lookback_total = body_doji_period.max(shadow_long_period).max(near_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_doji_period_total = 0.0;
+    let mut shadow_long_period_total = 0.0;
+    let mut near_period_total = 0.0;
+    let mut body_doji_trailing_idx = lookback_total - body_doji_period;
+    let mut shadow_long_trailing_idx = lookback_total - shadow_long_period;
+    let mut near_trailing_idx = lookback_total - near_period;
+
+    let mut i = body_doji_trailing_idx;
+    while i < lookback_total {
+        body_doji_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < lookback_total {
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = near_trailing_idx;
+    while i < lookback_total {
+        near_period_total += candle_range(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let rb = real_body(open[i], close[i]);
+        let us = upper_shadow(open[i], high[i], close[i]);
+        let ls = lower_shadow(open[i], low[i], close[i]);
+        let hl_mid = low[i] + (high[i] - low[i]) * 0.5;
+        let body_low = open[i].min(close[i]);
+        let body_high = open[i].max(close[i]);
+        let near_avg = candle_average(near_period_total, near_period);
+
+        if rb <= candle_average(body_doji_period_total, body_doji_period)
+            && ls > candle_average(shadow_long_period_total, shadow_long_period)
+            && us > candle_average(shadow_long_period_total, shadow_long_period)
+            && body_low <= hl_mid + near_avg
+            && body_high >= hl_mid - near_avg
+        {
+            out[i] = 100;
+        }
+
+        body_doji_period_total += real_body(open[i], close[i])
+            - real_body(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_long_trailing_idx],
+                high[shadow_long_trailing_idx],
+                close[shadow_long_trailing_idx],
+            );
+        near_period_total += candle_range(open[i], close[i])
+            - candle_range(open[near_trailing_idx], close[near_trailing_idx]);
+
+        i += 1;
+        body_doji_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+        near_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlshootingstar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let shadow_long_period = 10;
+    let shadow_very_short_period = 10;
+    let lookback_total = body_short_period
+        .max(shadow_long_period)
+        .max(shadow_very_short_period)
+        + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_long_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - 1 - body_short_period;
+    let mut shadow_long_trailing_idx = lookback_total - 1 - shadow_long_period;
+    let mut shadow_very_short_trailing_idx = lookback_total - 1 - shadow_very_short_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total - 1 {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_long_trailing_idx;
+    while i < lookback_total - 1 {
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_short_trailing_idx;
+    while i < lookback_total - 1 {
+        shadow_very_short_period_total += lower_shadow(open[i], low[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i], close[i]) < candle_average(body_period_total, body_short_period)
+            && upper_shadow(open[i], high[i], close[i])
+                > candle_average(shadow_long_period_total, shadow_long_period)
+            && lower_shadow(open[i], low[i], close[i])
+                < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+            && real_body_gap_up(open[i], close[i], open[i - 1], close[i - 1])
+        {
+            out[i] = -100;
+        }
+
+        body_period_total +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_long_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_long_trailing_idx],
+                high[shadow_long_trailing_idx],
+                close[shadow_long_trailing_idx],
+            );
+        shadow_very_short_period_total += lower_shadow(open[i], low[i], close[i])
+            - lower_shadow(
+                open[shadow_very_short_trailing_idx],
+                low[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            );
+
+        i += 1;
+        body_trailing_idx += 1;
+        shadow_long_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlshortline(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let shadow_short_period = 10;
+    let lookback_total = body_short_period.max(shadow_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut shadow_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - body_short_period;
+    let mut shadow_trailing_idx = lookback_total - shadow_short_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i], close[i]) < candle_average(body_period_total, body_short_period)
+            && upper_shadow(open[i], high[i], close[i])
+                < candle_average(shadow_period_total, shadow_short_period)
+            && lower_shadow(open[i], low[i], close[i])
+                < candle_average(shadow_period_total, shadow_short_period)
+        {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        body_period_total +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+        shadow_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_trailing_idx],
+                high[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            );
+
+        i += 1;
+        body_trailing_idx += 1;
+        shadow_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlspinningtop(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let lookback_total = body_short_period;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - body_short_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let rb = real_body(open[i], close[i]);
+        let us = upper_shadow(open[i], high[i], close[i]);
+        let ls = lower_shadow(open[i], low[i], close[i]);
+        if rb < candle_average(body_period_total, body_short_period) && us > rb && ls > rb {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        body_period_total +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+
+        i += 1;
+        body_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdltakuri(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_doji_period = 10;
+    let shadow_very_short_period = 10;
+    let shadow_very_long_period = 10;
+    let lookback_total = body_doji_period
+        .max(shadow_very_short_period)
+        .max(shadow_very_long_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_doji_period_total = 0.0;
+    let mut shadow_very_short_period_total = 0.0;
+    let mut shadow_very_long_period_total = 0.0;
+    let mut body_doji_trailing_idx = lookback_total - body_doji_period;
+    let mut shadow_very_short_trailing_idx = lookback_total - shadow_very_short_period;
+    let mut shadow_very_long_trailing_idx = lookback_total - shadow_very_long_period;
+
+    let mut i = body_doji_trailing_idx;
+    while i < lookback_total {
+        body_doji_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_short_trailing_idx;
+    while i < lookback_total {
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i]);
+        i += 1;
+    }
+    i = shadow_very_long_trailing_idx;
+    while i < lookback_total {
+        shadow_very_long_period_total += lower_shadow(open[i], low[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i], close[i]) <= candle_average(body_doji_period_total, body_doji_period)
+            && upper_shadow(open[i], high[i], close[i])
+                < candle_average(shadow_very_short_period_total, shadow_very_short_period)
+            && lower_shadow(open[i], low[i], close[i])
+                > candle_average(shadow_very_long_period_total, shadow_very_long_period)
+        {
+            out[i] = 100;
+        }
+
+        body_doji_period_total += real_body(open[i], close[i])
+            - real_body(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+        shadow_very_short_period_total += upper_shadow(open[i], high[i], close[i])
+            - upper_shadow(
+                open[shadow_very_short_trailing_idx],
+                high[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            );
+        shadow_very_long_period_total += lower_shadow(open[i], low[i], close[i])
+            - lower_shadow(
+                open[shadow_very_long_trailing_idx],
+                low[shadow_very_long_trailing_idx],
+                close[shadow_very_long_trailing_idx],
+            );
+
+        i += 1;
+        body_doji_trailing_idx += 1;
+        shadow_very_short_trailing_idx += 1;
+        shadow_very_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlhomingpigeon(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_short_period = 10;
+    let lookback_total = body_long_period.max(body_short_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_short_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 1], close[i - 1]) == -1
+            && candle_color(open[i], close[i]) == -1
+            && real_body(open[i - 1], close[i - 1])
+                > candle_average(body_long_period_total, body_long_period)
+            && real_body(open[i], close[i]) <= candle_average(body_short_period_total, body_short_period)
+            && open[i] < open[i - 1]
+            && close[i] > close[i - 1]
+        {
+            out[i] = 100;
+        }
+
+        body_long_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx - 1], close[body_long_trailing_idx - 1]);
+        body_short_period_total += real_body(open[i], close[i])
+            - real_body(open[body_short_trailing_idx], close[body_short_trailing_idx]);
+
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlmatchinglow(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let equal_period = 10;
+    let lookback_total = equal_period + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut equal_period_total = 0.0;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+
+    let mut i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let eq_avg = candle_average(equal_period_total, equal_period);
+        if candle_color(open[i - 1], close[i - 1]) == -1
+            && candle_color(open[i], close[i]) == -1
+            && close[i] <= close[i - 1] + eq_avg
+            && close[i] >= close[i - 1] - eq_avg
+        {
+            out[i] = 100;
+        }
+
+        equal_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+        i += 1;
+        equal_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlinneck(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let equal_period = 10;
+    let body_long_period = 10;
+    let lookback_total = equal_period.max(body_long_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut equal_period_total = 0.0;
+    let mut body_long_period_total = 0.0;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let eq_avg = candle_average(equal_period_total, equal_period);
+        if candle_color(open[i - 1], close[i - 1]) == -1
+            && real_body(open[i - 1], close[i - 1])
+                > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[i], close[i]) == 1
+            && open[i] < low[i - 1]
+            && close[i] <= close[i - 1] + eq_avg
+            && close[i] >= close[i - 1]
+        {
+            out[i] = -100;
+        }
+
+        equal_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+        body_long_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx - 1], close[body_long_trailing_idx - 1]);
+
+        i += 1;
+        equal_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlonneck(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let equal_period = 10;
+    let body_long_period = 10;
+    let lookback_total = equal_period.max(body_long_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut equal_period_total = 0.0;
+    let mut body_long_period_total = 0.0;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let eq_avg = candle_average(equal_period_total, equal_period);
+        if candle_color(open[i - 1], close[i - 1]) == -1
+            && real_body(open[i - 1], close[i - 1])
+                > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[i], close[i]) == 1
+            && open[i] < low[i - 1]
+            && close[i] <= low[i - 1] + eq_avg
+            && close[i] >= low[i - 1] - eq_avg
+        {
+            out[i] = -100;
+        }
+
+        equal_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+        body_long_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx - 1], close[body_long_trailing_idx - 1]);
+
+        i += 1;
+        equal_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlpiercing(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let lookback_total = body_long_period + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total_prev = 0.0;
+    let mut body_long_period_total_curr = 0.0;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total_prev += real_body(open[i - 1], close[i - 1]);
+        body_long_period_total_curr += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 1], close[i - 1]) == -1
+            && real_body(open[i - 1], close[i - 1])
+                > candle_average(body_long_period_total_prev, body_long_period)
+            && candle_color(open[i], close[i]) == 1
+            && real_body(open[i], close[i]) > candle_average(body_long_period_total_curr, body_long_period)
+            && open[i] < low[i - 1]
+            && close[i] < open[i - 1]
+            && close[i] > close[i - 1] + real_body(open[i - 1], close[i - 1]) * 0.5
+        {
+            out[i] = 100;
+        }
+
+        body_long_period_total_prev += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx - 1], close[body_long_trailing_idx - 1]);
+        body_long_period_total_curr += real_body(open[i], close[i])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+
+        i += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlthrusting(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let equal_period = 10;
+    let body_long_period = 10;
+    let lookback_total = equal_period.max(body_long_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut equal_period_total = 0.0;
+    let mut body_long_period_total = 0.0;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 1], close[i - 1]) == -1
+            && real_body(open[i - 1], close[i - 1])
+                > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[i], close[i]) == 1
+            && open[i] < low[i - 1]
+            && close[i] > close[i - 1] + candle_average(equal_period_total, equal_period)
+            && close[i] <= close[i - 1] + real_body(open[i - 1], close[i - 1]) * 0.5
+        {
+            out[i] = -100;
+        }
+
+        equal_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+        body_long_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx - 1], close[body_long_trailing_idx - 1]);
+
+        i += 1;
+        equal_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlmorningdojistar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_doji_period = 10;
+    let body_short_period = 10;
+    let penetration = if input.params.penetration == 0.0 {
+        0.3
+    } else {
+        input.params.penetration
+    };
+    let lookback_total = 2 + body_long_period
+        .max(body_doji_period)
+        .max(body_short_period);
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_period_total = 0.0;
+    let mut body_doji_period_total = 0.0;
+    let mut body_short_period_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - 2 - body_long_period;
+    let mut body_doji_trailing_idx = lookback_total - 1 - body_doji_period;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total - 2 {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = body_doji_trailing_idx;
+    while i < lookback_total - 1 {
+        body_doji_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_short_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i - 2], close[i - 2]) > candle_average(body_long_period_total, body_long_period)
+            && candle_color(open[i - 2], close[i - 2]) == -1
+            && real_body(open[i - 1], close[i - 1]) <= candle_average(body_doji_period_total, body_doji_period)
+            && real_body_gap_down(open[i - 1], close[i - 1], open[i - 2], close[i - 2])
+            && real_body(open[i], close[i]) > candle_average(body_short_period_total, body_short_period)
+            && candle_color(open[i], close[i]) == 1
+            && close[i] > close[i - 2] + real_body(open[i - 2], close[i - 2]) * penetration
+        {
+            out[i] = 100;
+        }
+
+        body_long_period_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_doji_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_doji_trailing_idx], close[body_doji_trailing_idx]);
+        body_short_period_total += real_body(open[i], close[i])
+            - real_body(open[body_short_trailing_idx], close[body_short_trailing_idx]);
+
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_doji_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdltristar(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_doji_period = 10;
+    let lookback_total = body_doji_period + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_period_total = 0.0;
+    let mut body_trailing_idx = lookback_total - 2 - body_doji_period;
+
+    let mut i = body_trailing_idx;
+    while i < lookback_total - 2 {
+        body_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let doji_avg = candle_average(body_period_total, body_doji_period);
+        if real_body(open[i - 2], close[i - 2]) <= doji_avg
+            && real_body(open[i - 1], close[i - 1]) <= doji_avg
+            && real_body(open[i], close[i]) <= doji_avg
+        {
+            let mut value = 0i8;
+            if real_body_gap_up(open[i - 1], close[i - 1], open[i - 2], close[i - 2])
+                && open[i].max(close[i]) < open[i - 1].max(close[i - 1])
+            {
+                value = -100;
+            }
+            if real_body_gap_down(open[i - 1], close[i - 1], open[i - 2], close[i - 2])
+                && open[i].min(close[i]) > open[i - 1].min(close[i - 1])
+            {
+                value = 100;
+            }
+            out[i] = value;
+        }
+
+        body_period_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+        i += 1;
+        body_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlidentical3crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let shadow_very_short_period = 10;
+    let equal_period = 10;
+    let lookback_total = shadow_very_short_period.max(equal_period) + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_total_2 = 0.0;
+    let mut shadow_total_1 = 0.0;
+    let mut shadow_total_0 = 0.0;
+    let mut equal_total_2 = 0.0;
+    let mut equal_total_1 = 0.0;
+    let mut shadow_trailing_idx = lookback_total - shadow_very_short_period;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+
+    let mut i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_total_2 += lower_shadow(open[i - 2], low[i - 2], close[i - 2]);
+        shadow_total_1 += lower_shadow(open[i - 1], low[i - 1], close[i - 1]);
+        shadow_total_0 += lower_shadow(open[i], low[i], close[i]);
+        i += 1;
+    }
+    i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_total_2 += real_body(open[i - 2], close[i - 2]);
+        equal_total_1 += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 2], close[i - 2]) == -1
+            && lower_shadow(open[i - 2], low[i - 2], close[i - 2])
+                < candle_average(shadow_total_2, shadow_very_short_period)
+            && candle_color(open[i - 1], close[i - 1]) == -1
+            && lower_shadow(open[i - 1], low[i - 1], close[i - 1])
+                < candle_average(shadow_total_1, shadow_very_short_period)
+            && candle_color(open[i], close[i]) == -1
+            && lower_shadow(open[i], low[i], close[i])
+                < candle_average(shadow_total_0, shadow_very_short_period)
+            && close[i - 2] > close[i - 1]
+            && close[i - 1] > close[i]
+            && open[i - 1] <= close[i - 2] + candle_average(equal_total_2, equal_period)
+            && open[i - 1] >= close[i - 2] - candle_average(equal_total_2, equal_period)
+            && open[i] <= close[i - 1] + candle_average(equal_total_1, equal_period)
+            && open[i] >= close[i - 1] - candle_average(equal_total_1, equal_period)
+        {
+            out[i] = -100;
+        }
+
+        shadow_total_2 += lower_shadow(open[i - 2], low[i - 2], close[i - 2])
+            - lower_shadow(
+                open[shadow_trailing_idx - 2],
+                low[shadow_trailing_idx - 2],
+                close[shadow_trailing_idx - 2],
+            );
+        shadow_total_1 += lower_shadow(open[i - 1], low[i - 1], close[i - 1])
+            - lower_shadow(
+                open[shadow_trailing_idx - 1],
+                low[shadow_trailing_idx - 1],
+                close[shadow_trailing_idx - 1],
+            );
+        shadow_total_0 += lower_shadow(open[i], low[i], close[i])
+            - lower_shadow(
+                open[shadow_trailing_idx],
+                low[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            );
+
+        equal_total_2 += real_body(open[i - 2], close[i - 2])
+            - real_body(open[equal_trailing_idx - 2], close[equal_trailing_idx - 2]);
+        equal_total_1 += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+
+        i += 1;
+        shadow_trailing_idx += 1;
+        equal_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlsticksandwich(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let equal_period = 10;
+    let lookback_total = equal_period + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut equal_period_total = 0.0;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+
+    let mut i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 2], close[i - 2]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let eq_avg = candle_average(equal_period_total, equal_period);
+        if candle_color(open[i - 2], close[i - 2]) == -1
+            && candle_color(open[i - 1], close[i - 1]) == 1
+            && candle_color(open[i], close[i]) == -1
+            && low[i - 1] > close[i - 2]
+            && close[i] <= close[i - 2] + eq_avg
+            && close[i] >= close[i - 2] - eq_avg
+        {
+            out[i] = 100;
+        }
+
+        equal_period_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[equal_trailing_idx - 2], close[equal_trailing_idx - 2]);
+        i += 1;
+        equal_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlseparatinglines(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let shadow_very_short_period = 10;
+    let body_long_period = 10;
+    let equal_period = 10;
+    let lookback_total = shadow_very_short_period
+        .max(body_long_period)
+        .max(equal_period)
+        + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn max_shadow(open: f64, high: f64, low: f64, close: f64) -> f64 {
+        upper_shadow(open, high, close).max(lower_shadow(open, low, close))
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_very_short_period_total = 0.0;
+    let mut body_long_period_total = 0.0;
+    let mut equal_period_total = 0.0;
+    let mut shadow_very_short_trailing_idx = lookback_total - shadow_very_short_period;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+
+    let mut i = shadow_very_short_trailing_idx;
+    while i < lookback_total {
+        shadow_very_short_period_total += max_shadow(open[i], high[i], low[i], close[i]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_period_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 1], close[i - 1]) == -candle_color(open[i], close[i])
+            && open[i] <= open[i - 1] + candle_average(equal_period_total, equal_period)
+            && open[i] >= open[i - 1] - candle_average(equal_period_total, equal_period)
+            && real_body(open[i], close[i]) > candle_average(body_long_period_total, body_long_period)
+            && ((candle_color(open[i], close[i]) == 1
+                && lower_shadow(open[i], low[i], close[i])
+                    < candle_average(shadow_very_short_period_total, shadow_very_short_period))
+                || (candle_color(open[i], close[i]) == -1
+                    && upper_shadow(open[i], high[i], close[i])
+                        < candle_average(shadow_very_short_period_total, shadow_very_short_period)))
+        {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        shadow_very_short_period_total += max_shadow(open[i], high[i], low[i], close[i])
+            - max_shadow(
+                open[shadow_very_short_trailing_idx],
+                high[shadow_very_short_trailing_idx],
+                low[shadow_very_short_trailing_idx],
+                close[shadow_very_short_trailing_idx],
+            );
+        body_long_period_total += real_body(open[i], close[i])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        equal_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+
+        i += 1;
+        shadow_very_short_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+        equal_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlgapsidesidewhite(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let near_period = 10;
+    let equal_period = 10;
+    let lookback_total = near_period.max(equal_period) + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut near_period_total = 0.0;
+    let mut equal_period_total = 0.0;
+    let mut near_trailing_idx = lookback_total - near_period;
+    let mut equal_trailing_idx = lookback_total - equal_period;
+
+    let mut i = near_trailing_idx;
+    while i < lookback_total {
+        near_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = equal_trailing_idx;
+    while i < lookback_total {
+        equal_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let gap_up_1 = real_body_gap_up(open[i - 1], close[i - 1], open[i - 2], close[i - 2]);
+        let gap_down_1 = real_body_gap_down(open[i - 1], close[i - 1], open[i - 2], close[i - 2]);
+        if ((gap_up_1 && real_body_gap_up(open[i], close[i], open[i - 2], close[i - 2]))
+            || (gap_down_1 && real_body_gap_down(open[i], close[i], open[i - 2], close[i - 2])))
+            && candle_color(open[i - 1], close[i - 1]) == 1
+            && candle_color(open[i], close[i]) == 1
+            && real_body(open[i], close[i]) >= real_body(open[i - 1], close[i - 1])
+                - candle_average(near_period_total, near_period)
+            && real_body(open[i], close[i]) <= real_body(open[i - 1], close[i - 1])
+                + candle_average(near_period_total, near_period)
+            && open[i] >= open[i - 1] - candle_average(equal_period_total, equal_period)
+            && open[i] <= open[i - 1] + candle_average(equal_period_total, equal_period)
+        {
+            out[i] = if gap_up_1 { 100 } else { -100 };
+        }
+
+        near_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[near_trailing_idx - 1], close[near_trailing_idx - 1]);
+        equal_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[equal_trailing_idx - 1], close[equal_trailing_idx - 1]);
+
+        i += 1;
+        near_trailing_idx += 1;
+        equal_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlhikkake(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (_open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = high.len();
+    let lookback_total = 5;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    let mut out = vec![0i8; size];
+    let mut pattern_idx = usize::MAX;
+    let mut pattern_result = 0i8;
+
+    let mut i = lookback_total - 3;
+    while i < lookback_total {
+        if high[i - 1] < high[i - 2]
+            && low[i - 1] > low[i - 2]
+            && ((high[i] < high[i - 1] && low[i] < low[i - 1])
+                || (high[i] > high[i - 1] && low[i] > low[i - 1]))
+        {
+            pattern_result = if high[i] < high[i - 1] { 100 } else { -100 };
+            pattern_idx = i;
+        } else if pattern_idx != usize::MAX
+            && pattern_idx > 0
+            && i <= pattern_idx + 3
+            && ((pattern_result > 0 && close[i] > high[pattern_idx - 1])
+                || (pattern_result < 0 && close[i] < low[pattern_idx - 1]))
+        {
+            pattern_idx = usize::MAX;
+        }
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if high[i - 1] < high[i - 2]
+            && low[i - 1] > low[i - 2]
+            && ((high[i] < high[i - 1] && low[i] < low[i - 1])
+                || (high[i] > high[i - 1] && low[i] > low[i - 1]))
+        {
+            pattern_result = if high[i] < high[i - 1] { 100 } else { -100 };
+            pattern_idx = i;
+            out[i] = pattern_result;
+        } else if pattern_idx != usize::MAX
+            && pattern_idx > 0
+            && i <= pattern_idx + 3
+            && ((pattern_result > 0 && close[i] > high[pattern_idx - 1])
+                || (pattern_result < 0 && close[i] < low[pattern_idx - 1]))
+        {
+            out[i] = pattern_result;
+            pattern_idx = usize::MAX;
+        }
+
+        i += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlhikkakemod(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let near_period = 10;
+    let lookback_total = near_period.max(1) + 5;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut near_period_total = 0.0;
+    let mut near_trailing_idx = lookback_total - 3 - near_period;
+    let mut pattern_idx = usize::MAX;
+    let mut pattern_result = 0i8;
+
+    let mut i = near_trailing_idx;
+    while i < lookback_total - 3 {
+        near_period_total += real_body(open[i - 2], close[i - 2]);
+        i += 1;
+    }
+
+    i = lookback_total - 3;
+    while i < lookback_total {
+        if high[i - 2] < high[i - 3]
+            && low[i - 2] > low[i - 3]
+            && high[i - 1] < high[i - 2]
+            && low[i - 1] > low[i - 2]
+            && ((high[i] < high[i - 1]
+                && low[i] < low[i - 1]
+                && close[i - 2] <= low[i - 2] + candle_average(near_period_total, near_period))
+                || (high[i] > high[i - 1]
+                    && low[i] > low[i - 1]
+                    && close[i - 2] >= high[i - 2] - candle_average(near_period_total, near_period)))
+        {
+            pattern_result = if high[i] < high[i - 1] { 100 } else { -100 };
+            pattern_idx = i;
+        } else if pattern_idx != usize::MAX
+            && pattern_idx > 0
+            && i <= pattern_idx + 3
+            && ((pattern_result > 0 && close[i] > high[pattern_idx - 1])
+                || (pattern_result < 0 && close[i] < low[pattern_idx - 1]))
+        {
+            pattern_idx = usize::MAX;
+        }
+
+        near_period_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[near_trailing_idx - 2], close[near_trailing_idx - 2]);
+        near_trailing_idx += 1;
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if high[i - 2] < high[i - 3]
+            && low[i - 2] > low[i - 3]
+            && high[i - 1] < high[i - 2]
+            && low[i - 1] > low[i - 2]
+            && ((high[i] < high[i - 1]
+                && low[i] < low[i - 1]
+                && close[i - 2] <= low[i - 2] + candle_average(near_period_total, near_period))
+                || (high[i] > high[i - 1]
+                    && low[i] > low[i - 1]
+                    && close[i - 2] >= high[i - 2] - candle_average(near_period_total, near_period)))
+        {
+            pattern_result = if high[i] < high[i - 1] { 100 } else { -100 };
+            pattern_idx = i;
+            out[i] = pattern_result;
+        } else if pattern_idx != usize::MAX
+            && pattern_idx > 0
+            && i <= pattern_idx + 3
+            && ((pattern_result > 0 && close[i] > high[pattern_idx - 1])
+                || (pattern_result < 0 && close[i] < low[pattern_idx - 1]))
+        {
+            out[i] = pattern_result;
+            pattern_idx = usize::MAX;
+        }
+
+        near_period_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[near_trailing_idx - 2], close[near_trailing_idx - 2]);
+        near_trailing_idx += 1;
+        i += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlkicking(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let shadow_very_short_period = 10;
+    let body_long_period = 10;
+    let lookback_total = shadow_very_short_period.max(body_long_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn candle_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    #[inline(always)]
+    fn candle_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_total_prev = 0.0;
+    let mut shadow_total_curr = 0.0;
+    let mut body_total_prev = 0.0;
+    let mut body_total_curr = 0.0;
+    let mut shadow_trailing_idx = lookback_total - shadow_very_short_period;
+    let mut body_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_total_prev += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]));
+        shadow_total_curr += upper_shadow(open[i], high[i], close[i]).max(lower_shadow(open[i], low[i], close[i]));
+        i += 1;
+    }
+    i = body_trailing_idx;
+    while i < lookback_total {
+        body_total_prev += real_body(open[i - 1], close[i - 1]);
+        body_total_curr += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 1], close[i - 1]) == -candle_color(open[i], close[i])
+            && real_body(open[i - 1], close[i - 1]) > candle_average(body_total_prev, body_long_period)
+            && upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+                .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]))
+                < candle_average(shadow_total_prev, shadow_very_short_period)
+            && real_body(open[i], close[i]) > candle_average(body_total_curr, body_long_period)
+            && upper_shadow(open[i], high[i], close[i]).max(lower_shadow(open[i], low[i], close[i]))
+                < candle_average(shadow_total_curr, shadow_very_short_period)
+            && ((candle_color(open[i - 1], close[i - 1]) == -1
+                && candle_gap_up(open[i], close[i], open[i - 1], close[i - 1]))
+                || (candle_color(open[i - 1], close[i - 1]) == 1
+                    && candle_gap_down(open[i], close[i], open[i - 1], close[i - 1])))
+        {
+            out[i] = (candle_color(open[i], close[i]) as i8) * 100;
+        }
+
+        shadow_total_prev += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]))
+            - upper_shadow(
+                open[shadow_trailing_idx - 1],
+                high[shadow_trailing_idx - 1],
+                close[shadow_trailing_idx - 1],
+            )
+            .max(lower_shadow(
+                open[shadow_trailing_idx - 1],
+                low[shadow_trailing_idx - 1],
+                close[shadow_trailing_idx - 1],
+            ));
+        shadow_total_curr += upper_shadow(open[i], high[i], close[i]).max(lower_shadow(open[i], low[i], close[i]))
+            - upper_shadow(
+                open[shadow_trailing_idx],
+                high[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            )
+            .max(lower_shadow(
+                open[shadow_trailing_idx],
+                low[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            ));
+        body_total_prev += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_trailing_idx - 1], close[body_trailing_idx - 1]);
+        body_total_curr +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+
+        i += 1;
+        shadow_trailing_idx += 1;
+        body_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlkickingbylength(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let shadow_very_short_period = 10;
+    let body_long_period = 10;
+    let lookback_total = shadow_very_short_period.max(body_long_period) + 1;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn candle_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    #[inline(always)]
+    fn candle_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_total_prev = 0.0;
+    let mut shadow_total_curr = 0.0;
+    let mut body_total_prev = 0.0;
+    let mut body_total_curr = 0.0;
+    let mut shadow_trailing_idx = lookback_total - shadow_very_short_period;
+    let mut body_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_total_prev += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]));
+        shadow_total_curr += upper_shadow(open[i], high[i], close[i]).max(lower_shadow(open[i], low[i], close[i]));
+        i += 1;
+    }
+    i = body_trailing_idx;
+    while i < lookback_total {
+        body_total_prev += real_body(open[i - 1], close[i - 1]);
+        body_total_curr += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 1], close[i - 1]) == -candle_color(open[i], close[i])
+            && real_body(open[i - 1], close[i - 1]) > candle_average(body_total_prev, body_long_period)
+            && upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+                .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]))
+                < candle_average(shadow_total_prev, shadow_very_short_period)
+            && real_body(open[i], close[i]) > candle_average(body_total_curr, body_long_period)
+            && upper_shadow(open[i], high[i], close[i]).max(lower_shadow(open[i], low[i], close[i]))
+                < candle_average(shadow_total_curr, shadow_very_short_period)
+            && ((candle_color(open[i - 1], close[i - 1]) == -1
+                && candle_gap_up(open[i], close[i], open[i - 1], close[i - 1]))
+                || (candle_color(open[i - 1], close[i - 1]) == 1
+                    && candle_gap_down(open[i], close[i], open[i - 1], close[i - 1])))
+        {
+            out[i] = if real_body(open[i], close[i]) > real_body(open[i - 1], close[i - 1]) {
+                (candle_color(open[i], close[i]) as i8) * 100
+            } else {
+                (candle_color(open[i - 1], close[i - 1]) as i8) * 100
+            };
+        }
+
+        shadow_total_prev += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            .max(lower_shadow(open[i - 1], low[i - 1], close[i - 1]))
+            - upper_shadow(
+                open[shadow_trailing_idx - 1],
+                high[shadow_trailing_idx - 1],
+                close[shadow_trailing_idx - 1],
+            )
+            .max(lower_shadow(
+                open[shadow_trailing_idx - 1],
+                low[shadow_trailing_idx - 1],
+                close[shadow_trailing_idx - 1],
+            ));
+        shadow_total_curr += upper_shadow(open[i], high[i], close[i]).max(lower_shadow(open[i], low[i], close[i]))
+            - upper_shadow(
+                open[shadow_trailing_idx],
+                high[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            )
+            .max(lower_shadow(
+                open[shadow_trailing_idx],
+                low[shadow_trailing_idx],
+                close[shadow_trailing_idx],
+            ));
+        body_total_prev += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_trailing_idx - 1], close[body_trailing_idx - 1]);
+        body_total_curr +=
+            real_body(open[i], close[i]) - real_body(open[body_trailing_idx], close[body_trailing_idx]);
+
+        i += 1;
+        shadow_trailing_idx += 1;
+        body_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlladderbottom(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let shadow_very_short_period = 10;
+    let lookback_total = shadow_very_short_period + 4;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut shadow_very_short_total = 0.0;
+    let mut shadow_trailing_idx = lookback_total - shadow_very_short_period;
+
+    let mut i = shadow_trailing_idx;
+    while i < lookback_total {
+        shadow_very_short_total += upper_shadow(open[i - 1], high[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 4], close[i - 4]) == -1
+            && candle_color(open[i - 3], close[i - 3]) == -1
+            && candle_color(open[i - 2], close[i - 2]) == -1
+            && open[i - 4] > open[i - 3]
+            && open[i - 3] > open[i - 2]
+            && close[i - 4] > close[i - 3]
+            && close[i - 3] > close[i - 2]
+            && candle_color(open[i - 1], close[i - 1]) == -1
+            && upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+                > candle_average(shadow_very_short_total, shadow_very_short_period)
+            && candle_color(open[i], close[i]) == 1
+            && open[i] > open[i - 1]
+            && close[i] > high[i - 1]
+        {
+            out[i] = 100;
+        }
+
+        shadow_very_short_total += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            - upper_shadow(
+                open[shadow_trailing_idx - 1],
+                high[shadow_trailing_idx - 1],
+                close[shadow_trailing_idx - 1],
+            );
+        i += 1;
+        shadow_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlmathold(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let body_long_period = 10;
+    let penetration = if input.params.penetration == 0.0 {
+        0.5
+    } else {
+        input.params.penetration
+    };
+    let lookback_total = body_short_period.max(body_long_period) + 4;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_total_4 = 0.0;
+    let mut body_total_3 = 0.0;
+    let mut body_total_2 = 0.0;
+    let mut body_total_1 = 0.0;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_total_3 += real_body(open[i - 3], close[i - 3]);
+        body_total_2 += real_body(open[i - 2], close[i - 2]);
+        body_total_1 += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_total_4 += real_body(open[i - 4], close[i - 4]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i - 4], close[i - 4]) > candle_average(body_total_4, body_long_period)
+            && real_body(open[i - 3], close[i - 3]) < candle_average(body_total_3, body_short_period)
+            && real_body(open[i - 2], close[i - 2]) < candle_average(body_total_2, body_short_period)
+            && real_body(open[i - 1], close[i - 1]) < candle_average(body_total_1, body_short_period)
+            && candle_color(open[i - 4], close[i - 4]) == 1
+            && candle_color(open[i - 3], close[i - 3]) == -1
+            && candle_color(open[i], close[i]) == 1
+            && real_body_gap_up(open[i - 3], close[i - 3], open[i - 4], close[i - 4])
+            && open[i - 2].min(close[i - 2]) < close[i - 4]
+            && open[i - 1].min(close[i - 1]) < close[i - 4]
+            && open[i - 2].min(close[i - 2]) > close[i - 4] - real_body(open[i - 4], close[i - 4]) * penetration
+            && open[i - 1].min(close[i - 1]) > close[i - 4] - real_body(open[i - 4], close[i - 4]) * penetration
+            && open[i - 2].max(close[i - 2]) < open[i - 3]
+            && open[i - 1].max(close[i - 1]) < open[i - 2].max(close[i - 2])
+            && open[i] > close[i - 1]
+            && close[i] > high[i - 3].max(high[i - 2]).max(high[i - 1])
+        {
+            out[i] = 100;
+        }
+
+        body_total_4 +=
+            real_body(open[i - 4], close[i - 4]) - real_body(open[body_long_trailing_idx - 4], close[body_long_trailing_idx - 4]);
+        body_total_3 +=
+            real_body(open[i - 3], close[i - 3]) - real_body(open[body_short_trailing_idx - 3], close[body_short_trailing_idx - 3]);
+        body_total_2 +=
+            real_body(open[i - 2], close[i - 2]) - real_body(open[body_short_trailing_idx - 2], close[body_short_trailing_idx - 2]);
+        body_total_1 +=
+            real_body(open[i - 1], close[i - 1]) - real_body(open[body_short_trailing_idx - 1], close[body_short_trailing_idx - 1]);
+
+        i += 1;
+        body_short_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlrisefall3methods(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let body_long_period = 10;
+    let lookback_total = body_short_period.max(body_long_period) + 4;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_total_4 = 0.0;
+    let mut body_total_3 = 0.0;
+    let mut body_total_2 = 0.0;
+    let mut body_total_1 = 0.0;
+    let mut body_total_0 = 0.0;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+
+    let mut i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_total_3 += real_body(open[i - 3], close[i - 3]);
+        body_total_2 += real_body(open[i - 2], close[i - 2]);
+        body_total_1 += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_total_4 += real_body(open[i - 4], close[i - 4]);
+        body_total_0 += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        let c4 = candle_color(open[i - 4], close[i - 4]);
+        if real_body(open[i - 4], close[i - 4]) > candle_average(body_total_4, body_long_period)
+            && real_body(open[i - 3], close[i - 3]) < candle_average(body_total_3, body_short_period)
+            && real_body(open[i - 2], close[i - 2]) < candle_average(body_total_2, body_short_period)
+            && real_body(open[i - 1], close[i - 1]) < candle_average(body_total_1, body_short_period)
+            && real_body(open[i], close[i]) > candle_average(body_total_0, body_long_period)
+            && c4 == -candle_color(open[i - 3], close[i - 3])
+            && candle_color(open[i - 3], close[i - 3]) == candle_color(open[i - 2], close[i - 2])
+            && candle_color(open[i - 2], close[i - 2]) == candle_color(open[i - 1], close[i - 1])
+            && candle_color(open[i - 1], close[i - 1]) == -candle_color(open[i], close[i])
+            && open[i - 3].min(close[i - 3]) < high[i - 4]
+            && open[i - 3].max(close[i - 3]) > low[i - 4]
+            && open[i - 2].min(close[i - 2]) < high[i - 4]
+            && open[i - 2].max(close[i - 2]) > low[i - 4]
+            && open[i - 1].min(close[i - 1]) < high[i - 4]
+            && open[i - 1].max(close[i - 1]) > low[i - 4]
+            && close[i - 2] * (c4 as f64) < close[i - 3] * (c4 as f64)
+            && close[i - 1] * (c4 as f64) < close[i - 2] * (c4 as f64)
+            && open[i] * (c4 as f64) > close[i - 1] * (c4 as f64)
+            && close[i] * (c4 as f64) > close[i - 4] * (c4 as f64)
+        {
+            out[i] = (c4 as i8) * 100;
+        }
+
+        body_total_4 +=
+            real_body(open[i - 4], close[i - 4]) - real_body(open[body_long_trailing_idx - 4], close[body_long_trailing_idx - 4]);
+        body_total_3 +=
+            real_body(open[i - 3], close[i - 3]) - real_body(open[body_short_trailing_idx - 3], close[body_short_trailing_idx - 3]);
+        body_total_2 +=
+            real_body(open[i - 2], close[i - 2]) - real_body(open[body_short_trailing_idx - 2], close[body_short_trailing_idx - 2]);
+        body_total_1 +=
+            real_body(open[i - 1], close[i - 1]) - real_body(open[body_short_trailing_idx - 1], close[body_short_trailing_idx - 1]);
+        body_total_0 +=
+            real_body(open[i], close[i]) - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+
+        i += 1;
+        body_short_trailing_idx += 1;
+        body_long_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlstalledpattern(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_long_period = 10;
+    let body_short_period = 10;
+    let shadow_very_short_period = 10;
+    let near_period = 10;
+    let lookback_total = body_long_period
+        .max(body_short_period)
+        .max(shadow_very_short_period)
+        .max(near_period)
+        + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_total_2 = 0.0;
+    let mut body_long_total_1 = 0.0;
+    let mut body_short_total = 0.0;
+    let mut shadow_vs_total = 0.0;
+    let mut near_total_2 = 0.0;
+    let mut near_total_1 = 0.0;
+    let mut body_long_trailing_idx = lookback_total - body_long_period;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+    let mut shadow_vs_trailing_idx = lookback_total - shadow_very_short_period;
+    let mut near_trailing_idx = lookback_total - near_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total {
+        body_long_total_2 += real_body(open[i - 2], close[i - 2]);
+        body_long_total_1 += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_short_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = shadow_vs_trailing_idx;
+    while i < lookback_total {
+        shadow_vs_total += upper_shadow(open[i - 1], high[i - 1], close[i - 1]);
+        i += 1;
+    }
+    i = near_trailing_idx;
+    while i < lookback_total {
+        near_total_2 += real_body(open[i - 2], close[i - 2]);
+        near_total_1 += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 2], close[i - 2]) == 1
+            && candle_color(open[i - 1], close[i - 1]) == 1
+            && candle_color(open[i], close[i]) == 1
+            && close[i] > close[i - 1]
+            && close[i - 1] > close[i - 2]
+            && real_body(open[i - 2], close[i - 2]) > candle_average(body_long_total_2, body_long_period)
+            && real_body(open[i - 1], close[i - 1]) > candle_average(body_long_total_1, body_long_period)
+            && upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+                < candle_average(shadow_vs_total, shadow_very_short_period)
+            && open[i - 1] > open[i - 2]
+            && open[i - 1] <= close[i - 2] + candle_average(near_total_2, near_period)
+            && real_body(open[i], close[i]) < candle_average(body_short_total, body_short_period)
+            && open[i] >= close[i - 1]
+                - real_body(open[i], close[i])
+                - candle_average(near_total_1, near_period)
+        {
+            out[i] = -100;
+        }
+
+        body_long_total_2 += real_body(open[i - 2], close[i - 2])
+            - real_body(open[body_long_trailing_idx - 2], close[body_long_trailing_idx - 2]);
+        body_long_total_1 += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_long_trailing_idx - 1], close[body_long_trailing_idx - 1]);
+        body_short_total +=
+            real_body(open[i], close[i]) - real_body(open[body_short_trailing_idx], close[body_short_trailing_idx]);
+        shadow_vs_total += upper_shadow(open[i - 1], high[i - 1], close[i - 1])
+            - upper_shadow(
+                open[shadow_vs_trailing_idx - 1],
+                high[shadow_vs_trailing_idx - 1],
+                close[shadow_vs_trailing_idx - 1],
+            );
+        near_total_2 += real_body(open[i - 2], close[i - 2])
+            - real_body(open[near_trailing_idx - 2], close[near_trailing_idx - 2]);
+        near_total_1 += real_body(open[i - 1], close[i - 1])
+            - real_body(open[near_trailing_idx - 1], close[near_trailing_idx - 1]);
+
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+        shadow_vs_trailing_idx += 1;
+        near_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdltasukigap(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let near_period = 10;
+    let lookback_total = near_period + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut near_period_total = 0.0;
+    let mut near_trailing_idx = lookback_total - near_period;
+
+    let mut i = near_trailing_idx;
+    while i < lookback_total {
+        near_period_total += real_body(open[i - 1], close[i - 1]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if (real_body_gap_up(open[i - 1], close[i - 1], open[i - 2], close[i - 2])
+            && candle_color(open[i - 1], close[i - 1]) == 1
+            && candle_color(open[i], close[i]) == -1
+            && open[i] < close[i - 1]
+            && open[i] > open[i - 1]
+            && close[i] < open[i - 1]
+            && close[i] > close[i - 2].max(open[i - 2])
+            && (real_body(open[i - 1], close[i - 1]) - real_body(open[i], close[i])).abs()
+                < candle_average(near_period_total, near_period))
+            || (real_body_gap_down(open[i - 1], close[i - 1], open[i - 2], close[i - 2])
+                && candle_color(open[i - 1], close[i - 1]) == -1
+                && candle_color(open[i], close[i]) == 1
+                && open[i] < open[i - 1]
+                && open[i] > close[i - 1]
+                && close[i] > open[i - 1]
+                && close[i] < close[i - 2].min(open[i - 2])
+                && (real_body(open[i - 1], close[i - 1]) - real_body(open[i], close[i])).abs()
+                    < candle_average(near_period_total, near_period))
+        {
+            out[i] = (candle_color(open[i - 1], close[i - 1]) as i8) * 100;
+        }
+
+        near_period_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[near_trailing_idx - 1], close[near_trailing_idx - 1]);
+        i += 1;
+        near_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlunique3river(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let body_long_period = 10;
+    let lookback_total = body_short_period.max(body_long_period) + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_total = 0.0;
+    let mut body_short_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - 2 - body_long_period;
+    let mut body_short_trailing_idx = lookback_total - body_short_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total - 2 {
+        body_long_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = body_short_trailing_idx;
+    while i < lookback_total {
+        body_short_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if real_body(open[i - 2], close[i - 2]) > candle_average(body_long_total, body_long_period)
+            && candle_color(open[i - 2], close[i - 2]) == -1
+            && candle_color(open[i - 1], close[i - 1]) == -1
+            && close[i - 1] > close[i - 2]
+            && open[i - 1] <= open[i - 2]
+            && low[i - 1] < low[i - 2]
+            && real_body(open[i], close[i]) < candle_average(body_short_total, body_short_period)
+            && candle_color(open[i], close[i]) == 1
+            && open[i] > low[i - 1]
+        {
+            out[i] = 100;
+        }
+
+        body_long_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_short_total +=
+            real_body(open[i], close[i]) - real_body(open[body_short_trailing_idx], close[body_short_trailing_idx]);
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlupsidegap2crows(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let body_short_period = 10;
+    let body_long_period = 10;
+    let lookback_total = body_short_period.max(body_long_period) + 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn candle_average(sum: f64, period: usize) -> f64 {
+        if period == 0 {
+            0.0
+        } else {
+            sum / period as f64
+        }
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut body_long_total = 0.0;
+    let mut body_short_total = 0.0;
+    let mut body_long_trailing_idx = lookback_total - 2 - body_long_period;
+    let mut body_short_trailing_idx = lookback_total - 1 - body_short_period;
+
+    let mut i = body_long_trailing_idx;
+    while i < lookback_total - 2 {
+        body_long_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+    i = body_short_trailing_idx;
+    while i < lookback_total - 1 {
+        body_short_total += real_body(open[i], close[i]);
+        i += 1;
+    }
+
+    i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 2], close[i - 2]) == 1
+            && real_body(open[i - 2], close[i - 2]) > candle_average(body_long_total, body_long_period)
+            && candle_color(open[i - 1], close[i - 1]) == -1
+            && real_body(open[i - 1], close[i - 1]) <= candle_average(body_short_total, body_short_period)
+            && real_body_gap_up(open[i - 1], close[i - 1], open[i - 2], close[i - 2])
+            && candle_color(open[i], close[i]) == -1
+            && open[i] > open[i - 1]
+            && close[i] < close[i - 1]
+            && close[i] > close[i - 2]
+        {
+            out[i] = -100;
+        }
+
+        body_long_total += real_body(open[i - 2], close[i - 2])
+            - real_body(open[body_long_trailing_idx], close[body_long_trailing_idx]);
+        body_short_total += real_body(open[i - 1], close[i - 1])
+            - real_body(open[body_short_trailing_idx], close[body_short_trailing_idx]);
+        i += 1;
+        body_long_trailing_idx += 1;
+        body_short_trailing_idx += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[inline]
+pub fn cdlxsidegap3methods(input: &PatternInput) -> Result<PatternOutput, PatternError> {
+    let (open, _high, _low, close) = input_ohlc(&input.data)?;
+
+    let size = open.len();
+    let lookback_total = 2;
+
+    if size < lookback_total {
+        return Err(PatternError::NotEnoughData {
+            len: size,
+            pattern: input.params.pattern_type,
+        });
+    }
+
+    #[inline(always)]
+    fn real_body_gap_up(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.min(curr_close) > prev_open.max(prev_close)
+    }
+
+    #[inline(always)]
+    fn real_body_gap_down(curr_open: f64, curr_close: f64, prev_open: f64, prev_close: f64) -> bool {
+        curr_open.max(curr_close) < prev_open.min(prev_close)
+    }
+
+    let mut out = vec![0i8; size];
+    let mut i = lookback_total;
+    while i < size {
+        if candle_color(open[i - 2], close[i - 2]) == candle_color(open[i - 1], close[i - 1])
+            && candle_color(open[i - 1], close[i - 1]) == -candle_color(open[i], close[i])
+            && open[i] < close[i - 1].max(open[i - 1])
+            && open[i] > close[i - 1].min(open[i - 1])
+            && close[i] < close[i - 2].max(open[i - 2])
+            && close[i] > close[i - 2].min(open[i - 2])
+            && ((candle_color(open[i - 2], close[i - 2]) == 1
+                && real_body_gap_up(open[i - 1], close[i - 1], open[i - 2], close[i - 2]))
+                || (candle_color(open[i - 2], close[i - 2]) == -1
+                    && real_body_gap_down(open[i - 1], close[i - 1], open[i - 2], close[i - 2])))
+        {
+            out[i] = (candle_color(open[i - 2], close[i - 2]) as i8) * 100;
+        }
+
+        i += 1;
+    }
+
+    Ok(PatternOutput { values: out })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn synthetic_candles(len: usize) -> Candles {
+        let mut timestamp = Vec::with_capacity(len);
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+
+        for i in 0..len {
+            let base = 100.0 + (i as f64 * 0.01) + (((i % 11) as f64) - 5.0) * 0.12;
+            let o = base + (((i % 5) as f64) - 2.0) * 0.05;
+            let c = base + (((i % 7) as f64) - 3.0) * 0.04;
+            let h = o.max(c) + 0.08 + ((i % 3) as f64) * 0.01;
+            let l = o.min(c) - 0.08 - ((i % 4) as f64) * 0.01;
+
+            timestamp.push(i as i64);
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(1000.0 + i as f64);
+        }
+
+        Candles::new(timestamp, open, high, low, close, volume)
+    }
+
+    fn adversarial_candles(len: usize) -> Candles {
+        let mut timestamp = Vec::with_capacity(len);
+        let mut open = Vec::with_capacity(len);
+        let mut high = Vec::with_capacity(len);
+        let mut low = Vec::with_capacity(len);
+        let mut close = Vec::with_capacity(len);
+        let mut volume = Vec::with_capacity(len);
+
+        let mut prev_close: f64 = 100.0;
+        for i in 0..len {
+            let band = i % 12;
+            let (o, c, hi_pad, lo_pad): (f64, f64, f64, f64) = match band {
+                0 => (prev_close + 5.0, prev_close + 5.0, 0.0, 0.0),
+                1 => (prev_close + 1.2, prev_close - 0.8, 0.3, 0.7),
+                2 => (prev_close - 3.5, prev_close + 2.2, 1.4, 1.1),
+                3 => (prev_close, prev_close, 0.02, 0.02),
+                4 => (prev_close + 0.01, prev_close - 0.01, 3.5, 3.5),
+                5 => (prev_close + 8.0, prev_close + 9.5, 0.5, 0.2),
+                6 => (prev_close - 7.0, prev_close - 8.2, 0.6, 0.3),
+                7 => (prev_close + 0.5, prev_close + 0.6, 2.2, 0.1),
+                8 => (prev_close - 0.6, prev_close - 0.5, 0.1, 2.2),
+                9 => (prev_close + 0.8, prev_close + 0.8, 0.01, 0.01),
+                10 => (prev_close - 0.8, prev_close - 0.8, 0.01, 0.01),
+                _ => (prev_close + 1.5, prev_close - 1.5, 0.4, 0.4),
+            };
+
+            let h = o.max(c) + hi_pad;
+            let l = o.min(c) - lo_pad;
+
+            timestamp.push(i as i64);
+            open.push(o);
+            high.push(h);
+            low.push(l);
+            close.push(c);
+            volume.push(1000.0 + ((i * 17) % 113) as f64);
+            prev_close = c;
+        }
+
+        Candles::new(timestamp, open, high, low, close, volume)
+    }
+
+    #[test]
+    fn pattern_specs_align_with_runners() {
+        assert_eq!(PATTERN_SPECS.len(), PATTERN_RUNNERS.len());
+        for (idx, spec) in PATTERN_SPECS.iter().enumerate() {
+            assert_eq!(spec.row_index, idx);
+            assert_eq!(spec.id, PATTERN_RUNNERS[idx].id);
+            assert_eq!(spec.category, PATTERN_RUNNERS[idx].category);
+            assert_eq!(pattern_type_from_id(spec.id), Some(PATTERN_RUNNERS[idx].pattern_type));
+        }
+    }
+
+    #[test]
+    fn shared_primitive_pass_matches_scalar_helpers() {
+        let candles = adversarial_candles(128);
+        let prim = build_shared_primitives(
+            &candles.open,
+            &candles.high,
+            &candles.low,
+            &candles.close,
+        );
+
+        assert_eq!(prim.body.len(), candles.close.len());
+        assert_eq!(prim.range.len(), candles.close.len());
+        assert_eq!(prim.upper_shadow.len(), candles.close.len());
+        assert_eq!(prim.lower_shadow.len(), candles.close.len());
+        assert_eq!(prim.direction.len(), candles.close.len());
+        assert_eq!(prim.body_gap_up.len(), candles.close.len());
+        assert_eq!(prim.body_gap_down.len(), candles.close.len());
+
+        for i in 0..candles.close.len() {
+            let o = candles.open[i];
+            let h = candles.high[i];
+            let l = candles.low[i];
+            let c = candles.close[i];
+
+            assert!((prim.body[i] - real_body(o, c)).abs() <= 1e-12);
+            assert!((prim.range[i] - (h - l)).abs() <= 1e-12);
+            assert!((prim.upper_shadow[i] - upper_shadow(o, h, c)).abs() <= 1e-12);
+            assert!((prim.lower_shadow[i] - lower_shadow(o, l, c)).abs() <= 1e-12);
+            assert_eq!(prim.direction[i], candle_color(o, c) as i8);
+
+            if i == 0 {
+                assert_eq!(prim.body_gap_up[i], 0);
+                assert_eq!(prim.body_gap_down[i], 0);
+            } else {
+                let cur_min = o.min(c);
+                let cur_max = o.max(c);
+                let prev_min = candles.open[i - 1].min(candles.close[i - 1]);
+                let prev_max = candles.open[i - 1].max(candles.close[i - 1]);
+                assert_eq!(prim.body_gap_up[i], (cur_min > prev_max) as u8);
+                assert_eq!(prim.body_gap_down[i], (cur_max < prev_min) as u8);
+            }
+        }
+    }
+
+    #[test]
+    fn pattern_dynamic_route_matches_direct_function() {
+        let candles = synthetic_candles(256);
+        let input = PatternInput::with_default_candles(&candles, PatternType::CdlDoji);
+        let direct = cdldoji(&input).unwrap();
+        let routed = pattern(&input).unwrap();
+        let routed_kernel = pattern_with_kernel(&input, Kernel::Scalar).unwrap();
+
+        assert_eq!(direct.values, routed.values);
+        assert_eq!(direct.values, routed_kernel.values);
+    }
+
+    #[test]
+    fn pattern_recognition_output_contract_holds() {
+        let candles = synthetic_candles(320);
+        let input = PatternRecognitionInput::with_default_candles(&candles);
+        let out = pattern_recognition(&input).unwrap();
+
+        assert_eq!(out.rows, PATTERN_RUNNERS.len());
+        assert_eq!(out.cols, candles.close.len());
+        assert_eq!(out.values_u8.len(), out.rows * out.cols);
+        assert_eq!(out.pattern_ids.len(), out.rows);
+        assert!(out.values_u8.iter().all(|v| *v == 0 || *v == 1));
+
+        for spec in list_patterns() {
+            assert_eq!(out.pattern_ids[spec.row_index], spec.id);
+        }
+    }
+
+    #[test]
+    fn pattern_recognition_matches_direct_pattern_functions() {
+        let candles = synthetic_candles(400);
+        let input = PatternRecognitionInput::with_default_candles(&candles);
+        let out = pattern_recognition_with_kernel(&input, Kernel::Scalar).unwrap();
+
+        for (row, runner) in PATTERN_RUNNERS.iter().enumerate() {
+            let direct_input = PatternInput::from_candles(
+                &candles,
+                PatternParams {
+                    pattern_type: runner.pattern_type.clone(),
+                    penetration: 0.0,
+                },
+            );
+            let direct = (runner.run)(&direct_input).unwrap();
+            let series = extract_pattern_series(&out, runner.id).unwrap();
+            for (idx, v) in direct.values.iter().enumerate() {
+                let mapped = if *v == 0 { 0 } else { 1 };
+                assert_eq!(series[idx], mapped, "pattern={} bar={}", runner.id, idx);
+                let hit = pattern_hit(&out, runner.id, idx).unwrap();
+                assert_eq!(hit, mapped != 0, "pattern={} bar={}", runner.id, idx);
+            }
+            assert_eq!(out.pattern_ids[row], runner.id);
+        }
+    }
+
+    #[test]
+    fn pattern_recognition_matches_direct_on_adversarial_fixture() {
+        let candles = adversarial_candles(320);
+        let input = PatternRecognitionInput::with_default_candles(&candles);
+        let out = pattern_recognition_with_kernel(&input, Kernel::Scalar).unwrap();
+
+        for runner in PATTERN_RUNNERS.iter() {
+            let direct_input = PatternInput::from_candles(
+                &candles,
+                PatternParams {
+                    pattern_type: runner.pattern_type,
+                    penetration: 0.0,
+                },
+            );
+            let direct = (runner.run)(&direct_input).unwrap();
+            let series = extract_pattern_series(&out, runner.id).unwrap();
+            for (idx, v) in direct.values.iter().enumerate() {
+                let mapped = if *v == 0 { 0 } else { 1 };
+                assert_eq!(series[idx], mapped, "pattern={} bar={}", runner.id, idx);
+            }
+        }
+    }
+
+    #[test]
+    fn from_slices_matches_from_candles() {
+        let candles = synthetic_candles(256);
+        let from_candles =
+            pattern_recognition(&PatternRecognitionInput::with_default_candles(&candles)).unwrap();
+        let from_slices = pattern_recognition(&PatternRecognitionInput::with_default_slices(
+            &candles.open,
+            &candles.high,
+            &candles.low,
+            &candles.close,
+        ))
+        .unwrap();
+
+        assert_eq!(from_candles.rows, from_slices.rows);
+        assert_eq!(from_candles.cols, from_slices.cols);
+        assert_eq!(from_candles.pattern_ids, from_slices.pattern_ids);
+        assert_eq!(from_candles.values_u8, from_slices.values_u8);
+    }
+
+    #[test]
+    fn packed_bitmask_export_matches_dense_values() {
+        let candles = synthetic_candles(191);
+        let out = pattern_recognition(&PatternRecognitionInput::with_default_candles(&candles))
+            .unwrap();
+        let packed = out.to_bitmask_u64();
+
+        assert_eq!(packed.rows, out.rows);
+        assert_eq!(packed.cols, out.cols);
+        assert_eq!(packed.pattern_ids, out.pattern_ids);
+        assert_eq!(packed.warmup, out.warmup);
+        assert_eq!(packed.words_per_row, out.cols.div_ceil(64));
+        assert_eq!(packed.words_u64.len(), packed.rows * packed.words_per_row);
+
+        for row in 0..out.rows {
+            for col in 0..out.cols {
+                let dense_idx = row * out.cols + col;
+                let word = row * packed.words_per_row + (col / 64);
+                let bit = col % 64;
+                let packed_hit = ((packed.words_u64[word] >> bit) & 1) != 0;
+                assert_eq!(packed_hit, out.values_u8[dense_idx] != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn from_slices_rejects_length_mismatch() {
+        let candles = synthetic_candles(64);
+        let res = pattern_recognition(&PatternRecognitionInput::from_slices(
+            &candles.open[..63],
+            &candles.high,
+            &candles.low,
+            &candles.close,
+            PatternRecognitionParams::default(),
+        ));
+
+        match res {
+            Err(PatternRecognitionError::DataLengthMismatch {
+                open,
+                high,
+                low,
+                close,
+            }) => {
+                assert_eq!(open, 63);
+                assert_eq!(high, 64);
+                assert_eq!(low, 64);
+                assert_eq!(close, 64);
+            }
+            other => panic!("expected DataLengthMismatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn direct_pattern_function_accepts_slice_input() {
+        let candles = synthetic_candles(256);
+        let params = PatternParams {
+            pattern_type: PatternType::CdlEngulfing,
+            penetration: 0.0,
+        };
+        let from_candles =
+            cdlengulfing(&PatternInput::from_candles(&candles, params.clone())).unwrap();
+        let from_slices = cdlengulfing(&PatternInput::from_slices(
+            &candles.open,
+            &candles.high,
+            &candles.low,
+            &candles.close,
+            params,
+        ))
+        .unwrap();
+        assert_eq!(from_candles.values, from_slices.values);
+    }
 }

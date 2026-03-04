@@ -41,7 +41,10 @@ fn bench_cpu_sma_dispatch(c: &mut Criterion) {
     group.sample_size(sample_size);
 
     group.bench_with_input(
-        BenchmarkId::new("direct_sma_batch_with_kernel", format!("{}x{}", len, end - start + 1)),
+        BenchmarkId::new(
+            "direct_sma_batch_with_kernel",
+            format!("{}x{}", len, end - start + 1),
+        ),
         &prices,
         |b, p| {
             b.iter(|| {
@@ -127,7 +130,10 @@ fn bench_cuda_sma_dispatch(c: &mut Criterion) {
     group.sample_size(sample_size);
 
     group.bench_with_input(
-        BenchmarkId::new("direct_cuda_sma_batch_dev", format!("{}x{}", len, end - start + 1)),
+        BenchmarkId::new(
+            "direct_cuda_sma_batch_dev",
+            format!("{}x{}", len, end - start + 1),
+        ),
         &prices_f32,
         |b, p| {
             b.iter(|| {
@@ -167,5 +173,9 @@ fn bench_cuda_sma_dispatch(c: &mut Criterion) {
 #[cfg(not(feature = "cuda"))]
 fn bench_cuda_sma_dispatch(_c: &mut Criterion) {}
 
-criterion_group!(ma_dispatch_benches, bench_cpu_sma_dispatch, bench_cuda_sma_dispatch);
+criterion_group!(
+    ma_dispatch_benches,
+    bench_cpu_sma_dispatch,
+    bench_cuda_sma_dispatch
+);
 criterion_main!(ma_dispatch_benches);

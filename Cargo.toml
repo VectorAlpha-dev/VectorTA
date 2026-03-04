@@ -49,10 +49,6 @@ name = "cuda_bench"
 harness = false
 required-features = ["cuda"]
 
-[[bench]]
-name = "ma_dispatch_benchmark"
-harness = false
-
 [[bin]]
 name = "generate_references"
 path = "src/bin/generate_references.rs"

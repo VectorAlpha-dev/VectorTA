@@ -6,11 +6,11 @@ use vector_ta::utilities::enums::Kernel;
 #[cfg(feature = "cuda")]
 use cust::memory::CopyDestination;
 #[cfg(feature = "cuda")]
+use std::collections::HashMap;
+#[cfg(feature = "cuda")]
 use vector_ta::cuda::cuda_available;
 #[cfg(feature = "cuda")]
 use vector_ta::cuda::moving_averages::{CudaCoraWave, CudaMaData, CudaMaSelector};
-#[cfg(feature = "cuda")]
-use std::collections::HashMap;
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
     if a.is_nan() && b.is_nan() {

@@ -710,6 +710,11 @@ fn compile_cuda_kernels() {
         "kernels/cuda/medprice_kernel.cu",
         "medprice_kernel.ptx",
     );
+    compile_kernel(
+        &cuda_path,
+        "kernels/cuda/pattern_recognition_kernel.cu",
+        "pattern_recognition_kernel.ptx",
+    );
 
     compile_kernel(
         &cuda_path,

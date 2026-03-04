@@ -234,6 +234,8 @@ pub mod obv_wrapper;
 #[cfg(feature = "cuda")]
 pub mod percentile_nearest_rank_wrapper;
 #[cfg(feature = "cuda")]
+pub mod pattern_recognition_wrapper;
+#[cfg(feature = "cuda")]
 pub mod pivot_wrapper;
 #[cfg(feature = "cuda")]
 pub mod prb_wrapper;
@@ -334,6 +336,10 @@ pub use oscillators::ppo_wrapper::{CudaPpo, CudaPpoError};
 pub use oscillators::tsi_wrapper::{CudaTsi, CudaTsiError};
 #[cfg(feature = "cuda")]
 pub use percentile_nearest_rank_wrapper::{CudaPercentileNearestRank, CudaPnrError};
+#[cfg(feature = "cuda")]
+pub use pattern_recognition_wrapper::{
+    CudaPatternRecognition, CudaPatternRecognitionError, DevicePatternFeatures, NativeSubsetRows,
+};
 #[cfg(feature = "cuda")]
 pub use prb_wrapper::{CudaPrb, CudaPrbError};
 #[cfg(feature = "cuda")]

@@ -357,6 +357,124 @@ impl CudaVwap {
         })
     }
 
+    fn first_valid_vwap_index_f32(timestamps: &[i64], volumes: &[f32], count: u32, unit: char) -> usize {
+        if timestamps.is_empty() {
+            return 0;
+        }
+        let mut cur_gid = i64::MIN;
+        let mut vsum = 0.0f32;
+        for i in 0..timestamps.len() {
+            let ts = timestamps[i];
+            let gid = match unit {
+                'm' => ts / ((count as i64) * 60_000),
+                'h' => ts / ((count as i64) * 3_600_000),
+                'd' => ts / ((count as i64) * 86_400_000),
+                'M' => crate::indicators::moving_averages::vwap::floor_to_month(ts, count)
+                    .unwrap_or(i64::MIN),
+                _ => i64::MIN,
+            };
+            if gid != cur_gid {
+                cur_gid = gid;
+                vsum = 0.0;
+            }
+            vsum += volumes[i];
+            if vsum > 0.0 {
+                return i;
+            }
+        }
+        0
+    }
+
+    fn prepare_batch_inputs_f32(
+        timestamps: &[i64],
+        volumes: &[f32],
+        prices: &[f32],
+        sweep: &VwapBatchRange,
+    ) -> Result<PreparedBatch, CudaVwapError> {
+        if timestamps.len() != volumes.len() || volumes.len() != prices.len() {
+            return Err(CudaVwapError::InvalidInput(
+                "timestamps, volumes, and prices must have equal length".into(),
+            ));
+        }
+        if timestamps.is_empty() {
+            return Err(CudaVwapError::InvalidInput("empty input series".into()));
+        }
+
+        let combos = expand_grid_vwap(sweep);
+        if combos.is_empty() {
+            return Err(CudaVwapError::InvalidInput(
+                "no parameter combinations after anchor expansion".into(),
+            ));
+        }
+
+        let mut counts = Vec::with_capacity(combos.len());
+        let mut unit_codes = Vec::with_capacity(combos.len());
+        let mut divisors = Vec::with_capacity(combos.len());
+        let mut first_valids = Vec::with_capacity(combos.len());
+        let mut needs_months = false;
+
+        for params in &combos {
+            let anchor = params.anchor.as_deref().unwrap_or("1d");
+            let (count_u32, unit_char) =
+                parse_anchor(anchor).map_err(|e| CudaVwapError::InvalidInput(e.to_string()))?;
+            if count_u32 == 0 {
+                return Err(CudaVwapError::InvalidInput(format!(
+                    "anchor '{}' resolved to zero count",
+                    anchor
+                )));
+            }
+            let count = i32::try_from(count_u32)
+                .map_err(|_| CudaVwapError::InvalidInput("count exceeds i32::MAX".into()))?;
+
+            let (unit_code, divisor) = match unit_char {
+                'm' => (0, (count as i64).saturating_mul(60_000)),
+                'h' => (1, (count as i64).saturating_mul(3_600_000)),
+                'd' => (2, (count as i64).saturating_mul(86_400_000)),
+                'M' => {
+                    needs_months = true;
+                    (3, count as i64)
+                }
+                other => {
+                    return Err(CudaVwapError::InvalidInput(format!(
+                        "unsupported anchor unit '{}'",
+                        other
+                    )))
+                }
+            };
+
+            if divisor <= 0 {
+                return Err(CudaVwapError::InvalidInput(format!(
+                    "non-positive divisor derived from anchor '{}'",
+                    anchor
+                )));
+            }
+
+            let warm = Self::first_valid_vwap_index_f32(timestamps, volumes, count_u32, unit_char);
+            let warm_i32 = i32::try_from(warm).unwrap_or(i32::MAX);
+
+            counts.push(count);
+            unit_codes.push(unit_code);
+            divisors.push(divisor);
+            first_valids.push(warm_i32);
+        }
+
+        let month_ids = if needs_months {
+            Some(Self::compute_month_ids(timestamps)?)
+        } else {
+            None
+        };
+
+        Ok(PreparedBatch {
+            combos,
+            counts,
+            unit_codes,
+            divisors,
+            first_valids,
+            month_ids,
+            series_len: prices.len(),
+        })
+    }
+
     fn compute_month_ids(timestamps: &[i64]) -> Result<Vec<i32>, CudaVwapError> {
         use crate::indicators::moving_averages::vwap::floor_to_month;
 
@@ -515,6 +633,91 @@ impl CudaVwap {
         let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
         let d_volumes = unsafe { DeviceBuffer::from_slice_async(&volumes_f32, &self.stream) }?;
         let d_prices = unsafe { DeviceBuffer::from_slice_async(&prices_f32, &self.stream) }?;
+        let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }?;
+        let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }?;
+        let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }?;
+        let d_first_valids =
+            unsafe { DeviceBuffer::from_slice_async(&first_valids, &self.stream) }?;
+        let mut d_month_ids = if let Some(ids) = month_ids {
+            Some(unsafe { DeviceBuffer::from_slice_async(&ids, &self.stream) }?)
+        } else {
+            None
+        };
+        let mut d_out: DeviceBuffer<f32> =
+            unsafe { DeviceBuffer::uninitialized_async(n_combos * series_len, &self.stream) }?;
+
+        let month_ptr = d_month_ids
+            .as_mut()
+            .map(|buf| buf.as_device_ptr().as_raw())
+            .unwrap_or(0);
+
+        self.launch_kernel(
+            &d_timestamps,
+            &d_volumes,
+            &d_prices,
+            &d_counts,
+            &d_unit_codes,
+            &d_divisors,
+            &d_first_valids,
+            month_ptr,
+            &mut d_out,
+            series_len,
+            n_combos,
+        )?;
+
+        self.stream.synchronize()?;
+        Ok(SharedDeviceArrayF32 {
+            buf: d_out,
+            rows: n_combos,
+            cols: series_len,
+        })
+    }
+
+    pub fn vwap_batch_dev_f32(
+        &self,
+        timestamps: &[i64],
+        volumes: &[f32],
+        prices: &[f32],
+        sweep: &VwapBatchRange,
+    ) -> Result<SharedDeviceArrayF32, CudaVwapError> {
+        let PreparedBatch {
+            combos,
+            counts,
+            unit_codes,
+            divisors,
+            first_valids,
+            month_ids,
+            series_len,
+        } = Self::prepare_batch_inputs_f32(timestamps, volumes, prices, sweep)?;
+        let n_combos = combos.len();
+
+        let in_bytes = series_len * (std::mem::size_of::<i64>() + 2 * std::mem::size_of::<f32>());
+        let param_bytes = n_combos
+            * (2 * std::mem::size_of::<i32>()
+                + std::mem::size_of::<i64>()
+                + std::mem::size_of::<i32>());
+        let month_bytes = month_ids.as_ref().map(|v| v.len() * 4).unwrap_or(0);
+        let out_bytes = n_combos
+            .checked_mul(series_len)
+            .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let required = in_bytes
+            .checked_add(param_bytes)
+            .and_then(|v| v.checked_add(month_bytes))
+            .and_then(|v| v.checked_add(out_bytes))
+            .ok_or_else(|| CudaVwapError::InvalidInput("byte size overflow".into()))?;
+        let headroom = 64 * 1024 * 1024;
+        if !Self::will_fit(required, headroom) {
+            return Err(CudaVwapError::OutOfMemory {
+                required,
+                free: Self::device_mem_info().map(|(f, _)| f).unwrap_or(0),
+                headroom,
+            });
+        }
+
+        let d_timestamps = unsafe { DeviceBuffer::from_slice_async(timestamps, &self.stream) }?;
+        let d_volumes = unsafe { DeviceBuffer::from_slice_async(volumes, &self.stream) }?;
+        let d_prices = unsafe { DeviceBuffer::from_slice_async(prices, &self.stream) }?;
         let d_counts = unsafe { DeviceBuffer::from_slice_async(&counts, &self.stream) }?;
         let d_unit_codes = unsafe { DeviceBuffer::from_slice_async(&unit_codes, &self.stream) }?;
         let d_divisors = unsafe { DeviceBuffer::from_slice_async(&divisors, &self.stream) }?;

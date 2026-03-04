@@ -80,9 +80,7 @@ fn map_periods<T>(combos: &[T], get_period: impl Fn(&T) -> usize) -> Vec<usize> 
 }
 
 #[inline]
-fn expand_period_axis(
-    range: (usize, usize, usize),
-) -> Result<Vec<usize>, MaBatchDispatchError> {
+fn expand_period_axis(range: (usize, usize, usize)) -> Result<Vec<usize>, MaBatchDispatchError> {
     let (start, end, step) = range;
     let periods = if step == 0 || start == end {
         vec![start]
@@ -1166,8 +1164,9 @@ pub fn ma_batch_with_kernel_and_params<'a>(
             })
         }
         "tradjema" => {
-            let candles =
-                candles.ok_or(MaBatchDispatchError::RequiresCandles { indicator: "tradjema" })?;
+            let candles = candles.ok_or(MaBatchDispatchError::RequiresCandles {
+                indicator: "tradjema",
+            })?;
             let mut sweep = super::tradjema::TradjemaBatchRange::default();
             sweep.length = period_range;
             if let Some(v) = get_f64(params, "tradjema", "mult")? {
@@ -1565,8 +1564,8 @@ pub fn ma_batch_with_kernel_and_params<'a>(
 mod tests {
     use super::*;
     use crate::indicators::moving_averages::ma::ma_with_kernel;
-    use crate::utilities::enums::Kernel;
     use crate::utilities::data_loader::Candles;
+    use crate::utilities::enums::Kernel;
 
     fn sample_prices(len: usize) -> Vec<f64> {
         (0..len)
@@ -1674,13 +1673,9 @@ mod tests {
         ];
 
         for ma_type in slice_cases {
-            let batch = ma_batch_with_kernel(
-                ma_type,
-                MaData::Slice(&prices),
-                period_range,
-                Kernel::Auto,
-            )
-            .unwrap();
+            let batch =
+                ma_batch_with_kernel(ma_type, MaData::Slice(&prices), period_range, Kernel::Auto)
+                    .unwrap();
 
             assert_eq!(batch.periods, expected_periods);
             assert_eq!(batch.rows, expected_periods.len());
@@ -1751,14 +1746,9 @@ mod tests {
             },
         ];
 
-        let got = ma_batch_with_kernel_and_typed_params(
-            "mama",
-            data,
-            (10, 10, 0),
-            Kernel::Auto,
-            &params,
-        )
-        .unwrap();
+        let got =
+            ma_batch_with_kernel_and_typed_params("mama", data, (10, 10, 0), Kernel::Auto, &params)
+                .unwrap();
 
         let direct = crate::indicators::moving_averages::mama::mama_batch_with_kernel(
             &prices,
@@ -2177,15 +2167,16 @@ mod tests {
             &params,
         )
         .unwrap();
-        let direct = crate::indicators::moving_averages::ehlers_itrend::ehlers_itrend_batch_with_kernel(
-            &prices,
-            &crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
-                warmup_bars: (30, 30, 0),
-                max_dc_period: (48, 48, 0),
-            },
-            Kernel::Auto,
-        )
-        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::ehlers_itrend::ehlers_itrend_batch_with_kernel(
+                &prices,
+                &crate::indicators::moving_averages::ehlers_itrend::EhlersITrendBatchRange {
+                    warmup_bars: (30, 30, 0),
+                    max_dc_period: (48, 48, 0),
+                },
+                Kernel::Auto,
+            )
+            .unwrap();
         assert_eq!(got.rows, direct.rows);
         assert_eq!(got.cols, direct.cols);
         assert_series_eq(&got.values, &direct.values, 1e-12);
@@ -2206,15 +2197,16 @@ mod tests {
             &params,
         )
         .unwrap();
-        let direct = crate::indicators::moving_averages::volatility_adjusted_ma::vama_batch_with_kernel(
-            &prices,
-            &crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
-                base_period: (18, 22, 2),
-                vol_period: (51, 51, 0),
-            },
-            Kernel::Auto,
-        )
-        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::volatility_adjusted_ma::vama_batch_with_kernel(
+                &prices,
+                &crate::indicators::moving_averages::volatility_adjusted_ma::VamaBatchRange {
+                    base_period: (18, 22, 2),
+                    vol_period: (51, 51, 0),
+                },
+                Kernel::Auto,
+            )
+            .unwrap();
         assert_eq!(got.rows, direct.rows);
         assert_eq!(got.cols, direct.cols);
         assert_series_eq(&got.values, &direct.values, 1e-12);
@@ -2392,16 +2384,17 @@ mod tests {
             &params,
         )
         .unwrap();
-        let direct = crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
-            &candles.close,
-            &candles.volume,
-            &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
-                fast_period: (5, 5, 0),
-                slow_period: (20, 20, 0),
-            },
-            Kernel::Auto,
-        )
-        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
+                &candles.close,
+                &candles.volume,
+                &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
+                    fast_period: (5, 5, 0),
+                    slow_period: (20, 20, 0),
+                },
+                Kernel::Auto,
+            )
+            .unwrap();
         assert_eq!(got.rows, direct.rows);
         assert_eq!(got.cols, direct.cols);
         assert_series_eq(&got.values, &direct.slow, 1e-12);
@@ -2467,16 +2460,17 @@ mod tests {
         )
         .unwrap();
 
-        let direct = crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
-            &candles.close,
-            &candles.volume,
-            &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
-                fast_period: (5, 5, 0),
-                slow_period: (20, 22, 1),
-            },
-            Kernel::Auto,
-        )
-        .unwrap();
+        let direct =
+            crate::indicators::moving_averages::buff_averages::buff_averages_batch_with_kernel(
+                &candles.close,
+                &candles.volume,
+                &crate::indicators::moving_averages::buff_averages::BuffAveragesBatchRange {
+                    fast_period: (5, 5, 0),
+                    slow_period: (20, 22, 1),
+                },
+                Kernel::Auto,
+            )
+            .unwrap();
 
         assert_eq!(got.periods, vec![20, 21, 22]);
         assert_eq!(got.rows, direct.rows);
@@ -2697,5 +2691,4 @@ mod tests {
         .to_string();
         assert!(err.contains("expected integer"));
     }
-
 }
