@@ -61,7 +61,7 @@ Enable:
 
 ```toml
 [dependencies]
-vector-ta = { version = "0.1.3", features = ["cuda"] }
+vector-ta = { version = "0.1.6", features = ["cuda"] }
 ```
 
 Notes:

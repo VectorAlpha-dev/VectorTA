@@ -7,8 +7,63 @@ on:
       - "v*"
 
 jobs:
+  validate_release_tag:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag/version contract
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          ref = os.environ.get("GITHUB_REF", "")
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+
+          if event != "push" or not ref.startswith("refs/tags/"):
+              print("Not a tag push; skipping release tag validation.")
+              raise SystemExit(0)
+
+          if not tag.startswith("v"):
+              print(f"Release tag must start with 'v': got '{tag}'", file=sys.stderr)
+              raise SystemExit(1)
+
+          cargo = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
+          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo)
+          if not match:
+              print("Could not find `version = \"...\"` in Cargo.toml", file=sys.stderr)
+              raise SystemExit(1)
+
+          cargo_version = match.group(1)
+          tag_version = tag[1:]
+
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+].+)?", tag_version):
+              print(
+                  f"Release tag must be SemVer (vX.Y.Z): got '{tag}'. "
+                  f"If you intended Cargo version {cargo_version}, use 'v{cargo_version}'.",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          if tag_version != cargo_version:
+              print(
+                  f"Refusing to publish: tag version {tag_version} != Cargo.toml version {cargo_version}. "
+                  f"Use tag v{cargo_version}.",
+                  file=sys.stderr,
+              )
+              raise SystemExit(1)
+
+          print(f"OK: publishing version {cargo_version} from tag {tag}")
+          PY
+
   wheels:
     name: Wheels (${{ matrix.os }} / py${{ matrix.python.version }})
+    needs: [validate_release_tag]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -52,6 +107,7 @@ jobs:
 
   sdist:
     name: Source distribution (sdist)
+    needs: [validate_release_tag]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,35 +141,6 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate tag matches Cargo.toml version
-        run: |
-          python - <<'PY'
-          import os
-          import pathlib
-          import re
-          import sys
-
-          cargo = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
-          match = re.search(r'(?m)^version\s*=\s*"([^"]+)"\s*$', cargo)
-          if not match:
-              print("Could not find `version = \"...\"` in Cargo.toml", file=sys.stderr)
-              raise SystemExit(1)
-
-          cargo_version = match.group(1)
-          tag = os.environ["GITHUB_REF_NAME"]
-          tag_version = tag[1:] if tag.startswith("v") else tag
-          if tag_version != cargo_version:
-              print(
-                  f"Refusing to publish: tag version {tag_version} != Cargo.toml version {cargo_version}",
-                  file=sys.stderr,
-              )
-              raise SystemExit(1)
-
-          print(f"OK: publishing version {cargo_version} from tag {tag}")
-          PY
-
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
