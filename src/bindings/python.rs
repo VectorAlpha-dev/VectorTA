@@ -1060,6 +1060,12 @@ use crate::indicators::otto::{otto_batch_py, otto_py, OttoStreamPy};
 #[cfg(all(feature = "python", feature = "cuda"))]
 use crate::indicators::otto::{otto_cuda_batch_dev_py, otto_cuda_many_series_one_param_dev_py};
 #[cfg(feature = "python")]
+use crate::indicators::pattern_recognition::pattern_recognition_py;
+#[cfg(all(feature = "python", feature = "cuda"))]
+use crate::indicators::pattern_recognition::{
+    pattern_recognition_cuda_batch_dev_py, pattern_recognition_cuda_host_f32_py,
+};
+#[cfg(feature = "python")]
 use crate::indicators::percentile_nearest_rank::{
     percentile_nearest_rank_batch_py, percentile_nearest_rank_py, PercentileNearestRankStreamPy,
 };
@@ -2186,6 +2192,12 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(percentile_nearest_rank_py, m)?)?;
     m.add_function(wrap_pyfunction!(percentile_nearest_rank_batch_py, m)?)?;
     m.add_class::<PercentileNearestRankStreamPy>()?;
+    m.add_function(wrap_pyfunction!(pattern_recognition_py, m)?)?;
+    #[cfg(feature = "cuda")]
+    {
+        m.add_function(wrap_pyfunction!(pattern_recognition_cuda_batch_dev_py, m)?)?;
+        m.add_function(wrap_pyfunction!(pattern_recognition_cuda_host_f32_py, m)?)?;
+    }
 
     m.add_function(wrap_pyfunction!(uma_py, m)?)?;
     m.add_function(wrap_pyfunction!(uma_batch_py, m)?)?;

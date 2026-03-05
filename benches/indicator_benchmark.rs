@@ -227,6 +227,9 @@ use my_project::indicators::{
     obv::{obv as obv_raw, ObvInput},
     ott::{ott as ott_raw, ott_with_kernel, OttBatchBuilder, OttInput},
     otto::{otto as otto_raw, OttoBatchBuilder, OttoInput},
+    pattern_recognition::{
+        pattern_recognition as pattern_recognition_raw, PatternRecognitionInput,
+    },
     percentile_nearest_rank::{
         percentile_nearest_rank_with_kernel, PercentileNearestRankBatchBuilder,
         PercentileNearestRankInput,
@@ -423,6 +426,7 @@ pub type NviInputS = NviInput<'static>;
 pub type ObvInputS = ObvInput<'static>;
 pub type OttoInputS = OttoInput<'static>;
 pub type OttInputS = OttInput<'static>;
+pub type PatternRecognitionInputS = PatternRecognitionInput<'static>;
 pub type PfeInputS = PfeInput<'static>;
 pub type PercentileNearestRankInputS = PercentileNearestRankInput<'static>;
 pub type PivotInputS = PivotInput<'static>;
@@ -1375,6 +1379,7 @@ impl_input_len!(
     ObvInputS,
     OttoInputS,
     OttInputS,
+    PatternRecognitionInputS,
     PercentileNearestRankInputS,
     PfeInputS,
     PivotInputS,
@@ -1537,6 +1542,7 @@ bench_wrappers! {
     (obv_bench, obv_raw, ObvInputS),
     (ott_bench, ott_raw, OttInputS),
     (otto_bench, otto_raw, OttoInputS),
+    (pattern_recognition_bench, pattern_recognition_raw, PatternRecognitionInputS),
     (pfe_bench, pfe_raw, PfeInputS),
     (pivot_bench, pivot_raw, PivotInputS),
     (pma_bench, pma_raw, PmaInputS),
@@ -1678,6 +1684,7 @@ bench_scalars!(
     obv_bench    => ObvInputS,
     ott_bench    => OttInputS,
     otto_bench   => OttoInputS,
+    pattern_recognition_bench => PatternRecognitionInputS,
     pfe_bench    => PfeInputS,
     pivot_bench  => PivotInputS,
     pma_bench    => PmaInputS,

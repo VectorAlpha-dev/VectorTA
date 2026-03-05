@@ -1,7 +1,23 @@
+#[cfg(all(feature = "python", feature = "cuda"))]
+pub use crate::utilities::dlpack_cuda::DeviceArrayF32Py;
+#[cfg(feature = "python")]
+use numpy::{IntoPyArray, PyArrayMethods};
+#[cfg(feature = "python")]
+use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
+use pyo3::prelude::*;
+#[cfg(feature = "python")]
+use pyo3::types::{PyDict, PyList};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use serde::{Deserialize, Serialize};
 use crate::utilities::data_loader::Candles;
 use crate::utilities::enums::Kernel;
+#[cfg(feature = "python")]
+use crate::utilities::kernel_validation::validate_kernel;
 use std::mem::MaybeUninit;
 use thiserror::Error;
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+use wasm_bindgen::prelude::*;
 
 #[derive(Debug, Clone)]
 pub enum PatternData<'a> {
@@ -6695,6 +6711,281 @@ pub fn cdlxsidegap3methods(input: &PatternInput) -> Result<PatternOutput, Patter
     }
 
     Ok(PatternOutput { values: out })
+}
+
+#[cfg(feature = "python")]
+#[pyfunction(name = "pattern_recognition")]
+#[pyo3(signature = (open, high, low, close, kernel=None))]
+pub fn pattern_recognition_py<'py>(
+    py: Python<'py>,
+    open: numpy::PyReadonlyArray1<'py, f64>,
+    high: numpy::PyReadonlyArray1<'py, f64>,
+    low: numpy::PyReadonlyArray1<'py, f64>,
+    close: numpy::PyReadonlyArray1<'py, f64>,
+    kernel: Option<&str>,
+) -> PyResult<Bound<'py, PyDict>> {
+    let open_slice = open.as_slice()?;
+    let high_slice = high.as_slice()?;
+    let low_slice = low.as_slice()?;
+    let close_slice = close.as_slice()?;
+    let kern = validate_kernel(kernel, false)?;
+
+    let input =
+        PatternRecognitionInput::with_default_slices(open_slice, high_slice, low_slice, close_slice);
+    let output = py
+        .allow_threads(|| pattern_recognition_with_kernel(&input, kern))
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+
+    let dict = PyDict::new(py);
+    let rows = output.rows;
+    let cols = output.cols;
+    let values = output.values_u8.into_pyarray(py);
+    dict.set_item("values", values.reshape((rows, cols))?)?;
+    dict.set_item(
+        "pattern_ids",
+        PyList::new(py, output.pattern_ids.iter().copied())?,
+    )?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("warmup", output.warmup)?;
+    Ok(dict)
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pattern_recognition_cuda_batch_dev")]
+#[pyo3(signature = (open_f32, high_f32, low_f32, close_f32, device_id=0))]
+pub fn pattern_recognition_cuda_batch_dev_py(
+    py: Python<'_>,
+    open_f32: numpy::PyReadonlyArray1<'_, f32>,
+    high_f32: numpy::PyReadonlyArray1<'_, f32>,
+    low_f32: numpy::PyReadonlyArray1<'_, f32>,
+    close_f32: numpy::PyReadonlyArray1<'_, f32>,
+    device_id: usize,
+) -> PyResult<DeviceArrayF32Py> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let open_slice = open_f32.as_slice()?;
+    let high_slice = high_f32.as_slice()?;
+    let low_slice = low_f32.as_slice()?;
+    let close_slice = close_f32.as_slice()?;
+
+    let (inner, ctx, dev_id) = py.allow_threads(|| {
+        let cuda =
+            CudaPatternRecognition::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let ctx = cuda.context_arc();
+        let dev_id = cuda.device_id();
+        let features = cuda
+            .compute_features_device(open_slice, high_slice, low_slice, close_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
+        let rows = native_ids.len();
+        let cols = close_slice.len();
+        let row_map: Vec<(&str, usize)> = native_ids
+            .iter()
+            .enumerate()
+            .map(|(row, id)| (*id, row))
+            .collect();
+        let d_u8 = cuda
+            .compute_native_matrix_device(&features, rows, cols, row_map.as_slice())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let d_f32 = cuda
+            .matrix_u8_to_f32_device(&d_u8, rows, cols)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Ok::<_, PyErr>((d_f32, ctx, dev_id))
+    })?;
+
+    Ok(DeviceArrayF32Py {
+        inner,
+        _ctx: Some(ctx),
+        device_id: Some(dev_id),
+    })
+}
+
+#[cfg(all(feature = "python", feature = "cuda"))]
+#[pyfunction(name = "pattern_recognition_cuda_host_f32")]
+#[pyo3(signature = (open_f32, high_f32, low_f32, close_f32, device_id=0))]
+pub fn pattern_recognition_cuda_host_f32_py<'py>(
+    py: Python<'py>,
+    open_f32: numpy::PyReadonlyArray1<'py, f32>,
+    high_f32: numpy::PyReadonlyArray1<'py, f32>,
+    low_f32: numpy::PyReadonlyArray1<'py, f32>,
+    close_f32: numpy::PyReadonlyArray1<'py, f32>,
+    device_id: usize,
+) -> PyResult<Bound<'py, PyDict>> {
+    use crate::cuda::cuda_available;
+    use crate::cuda::pattern_recognition_wrapper::CudaPatternRecognition;
+
+    if !cuda_available() {
+        return Err(PyValueError::new_err("CUDA not available"));
+    }
+
+    let open_slice = open_f32.as_slice()?;
+    let high_slice = high_f32.as_slice()?;
+    let low_slice = low_f32.as_slice()?;
+    let close_slice = close_f32.as_slice()?;
+
+    let (values_f32, pattern_ids, rows, cols) = py.allow_threads(|| {
+        let cuda =
+            CudaPatternRecognition::new(device_id).map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let features = cuda
+            .compute_features_device(open_slice, high_slice, low_slice, close_slice)
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let native_ids = CudaPatternRecognition::native_supported_pattern_ids();
+        let rows = native_ids.len();
+        let cols = close_slice.len();
+        let row_map: Vec<(&str, usize)> = native_ids
+            .iter()
+            .enumerate()
+            .map(|(row, id)| (*id, row))
+            .collect();
+        let host_u8 = cuda
+            .compute_native_matrix_host(&features, rows, cols, row_map.as_slice())
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        let mut values_f32 = Vec::with_capacity(host_u8.len());
+        values_f32.extend(host_u8.into_iter().map(|x| x as f32));
+        let pattern_ids = native_ids.iter().map(|x| (*x).to_string()).collect::<Vec<_>>();
+        Ok::<_, PyErr>((values_f32, pattern_ids, rows, cols))
+    })?;
+
+    let dict = PyDict::new(py);
+    let values = values_f32.into_pyarray(py);
+    dict.set_item("values", values.reshape((rows, cols))?)?;
+    dict.set_item("pattern_ids", pattern_ids)?;
+    dict.set_item("rows", rows)?;
+    dict.set_item("cols", cols)?;
+    dict.set_item("warmup", py.None())?;
+    Ok(dict)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[derive(Serialize, Deserialize)]
+struct PatternRecognitionJsOutput {
+    values: Vec<u8>,
+    pattern_ids: Vec<String>,
+    rows: usize,
+    cols: usize,
+    warmup: Option<usize>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[derive(Serialize, Deserialize)]
+struct PatternRecognitionIntoMeta {
+    pattern_ids: Vec<String>,
+    rows: usize,
+    cols: usize,
+    warmup: Option<usize>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pattern_recognition_js(
+    open: &[f64],
+    high: &[f64],
+    low: &[f64],
+    close: &[f64],
+) -> Result<JsValue, JsValue> {
+    let input = PatternRecognitionInput::with_default_slices(open, high, low, close);
+    let output = pattern_recognition(&input).map_err(|e| JsValue::from_str(&e.to_string()))?;
+    let js_output = PatternRecognitionJsOutput {
+        values: output.values_u8,
+        pattern_ids: output
+            .pattern_ids
+            .into_iter()
+            .map(|x| x.to_string())
+            .collect(),
+        rows: output.rows,
+        cols: output.cols,
+        warmup: output.warmup,
+    };
+    serde_wasm_bindgen::to_value(&js_output)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pattern_recognition_alloc(len: usize) -> *mut u8 {
+    let mut vec = Vec::<u8>::with_capacity(len);
+    let ptr = vec.as_mut_ptr();
+    std::mem::forget(vec);
+    ptr
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pattern_recognition_free(ptr: *mut u8, len: usize) {
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let _ = Vec::from_raw_parts(ptr, len, len);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+#[wasm_bindgen]
+pub fn pattern_recognition_into(
+    open_ptr: *const f64,
+    high_ptr: *const f64,
+    low_ptr: *const f64,
+    close_ptr: *const f64,
+    out_ptr: *mut u8,
+    len: usize,
+    out_len: usize,
+) -> Result<JsValue, JsValue> {
+    if open_ptr.is_null()
+        || high_ptr.is_null()
+        || low_ptr.is_null()
+        || close_ptr.is_null()
+        || out_ptr.is_null()
+    {
+        return Err(JsValue::from_str(
+            "null pointer passed to pattern_recognition_into",
+        ));
+    }
+    if len == 0 {
+        return Err(JsValue::from_str("len must be > 0"));
+    }
+
+    let rows = PATTERN_RUNNERS.len();
+    let expected_out_len = rows
+        .checked_mul(len)
+        .ok_or_else(|| JsValue::from_str("rows*len overflow"))?;
+    if out_len < expected_out_len {
+        return Err(JsValue::from_str("output buffer too small"));
+    }
+
+    unsafe {
+        let open = std::slice::from_raw_parts(open_ptr, len);
+        let high = std::slice::from_raw_parts(high_ptr, len);
+        let low = std::slice::from_raw_parts(low_ptr, len);
+        let close = std::slice::from_raw_parts(close_ptr, len);
+        let output =
+            pattern_recognition(&PatternRecognitionInput::with_default_slices(open, high, low, close))
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        if output.values_u8.len() != expected_out_len {
+            return Err(JsValue::from_str("unexpected output length"));
+        }
+        let out_slice = std::slice::from_raw_parts_mut(out_ptr, expected_out_len);
+        out_slice.copy_from_slice(&output.values_u8);
+
+        let meta = PatternRecognitionIntoMeta {
+            pattern_ids: output
+                .pattern_ids
+                .into_iter()
+                .map(|x| x.to_string())
+                .collect(),
+            rows: output.rows,
+            cols: output.cols,
+            warmup: output.warmup,
+        };
+        serde_wasm_bindgen::to_value(&meta)
+            .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+    }
 }
 
 #[cfg(test)]
