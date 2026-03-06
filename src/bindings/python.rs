@@ -657,6 +657,10 @@ use crate::indicators::moving_averages::volatility_adjusted_ma::{
 };
 #[cfg(feature = "python")]
 use crate::indicators::moving_averages::volume_adjusted_ma as vama_volu;
+#[cfg(feature = "python")]
+use crate::indicators::yang_zhang_volatility::{
+    yang_zhang_volatility_batch_py, yang_zhang_volatility_py, YangZhangVolatilityStreamPy,
+};
 
 #[cfg(feature = "python")]
 #[pyfunction(name = "vama")]
@@ -3216,6 +3220,10 @@ fn vector_ta(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(zscore_py, m)?)?;
     m.add_function(wrap_pyfunction!(zscore_batch_py, m)?)?;
     m.add_class::<ZscoreStreamPy>()?;
+
+    m.add_function(wrap_pyfunction!(yang_zhang_volatility_py, m)?)?;
+    m.add_function(wrap_pyfunction!(yang_zhang_volatility_batch_py, m)?)?;
+    m.add_class::<YangZhangVolatilityStreamPy>()?;
 
     m.add_function(wrap_pyfunction!(alphatrend_py, m)?)?;
     m.add_class::<AlphaTrendStreamPy>()?;

@@ -26,6 +26,7 @@ include = [
   "/build.rs",
   "/src/lib.rs",
   "/src/bin/generate_references.rs",
+  "/src/bin/profile_yang_zhang_cuda.rs",
   "/src/bindings/**/*.rs",
   "/src/cuda/**/*.rs",
   "/src/indicators/**/*.rs",
@@ -52,6 +53,10 @@ required-features = ["cuda"]
 [[bin]]
 name = "generate_references"
 path = "src/bin/generate_references.rs"
+
+[[bin]]
+name = "profile_yang_zhang_cuda"
+path = "src/bin/profile_yang_zhang_cuda.rs"
 
 
 [dependencies]

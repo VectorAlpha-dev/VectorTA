@@ -143,6 +143,9 @@ use crate::indicators::wavetrend::{wavetrend_with_kernel, WavetrendInput, Wavetr
 use crate::indicators::wclprice::{wclprice_with_kernel, WclpriceInput};
 use crate::indicators::willr::{willr_with_kernel, WillrInput, WillrParams};
 use crate::indicators::wto::{wto_with_kernel, WtoInput, WtoParams};
+use crate::indicators::yang_zhang_volatility::{
+    yang_zhang_volatility_with_kernel, YangZhangVolatilityInput, YangZhangVolatilityParams,
+};
 use crate::indicators::zscore::{zscore_with_kernel, ZscoreInput, ZscoreParams};
 use crate::indicators::{cg::cg_with_kernel, cg::CgInput, cg::CgParams};
 use crate::utilities::data_loader::source_type;
@@ -223,6 +226,13 @@ fn try_fast_dispatch_non_strict(
                     None
                 }
             }
+            "yang_zhang_volatility" => {
+                if let Some(out) = output_id {
+                    Some(compute_yang_zhang_volatility_batch(req, out))
+                } else {
+                    None
+                }
+            }
             "voss" => {
                 if let Some(out) = output_id {
                     Some(compute_voss_batch(req, out))
@@ -274,6 +284,12 @@ fn try_fast_dispatch_non_strict(
     if id.eq_ignore_ascii_case("wto") {
         if let Some(out) = output_id {
             return Some(compute_wto_batch(req, out));
+        }
+        return None;
+    }
+    if id.eq_ignore_ascii_case("yang_zhang_volatility") {
+        if let Some(out) = output_id {
+            return Some(compute_yang_zhang_volatility_batch(req, out));
         }
         return None;
     }
@@ -378,6 +394,7 @@ fn dispatch_cpu_batch_by_indicator(
         "vi" => compute_vi_batch(req, output_id),
         "wavetrend" => compute_wavetrend_batch(req, output_id),
         "wto" => compute_wto_batch(req, output_id),
+        "yang_zhang_volatility" => compute_yang_zhang_volatility_batch(req, output_id),
         "acosc" => compute_acosc_batch(req, output_id),
         "alligator" => compute_alligator_batch(req, output_id),
         "alphatrend" => compute_alphatrend_batch(req, output_id),
@@ -3247,6 +3264,52 @@ fn compute_wto_batch(
     })
 }
 
+fn compute_yang_zhang_volatility_batch(
+    req: IndicatorBatchRequest<'_>,
+    output_id: &str,
+) -> Result<IndicatorBatchOutput, IndicatorDispatchError> {
+    let (open, high, low, close) = extract_ohlc_full_input("yang_zhang_volatility", req.data)?;
+    let kernel = req.kernel.to_non_batch();
+    collect_f64(
+        "yang_zhang_volatility",
+        output_id,
+        req.combos,
+        close.len(),
+        |params| {
+            let lookback = get_usize_param("yang_zhang_volatility", params, "lookback", 14)?;
+            let k_override = get_bool_param("yang_zhang_volatility", params, "k_override", false)?;
+            let k = get_f64_param("yang_zhang_volatility", params, "k", 0.34)?;
+            let input = YangZhangVolatilityInput::from_slices(
+                open,
+                high,
+                low,
+                close,
+                YangZhangVolatilityParams {
+                    lookback: Some(lookback),
+                    k_override: Some(k_override),
+                    k: Some(k),
+                },
+            );
+            let out = yang_zhang_volatility_with_kernel(&input, kernel).map_err(|e| {
+                IndicatorDispatchError::ComputeFailed {
+                    indicator: "yang_zhang_volatility".to_string(),
+                    details: e.to_string(),
+                }
+            })?;
+            if output_id.eq_ignore_ascii_case("yz") || output_id.eq_ignore_ascii_case("value") {
+                return Ok(out.yz);
+            }
+            if output_id.eq_ignore_ascii_case("rs") {
+                return Ok(out.rs);
+            }
+            Err(IndicatorDispatchError::UnknownOutput {
+                indicator: "yang_zhang_volatility".to_string(),
+                output: output_id.to_string(),
+            })
+        },
+    )
+}
+
 fn compute_acosc_batch(
     req: IndicatorBatchRequest<'_>,
     output_id: &str,
@@ -5575,6 +5638,9 @@ mod tests {
     };
     use crate::indicators::ttm_trend::{ttm_trend_with_kernel, TtmTrendInput, TtmTrendParams};
     use crate::indicators::vpci::{vpci_with_kernel, VpciInput, VpciParams};
+    use crate::indicators::yang_zhang_volatility::{
+        yang_zhang_volatility_with_kernel, YangZhangVolatilityInput, YangZhangVolatilityParams,
+    };
     use crate::indicators::zscore::{zscore_with_kernel, ZscoreInput, ZscoreParams};
     use crate::utilities::enums::Kernel;
     use std::time::Instant;
@@ -7135,6 +7201,55 @@ mod tests {
         let direct = vpci_with_kernel(&input, Kernel::Auto.to_non_batch())
             .unwrap()
             .vpcis;
+        let got = out.values_f64.unwrap();
+        assert_series_eq(&got, &direct, 1e-12);
+    }
+
+    #[test]
+    fn yang_zhang_secondary_output_matches_direct() {
+        let (open, high, low, close) = sample_ohlc();
+        let combo = [
+            ParamKV {
+                key: "lookback",
+                value: ParamValue::Int(21),
+            },
+            ParamKV {
+                key: "k_override",
+                value: ParamValue::Bool(true),
+            },
+            ParamKV {
+                key: "k",
+                value: ParamValue::Float(0.28),
+            },
+        ];
+        let combos = [IndicatorParamSet { params: &combo }];
+        let req = IndicatorBatchRequest {
+            indicator_id: "yang_zhang_volatility",
+            output_id: Some("rs"),
+            data: IndicatorDataRef::Ohlc {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+            },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out = compute_cpu_batch(req).unwrap();
+        let input = YangZhangVolatilityInput::from_slices(
+            &open,
+            &high,
+            &low,
+            &close,
+            YangZhangVolatilityParams {
+                lookback: Some(21),
+                k_override: Some(true),
+                k: Some(0.28),
+            },
+        );
+        let direct = yang_zhang_volatility_with_kernel(&input, Kernel::Auto.to_non_batch())
+            .unwrap()
+            .rs;
         let got = out.values_f64.unwrap();
         assert_series_eq(&got, &direct, 1e-12);
     }

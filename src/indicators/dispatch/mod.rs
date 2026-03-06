@@ -23,6 +23,6 @@ pub use compiled::run_compiled_cuda;
 pub use cuda::compute_cuda;
 #[cfg(feature = "cuda")]
 pub use types::{
-    CudaOutputTarget, DeviceMatrixF32, IndicatorCudaDataRef, IndicatorCudaOutput, IndicatorCudaRequest,
-    IndicatorCudaSeries,
+    CudaOutputTarget, DeviceMatrixF32, IndicatorCudaDataRef, IndicatorCudaOutput,
+    IndicatorCudaRequest, IndicatorCudaSeries,
 };

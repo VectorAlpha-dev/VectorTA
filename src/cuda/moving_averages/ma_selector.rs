@@ -233,9 +233,9 @@ impl<'a> CudaMaData<'a> {
         match self {
             CudaMaData::Slice(s) => s,
             CudaMaData::Candles { candles, source } => source_type(candles, source),
-            CudaMaData::SliceF32(_)
-            | CudaMaData::OhlcF32 { .. }
-            | CudaMaData::OhlcvF32 { .. } => panic!("as_prices_f64 called for f32 data"),
+            CudaMaData::SliceF32(_) | CudaMaData::OhlcF32 { .. } | CudaMaData::OhlcvF32 { .. } => {
+                panic!("as_prices_f64 called for f32 data")
+            }
         }
     }
 
@@ -1935,10 +1935,14 @@ impl CudaMaSelector {
                         cuda.tradjema_batch_dev(&high, &low, &close, &sweep)
                             .map_err(|e| CudaMaSelectorError::Backend(e.to_string()))
                     }
-                    CudaMaData::OhlcF32 { high, low, close, .. } => cuda
+                    CudaMaData::OhlcF32 {
+                        high, low, close, ..
+                    } => cuda
                         .tradjema_batch_dev(high, low, close, &sweep)
                         .map_err(|e| CudaMaSelectorError::Backend(e.to_string())),
-                    CudaMaData::OhlcvF32 { high, low, close, .. } => cuda
+                    CudaMaData::OhlcvF32 {
+                        high, low, close, ..
+                    } => cuda
                         .tradjema_batch_dev(high, low, close, &sweep)
                         .map_err(|e| CudaMaSelectorError::Backend(e.to_string())),
                     _ => Err(CudaMaSelectorError::Unsupported(

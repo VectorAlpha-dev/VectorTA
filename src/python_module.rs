@@ -37,5 +37,6 @@ fn ta_indicators(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::indicators::lpc::register_lpc_module(m)?;
     crate::indicators::linearreg_angle::register_linearreg_angle_module(m)?;
     crate::indicators::kst::register_kst_module(m)?;
+    crate::indicators::yang_zhang_volatility::register_yang_zhang_volatility_module(m)?;
     Ok(())
 }

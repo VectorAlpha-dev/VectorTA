@@ -126,10 +126,7 @@ impl CudaPatternRecognition {
         let device = Device::get_device(device_id as u32)?;
         let context = Arc::new(Context::new(device)?);
 
-        let ptx: &str = include_str!(concat!(
-            env!("OUT_DIR"),
-            "/pattern_recognition_kernel.ptx"
-        ));
+        let ptx: &str = include_str!(concat!(env!("OUT_DIR"), "/pattern_recognition_kernel.ptx"));
         let module = Module::from_ptx(
             ptx,
             &[
@@ -4138,9 +4135,9 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let matrix_len = rows
-            .checked_mul(cols)
-            .ok_or_else(|| CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string()))?;
+        let matrix_len = rows.checked_mul(cols).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string())
+        })?;
         if d_matrix.len() < matrix_len {
             return Err(CudaPatternRecognitionError::InvalidInput(
                 "matrix buffer too small".to_string(),
@@ -4148,9 +4145,9 @@ impl CudaPatternRecognition {
         }
 
         let words_per_row = cols.div_ceil(64);
-        let total_words = rows
-            .checked_mul(words_per_row)
-            .ok_or_else(|| CudaPatternRecognitionError::InvalidInput("rows*words overflow".to_string()))?;
+        let total_words = rows.checked_mul(words_per_row).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*words overflow".to_string())
+        })?;
         if d_words.len() < total_words {
             return Err(CudaPatternRecognitionError::InvalidInput(
                 "words buffer too small".to_string(),
@@ -4199,9 +4196,9 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let matrix_len = rows
-            .checked_mul(cols)
-            .ok_or_else(|| CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string()))?;
+        let matrix_len = rows.checked_mul(cols).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string())
+        })?;
         if matrix.len() != matrix_len {
             return Err(CudaPatternRecognitionError::InvalidInput(format!(
                 "matrix length mismatch: expected {}, got {}",
@@ -4211,9 +4208,9 @@ impl CudaPatternRecognition {
         }
 
         let words_per_row = cols.div_ceil(64);
-        let total_words = rows
-            .checked_mul(words_per_row)
-            .ok_or_else(|| CudaPatternRecognitionError::InvalidInput("rows*words overflow".to_string()))?;
+        let total_words = rows.checked_mul(words_per_row).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*words overflow".to_string())
+        })?;
 
         let d_matrix = DeviceBuffer::from_slice(matrix)?;
         let mut d_words = unsafe { DeviceBuffer::<u64>::uninitialized(total_words) }?;
@@ -4238,9 +4235,9 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let len = rows
-            .checked_mul(cols)
-            .ok_or_else(|| CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string()))?;
+        let len = rows.checked_mul(cols).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string())
+        })?;
         if d_matrix_u8.len() < len {
             return Err(CudaPatternRecognitionError::InvalidInput(
                 "input matrix buffer too small".to_string(),
@@ -4269,7 +4266,11 @@ impl CudaPatternRecognition {
             self.stream.launch(&func, grid, block, 0, args)?;
         }
 
-        Ok(DeviceArrayF32 { buf: out, rows, cols })
+        Ok(DeviceArrayF32 {
+            buf: out,
+            rows,
+            cols,
+        })
     }
 
     pub fn matrix_f32_to_device(
@@ -4284,9 +4285,9 @@ impl CudaPatternRecognition {
             ));
         }
 
-        let len = rows
-            .checked_mul(cols)
-            .ok_or_else(|| CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string()))?;
+        let len = rows.checked_mul(cols).ok_or_else(|| {
+            CudaPatternRecognitionError::InvalidInput("rows*cols overflow".to_string())
+        })?;
 
         if matrix.len() != len {
             return Err(CudaPatternRecognitionError::InvalidInput(format!(
@@ -4335,7 +4336,8 @@ fn grid_1d_for(n: usize, block_x: u32) -> (GridSize, BlockSize) {
 mod tests {
     use super::*;
     use crate::indicators::pattern_recognition::{
-        extract_pattern_series, list_patterns, pattern_recognition_with_kernel, PatternRecognitionInput,
+        extract_pattern_series, list_patterns, pattern_recognition_with_kernel,
+        PatternRecognitionInput,
     };
     use crate::utilities::enums::Kernel;
 
@@ -4485,7 +4487,9 @@ mod tests {
         }
 
         let cuda = CudaPatternRecognition::new(0).unwrap();
-        let got = cuda.pack_matrix_u8_host(matrix.as_slice(), rows, cols).unwrap();
+        let got = cuda
+            .pack_matrix_u8_host(matrix.as_slice(), rows, cols)
+            .unwrap();
 
         let words_per_row = cols.div_ceil(64);
         let mut expected = vec![0u64; rows * words_per_row];

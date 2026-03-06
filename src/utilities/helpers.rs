@@ -188,3 +188,20 @@ pub fn make_uninit_matrix(rows: usize, cols: usize) -> Vec<MaybeUninit<f64>> {
     }
     v
 }
+
+#[inline(always)]
+pub fn alloc_uninit_f64(len: usize) -> Vec<f64> {
+    #[cfg(not(debug_assertions))]
+    {
+        let mut v = Vec::<f64>::with_capacity(len);
+        unsafe {
+            v.set_len(len);
+        }
+        v
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        vec![f64::from_bits(0x11111111_11111111); len]
+    }
+}

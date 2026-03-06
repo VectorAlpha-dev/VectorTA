@@ -234,6 +234,7 @@ pub use wto::{
     WtoBatchOutput, WtoBatchRange, WtoBuilder, WtoData, WtoError, WtoInput, WtoOutput, WtoParams,
     WtoStream,
 };
+pub mod yang_zhang_volatility;
 pub mod zscore;
 pub use vpci::{
     vpci, VpciBatchBuilder, VpciBatchOutput, VpciBatchRange, VpciData, VpciError, VpciInput,
@@ -316,3 +317,23 @@ pub use vpci::{
 };
 #[cfg(feature = "python")]
 pub use wto::{wto_batch_py, wto_py, WtoStreamPy};
+#[cfg(not(all(target_arch = "wasm32", feature = "wasm")))]
+pub use yang_zhang_volatility::yang_zhang_volatility_into;
+pub use yang_zhang_volatility::{
+    yang_zhang_volatility, yang_zhang_volatility_batch_par_slice,
+    yang_zhang_volatility_batch_slice, yang_zhang_volatility_batch_with_kernel,
+    yang_zhang_volatility_into_slice, yang_zhang_volatility_with_kernel,
+    YangZhangVolatilityBatchBuilder, YangZhangVolatilityBatchOutput, YangZhangVolatilityBatchRange,
+    YangZhangVolatilityBuilder, YangZhangVolatilityData, YangZhangVolatilityError,
+    YangZhangVolatilityInput, YangZhangVolatilityOutput, YangZhangVolatilityParams,
+    YangZhangVolatilityStream,
+};
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub use yang_zhang_volatility::{
+    yang_zhang_volatility_alloc, yang_zhang_volatility_batch_into, yang_zhang_volatility_batch_js,
+    yang_zhang_volatility_free, yang_zhang_volatility_into, yang_zhang_volatility_js,
+};
+#[cfg(feature = "python")]
+pub use yang_zhang_volatility::{
+    yang_zhang_volatility_batch_py, yang_zhang_volatility_py, YangZhangVolatilityStreamPy,
+};

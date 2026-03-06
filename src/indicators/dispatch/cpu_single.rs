@@ -114,7 +114,12 @@ fn compute_pattern_recognition(
         warmup: out.warmup,
         rows: out.rows,
         cols: out.cols,
-        pattern_ids: Some(out.pattern_ids.into_iter().map(|id| id.to_string()).collect()),
+        pattern_ids: Some(
+            out.pattern_ids
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
+        ),
     })
 }
 

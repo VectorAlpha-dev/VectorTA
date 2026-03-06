@@ -175,6 +175,7 @@ fn collect_registered_profiles() -> Vec<CudaBenchScenario> {
 
     v.extend(my_project::cuda::di_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::zscore_wrapper::benches::bench_profiles());
+    v.extend(my_project::cuda::yang_zhang_volatility_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::deviation_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::bollinger_bands_width_wrapper::benches::bench_profiles());
     v.extend(my_project::cuda::medium_ad_wrapper::benches::bench_profiles());

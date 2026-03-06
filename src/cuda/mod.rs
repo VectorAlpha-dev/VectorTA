@@ -232,9 +232,9 @@ pub mod net_myrsi_wrapper;
 #[cfg(feature = "cuda")]
 pub mod obv_wrapper;
 #[cfg(feature = "cuda")]
-pub mod percentile_nearest_rank_wrapper;
-#[cfg(feature = "cuda")]
 pub mod pattern_recognition_wrapper;
+#[cfg(feature = "cuda")]
+pub mod percentile_nearest_rank_wrapper;
 #[cfg(feature = "cuda")]
 pub mod pivot_wrapper;
 #[cfg(feature = "cuda")]
@@ -261,6 +261,8 @@ pub mod voss_wrapper;
 pub mod vpci_wrapper;
 #[cfg(feature = "cuda")]
 pub mod wad_wrapper;
+#[cfg(feature = "cuda")]
+pub mod yang_zhang_volatility_wrapper;
 #[cfg(feature = "cuda")]
 pub mod zscore_wrapper;
 
@@ -335,11 +337,11 @@ pub use oscillators::ppo_wrapper::{CudaPpo, CudaPpoError};
 #[cfg(feature = "cuda")]
 pub use oscillators::tsi_wrapper::{CudaTsi, CudaTsiError};
 #[cfg(feature = "cuda")]
-pub use percentile_nearest_rank_wrapper::{CudaPercentileNearestRank, CudaPnrError};
-#[cfg(feature = "cuda")]
 pub use pattern_recognition_wrapper::{
     CudaPatternRecognition, CudaPatternRecognitionError, DevicePatternFeatures, NativeSubsetRows,
 };
+#[cfg(feature = "cuda")]
+pub use percentile_nearest_rank_wrapper::{CudaPercentileNearestRank, CudaPnrError};
 #[cfg(feature = "cuda")]
 pub use prb_wrapper::{CudaPrb, CudaPrbError};
 #[cfg(feature = "cuda")]
@@ -356,6 +358,10 @@ pub use voss_wrapper::{CudaVoss, CudaVossError};
 pub use vpci_wrapper::{CudaVpci, CudaVpciError};
 #[cfg(feature = "cuda")]
 pub use wad_wrapper::{CudaWad, CudaWadError};
+#[cfg(feature = "cuda")]
+pub use yang_zhang_volatility_wrapper::{
+    CudaYangZhangBatchResult, CudaYangZhangVolatility, CudaYangZhangVolatilityError,
+};
 #[cfg(feature = "cuda")]
 pub use zscore_wrapper::{CudaZscore, CudaZscoreError};
 #[cfg(feature = "cuda")]

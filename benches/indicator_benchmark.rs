@@ -296,6 +296,10 @@ use my_project::indicators::{
     wclprice::{wclprice as wclprice_raw, wclprice_with_kernel, WclpriceInput},
     willr::{willr as willr_raw, WillrBatchBuilder, WillrInput},
     wto::{wto_with_kernel, WtoBatchBuilder, WtoInput},
+    yang_zhang_volatility::{
+        yang_zhang_volatility as yang_zhang_volatility_raw, yang_zhang_volatility_with_kernel,
+        YangZhangVolatilityBatchBuilder, YangZhangVolatilityInput,
+    },
     zscore::{zscore as zscore_raw, zscore_with_kernel, ZscoreBatchBuilder, ZscoreInput},
 };
 
@@ -515,6 +519,7 @@ pub type CciCycleInputS = CciCycleInput<'static>;
 pub type FvgTrailingStopInputS = FvgTrailingStopInput<'static>;
 pub type ReverseRsiInputS = ReverseRsiInput<'static>;
 pub type ZscoreInputS = ZscoreInput<'static>;
+pub type YangZhangVolatilityInputS = YangZhangVolatilityInput<'static>;
 
 macro_rules! impl_input_len {
      ($($ty:ty),* $(,)?) => {
@@ -1444,6 +1449,7 @@ impl_input_len!(
     WmaInputS,
     ZlemaInputS,
     ZscoreInputS,
+    YangZhangVolatilityInputS,
     AvslInputS,
     DmaInputS,
     EhmaInputS,
@@ -1585,6 +1591,11 @@ bench_wrappers! {
     (wclprice_bench, wclprice_raw, WclpriceInputS),
     (willr_bench, willr_raw, WillrInputS),
     (zscore_bench, zscore_raw, ZscoreInputS),
+    (
+        yang_zhang_volatility_bench,
+        yang_zhang_volatility_raw,
+        YangZhangVolatilityInputS
+    ),
 
     (mod_god_mode_bench, mod_god_mode_raw, ModGodModeInputS),
     (nadaraya_watson_envelope_bench, nadaraya_watson_envelope_raw, NweInputS),
@@ -1728,6 +1739,7 @@ bench_scalars!(
     wclprice_bench => WclpriceInputS,
     willr_bench     => WillrInputS,
     zscore_bench    => ZscoreInputS,
+    yang_zhang_volatility_bench => YangZhangVolatilityInputS,
 
     buff_averages_bench => BuffAveragesInputS,
     volume_adjusted_ma_bench => VolumeAdjustedMaInputS,
@@ -1809,6 +1821,12 @@ make_kernel_wrappers!(adx, adx_with_kernel, AdxInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(buff_averages, buff_averages_with_kernel, BuffAveragesInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(correl_hl, correl_hl_with_kernel, CorrelHlInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(zscore, zscore_with_kernel, ZscoreInputS; Scalar,Avx2,Avx512);
+make_kernel_wrappers!(
+    yang_zhang_volatility,
+    yang_zhang_volatility_with_kernel,
+    YangZhangVolatilityInputS;
+    Scalar,Avx2,Avx512
+);
 make_kernel_wrappers!(var, var_with_kernel, VarInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(cmo, cmo_with_kernel, CmoInputS; Scalar,Avx2,Avx512);
 make_kernel_wrappers!(srsi, srsi_with_kernel, SrsiInputS; Scalar,Avx2,Avx512);
@@ -2994,6 +3012,31 @@ make_quad_with_method_wrappers!(
     },
     apply_slice
 );
+make_quad_with_method_wrappers!(
+    yang_zhang_volatility_batch,
+    YangZhangVolatilityBatchBuilder,
+    YangZhangVolatilityInputS,
+    |input: &YangZhangVolatilityInputS| -> anyhow::Result<(&[f64], &[f64], &[f64], &[f64])> {
+        let (o, h, l, c) = match &input.data {
+            my_project::indicators::yang_zhang_volatility::YangZhangVolatilityData::Candles {
+                candles,
+            } => (
+                candles.open.as_slice(),
+                candles.high.as_slice(),
+                candles.low.as_slice(),
+                candles.close.as_slice(),
+            ),
+            my_project::indicators::yang_zhang_volatility::YangZhangVolatilityData::Slices {
+                open,
+                high,
+                low,
+                close,
+            } => (*open, *high, *low, *close),
+        };
+        Ok((o, h, l, c))
+    },
+    apply_slices
+);
 make_batch_wrappers!(trix_batch, TrixBatchBuilder, TrixInputS; ScalarBatch, Avx2Batch, Avx512Batch);
 
 make_hlc_batch_wrappers!(
@@ -3221,6 +3264,13 @@ bench_variants!(
     zscore_batch_scalarbatch,
     zscore_batch_avx2batch,
     zscore_batch_avx512batch
+);
+
+bench_variants!(
+    yang_zhang_volatility_batch => YangZhangVolatilityInputS; Some(14);
+    yang_zhang_volatility_batch_scalarbatch,
+    yang_zhang_volatility_batch_avx2batch,
+    yang_zhang_volatility_batch_avx512batch
 );
 
 bench_variants!(
@@ -4036,6 +4086,13 @@ bench_variants!(
     zscore_scalar,
     zscore_avx2,
     zscore_avx512,
+);
+
+bench_variants!(
+    yang_zhang_volatility => YangZhangVolatilityInputS; Some(14);
+    yang_zhang_volatility_scalar,
+    yang_zhang_volatility_avx2,
+    yang_zhang_volatility_avx512,
 );
 
 bench_variants!(
@@ -5260,10 +5317,12 @@ criterion_main!(
     benches_bandpass_batch,
     benches_decycler_batch,
     benches_zscore,
+    benches_yang_zhang_volatility,
     benches_mab,
     benches_eri,
     benches_eri_batch,
     benches_zscore_batch,
+    benches_yang_zhang_volatility_batch,
     benches_var,
     benches_var_batch,
     benches_deviation,

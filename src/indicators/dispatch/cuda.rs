@@ -173,9 +173,10 @@ fn compute_pattern_recognition_cuda(
 
     match req.target {
         CudaOutputTarget::HostF32 => {
-            cuda.synchronize().map_err(|e| IndicatorDispatchError::KernelUnavailable {
-                details: e.to_string(),
-            })?;
+            cuda.synchronize()
+                .map_err(|e| IndicatorDispatchError::KernelUnavailable {
+                    details: e.to_string(),
+                })?;
             let mut host_u8 = vec![0u8; rows.saturating_mul(cols)];
             d_u8.copy_to(host_u8.as_mut_slice()).map_err(|e| {
                 IndicatorDispatchError::KernelUnavailable {
@@ -593,13 +594,13 @@ fn map_cuda_error(indicator: &str, err: CudaMaSelectorError) -> IndicatorDispatc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indicators::registry::{IndicatorParamKind, ParamValueStatic};
     use crate::indicators::dispatch::{
         compute_cpu, compute_cpu_batch, IndicatorBatchRequest, IndicatorComputeRequest,
         IndicatorDataRef, IndicatorParamSet, IndicatorSeries,
     };
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use crate::indicators::registry::{IndicatorParamKind, ParamValueStatic};
     use crate::utilities::enums::Kernel;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn sample_series() -> Vec<f32> {
         (1..=128).map(|v| v as f32).collect()
@@ -800,6 +801,80 @@ mod tests {
             output_id: Some("value"),
             data: IndicatorDataRef::Ohlc {
                 open: &close_f64,
+                high: &high_f64,
+                low: &low_f64,
+                close: &close_f64,
+            },
+            combos: &combos,
+            kernel: Kernel::Auto,
+        };
+        let out_cpu = compute_cpu_batch(req_cpu).unwrap();
+        let cpu = out_cpu.values_f64.unwrap();
+        assert_eq!(cuda.len(), cpu.len());
+        for i in 0..cuda.len() {
+            let a = cuda[i] as f64;
+            let b = cpu[i];
+            if a.is_nan() && b.is_nan() {
+                continue;
+            }
+            assert!((a - b).abs() <= 1e-3, "mismatch at index {i}: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn host_output_matches_cpu_for_yang_zhang_when_cuda_available() {
+        if !crate::cuda::cuda_available() {
+            return;
+        }
+
+        let (open, high, low, close) = sample_ohlc(192);
+        let params = [
+            ParamKV {
+                key: "lookback",
+                value: ParamValue::Int(21),
+            },
+            ParamKV {
+                key: "k_override",
+                value: ParamValue::Bool(true),
+            },
+            ParamKV {
+                key: "k",
+                value: ParamValue::Float(0.28),
+            },
+        ];
+        let req_cuda = IndicatorCudaRequest {
+            indicator_id: "yang_zhang_volatility",
+            output_id: Some("rs"),
+            data: IndicatorCudaDataRef::Ohlc {
+                open: &open,
+                high: &high,
+                low: &low,
+                close: &close,
+                source: None,
+            },
+            params: &params,
+            kernel: Kernel::Auto,
+            target: CudaOutputTarget::HostF32,
+        };
+
+        let out_cuda = compute_cuda(req_cuda).unwrap();
+        assert_eq!(out_cuda.rows, 1);
+        assert_eq!(out_cuda.cols, close.len());
+        let cuda = match out_cuda.series {
+            IndicatorCudaSeries::HostF32(v) => v,
+            _ => panic!("expected HostF32"),
+        };
+
+        let open_f64 = to_f64(&open);
+        let high_f64 = to_f64(&high);
+        let low_f64 = to_f64(&low);
+        let close_f64 = to_f64(&close);
+        let combos = [IndicatorParamSet { params: &params }];
+        let req_cpu = IndicatorBatchRequest {
+            indicator_id: "yang_zhang_volatility",
+            output_id: Some("rs"),
+            data: IndicatorDataRef::Ohlc {
+                open: &open_f64,
                 high: &high_f64,
                 low: &low_f64,
                 close: &close_f64,
@@ -1122,15 +1197,17 @@ mod tests {
                 close: &data.close,
                 source: Some(&data.close),
             },
-            IndicatorInputKind::Ohlcv | IndicatorInputKind::Candles => IndicatorCudaDataRef::Ohlcv {
-                timestamp: Some(&data.timestamp),
-                open: &data.open,
-                high: &data.high,
-                low: &data.low,
-                close: &data.close,
-                volume: &data.volume,
-                source: Some(&data.close),
-            },
+            IndicatorInputKind::Ohlcv | IndicatorInputKind::Candles => {
+                IndicatorCudaDataRef::Ohlcv {
+                    timestamp: Some(&data.timestamp),
+                    open: &data.open,
+                    high: &data.high,
+                    low: &data.low,
+                    close: &data.close,
+                    volume: &data.volume,
+                    source: Some(&data.close),
+                }
+            }
             IndicatorInputKind::HighLow => IndicatorCudaDataRef::HighLow {
                 high: &data.high,
                 low: &data.low,
@@ -1184,13 +1261,19 @@ mod tests {
                     kv.value = ParamValue::Int(20);
                 }
             }
-            if !out.iter().any(|kv| kv.key.eq_ignore_ascii_case("fast_period")) {
+            if !out
+                .iter()
+                .any(|kv| kv.key.eq_ignore_ascii_case("fast_period"))
+            {
                 out.push(ParamKV {
                     key: "fast_period",
                     value: ParamValue::Int(5),
                 });
             }
-            if !out.iter().any(|kv| kv.key.eq_ignore_ascii_case("slow_period")) {
+            if !out
+                .iter()
+                .any(|kv| kv.key.eq_ignore_ascii_case("slow_period"))
+            {
                 out.push(ParamKV {
                     key: "slow_period",
                     value: ParamValue::Int(20),
@@ -1285,10 +1368,7 @@ mod tests {
     stability_probe_test!(stability_probe_gaussian, "gaussian");
     stability_probe_test!(stability_probe_sma, "sma");
     stability_probe_test!(stability_probe_mean_ad, "mean_ad");
-    stability_probe_test!(
-        stability_probe_supersmoother_3_pole,
-        "supersmoother_3_pole"
-    );
+    stability_probe_test!(stability_probe_supersmoother_3_pole, "supersmoother_3_pole");
 
     fn out_cpu_rows(open: &[f64], high: &[f64], low: &[f64], close: &[f64]) -> usize {
         let req_cpu = IndicatorComputeRequest {

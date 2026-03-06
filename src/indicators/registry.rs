@@ -319,6 +319,16 @@ const OUTPUT_HISTOGRAM: IndicatorOutputInfo = IndicatorOutputInfo {
     label: "Histogram",
     value_type: IndicatorValueType::F64,
 };
+const OUTPUT_YZ: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "yz",
+    label: "YZ",
+    value_type: IndicatorValueType::F64,
+};
+const OUTPUT_RS: IndicatorOutputInfo = IndicatorOutputInfo {
+    id: "rs",
+    label: "RS",
+    value_type: IndicatorValueType::F64,
+};
 
 const OUTPUTS_VALUE_F64: &[IndicatorOutputInfo] = &[OUTPUT_VALUE_F64];
 const OUTPUTS_VALUE_BOOL: &[IndicatorOutputInfo] = &[OUTPUT_VALUE_BOOL];
@@ -340,6 +350,7 @@ const OUTPUTS_SQUEEZE_MOMENTUM: &[IndicatorOutputInfo] =
 const OUTPUTS_WTO: &[IndicatorOutputInfo] =
     &[OUTPUT_WAVETREND1, OUTPUT_WAVETREND2, OUTPUT_HISTOGRAM];
 const OUTPUTS_WAVETREND: &[IndicatorOutputInfo] = &[OUTPUT_WT1, OUTPUT_WT2, OUTPUT_WT_DIFF];
+const OUTPUTS_YANG_ZHANG: &[IndicatorOutputInfo] = &[OUTPUT_YZ, OUTPUT_RS];
 const OUTPUTS_ACOSC: &[IndicatorOutputInfo] = &[
     IndicatorOutputInfo {
         id: "osc",
@@ -2274,6 +2285,45 @@ const PARAM_WAVETREND: &[IndicatorParamInfo] = &[
     },
 ];
 
+const PARAM_YANG_ZHANG: &[IndicatorParamInfo] = &[
+    IndicatorParamInfo {
+        key: "lookback",
+        label: "Lookback",
+        kind: IndicatorParamKind::Int,
+        required: false,
+        default: Some(ParamValueStatic::Int(14)),
+        min: Some(1.0),
+        max: None,
+        step: Some(1.0),
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "k_override",
+        label: "K Override",
+        kind: IndicatorParamKind::Bool,
+        required: false,
+        default: Some(ParamValueStatic::Bool(false)),
+        min: None,
+        max: None,
+        step: None,
+        enum_values: ENUM_VALUES_TRUE_FALSE,
+        notes: None,
+    },
+    IndicatorParamInfo {
+        key: "k",
+        label: "K",
+        kind: IndicatorParamKind::Float,
+        required: false,
+        default: Some(ParamValueStatic::Float(0.34)),
+        min: Some(0.0),
+        max: None,
+        step: None,
+        enum_values: EMPTY_ENUM_VALUES,
+        notes: None,
+    },
+];
+
 const PARAM_VI: &[IndicatorParamInfo] = &[IndicatorParamInfo {
     key: "period",
     label: "Period",
@@ -3927,6 +3977,14 @@ const SUPPLEMENTAL_INDICATORS: &[SupplementalIndicatorSeed] = &[
         params: PARAM_WTO,
     },
     SupplementalIndicatorSeed {
+        id: "yang_zhang_volatility",
+        label: "Yang-Zhang Volatility",
+        category: "volatility",
+        input_kind: IndicatorInputKind::Ohlc,
+        outputs: OUTPUTS_YANG_ZHANG,
+        params: PARAM_YANG_ZHANG,
+    },
+    SupplementalIndicatorSeed {
         id: "atr",
         label: "ATR",
         category: "volatility",
@@ -4693,6 +4751,7 @@ fn supplemental_supports_cpu_batch(id: &str) -> bool {
             | "squeeze_momentum"
             | "wavetrend"
             | "wto"
+            | "yang_zhang_volatility"
             | "bop"
             | "emv"
             | "efi"
@@ -4791,25 +4850,140 @@ fn supplemental_supports_cuda_single(id: &str) -> bool {
 fn supplemental_supports_cuda_batch(id: &str) -> bool {
     matches!(
         id,
-            "acosc" | "adosc" | "adx" | "adxr" | "alligator" | "alphatrend" | "ao" | "apo" |
-            "aroon" | "aroonosc" | "aso" | "atr" | "avsl" | "bandpass" | "bollinger_bands" |
-            "bollinger_bands_width" | "bop" | "cci" | "cci_cycle" | "cfo" | "cg" | "chande" |
-            "chandelier_exit" | "chop" | "cksp" | "cmo" | "coppock" | "correl_hl" |
-            "correlation_cycle" | "cvi" | "damiani_volatmeter" | "dec_osc" | "decycler" |
-            "deviation" | "devstop" | "di" | "dm" | "donchian" | "dpo" | "dti" | "dvdiqqe" | "dx" |
-            "efi" | "emd" | "emv" | "er" | "eri" | "fisher" | "fosc" | "fvg_trailing_stop" |
-            "gatorosc" | "halftrend" | "ift_rsi" | "kaufmanstop" | "kdj" | "keltner" | "kst" |
-            "kurtosis" | "kvo" | "linearreg_angle" | "linearreg_intercept" | "linearreg_slope" |
-            "lpc" | "lrsi" | "mab" | "macd" | "macz" | "marketefi" | "mass" | "mean_ad" |
-            "medium_ad" | "medprice" | "mfi" | "minmax" | "mod_god_mode" | "mom" | "msw" |
-            "nadaraya_watson_envelope" | "natr" | "net_myrsi" | "nvi" | "obv" | "ott" | "otto" |
-            "percentile_nearest_rank" | "pfe" | "pivot" | "pma" | "ppo" | "prb" | "pvi" | "qqe" |
-            "qstick" | "range_filter" | "reverse_rsi" | "roc" | "rocp" | "rocr" | "rsi" | "rsmk" |
-            "rsx" | "rvi" | "safezonestop" | "sar" | "squeeze_momentum" | "srsi" | "stc" |
-            "stddev" | "stoch" | "stochf" | "supertrend" | "trix" | "tsf" | "tsi" | "ttm_squeeze" |
-            "ttm_trend" | "ui" | "ultosc" | "var" | "vi" | "vidya" | "vlma" | "vosc" | "voss" |
-            "vpci" | "vpt" | "vwmacd" | "wad" | "wavetrend" | "wclprice" | "willr" | "wto" |
-            "zscore"
+        "acosc"
+            | "adosc"
+            | "adx"
+            | "adxr"
+            | "alligator"
+            | "alphatrend"
+            | "ao"
+            | "apo"
+            | "aroon"
+            | "aroonosc"
+            | "aso"
+            | "atr"
+            | "avsl"
+            | "bandpass"
+            | "bollinger_bands"
+            | "bollinger_bands_width"
+            | "bop"
+            | "cci"
+            | "cci_cycle"
+            | "cfo"
+            | "cg"
+            | "chande"
+            | "chandelier_exit"
+            | "chop"
+            | "cksp"
+            | "cmo"
+            | "coppock"
+            | "correl_hl"
+            | "correlation_cycle"
+            | "cvi"
+            | "damiani_volatmeter"
+            | "dec_osc"
+            | "decycler"
+            | "deviation"
+            | "devstop"
+            | "di"
+            | "dm"
+            | "donchian"
+            | "dpo"
+            | "dti"
+            | "dvdiqqe"
+            | "dx"
+            | "efi"
+            | "emd"
+            | "emv"
+            | "er"
+            | "eri"
+            | "fisher"
+            | "fosc"
+            | "fvg_trailing_stop"
+            | "gatorosc"
+            | "halftrend"
+            | "ift_rsi"
+            | "kaufmanstop"
+            | "kdj"
+            | "keltner"
+            | "kst"
+            | "kurtosis"
+            | "kvo"
+            | "linearreg_angle"
+            | "linearreg_intercept"
+            | "linearreg_slope"
+            | "lpc"
+            | "lrsi"
+            | "mab"
+            | "macd"
+            | "macz"
+            | "marketefi"
+            | "mass"
+            | "mean_ad"
+            | "medium_ad"
+            | "medprice"
+            | "mfi"
+            | "minmax"
+            | "mod_god_mode"
+            | "mom"
+            | "msw"
+            | "nadaraya_watson_envelope"
+            | "natr"
+            | "net_myrsi"
+            | "nvi"
+            | "obv"
+            | "ott"
+            | "otto"
+            | "percentile_nearest_rank"
+            | "pfe"
+            | "pivot"
+            | "pma"
+            | "ppo"
+            | "prb"
+            | "pvi"
+            | "qqe"
+            | "qstick"
+            | "range_filter"
+            | "reverse_rsi"
+            | "roc"
+            | "rocp"
+            | "rocr"
+            | "rsi"
+            | "rsmk"
+            | "rsx"
+            | "rvi"
+            | "safezonestop"
+            | "sar"
+            | "squeeze_momentum"
+            | "srsi"
+            | "stc"
+            | "stddev"
+            | "stoch"
+            | "stochf"
+            | "supertrend"
+            | "trix"
+            | "tsf"
+            | "tsi"
+            | "ttm_squeeze"
+            | "ttm_trend"
+            | "ui"
+            | "ultosc"
+            | "var"
+            | "vi"
+            | "vidya"
+            | "vlma"
+            | "vosc"
+            | "voss"
+            | "vpci"
+            | "vpt"
+            | "vwmacd"
+            | "wad"
+            | "wavetrend"
+            | "wclprice"
+            | "willr"
+            | "wto"
+            | "yang_zhang_volatility"
+            | "zscore"
     )
 }
 

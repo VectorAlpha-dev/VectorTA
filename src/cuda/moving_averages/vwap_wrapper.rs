@@ -357,7 +357,12 @@ impl CudaVwap {
         })
     }
 
-    fn first_valid_vwap_index_f32(timestamps: &[i64], volumes: &[f32], count: u32, unit: char) -> usize {
+    fn first_valid_vwap_index_f32(
+        timestamps: &[i64],
+        volumes: &[f32],
+        count: u32,
+        unit: char,
+    ) -> usize {
         if timestamps.is_empty() {
             return 0;
         }
